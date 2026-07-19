@@ -74,7 +74,7 @@ pub fn apply(
 /// the sources indexed while parsing this package; the VM never receives a
 /// filesystem path and cannot traverse into a sibling plugin. Results follow
 /// Lua `require` semantics and are cached once per VM.
-pub(super) fn install_package_modules(
+pub(crate) fn install_package_modules(
     lua: &Lua,
     sources: &std::collections::BTreeMap<String, String>,
 ) -> mlua::Result<()> {

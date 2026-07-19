@@ -58,7 +58,8 @@ pub(super) fn library_card(ui: &mut egui::Ui, ctx: &TabCtx, st: &mut DeviceUi, i
                     }
                 }
             }
-            let label = std::borrow::Cow::Owned(descriptor.name.clone());
+            let label =
+                std::borrow::Cow::Borrowed(descriptor.localized_name(&ctx.state.gui.language));
             let resp = match st.lcd.editor.widget_icon_tex.get(&descriptor.id) {
                 Some(texture) => library_texture_tile(ui, texture, &label),
                 None => library_tile(ui, "…", &label),
@@ -333,6 +334,8 @@ mod tests {
             id: "halo_lcd:text".to_owned(),
             plugin_id: "halo_lcd".to_owned(),
             name: "Text".to_owned(),
+            name_key: None,
+            translations: Default::default(),
             icon: "text.svg".to_owned(),
             assets: Vec::new(),
             params: Vec::new(),

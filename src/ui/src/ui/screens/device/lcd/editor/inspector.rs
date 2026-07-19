@@ -113,7 +113,11 @@ pub(super) fn selected_widget_card(
                 .available_widgets
                 .iter()
                 .find(|descriptor| descriptor.id == catalog_id)
-                .map(|descriptor| descriptor.name.clone())
+                .map(|descriptor| {
+                    descriptor
+                        .localized_name(&ctx.state.gui.language)
+                        .to_owned()
+                })
         });
         egui::RichText::new(t!(
             "lcd.selected_caption",

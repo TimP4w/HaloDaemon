@@ -96,11 +96,31 @@ pub async fn begin_setup(id: String, app: Arc<AppState>) -> Result<()> {
         .setup
         .as_ref()
         .context("integration does not require an interactive setup flow")?;
+    let locale = app.config.read().await.gui.language.clone();
     let (title, instructions) = match &setup.auth {
         crate::domain::plugin::manifest::IntegrationAuthConfig::Button {
             title,
             instructions,
-        } => (Some(title.clone()), instructions.clone()),
+        } => (
+            Some(
+                manifest
+                    .translate(&locale, "setup.auth.title", title)
+                    .to_owned(),
+            ),
+            instructions
+                .iter()
+                .enumerate()
+                .map(|(index, instruction)| {
+                    manifest
+                        .translate(
+                            &locale,
+                            &format!("setup.auth.instructions.{index}"),
+                            instruction,
+                        )
+                        .to_owned()
+                })
+                .collect(),
+        ),
         _ => (None, vec![]),
     };
     publish_setup(
@@ -916,7 +936,7 @@ mod tests {
             std::fs::create_dir_all(&plugin_dir).unwrap();
             std::fs::write(
                 plugin_dir.join("plugin.yaml"),
-                "id: empty_pair\ntype: integration\npermissions: [network, secure_storage]\ntransports:\n  http:\n    origins: [https://api.example.com]\n    methods: [POST]\nsetup:\n  modes: [manual]\n  auth:\n    kind: button\n    title: Pair\n    instructions: [Press the button]\nconfig:\n  fields:\n    - { key: host, label: Host, default: api.example.com }\n    - { key: token, label: Token, secure: true }\n",
+                "id: empty_pair\ntype: integration\npermissions: [network, secure_storage]\ntranslations:\n  it:\n    setup.auth.title: Associa\n    setup.auth.instructions.0: Premi il pulsante\ntransports:\n  http:\n    origins: [https://api.example.com]\n    methods: [POST]\nsetup:\n  modes: [manual]\n  auth:\n    kind: button\n    title: Pair\n    instructions: [Press the button]\nconfig:\n  fields:\n    - { key: host, label: Host, default: api.example.com }\n    - { key: token, label: Token, secure: true }\n",
             )
             .unwrap();
             std::fs::write(
@@ -941,10 +961,17 @@ mod tests {
                     .accepted_authorities
                     .insert("empty_pair".into(), authority.normalized());
                 cfg.plugins.enabled.push("empty_pair".into());
+                cfg.gui.language = "it".into();
                 app.registry.replace_policy(&cfg.plugins);
             }
 
             begin_setup("empty_pair".into(), app.clone()).await.unwrap();
+            let localized = app
+                .registry
+                .integration_setup_status("empty_pair")
+                .unwrap();
+            assert_eq!(localized.title.as_deref(), Some("Associa"));
+            assert_eq!(localized.instructions, ["Premi il pulsante"]);
             select_setup_mode(
                 "empty_pair".into(),
                 IntegrationSetupMode::Manual,

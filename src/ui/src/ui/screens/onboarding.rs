@@ -427,9 +427,12 @@ fn plugin_toggle_row(ui: &mut egui::Ui, plugin: &PluginInfo, on: bool) -> bool {
     let next = egui::Frame::NONE
         .inner_margin(egui::Margin::symmetric(4, 14))
         .show(ui, |ui| {
-            let next = widgets::setting_row(ui, &plugin.name, &plugin.description, |ui| {
-                widgets::toggle(ui, on)
-            });
+            let next = widgets::setting_row(
+                ui,
+                plugin.localized_name(&rust_i18n::locale()),
+                plugin.localized_description(&rust_i18n::locale()),
+                |ui| widgets::toggle(ui, on),
+            );
             if on && !plugin.enabled {
                 ui.add_space(theme::SPACE_4);
                 if plugin.declared_permissions.is_empty() {

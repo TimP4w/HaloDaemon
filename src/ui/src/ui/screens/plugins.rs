@@ -22,6 +22,14 @@ use crate::ui::components::{self as widgets, ButtonKind};
 use crate::ui::icons;
 use crate::ui::theme;
 
+fn plugin_name(plugin: &PluginInfo) -> &str {
+    plugin.localized_name(&rust_i18n::locale())
+}
+
+fn plugin_description(plugin: &PluginInfo) -> &str {
+    plugin.localized_description(&rust_i18n::locale())
+}
+
 /// In-progress state of the "Add repository" modal.
 #[derive(Default)]
 struct AddRepoState {
@@ -932,7 +940,7 @@ impl PluginsUi {
             460.0,
             |ui| {
                 ui.label(
-                    egui::RichText::new(t!("plugins.consent_body", name = p.name.clone()))
+                    egui::RichText::new(t!("plugins.consent_body", name = plugin_name(p)))
                         .font(theme::body_md())
                         .color(theme::TEXT_DIM),
                 );
@@ -1479,7 +1487,7 @@ pub(crate) fn quarantine_toasts(
         .filter(|p| is_quarantined(p) && toasted.insert(p.id.clone()))
         .map(|p| Notification {
             code: NotificationCode::PluginContentChanged {
-                plugin: p.name.clone(),
+                plugin: plugin_name(p).to_owned(),
             },
             show_native: true,
             timestamp_ms,
@@ -1788,14 +1796,14 @@ fn list_row(
     let tile_rect = widgets::row_tile_rect(rect);
     match logo_tex {
         Some(tex) => draw_logo_fit(ui.painter(), tile_rect, tex),
-        None => initials_tile_at(ui, tile_rect, &p.name, &p.id),
+        None => initials_tile_at(ui, tile_rect, plugin_name(p), &p.id),
     }
 
     let text_x = tile_rect.right() + 10.0;
     ui.painter().text(
         Pos2::new(text_x, rect.top() + 9.0),
         Align2::LEFT_TOP,
-        compact_plugin_name(&p.name),
+        compact_plugin_name(plugin_name(p)),
         theme::semibold(12.5),
         theme::TEXT,
     );
@@ -2001,13 +2009,13 @@ fn detail_body(
                         let (rect, _) = ui.allocate_exact_size(Vec2::splat(44.0), Sense::hover());
                         draw_logo_fit(ui.painter(), rect, tex);
                     }
-                    None => initials_tile(ui, &p.name, &p.id, 44.0),
+                    None => initials_tile(ui, plugin_name(p), &p.id, 44.0),
                 }
                 ui.add_space(theme::SPACE_2);
                 ui.vertical(|ui| {
                     ui.horizontal(|ui| {
                         ui.label(
-                            egui::RichText::new(&p.name)
+                            egui::RichText::new(plugin_name(p))
                                 .font(theme::bold(18.0))
                                 .color(theme::TEXT),
                         );
@@ -2044,7 +2052,7 @@ fn detail_body(
             ui.add_space(theme::SPACE_7);
             if issue_banner(ui, issue) {
                 *issue_modal = Some((
-                    t!("plugins.issue_modal_title", plugin = &p.name).to_string(),
+                    t!("plugins.issue_modal_title", plugin = plugin_name(p)).to_string(),
                     plugin_issue_detail(issue),
                 ));
             }
@@ -2095,7 +2103,7 @@ fn detail_body(
         ui.add_space(theme::SPACE_7);
         if issue_banner(ui, issue) {
             *issue_modal = Some((
-                t!("plugins.issue_modal_title", plugin = &p.name).to_string(),
+                t!("plugins.issue_modal_title", plugin = plugin_name(p)).to_string(),
                 plugin_issue_detail(issue),
             ));
         }
@@ -2144,10 +2152,10 @@ fn detail_body(
         update_info_banner(ui, &update.current_version, &update.available_version);
     }
 
-    if !p.description.is_empty() {
+    if !plugin_description(p).is_empty() {
         ui.add_space(theme::SPACE_8);
         ui.label(
-            egui::RichText::new(&p.description)
+            egui::RichText::new(plugin_description(p))
                 .font(theme::body_md())
                 .color(theme::TEXT_DIM),
         );
@@ -3377,12 +3385,12 @@ fn repo_detail_body(
             Pos2::new(rect.left() + 6.0, rect.center().y - 12.0),
             Vec2::splat(24.0),
         );
-        initials_tile_at(ui, tile_rect, &p.name, &p.id);
+        initials_tile_at(ui, tile_rect, plugin_name(p), &p.id);
         let text_x = tile_rect.right() + 10.0;
         ui.painter().text(
             Pos2::new(text_x, rect.top() + 6.0),
             Align2::LEFT_TOP,
-            &p.name,
+            plugin_name(p),
             theme::subhead(),
             theme::TEXT,
         );
@@ -3677,6 +3685,7 @@ mod tests {
         PluginInfo {
             id: id.into(),
             name: format!("{id} device"),
+            translations: Default::default(),
             path: format!("/home/u/.config/halod/plugins/{id}.lua"),
             plugin_type: halod_shared::types::PluginKind::Device,
             experimental: false,

@@ -1,4 +1,4 @@
-use std::collections::{BTreeSet, HashMap};
+use std::collections::{BTreeMap, BTreeSet, HashMap};
 
 use serde::{Deserialize, Serialize};
 
@@ -63,6 +63,12 @@ pub struct LcdWidgetDescriptor {
     pub id: String,
     pub plugin_id: String,
     pub name: String,
+    /// Optional plugin-owned translation key. `name` remains the mandatory fallback.
+    #[serde(default, skip_serializing_if = "Option::is_none")]
+    pub name_key: Option<String>,
+    /// Inert plugin-owned catalogs, indexed by locale then translation key.
+    #[serde(default, skip_serializing_if = "BTreeMap::is_empty")]
+    pub translations: BTreeMap<String, BTreeMap<String, String>>,
     /// Declared SVG asset, fetched through `GetLcdWidgetIcon`.
     pub icon: String,
     /// Additional SVGs this widget may access through `ctx:draw_asset`.
@@ -101,6 +107,23 @@ pub struct LcdWidgetDescriptor {
     pub fixed_text_weight: Option<String>,
     #[serde(default)]
     pub updates: LcdWidgetUpdates,
+}
+
+impl LcdWidgetDescriptor {
+    pub fn localized_name(&self, locale: &str) -> &str {
+        let Some(key) = self.name_key.as_deref() else {
+            return &self.name;
+        };
+        let locale = locale.to_ascii_lowercase();
+        let base = locale.split(['-', '_']).next().unwrap_or(&locale);
+        self.translations
+            .get(&locale)
+            .and_then(|c| c.get(key))
+            .or_else(|| self.translations.get(base).and_then(|c| c.get(key)))
+            .or_else(|| self.translations.get("en").and_then(|c| c.get(key)))
+            .map(String::as_str)
+            .unwrap_or(&self.name)
+    }
 }
 
 fn default_widget_scale() -> f32 {
@@ -1349,6 +1372,8 @@ pub struct UdevRulesStatus {
 pub struct PluginInfo {
     pub id: String,
     pub name: String,
+    #[serde(default)]
+    pub translations: BTreeMap<String, BTreeMap<String, String>>,
     /// Filesystem path of the script.
     pub path: String,
     #[serde(default)]
@@ -1467,6 +1492,36 @@ pub struct PluginInfo {
     /// remain scoped in the daemon registry and may be added to wire devices.
     #[serde(default)]
     pub health: HealthState,
+}
+
+impl PluginInfo {
+    fn translated_text<'a>(&'a self, locale: &str, key: &str, fallback: &'a str) -> &'a str {
+        let locale = locale.to_ascii_lowercase();
+        let base = locale.split(['-', '_']).next().unwrap_or(&locale);
+        self.translations
+            .get(&locale)
+            .and_then(|catalog| catalog.get(key))
+            .or_else(|| {
+                self.translations
+                    .get(base)
+                    .and_then(|catalog| catalog.get(key))
+            })
+            .or_else(|| {
+                self.translations
+                    .get("en")
+                    .and_then(|catalog| catalog.get(key))
+            })
+            .map(String::as_str)
+            .unwrap_or(fallback)
+    }
+
+    pub fn localized_name(&self, locale: &str) -> &str {
+        self.translated_text(locale, "plugin.name", &self.name)
+    }
+
+    pub fn localized_description(&self, locale: &str) -> &str {
+        self.translated_text(locale, "plugin.description", &self.description)
+    }
 }
 
 fn default_true() -> bool {
@@ -2745,11 +2800,19 @@ mod tests {
         );
         // A PluginInfo payload without `health` deserializes to healthy.
         let info: PluginInfo = serde_json::from_value(serde_json::json!({
-            "id": "p", "name": "P", "path": "", "enabled": true
+            "id": "p", "name": "Weather", "description": "Weather provider",
+            "path": "", "enabled": true,
+            "translations": {"it": {
+                "plugin.name": "Meteo",
+                "plugin.description": "Servizio meteo"
+            }}
         }))
         .unwrap();
         assert_eq!(info.health, HealthState::default());
         assert!(!info.experimental);
+        assert_eq!(info.localized_name("it-CH"), "Meteo");
+        assert_eq!(info.localized_description("it"), "Servizio meteo");
+        assert_eq!(info.localized_name("de"), "Weather");
 
         let init_failed = PluginIssue {
             kind: PluginIssueKind::InitFailed,

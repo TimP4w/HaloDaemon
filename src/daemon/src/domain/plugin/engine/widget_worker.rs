@@ -43,6 +43,8 @@ pub struct WidgetRenderInput {
     pub height: u32,
     pub time: f32,
     pub dt: f32,
+    pub locale: String,
+    pub translations: BTreeMap<String, BTreeMap<String, String>>,
     pub params: HashMap<String, EffectParamValue>,
     pub color: RgbColor,
     pub font: FontArc,
@@ -231,6 +233,8 @@ fn render_one(ctx: &WorkerCtx, input: WidgetRenderInput) -> Result<Vec<u8>> {
         color: input.color,
         font: input.font,
         text_style,
+        locale: input.locale,
+        translations: input.translations,
         audio: input.audio.or_else(|| input.preview.then(preview_audio)),
         media_art: input.media_art,
         images: input.images,
@@ -300,6 +304,8 @@ struct RenderCtx {
     color: RgbColor,
     font: FontArc,
     text_style: WidgetTextStyle,
+    locale: String,
+    translations: BTreeMap<String, BTreeMap<String, String>>,
     audio: Option<WidgetAudioInput>,
     media_art: Option<WidgetImageInput>,
     images: HashMap<String, WidgetImageInput>,
@@ -551,6 +557,27 @@ impl UserData for RenderCtx {
             Ok(())
         });
         methods.add_method("is_preview", |_, this, ()| Ok(this.preview));
+        methods.add_method("locale", |_, this, ()| Ok(this.locale.clone()));
+        methods.add_method("translate", |_, this, (key, fallback): (String, String)| {
+            let locale = this.locale.to_ascii_lowercase();
+            let base = locale.split(['-', '_']).next().unwrap_or(&locale);
+            Ok(this
+                .translations
+                .get(&locale)
+                .and_then(|catalog| catalog.get(&key))
+                .or_else(|| {
+                    this.translations
+                        .get(base)
+                        .and_then(|catalog| catalog.get(&key))
+                })
+                .or_else(|| {
+                    this.translations
+                        .get("en")
+                        .and_then(|catalog| catalog.get(&key))
+                })
+                .cloned()
+                .unwrap_or(fallback))
+        });
         methods.add_method("color", |lua, this, ()| lua.to_value(&this.color));
         methods.add_method("audio", |lua, this, ()| {
             let Some(audio) = &this.audio else {
@@ -2089,6 +2116,8 @@ mod tests {
             height: 24,
             time: 1.0,
             dt: 0.016,
+            locale: "en".to_owned(),
+            translations: BTreeMap::new(),
             params: HashMap::new(),
             color: RgbColor { r: 7, g: 8, b: 9 },
             font: font(),
@@ -2132,6 +2161,35 @@ mod tests {
             HashMap::new(),
         );
         assert!(missing.render(input(true)).await.is_err());
+    }
+
+    #[tokio::test]
+    async fn widget_translations_follow_locale_and_fallback() {
+        let source = r#"
+            local function check(ctx)
+                assert(ctx:locale() == "it-CH")
+                assert(ctx:translate("date.weekday.Thu", "Thu") == "Gio")
+                assert(ctx:translate("missing", "fallback") == "fallback")
+            end
+            return {
+                render_widget_meter = function(canvas, w, h, t, dt, params, ctx) check(ctx) end,
+                preview_widget_meter = function(canvas, w, h, params, ctx) check(ctx) end,
+            }
+        "#;
+        let worker = PluginWidgetHandle::spawn(
+            source.to_owned(),
+            BTreeMap::new(),
+            vec!["meter".to_owned()],
+            vec![],
+            HashMap::new(),
+        );
+        let mut render = input(true);
+        render.locale = "it-CH".to_owned();
+        render.translations.insert(
+            "it".to_owned(),
+            BTreeMap::from([("date.weekday.Thu".to_owned(), "Gio".to_owned())]),
+        );
+        worker.render(render).await.unwrap();
     }
 
     #[tokio::test]

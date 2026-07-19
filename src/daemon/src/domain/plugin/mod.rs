@@ -400,7 +400,7 @@ fn widget_entries_for(manifest: &PluginManifest) -> Vec<PluginWidgetEntry> {
             script_source: manifest.script_source.clone(),
             module_sources: manifest.module_sources.clone(),
             catalog_id: widget.catalog_id(&manifest.plugin_id),
-            descriptor: widget.descriptor(&manifest.plugin_id),
+            descriptor: widget.descriptor(&manifest.plugin_id, &manifest.translations),
             plugin_dir: manifest.plugin_dir.clone(),
         })
         .collect()
@@ -1473,6 +1473,7 @@ impl Registry {
         PluginInfo {
             id: m.plugin_id.clone(),
             name: m.display_name(),
+            translations: m.translations.clone(),
             path: m.source_path.display().to_string(),
             plugin_type: m.plugin_type,
             experimental: m.experimental,
@@ -1840,6 +1841,7 @@ fn record_invalid_plugin_dir(
                 poll_interval_ms: 1_000,
                 effects: vec![],
                 widgets: vec![],
+                translations: Default::default(),
                 presets: vec![],
                 transports: Default::default(),
                 requirements: vec![],

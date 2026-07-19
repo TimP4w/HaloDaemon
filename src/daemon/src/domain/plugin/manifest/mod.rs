@@ -740,6 +740,8 @@ impl EffectManifest {
 pub struct WidgetManifest {
     pub id: String,
     pub name: String,
+    #[serde(default)]
+    pub name_key: Option<String>,
     /// Mandatory SVG used for the GUI catalog tile.
     pub icon: String,
     #[serde(default)]
@@ -777,11 +779,20 @@ impl WidgetManifest {
         format!("{plugin_id}:{}", self.id)
     }
 
-    pub fn descriptor(&self, plugin_id: &str) -> LcdWidgetDescriptor {
+    pub fn descriptor(
+        &self,
+        plugin_id: &str,
+        translations: &std::collections::BTreeMap<
+            String,
+            std::collections::BTreeMap<String, String>,
+        >,
+    ) -> LcdWidgetDescriptor {
         LcdWidgetDescriptor {
             id: self.catalog_id(plugin_id),
             plugin_id: plugin_id.to_owned(),
             name: self.name.clone(),
+            name_key: self.name_key.clone(),
+            translations: translations.clone(),
             icon: self.icon.clone(),
             assets: self.assets.clone(),
             params: self.params.clone(),
@@ -1194,6 +1205,8 @@ pub struct PluginManifest {
     pub poll_interval_ms: u64,
     pub effects: Vec<EffectManifest>,
     pub widgets: Vec<WidgetManifest>,
+    pub translations:
+        std::collections::BTreeMap<String, std::collections::BTreeMap<String, String>>,
     pub presets: Vec<PresetManifest>,
     pub transports: TransportsConfig,
     /// Explicitly declared host requirements (see [`RequirementDef`]). Auto-
@@ -1267,6 +1280,9 @@ pub struct PluginMeta {
     pub effects: Vec<EffectManifest>,
     #[serde(default)]
     pub widgets: Vec<WidgetManifest>,
+    #[serde(default)]
+    pub translations:
+        std::collections::BTreeMap<String, std::collections::BTreeMap<String, String>>,
     #[serde(default)]
     pub presets: Vec<PresetManifest>,
     #[serde(default)]
@@ -1346,6 +1362,26 @@ fn default_plugin_poll_interval_ms() -> u64 {
 const DEFAULT_LOGO_NAME: &str = "logo.png";
 
 impl PluginManifest {
+    pub fn translate<'a>(&'a self, locale: &str, key: &str, fallback: &'a str) -> &'a str {
+        let locale = locale.to_ascii_lowercase();
+        let base = locale.split(['-', '_']).next().unwrap_or(&locale);
+        self.translations
+            .get(&locale)
+            .and_then(|catalog| catalog.get(key))
+            .or_else(|| {
+                self.translations
+                    .get(base)
+                    .and_then(|catalog| catalog.get(key))
+            })
+            .or_else(|| {
+                self.translations
+                    .get("en")
+                    .and_then(|catalog| catalog.get(key))
+            })
+            .map(String::as_str)
+            .unwrap_or(fallback)
+    }
+
     /// The first declared device spec that accepts `handle`, if any.
     pub fn device_for(&self, handle: &DiscoveryHandle<'_>) -> Option<&DeviceSpec> {
         self.devices.iter().find(|s| s.matches(handle))
@@ -1634,6 +1670,7 @@ pub(super) fn validate_manifest(manifest: &PluginManifest) -> Result<()> {
     validate_catalog(manifest)?;
     validate_device_identifiers(manifest)?;
     validate_effects(&manifest.effects, "effect")?;
+    validate_translations(manifest)?;
     validate_lcd_content(manifest)?;
     validate_effect_assets(manifest)?;
     validate_transports(manifest)?;
@@ -2391,6 +2428,52 @@ fn validate_effects(effects: &[EffectManifest], what: &str) -> Result<()> {
             bail!("{what} id '{}' is declared more than once", effect.id);
         }
         validate_effect_params(&effect.params, &format!("{what} '{}'", effect.id))?;
+    }
+    Ok(())
+}
+
+fn validate_translations(manifest: &PluginManifest) -> Result<()> {
+    check_count("translation locales", manifest.translations.len(), 32)?;
+    for (locale, catalog) in &manifest.translations {
+        if locale.is_empty()
+            || locale.len() > 35
+            || !locale
+                .chars()
+                .all(|c| c.is_ascii_alphanumeric() || c == '-' || c == '_')
+        {
+            bail!("translation locale '{locale}' is invalid");
+        }
+        check_count(
+            &format!("translation catalog '{locale}'"),
+            catalog.len(),
+            512,
+        )?;
+        for (key, value) in catalog {
+            if key.is_empty()
+                || key.len() > 128
+                || !key
+                    .chars()
+                    .all(|c| c.is_ascii_alphanumeric() || matches!(c, '.' | '_' | '-'))
+            {
+                bail!("translation key '{key}' is invalid");
+            }
+            validate_short_text(&format!("translation '{locale}.{key}'"), value)?;
+        }
+    }
+    for widget in &manifest.widgets {
+        if let Some(key) = &widget.name_key {
+            let declared = manifest
+                .translations
+                .values()
+                .any(|catalog| catalog.contains_key(key));
+            if !declared {
+                bail!(
+                    "widget '{}' name_key '{}' is absent from every translation catalog",
+                    widget.id,
+                    key
+                );
+            }
+        }
     }
     Ok(())
 }
@@ -3236,6 +3319,7 @@ pub(super) fn build_manifest_from_dir(dir: &Path) -> Result<PluginManifest> {
         poll_interval_ms: meta.poll_interval_ms.clamp(50, 60_000),
         effects: meta.effects,
         widgets: meta.widgets,
+        translations: meta.translations,
         presets: meta.presets,
         transports: meta.transports,
         requirements: meta.requirements,
@@ -3528,7 +3612,9 @@ mod tests {
         let manifest = parse_manifest_from_dir(&dir).unwrap();
         assert_eq!(manifest.widgets[0].assets, ["sun.svg", "cloud.svg"]);
         assert_eq!(
-            manifest.widgets[0].descriptor("lcd_assets").assets,
+            manifest.widgets[0]
+                .descriptor("lcd_assets", &manifest.translations)
+                .assets,
             ["sun.svg", "cloud.svg"]
         );
     }
@@ -4484,5 +4570,16 @@ mod tests {
         );
         let error = parse_manifest_from_dir(&dir).unwrap_err();
         assert!(format!("{error:#}").contains("unknown field `usb_control`"));
+    }
+
+    #[test]
+    fn widget_name_uses_plugin_catalog_with_fallbacks() {
+        let meta: PluginMeta = serde_yaml::from_str(
+            "id: demo\ntype: lcd\ntranslations:\n  it:\n    widgets.date.name: Data\nwidgets:\n  - id: date\n    name: Date\n    name_key: widgets.date.name\n    icon: date.svg\n",
+        )
+        .unwrap();
+        let descriptor = meta.widgets[0].descriptor("demo", &meta.translations);
+        assert_eq!(descriptor.localized_name("it-CH"), "Data");
+        assert_eq!(descriptor.localized_name("de"), "Date");
     }
 }

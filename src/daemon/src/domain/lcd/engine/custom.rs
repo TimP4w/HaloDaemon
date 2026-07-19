@@ -191,6 +191,7 @@ impl CustomTemplate {
             .map(|last| (ctx.t - last).max(0.0) as f32)
             .unwrap_or(0.0);
         self.last_plugin_render_t = Some(ctx.t);
+        let locale = app.config.read().await.gui.language.clone();
         let revision = app.registry.content_revision();
         if revision != self.plugin_revision {
             self.plugin_handles.clear();
@@ -281,6 +282,7 @@ impl CustomTemplate {
                 .unwrap_or(&self.def.style.font)
                 .to_owned();
             selected_font.hash(&mut hasher);
+            locale.hash(&mut hasher);
             let signature = hasher.finish();
             if self
                 .plugin_sprites
@@ -344,6 +346,8 @@ impl CustomTemplate {
                 height,
                 time: ctx.t as f32,
                 dt,
+                locale: locale.clone(),
+                translations: entry.descriptor.translations.clone(),
                 params,
                 color: self.color_for(&widget),
                 font,

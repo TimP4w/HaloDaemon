@@ -492,6 +492,7 @@ mod tests {
         PluginInfo {
             id: id.into(),
             name: id.into(),
+            translations: Default::default(),
             path: String::new(),
             plugin_type: Default::default(),
             experimental: false,

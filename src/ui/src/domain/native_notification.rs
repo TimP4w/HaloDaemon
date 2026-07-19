@@ -10,9 +10,12 @@ pub fn show(title: &str, message: &str) {
 #[cfg(target_os = "linux")]
 mod platform {
     use std::collections::HashMap;
+    use std::sync::atomic::{AtomicU64, Ordering};
     use std::time::Duration;
 
     use zbus::zvariant::{Str, Value};
+
+    static NEXT_NOTIFICATION_ID: AtomicU64 = AtomicU64::new(1);
 
     pub(super) fn show(title: &str, message: &str) {
         let title = title.to_owned();
@@ -40,14 +43,57 @@ mod platform {
 
     fn send(title: &str, message: &str) -> zbus::Result<&'static str> {
         let connection = zbus::blocking::Connection::session()?;
+        match send_gtk(&connection, title, message) {
+            Ok(()) => Ok("GTK notification service"),
+            Err(gtk_error) => {
+                log::debug!("GTK notification service unavailable: {gtk_error}");
+                send_freedesktop(&connection, title, message)?;
+                Ok("freedesktop service")
+            }
+        }
+    }
+
+    fn send_gtk(
+        connection: &zbus::blocking::Connection,
+        title: &str,
+        message: &str,
+    ) -> zbus::Result<()> {
         let proxy = zbus::blocking::Proxy::new(
-            &connection,
+            connection,
+            "org.gtk.Notifications",
+            "/org/gtk/Notifications",
+            "org.gtk.Notifications",
+        )?;
+        let mut notification: HashMap<&str, Value<'_>> = HashMap::new();
+        notification.insert("title", Value::Str(Str::from(title)));
+        notification.insert("body", Value::Str(Str::from(message)));
+        notification.insert("priority", Value::Str(Str::from("urgent")));
+
+        // Reusing a GTK notification ID replaces the existing notification.
+        // Include the process ID so notifications retained across GUI restarts
+        // cannot collide with IDs from a previous process.
+        let sequence = NEXT_NOTIFICATION_ID.fetch_add(1, Ordering::Relaxed);
+        let notification_id = format!("halod-{}-{sequence}", std::process::id());
+        proxy.call(
+            "AddNotification",
+            &(halod_shared::app::APP_ID, notification_id, notification),
+        )
+    }
+
+    fn send_freedesktop(
+        connection: &zbus::blocking::Connection,
+        title: &str,
+        message: &str,
+    ) -> zbus::Result<()> {
+        let proxy = zbus::blocking::Proxy::new(
+            connection,
             "org.freedesktop.Notifications",
             "/org/freedesktop/Notifications",
             "org.freedesktop.Notifications",
         )?;
         let actions: Vec<&str> = Vec::new();
         let mut hints: HashMap<&str, Value<'_>> = HashMap::new();
+        hints.insert("urgency", Value::U8(2));
         hints.insert(
             "desktop-entry",
             Value::Str(Str::from(halod_shared::app::APP_ID)),
@@ -65,7 +111,7 @@ mod platform {
                 10_000_i32,
             ),
         )?;
-        Ok("freedesktop service")
+        Ok(())
     }
 }
 

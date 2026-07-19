@@ -724,6 +724,11 @@ pub fn run(handle: tokio::runtime::Handle, package: &Path) -> Result<i32> {
 
     let report = Arc::new(Mutex::new(Report::default()));
     let lua = Lua::new();
+    let halod = lua.create_table().anyhow()?;
+    lua.globals().set("halod", halod).anyhow()?;
+    super::engine::sandbox::install_package_modules(&lua, &manifest.module_sources)
+        .anyhow()
+        .context("installing package-local modules for test.lua")?;
     let harness = build_harness(&lua, &manifest, handle, report.clone())?;
 
     let test_fn: Function = lua
@@ -792,6 +797,8 @@ fn validate_lcd_widgets(runtime: &tokio::runtime::Handle, manifest: &PluginManif
                 height: 128,
                 time: 0.0,
                 dt: 0.0,
+                locale: "en".to_owned(),
+                translations: Default::default(),
                 params,
                 color: RgbColor {
                     r: 0,

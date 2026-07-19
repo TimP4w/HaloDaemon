@@ -14,7 +14,7 @@ mod ffi;
 pub(crate) mod http_api;
 mod image_api;
 mod lua_worker;
-mod sandbox;
+pub(super) mod sandbox;
 pub(crate) mod transport;
 mod transport_api;
 pub(crate) mod udp_api;

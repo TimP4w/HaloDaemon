@@ -28,6 +28,14 @@ use crate::ui::screens::plugins::{
 };
 use crate::ui::theme;
 
+fn plugin_name(plugin: &PluginInfo) -> &str {
+    plugin.localized_name(&rust_i18n::locale())
+}
+
+fn plugin_description(plugin: &PluginInfo) -> &str {
+    plugin.localized_description(&rust_i18n::locale())
+}
+
 /// Whether `p` belongs on the Integrations page: an integration-type plugin
 /// that is actually runnable — enabled from the Plugins screen (a disabled one
 /// has no worker) and with its permissions granted (an ungranted one can never
@@ -220,13 +228,13 @@ impl IntegrationsUi {
                         let (rect, _) = ui.allocate_exact_size(Vec2::splat(40.0), Sense::hover());
                         match self.logo_texture(p) {
                             Some(tex) => draw_logo_fit(ui.painter(), rect, tex),
-                            None => initials_tile_at(ui, rect, &p.name, &p.id),
+                            None => initials_tile_at(ui, rect, plugin_name(p), &p.id),
                         }
                         ui.add_space(theme::SPACE_3);
                         ui.vertical(|ui| {
                             ui.horizontal(|ui| {
                                 ui.label(
-                                    egui::RichText::new(&p.name)
+                                    egui::RichText::new(plugin_name(p))
                                         .font(theme::title())
                                         .color(theme::TEXT),
                                 );
@@ -238,10 +246,10 @@ impl IntegrationsUi {
                                     );
                                 }
                             });
-                            if !p.description.is_empty() {
+                            if !plugin_description(p).is_empty() {
                                 ui.add_space(theme::SPACE_2);
                                 ui.label(
-                                    egui::RichText::new(&p.description)
+                                    egui::RichText::new(plugin_description(p))
                                         .font(theme::body_sm())
                                         .color(theme::TEXT_MUT),
                                 );
@@ -314,7 +322,7 @@ impl IntegrationsUi {
                             )
                             .clicked()
                         {
-                            self.reset_confirm = Some((p.id.clone(), p.name.clone()));
+                            self.reset_confirm = Some((p.id.clone(), plugin_name(p).to_owned()));
                         }
                     });
                 },
@@ -324,7 +332,11 @@ impl IntegrationsUi {
                 ui.add_space(theme::SPACE_5);
                 if integration_issue_bar(ui, issue) {
                     self.issue_modal = Some((
-                        t!("integrations.issue_modal_title", integration = &p.name).to_string(),
+                        t!(
+                            "integrations.issue_modal_title",
+                            integration = plugin_name(p)
+                        )
+                        .to_string(),
                         plugin_issue_detail(issue),
                     ));
                 }
@@ -417,7 +429,7 @@ impl IntegrationsUi {
             return;
         };
         let mut close = false;
-        let title = t!("integrations.setup_connect", name = plugin.name).to_string();
+        let title = t!("integrations.setup_connect", name = plugin_name(&plugin)).to_string();
         let time = ctx.input(|i| i.time) as f32;
         let dismissed =
             widgets::modal_frame_raw(ctx, "integration_setup", &title, 620.0, 500.0, |ui| {
@@ -670,7 +682,7 @@ impl IntegrationsUi {
         let pair_title = t!("integrations.setup_pair_title_fallback");
         step_heading(ui, setup.title.as_deref().unwrap_or(&pair_title));
         ui.add_space(theme::SPACE_6);
-        pairing_hero(ui, &plugin.name, time);
+        pairing_hero(ui, plugin_name(plugin), time);
         ui.add_space(theme::SPACE_8);
         for (index, instruction) in setup.instructions.iter().enumerate() {
             instruction_row(ui, index + 1, instruction);
@@ -736,7 +748,11 @@ impl IntegrationsUi {
             .show(ui)
         {
             self.issue_modal = Some((
-                t!("integrations.issue_modal_title", integration = &plugin.name).to_string(),
+                t!(
+                    "integrations.issue_modal_title",
+                    integration = plugin_name(plugin)
+                )
+                .to_string(),
                 error.to_owned(),
             ));
         }
@@ -1106,9 +1122,12 @@ fn setup_done(
             widgets::success_check(ui, 68.0);
             ui.add_space(theme::SPACE_9);
             ui.label(
-                RichText::new(t!("integrations.setup_connected", name = plugin.name))
-                    .font(theme::bold(21.0))
-                    .color(theme::TEXT),
+                RichText::new(t!(
+                    "integrations.setup_connected",
+                    name = plugin_name(plugin)
+                ))
+                .font(theme::bold(21.0))
+                .color(theme::TEXT),
             );
             ui.add_space(theme::SPACE_3);
             ui.label(
@@ -1281,6 +1300,7 @@ mod tests {
         PluginInfo {
             id: id.into(),
             name: format!("{id} integration"),
+            translations: Default::default(),
             path: String::new(),
             plugin_type: PluginKind::Integration,
             experimental: false,
