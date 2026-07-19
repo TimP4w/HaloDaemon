@@ -88,7 +88,6 @@ pipewire = "0.10"
 evdev = "0.12"
 wayland-client = "0.31"
 wayland-protocols-wlr = { version = "0.3", features = ["client"] }
-x11rb = "0.13"
 zbus = { version = "4", default-features = false, features = ["tokio"] }
 
 [target.'cfg(target_os = "windows")'.dependencies.enigo]

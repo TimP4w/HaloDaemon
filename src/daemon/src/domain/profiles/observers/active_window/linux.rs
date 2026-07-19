@@ -2,34 +2,35 @@
 use super::FocusEvent;
 use tokio::sync::mpsc;
 
-pub async fn spawn() -> anyhow::Result<mpsc::Receiver<FocusEvent>> {
-    if std::env::var("WAYLAND_DISPLAY").is_ok() {
-        // Try GNOME Shell extension first — compositor-native, no accessibility required.
-        match super::gnome_shell::spawn().await {
-            Ok(rx) => {
-                log::info!("[FocusWatcher] Using GNOME Shell extension backend");
-                return Ok(rx);
-            }
-            Err(e) => log::debug!("[FocusWatcher] GNOME Shell extension unavailable: {e}"),
-        }
+fn is_gnome_session() -> bool {
+    ["XDG_CURRENT_DESKTOP", "DESKTOP_SESSION"]
+        .into_iter()
+        .filter_map(|name| std::env::var(name).ok())
+        .flat_map(|value| {
+            value
+                .split([':', ';'])
+                .map(str::trim)
+                .map(str::to_owned)
+                .collect::<Vec<_>>()
+        })
+        .any(|desktop| {
+            desktop.eq_ignore_ascii_case("gnome")
+                || desktop.eq_ignore_ascii_case("gnome-classic")
+                || desktop.eq_ignore_ascii_case("gnome-flashback")
+                || desktop.eq_ignore_ascii_case("ubuntu")
+        })
+}
 
-        // Try wlroots/KDE compositor (zwlr_foreign_toplevel_manager_v1).
-        match super::wayland::spawn().await {
-            Ok(rx) => {
-                log::info!("[FocusWatcher] Using Wayland (wlr) backend");
-                return Ok(rx);
-            }
-            Err(e) => log::debug!("[FocusWatcher] wlr backend unavailable: {e}"),
-        }
+pub async fn spawn() -> anyhow::Result<mpsc::Receiver<FocusEvent>> {
+    // GNOME exposes focused-window information through the HaloDaemon Shell
+    // extension on both Wayland and X11. Do not silently fall back to a less
+    // accurate compositor/window-system backend when the extension is missing.
+    if is_gnome_session() {
+        return super::gnome_shell::spawn().await;
     }
-    if std::env::var_os("DISPLAY").is_some() {
-        match super::x11::spawn().await {
-            Ok(rx) => {
-                log::info!("[FocusWatcher] Using X11 EWMH backend");
-                return Ok(rx);
-            }
-            Err(e) => log::debug!("[FocusWatcher] X11 backend unavailable: {e}"),
-        }
+
+    if std::env::var("WAYLAND_DISPLAY").is_ok() {
+        return super::wayland::spawn().await;
     }
-    anyhow::bail!("no supported focus backend (headless, SSH, or no compositor protocol available)")
+    anyhow::bail!("no supported Wayland focus backend available")
 }

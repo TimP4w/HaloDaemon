@@ -12,8 +12,6 @@ mod linux;
 #[cfg(target_os = "linux")]
 pub mod wayland;
 pub mod windows;
-#[cfg(target_os = "linux")]
-mod x11;
 
 #[derive(Debug, Clone)]
 pub enum FocusEvent {
