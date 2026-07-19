@@ -22,5 +22,14 @@ pub async fn spawn() -> anyhow::Result<mpsc::Receiver<FocusEvent>> {
             Err(e) => log::debug!("[FocusWatcher] wlr backend unavailable: {e}"),
         }
     }
+    if std::env::var_os("DISPLAY").is_some() {
+        match super::x11::spawn().await {
+            Ok(rx) => {
+                log::info!("[FocusWatcher] Using X11 EWMH backend");
+                return Ok(rx);
+            }
+            Err(e) => log::debug!("[FocusWatcher] X11 backend unavailable: {e}"),
+        }
+    }
     anyhow::bail!("no supported focus backend (headless, SSH, or no compositor protocol available)")
 }

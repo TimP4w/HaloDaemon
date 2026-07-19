@@ -1173,10 +1173,7 @@ impl crate::infrastructure::media::MediaPublisher for DataBus {
                 .into(),
             ),
         );
-        value.insert(
-            "art_available".into(),
-            DataValue::Bool(info.art.is_some()),
-        );
+        value.insert("art_available".into(), DataValue::Bool(info.art.is_some()));
         let _ = self.publish(
             "host",
             "host.media.playback",
