@@ -4,7 +4,7 @@
 
 /// UUID of the `halod@halod` GNOME Shell extension used for focus tracking.
 #[cfg(target_os = "linux")]
-pub const GNOME_EXTENSION_UUID: &str = "halod@halod";
+pub const GNOME_EXTENSION_UUID: &str = "companion@halod.timp4w.dev";
 
 /// D-Bus interface the `halod@halod` GNOME Shell extension emits its
 /// `FocusChanged` signal on.

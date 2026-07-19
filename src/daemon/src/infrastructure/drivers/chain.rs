@@ -252,6 +252,24 @@ impl LightingDivisionHost {
             .collect()
     }
 
+    /// Snapshot only user-created links. Hardware-discovered links are probed
+    /// again on startup and must not be written to configuration.
+    pub fn persistent_links(&self) -> HashMap<String, Vec<ChainLinkRuntime>> {
+        let state = self.state.lock().unwrap_or_else(|e| e.into_inner());
+        state
+            .iter()
+            .filter_map(|(channel_id, chain)| {
+                let links: Vec<_> = chain
+                    .links
+                    .iter()
+                    .filter(|link| !link.locked)
+                    .cloned()
+                    .collect();
+                (!links.is_empty()).then(|| (channel_id.clone(), links))
+            })
+            .collect()
+    }
+
     /// Register a hardware-detected first link (locked). Called from the
     /// parent's `discover_children` after `child.initialize()` succeeds. The
     /// host tracks the child Arc itself so the parent's `serialize()` reads
@@ -338,6 +356,33 @@ impl LightingDivisionHost {
             )
             .await?;
         Ok((new_id, device))
+    }
+
+    /// Restore a user-created link with its stable persisted child id.
+    pub async fn restore_link(
+        self: &Arc<Self>,
+        channel_id: &str,
+        child_id: &str,
+        spec: ChainLinkSpec,
+    ) -> Result<Arc<dyn Device>> {
+        {
+            let state = self.state.lock().unwrap_or_else(|e| e.into_inner());
+            if state
+                .get(channel_id)
+                .and_then(|chain| chain.find_index(child_id))
+                .is_some()
+            {
+                anyhow::bail!("chain link already exists: {child_id}");
+            }
+        }
+        self.spawn_link(
+            channel_id,
+            child_id,
+            spec.name,
+            spec.topology,
+            spec.led_count,
+        )
+        .await
     }
 
     /// Shared spawn→reserve→register pipeline for `add_link` and `restore_link`.

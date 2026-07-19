@@ -342,6 +342,9 @@ fn run_pipewire(
     frame_slot: Arc<Mutex<Option<RawFrame>>>,
     stop: Arc<AtomicBool>,
 ) {
+    // Take ownership before any fallible PipeWire construction so every early
+    // return closes the portal descriptor.
+    let pw_fd = unsafe { OwnedFd::from_raw_fd(pw_fd) };
     pipewire::init();
 
     let ml = match pipewire::main_loop::MainLoopBox::new(None) {
@@ -360,7 +363,7 @@ fn run_pipewire(
         }
     };
 
-    let core = match ctx.connect_fd(unsafe { OwnedFd::from_raw_fd(pw_fd) }, None) {
+    let core = match ctx.connect_fd(pw_fd, None) {
         Ok(c) => c,
         Err(e) => {
             log::error!("PipeWire connect_fd: {e}");

@@ -121,7 +121,10 @@ mod tests {
         .await
         .unwrap();
         let cfg = app.config.read().await;
+        #[cfg(windows)]
         assert_eq!(cfg.app_rules[0].process_names, vec!["firefox", "code"]);
+        #[cfg(not(windows))]
+        assert_eq!(cfg.app_rules[0].process_names, vec!["firefox", "code.exe"]);
     }
 
     #[tokio::test]

@@ -393,7 +393,7 @@ impl Drop for PipeSecurity {
 /// True if a daemon is already accepting connections on `path`.
 /// `ECONNREFUSED` (a stale socket file left by a crashed instance) or a missing path means we may safely (re)bind.
 #[cfg(unix)]
-fn daemon_already_listening(path: &str) -> bool {
+fn daemon_already_listening(path: &std::path::Path) -> bool {
     std::os::unix::net::UnixStream::connect(path).is_ok()
 }
 
@@ -403,7 +403,8 @@ pub fn ensure_single_instance() -> Result<()> {
     let path = socket_path();
     if daemon_already_listening(&path) {
         anyhow::bail!(
-            "another halod instance is already running (socket {path}); refusing to start"
+            "another halod instance is already running (socket {}); refusing to start",
+            path.display()
         );
     }
     Ok(())
@@ -469,7 +470,7 @@ fn serve_at(
         // Belt-and-suspenders against umask/TOCTOU: even inside a private dir,
         // make the socket node itself owner-only.
         std::fs::set_permissions(&path, Permissions::from_mode(0o600))?;
-        log::info!("Listening on {path}");
+        log::info!("Listening on {}", path.display());
 
         let our_uid = current_uid();
         loop {
@@ -1356,20 +1357,18 @@ mod unix_tests {
 
         let tmp = tempfile::tempdir().unwrap();
         let path = tmp.path().join("halod.sock");
-        let path_str = path.to_str().unwrap();
-
         // Missing path: free.
-        assert!(!daemon_already_listening(path_str));
+        assert!(!daemon_already_listening(&path));
 
         // Live owner: detected.
         let listener = UnixListener::bind(&path).unwrap();
-        assert!(daemon_already_listening(path_str));
+        assert!(daemon_already_listening(&path));
 
         // Socket node left behind with no listener (crashed instance): the file
         // still exists but `connect` is refused, so it reads as free.
         drop(listener);
         assert!(path.exists(), "std UnixListener leaves the node on drop");
-        assert!(!daemon_already_listening(path_str));
+        assert!(!daemon_already_listening(&path));
     }
 
     /// Binding in a fallback location (`XDG_RUNTIME_DIR` unset) must create a

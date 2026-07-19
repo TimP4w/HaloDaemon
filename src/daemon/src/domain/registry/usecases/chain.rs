@@ -6,6 +6,7 @@ use anyhow::{Context, Result};
 use std::sync::Arc;
 
 use crate::application::state::AppState;
+use crate::domain::registry::model::{ChainLinkRecord, ChannelLayoutRecord, DeviceLayout};
 use crate::infrastructure::drivers::chain::LightingDivisionHost;
 use crate::infrastructure::drivers::{ChainLinkSpec, Device};
 use halod_shared::types::ZoneTopology;
@@ -16,16 +17,41 @@ fn require_chain(device: &Arc<dyn Device>) -> Result<&Arc<LightingDivisionHost>>
         .context("device does not support chainable channels")
 }
 
-/// Lighting segments are intentionally not persisted across the hard lighting
-/// model cut.  The runtime descriptor is the only source of truth.
 pub(crate) async fn persist_layout(app: &Arc<AppState>, device: &dyn Device) -> Result<()> {
     let dev_id = device.id().to_owned();
+    let host = require_chain_ref(device)?;
+    let channels: std::collections::HashMap<String, ChannelLayoutRecord> = host
+        .persistent_links()
+        .into_iter()
+        .map(|(channel_id, links)| {
+            let chain_links = links
+                .into_iter()
+                .map(|link| ChainLinkRecord {
+                    id: link.child_id,
+                    name: link.name,
+                    topology: link.topology,
+                    led_count: link.led_count,
+                })
+                .collect();
+            (channel_id, ChannelLayoutRecord { chain_links })
+        })
+        .collect();
     {
         let mut cfg = app.config.write().await;
-        cfg.device_layouts.remove(&dev_id);
+        if channels.is_empty() {
+            cfg.device_layouts.remove(&dev_id);
+        } else {
+            cfg.device_layouts.insert(dev_id, DeviceLayout { channels });
+        }
     }
     app.request_config_save();
     Ok(())
+}
+
+fn require_chain_ref(device: &dyn Device) -> Result<&Arc<LightingDivisionHost>> {
+    device
+        .chain_host()
+        .context("device does not support chainable channels")
 }
 
 pub async fn lighting_add_segment(
@@ -112,11 +138,63 @@ pub async fn lighting_detect_segments(
     chain.detect_channel(&channel_id).await
 }
 
-/// Legacy chain layouts are deliberately discarded by the lighting hard cut.
 pub async fn restore_saved_chains(app: Arc<AppState>) {
-    let mut cfg = app.config.write().await;
-    cfg.device_layouts.clear();
-    drop(cfg);
+    let saved = app.config.read().await.device_layouts.clone();
+    let devices = app.device_registry.read().await.clone();
+    let mut restored_layouts = saved.clone();
+
+    for device in devices {
+        let Some(layout) = saved.get(device.id()) else {
+            continue;
+        };
+        let Some(host) = device.chain_host() else {
+            restored_layouts.remove(device.id());
+            continue;
+        };
+        let mut restored_channels = std::collections::HashMap::new();
+        for (channel_id, channel) in &layout.channels {
+            let mut restored_links = Vec::new();
+            for link in &channel.chain_links {
+                let spec = ChainLinkSpec {
+                    name: link.name.clone(),
+                    topology: link.topology.clone(),
+                    led_count: link.led_count,
+                };
+                match host.restore_link(channel_id, &link.id, spec).await {
+                    Ok(child) => {
+                        app.device_registry.write().await.push(child);
+                        restored_links.push(link.clone());
+                    }
+                    Err(error) => log::warn!(
+                        "failed to restore chain link {} on {}:{}: {error:#}",
+                        link.id,
+                        device.id(),
+                        channel_id
+                    ),
+                }
+            }
+            if !restored_links.is_empty() {
+                restored_channels.insert(
+                    channel_id.clone(),
+                    ChannelLayoutRecord {
+                        chain_links: restored_links,
+                    },
+                );
+            }
+        }
+        if restored_channels.is_empty() {
+            restored_layouts.remove(device.id());
+        } else {
+            restored_layouts.insert(
+                device.id().to_owned(),
+                DeviceLayout {
+                    channels: restored_channels,
+                },
+            );
+        }
+    }
+
+    app.config.write().await.device_layouts = restored_layouts;
     app.request_config_save();
 }
 
@@ -261,10 +339,8 @@ mod tests {
         );
     }
 
-    // The hard cut drops every persisted segment layout.
-
     #[tokio::test]
-    async fn persist_layout_discards_legacy_layout() {
+    async fn persist_layout_records_user_link_with_stable_id() {
         let dev = Arc::new(MockChainDevice::new("dev1").with_channels(vec![channel(
             "ch0",
             "Channel 0",
@@ -272,10 +348,28 @@ mod tests {
         )]));
         let app = make_app_with(dev.clone() as Arc<dyn Device>);
 
+        let (child_id, child) = dev
+            .host
+            .add_link(
+                "ch0",
+                ChainLinkSpec {
+                    name: "Desk strip".into(),
+                    topology: ZoneTopology::Linear,
+                    led_count: 24,
+                },
+            )
+            .await
+            .unwrap();
+        app.device_registry.write().await.push(child);
+
         persist_layout(&app, dev.as_ref()).await.unwrap();
 
         let cfg = app.config.read().await;
-        assert!(!cfg.device_layouts.contains_key("dev1"));
+        let links = &cfg.device_layouts["dev1"].channels["ch0"].chain_links;
+        assert_eq!(links.len(), 1);
+        assert_eq!(links[0].id, child_id);
+        assert_eq!(links[0].name, "Desk strip");
+        assert_eq!(links[0].led_count, 24);
     }
 
     #[tokio::test]
@@ -339,5 +433,42 @@ mod tests {
             !cfg.device_layouts.contains_key("dev1"),
             "device layout entry must be removed when all restore attempts fail"
         );
+    }
+
+    #[tokio::test]
+    async fn restore_saved_chains_recreates_child_with_persisted_id() {
+        let dev = Arc::new(MockChainDevice::new("dev1").with_channels(vec![channel(
+            "ch0",
+            "Channel 0",
+            100,
+        )]));
+        let app = make_app_with(dev.clone() as Arc<dyn Device>);
+        app.config.write().await.device_layouts.insert(
+            "dev1".into(),
+            DeviceLayout {
+                channels: std::collections::HashMap::from([(
+                    "ch0".into(),
+                    ChannelLayoutRecord {
+                        chain_links: vec![ChainLinkRecord {
+                            id: "stable-child-id".into(),
+                            name: "Restored strip".into(),
+                            topology: ZoneTopology::Linear,
+                            led_count: 16,
+                        }],
+                    },
+                )]),
+            },
+        );
+
+        restore_saved_chains(app.clone()).await;
+
+        let registry = app.device_registry.read().await;
+        assert!(registry
+            .iter()
+            .any(|device| device.id() == "stable-child-id"));
+        drop(registry);
+        let links = dev.host.persistent_links();
+        assert_eq!(links["ch0"][0].child_id, "stable-child-id");
+        assert_eq!(links["ch0"][0].name, "Restored strip");
     }
 }

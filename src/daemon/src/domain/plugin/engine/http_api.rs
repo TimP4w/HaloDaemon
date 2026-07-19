@@ -164,7 +164,7 @@ mod tests {
             .unwrap();
         register(&lua, runtime(backend.clone())).unwrap();
         let err = lua
-            .load(r#"return halod.http:request{ origin = "https://evil.example.com" }"#)
+            .load(r#"return halod.http:request{ origin = "https://evil.example.com", path = "/" }"#)
             .eval::<Value>()
             .unwrap_err()
             .to_string();

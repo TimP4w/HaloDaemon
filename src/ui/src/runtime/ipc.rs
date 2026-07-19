@@ -318,7 +318,7 @@ async fn connect_once(
     let path = socket_path();
     let mut stream = UnixStream::connect(&path)
         .await
-        .map_err(|e| anyhow::anyhow!("connect {path}: {e}"))?;
+        .map_err(|e| anyhow::anyhow!("connect {}: {e}", path.display()))?;
     read_frames(&mut stream, tx, cmd_rx, repaint).await
 }
 

@@ -4,17 +4,18 @@
 use std::ffi::OsString;
 use std::os::windows::ffi::OsStringExt;
 use std::path::Path;
-use std::sync::Mutex;
-use std::sync::OnceLock;
+use std::sync::atomic::{AtomicU32, AtomicU64, Ordering};
+use std::sync::{Arc, Mutex, OnceLock};
 use tokio::sync::mpsc;
 use windows::Win32::Foundation::{CloseHandle, HWND};
 use windows::Win32::System::Threading::{
-    OpenProcess, QueryFullProcessImageNameW, PROCESS_NAME_WIN32, PROCESS_QUERY_LIMITED_INFORMATION,
+    GetCurrentThreadId, OpenProcess, QueryFullProcessImageNameW, PROCESS_NAME_WIN32,
+    PROCESS_QUERY_LIMITED_INFORMATION,
 };
 use windows::Win32::UI::Accessibility::{SetWinEventHook, UnhookWinEvent, HWINEVENTHOOK};
 use windows::Win32::UI::WindowsAndMessaging::{
-    DispatchMessageW, GetMessageW, GetWindowThreadProcessId, TranslateMessage,
-    EVENT_SYSTEM_FOREGROUND, MSG, WINEVENT_OUTOFCONTEXT, WINEVENT_SKIPOWNPROCESS,
+    DispatchMessageW, GetMessageW, GetWindowThreadProcessId, PostThreadMessageW, TranslateMessage,
+    EVENT_SYSTEM_FOREGROUND, MSG, WINEVENT_OUTOFCONTEXT, WINEVENT_SKIPOWNPROCESS, WM_QUIT,
 };
 
 use super::FocusEvent;
@@ -22,6 +23,7 @@ use super::FocusEvent;
 /// Global bridge — `WINEVENT_OUTOFCONTEXT` delivers on a system thread, so
 /// `OnceLock<Mutex<…>>` replaces `thread_local!`.
 static BRIDGE: OnceLock<Mutex<Option<std::sync::mpsc::SyncSender<FocusEvent>>>> = OnceLock::new();
+static BRIDGE_GENERATION: AtomicU64 = AtomicU64::new(0);
 
 unsafe extern "system" fn hook_proc(
     _hook: HWINEVENTHOOK,
@@ -124,11 +126,22 @@ pub async fn spawn() -> anyhow::Result<mpsc::Receiver<FocusEvent>> {
     log::info!("[FocusWatcher/Windows] spawn() called, initializing WinEvent hook");
     let (bridge_tx, bridge_rx) = std::sync::mpsc::sync_channel::<FocusEvent>(32);
     let (tx, rx) = mpsc::channel::<FocusEvent>(32);
+    let generation = BRIDGE_GENERATION.fetch_add(1, Ordering::AcqRel) + 1;
+    *BRIDGE.get_or_init(|| Mutex::new(None)).lock().unwrap() = Some(bridge_tx);
+    let hook_thread_id = Arc::new(AtomicU32::new(0));
+    let hook_thread_id_for_hook = Arc::clone(&hook_thread_id);
 
     std::thread::spawn(move || {
         log::info!("[FocusWatcher/Windows] hook thread started");
-        let _ = BRIDGE.set(Mutex::new(Some(bridge_tx)));
-        log::debug!("[FocusWatcher/Windows] BRIDGE installed via OnceLock");
+        hook_thread_id_for_hook.store(unsafe { GetCurrentThreadId() }, Ordering::Release);
+        let still_active = BRIDGE_GENERATION.load(Ordering::Acquire) == generation
+            && BRIDGE
+                .get()
+                .and_then(|bridge| bridge.lock().ok())
+                .is_some_and(|bridge| bridge.is_some());
+        if !still_active {
+            return;
+        }
 
         unsafe {
             let hook = SetWinEventHook(
@@ -175,10 +188,26 @@ pub async fn spawn() -> anyhow::Result<mpsc::Receiver<FocusEvent>> {
     // Bridge: forward from std::sync::mpsc to tokio mpsc
     let bridge = tokio::task::spawn_blocking(move || {
         log::debug!("[FocusWatcher/Windows] bridge forwarder task started");
-        while let Ok(event) = bridge_rx.recv() {
-            if tx.blocking_send(event).is_err() {
-                log::warn!("[FocusWatcher/Windows] tokio tx closed, bridge forwarder exiting");
+        loop {
+            if tx.is_closed() {
                 break;
+            }
+            match bridge_rx.recv_timeout(std::time::Duration::from_millis(100)) {
+                Ok(event) if tx.blocking_send(event).is_err() => break,
+                Ok(_) | Err(std::sync::mpsc::RecvTimeoutError::Timeout) => {}
+                Err(std::sync::mpsc::RecvTimeoutError::Disconnected) => break,
+            }
+        }
+        if BRIDGE_GENERATION.load(Ordering::Acquire) == generation {
+            if let Some(bridge) = BRIDGE.get() {
+                *bridge.lock().unwrap() = None;
+            }
+        }
+        let thread_id = hook_thread_id.load(Ordering::Acquire);
+        if thread_id != 0 {
+            unsafe {
+                let _ =
+                    PostThreadMessageW(thread_id, WM_QUIT, Default::default(), Default::default());
             }
         }
         log::warn!("[FocusWatcher/Windows] bridge forwarder exited (bridge_rx closed)");

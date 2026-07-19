@@ -458,11 +458,27 @@ impl CustomTemplate {
             .iter()
             .map(|widget| widget.id.as_str())
             .collect();
+        let live_images: std::collections::HashSet<&str> = def
+            .widgets
+            .iter()
+            .flat_map(|widget| widget.params.values())
+            .filter_map(|value| match value {
+                EffectParamValue::Str(filename)
+                    if halod_shared::types::validate_image_filename(filename).is_ok() =>
+                {
+                    Some(filename.as_str())
+                }
+                _ => None,
+            })
+            .collect();
         self.composite_cache
             .borrow_mut()
             .retain(|id, _| live.contains(id.as_str()));
         self.plugin_sprites
             .retain(|id, _| live.contains(id.as_str()));
+        self.decoded_cache
+            .borrow_mut()
+            .retain(|filename, _| live_images.contains(filename.as_str()));
         self.def = def;
     }
 
@@ -1116,6 +1132,37 @@ mod tests {
             start + timeout + std::time::Duration::from_millis(1),
             timeout,
         ));
+    }
+
+    #[test]
+    fn update_def_prunes_images_no_longer_referenced() {
+        let mut template = CustomTemplate::new(CustomTemplateDef::default(), Path::new("."));
+        template
+            .decoded_cache
+            .borrow_mut()
+            .insert("removed.png".into(), None);
+        template
+            .decoded_cache
+            .borrow_mut()
+            .insert("kept.png".into(), None);
+        let mut def = CustomTemplateDef::default();
+        def.widgets.push(WidgetDef {
+            id: "image".into(),
+            widget: "test:image".into(),
+            x: 0.0,
+            y: 0.0,
+            scale: 1.0,
+            rotation: 0.0,
+            color: None,
+            font: None,
+            params: HashMap::from([("image".into(), EffectParamValue::Str("kept.png".into()))]),
+        });
+
+        template.update_def(def);
+
+        let cache = template.decoded_cache.borrow();
+        assert!(cache.contains_key("kept.png"));
+        assert!(!cache.contains_key("removed.png"));
     }
 
     #[test]

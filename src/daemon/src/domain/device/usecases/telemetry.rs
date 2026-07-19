@@ -61,9 +61,26 @@ async fn sample_device(
 ) -> Vec<(String, Sensor)> {
     let mut sensors = Vec::new();
     if let Some(capability) = device.as_sensor_capability() {
-        if let Ok(Ok(readings)) =
-            tokio::time::timeout(DEVICE_SAMPLE_TIMEOUT, capability.get_sensors()).await
-        {
+        match tokio::time::timeout(DEVICE_SAMPLE_TIMEOUT, capability.get_sensors()).await {
+            Ok(Ok(readings)) => {
+                for mut sensor in readings {
+                    if let Some(state) = visibility.get(&sensor.id) {
+                        sensor.visibility = state.clone();
+                    }
+                    sensors.push((device.id().to_owned(), sensor));
+                }
+            }
+            Ok(Err(error)) => log::debug!("sensor read failed for {}: {error:#}", device.id()),
+            Err(_) => log::warn!("sensor read timed out for {}", device.id()),
+        }
+    }
+    match tokio::time::timeout(
+        DEVICE_SAMPLE_TIMEOUT,
+        crate::infrastructure::drivers::fan_sensors(device.as_ref()),
+    )
+    .await
+    {
+        Ok(readings) => {
             for mut sensor in readings {
                 if let Some(state) = visibility.get(&sensor.id) {
                     sensor.visibility = state.clone();
@@ -71,19 +88,7 @@ async fn sample_device(
                 sensors.push((device.id().to_owned(), sensor));
             }
         }
-    }
-    if let Ok(readings) = tokio::time::timeout(
-        DEVICE_SAMPLE_TIMEOUT,
-        crate::infrastructure::drivers::fan_sensors(device.as_ref()),
-    )
-    .await
-    {
-        for mut sensor in readings {
-            if let Some(state) = visibility.get(&sensor.id) {
-                sensor.visibility = state.clone();
-            }
-            sensors.push((device.id().to_owned(), sensor));
-        }
+        Err(_) => log::warn!("fan sensor read timed out for {}", device.id()),
     }
     sensors
 }

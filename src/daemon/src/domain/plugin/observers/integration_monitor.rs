@@ -32,21 +32,15 @@ fn tick_delay(attempt: u32) -> Duration {
     Duration::from_secs(secs)
 }
 
-/// Per-plugin reconnect state, replacing the old `failures: HashMap<_, u32>` +
-/// `in_progress: HashSet<_>` pair. Transitions: `Offline -> Connecting ->
-/// Online | Backoff`; `Backoff -> Connecting -> Online | Backoff` (attempt+1);
-/// a deterministic runtime failure transitions to `Unrecoverable`, which is
-/// held until an explicit disable/re-enable or scoped rediscovery;
-/// any -> `Disabled` once no longer enabled/granted, back to `Offline` if
-/// re-enabled. A live root dropping mid-diff (Case C) doesn't transition this
-/// state — it stays `Online` until next tick's liveness check routes it
-/// through Case B, which does.
+/// Per-plugin reconnect state.
+/// Transitions: `Offline -> Connecting -> Online | Backoff`; `Backoff -> Connecting -> Online | Backoff` (attempt+1).
 #[derive(Debug, Clone, PartialEq)]
 pub(super) enum MonitorState {
     Offline,
     Connecting,
     Online,
     Backoff { attempt: u32, deadline: Instant },
+    // Deterministic runtime failure (e.g. bad config)
     Unrecoverable,
     Disabled,
     Stopping,
@@ -72,7 +66,6 @@ pub async fn integration_monitor(app: Arc<AppState>) {
     }
 }
 
-/// Advance `plugin_id` to `Backoff`, incrementing its attempt streak.
 fn backoff(states: &mut HashMap<String, MonitorState>, plugin_id: &str, prev_attempt: u32) {
     let attempt = prev_attempt + 1;
     states.insert(
@@ -84,7 +77,6 @@ fn backoff(states: &mut HashMap<String, MonitorState>, plugin_id: &str, prev_att
     );
 }
 
-/// This plugin's current backoff attempt streak, or 0 if it isn't backing off.
 fn attempt_of(states: &HashMap<String, MonitorState>, plugin_id: &str) -> u32 {
     match states.get(plugin_id) {
         Some(MonitorState::Backoff { attempt, .. }) => *attempt,

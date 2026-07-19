@@ -43,7 +43,7 @@ fn idle_interval_ms(idle_since: Option<Instant>, now: Instant, base_ms: u64) -> 
 type RgbDeviceMap = HashMap<String, Arc<dyn Device>>;
 type FrameTx = tokio::sync::broadcast::Sender<Arc<CanvasFrame>>;
 /// Per device: the transformed frames to write this tick, one entry per zone.
-type PendingWrites = HashMap<String, (Arc<dyn Device>, Vec<(String, Vec<RgbColor>)>)>;
+type PendingWrites = HashMap<String, (Arc<dyn Device>, WriteGuard, Vec<(String, Vec<RgbColor>)>)>;
 type DirectDevice = (
     Arc<dyn Device>,
     String,
@@ -51,7 +51,7 @@ type DirectDevice = (
 );
 
 struct LivePixmap {
-    key: String,
+    signature: EffectSignature,
     pixmap: Pixmap,
     runtime: PixmapRuntime,
 }
@@ -63,7 +63,7 @@ enum PixmapRuntime {
 }
 
 struct LiveDirect {
-    key: String,
+    signature: EffectSignature,
     runtime: DirectRuntime,
 }
 
@@ -87,15 +87,44 @@ pub struct RgbEngine {
     write_slots: std::sync::Mutex<HashMap<String, tokio::task::JoinHandle<()>>>,
 }
 
-fn params_key(params: &HashMap<String, halod_shared::types::EffectParamValue>) -> String {
-    let sorted: std::collections::BTreeMap<_, _> = params.iter().collect();
-    serde_json::to_string(&sorted).unwrap_or_default()
+#[derive(Clone, Debug, PartialEq)]
+struct EffectSignature {
+    effect_id: String,
+    params: HashMap<String, halod_shared::types::EffectParamValue>,
 }
 
-fn instance_key(def: Option<&EffectDef>) -> String {
+#[derive(Clone, Debug, PartialEq)]
+enum WriteGuard {
+    Engine,
+    Direct(EffectSignature),
+}
+
+impl WriteGuard {
+    fn permits(&self, state: Option<LightingState>) -> bool {
+        match (self, state) {
+            (Self::Engine, Some(LightingState::Engine)) => true,
+            (Self::Direct(expected), Some(LightingState::DirectEffect { id, params })) => {
+                *expected
+                    == EffectSignature {
+                        effect_id: id,
+                        params,
+                    }
+            }
+            _ => false,
+        }
+    }
+}
+
+fn effect_signature(def: Option<&EffectDef>) -> EffectSignature {
     match def {
-        Some(d) => format!("{}|{}", d.effect_id, params_key(&d.params)),
-        None => DEFAULT_KEY.to_string(),
+        Some(def) => EffectSignature {
+            effect_id: def.effect_id.clone(),
+            params: def.params.clone(),
+        },
+        None => EffectSignature {
+            effect_id: DEFAULT_KEY.to_string(),
+            params: HashMap::new(),
+        },
     }
 }
 
@@ -417,8 +446,8 @@ impl RgbEngine {
         let mut built: Vec<String> = Vec::with_capacity(pixmap_keys.len());
         for key in &pixmap_keys {
             let def = &defs[key];
-            let want = instance_key(def.as_ref());
-            let stale = live.get(key).map(|lp| lp.key != want).unwrap_or(true);
+            let want = effect_signature(def.as_ref());
+            let stale = live.get(key).map(|lp| lp.signature != want).unwrap_or(true);
             if stale {
                 let Some(pixmap) = Pixmap::new(CANVAS_W, CANVAS_H) else {
                     log::error!("canvas: failed to allocate pixmap for '{key}', skipping");
@@ -428,7 +457,7 @@ impl RgbEngine {
                 live.insert(
                     key.clone(),
                     LivePixmap {
-                        key: want,
+                        signature: want,
                         pixmap,
                         runtime,
                     },
@@ -498,8 +527,8 @@ impl RgbEngine {
                         led_colors.extend(entries);
                         pending
                             .entry(zone.device_id.clone())
-                            .or_insert_with(|| (Arc::clone(dev), Vec::new()))
-                            .1
+                            .or_insert_with(|| (Arc::clone(dev), WriteGuard::Engine, Vec::new()))
+                            .2
                             .push((zone.channel_id.clone(), colors));
                     }
                 }
@@ -534,8 +563,14 @@ impl RgbEngine {
         live.retain(|k, _| active.contains(k.as_str()));
 
         for (dev, id, params) in direct_devices {
-            let want = format!("{id}|{}", params_key(params));
-            let stale = live.get(dev.id()).map(|ld| ld.key != want).unwrap_or(true);
+            let want = EffectSignature {
+                effect_id: id.clone(),
+                params: params.clone(),
+            };
+            let stale = live
+                .get(dev.id())
+                .map(|ld| ld.signature != want)
+                .unwrap_or(true);
             if stale {
                 let runtime = match direct::build_builtin(id, params) {
                     Some(fx) => DirectRuntime::BuiltIn(fx),
@@ -552,7 +587,13 @@ impl RgbEngine {
                         }
                     },
                 };
-                live.insert(dev.id().to_string(), LiveDirect { key: want, runtime });
+                live.insert(
+                    dev.id().to_string(),
+                    LiveDirect {
+                        signature: want.clone(),
+                        runtime,
+                    },
+                );
             }
             let ld = live.get_mut(dev.id()).expect("built above");
             let Some(rgb) = dev.as_lighting() else {
@@ -615,8 +656,14 @@ impl RgbEngine {
                         led_colors.extend(entries);
                         pending
                             .entry(dev.id().to_string())
-                            .or_insert_with(|| (Arc::clone(dev), Vec::new()))
-                            .1
+                            .or_insert_with(|| {
+                                (
+                                    Arc::clone(dev),
+                                    WriteGuard::Direct(want.clone()),
+                                    Vec::new(),
+                                )
+                            })
+                            .2
                             .push((rgb_zone.id.clone(), colors));
                     }
                 }
@@ -632,8 +679,14 @@ impl RgbEngine {
                         led_colors.extend(entries);
                         pending
                             .entry(dev.id().to_string())
-                            .or_insert_with(|| (Arc::clone(dev), Vec::new()))
-                            .1
+                            .or_insert_with(|| {
+                                (
+                                    Arc::clone(dev),
+                                    WriteGuard::Direct(want.clone()),
+                                    Vec::new(),
+                                )
+                            })
+                            .2
                             .push((rgb_zone.id.clone(), colors));
                     }
                 }
@@ -650,8 +703,14 @@ impl RgbEngine {
                     led_colors.extend(entries);
                     pending
                         .entry(dev.id().to_string())
-                        .or_insert_with(|| (Arc::clone(dev), Vec::new()))
-                        .1
+                        .or_insert_with(|| {
+                            (
+                                Arc::clone(dev),
+                                WriteGuard::Direct(want.clone()),
+                                Vec::new(),
+                            )
+                        })
+                        .2
                         .push((rgb_zone.id.clone(), colors));
                 }
             }
@@ -789,7 +848,7 @@ impl RgbEngine {
     fn dispatch_writes(&self, pending: PendingWrites) {
         let mut slots = self.write_slots.lock().expect("write slots poisoned");
         slots.retain(|_, handle| !handle.is_finished());
-        for (id, (dev, channels)) in pending {
+        for (id, (dev, guard, channels)) in pending {
             // Skip a device that went offline between state sync and dispatch.
             if !dev.is_live() || dev.active_state() == VisibilityState::Disabled {
                 continue;
@@ -802,7 +861,7 @@ impl RgbEngine {
                     return;
                 }
                 let Some(rgb) = dev.as_lighting() else { return };
-                if !matches!(rgb.current_state(), Some(LightingState::Engine)) {
+                if !guard.permits(rgb.current_state()) {
                     return;
                 }
                 let encoded: Vec<_> = channels
@@ -1078,7 +1137,7 @@ mod tests {
     }
 
     #[test]
-    fn instance_key_changes_with_params() {
+    fn effect_signature_changes_with_params() {
         let a = EffectDef {
             effect_id: "static_color".into(),
             name: None,
@@ -1093,12 +1152,12 @@ mod tests {
                 .into_iter()
                 .collect(),
         };
-        assert_ne!(instance_key(Some(&a)), instance_key(Some(&b)));
-        assert_eq!(instance_key(None), DEFAULT_KEY);
+        assert_ne!(effect_signature(Some(&a)), effect_signature(Some(&b)));
+        assert_eq!(effect_signature(None).effect_id, DEFAULT_KEY);
     }
 
     #[test]
-    fn params_key_is_order_independent() {
+    fn effect_signature_is_map_order_independent() {
         let mut a = HashMap::new();
         a.insert("zzz".to_string(), EffectParamValue::Float(1.0));
         a.insert("aaa".to_string(), EffectParamValue::Float(2.0));
@@ -1107,7 +1166,16 @@ mod tests {
         b.insert("aaa".to_string(), EffectParamValue::Float(2.0));
         b.insert("mmm".to_string(), EffectParamValue::Float(3.0));
         b.insert("zzz".to_string(), EffectParamValue::Float(1.0));
-        assert_eq!(params_key(&a), params_key(&b));
+        assert_eq!(
+            EffectSignature {
+                effect_id: "test".into(),
+                params: a,
+            },
+            EffectSignature {
+                effect_id: "test".into(),
+                params: b,
+            }
+        );
     }
 
     /// Position-independent pulse `sin(t*0.5*pi)^2` (black at t=0, peak at
@@ -1345,6 +1413,7 @@ mod tests {
             "dev0".to_string(),
             (
                 dev_arc,
+                WriteGuard::Engine,
                 vec![("ring".to_string(), vec![RgbColor::default(); 3])],
             ),
         );
@@ -1701,6 +1770,7 @@ mod tests {
             "dev0".into(),
             (
                 dev.clone() as Arc<dyn Device>,
+                WriteGuard::Engine,
                 vec![("ring".into(), solid_colors(3))],
             ),
         );
@@ -1720,11 +1790,48 @@ mod tests {
             "dev0".into(),
             (
                 dev.clone() as Arc<dyn Device>,
+                WriteGuard::Engine,
                 vec![("ring".into(), solid_colors(3))],
             ),
         );
         *dev.rgb_state.lock().unwrap() = Some(LightingState::Static {
             color: RgbColor::default(),
+        });
+
+        engine.dispatch_writes(pending);
+        engine.drain_writes().await;
+
+        assert_eq!(dev.write_count.load(Ordering::SeqCst), 0);
+    }
+
+    #[tokio::test]
+    async fn dispatch_drops_direct_frame_after_effect_parameters_change() {
+        let engine = RgbEngine::new(make_app()).await;
+        let dev = MockRgbDevice::new("dev0", "ring", 3, false);
+        let original = EffectSignature {
+            effect_id: "breathing".into(),
+            params: [("speed".into(), EffectParamValue::Float(1.0))]
+                .into_iter()
+                .collect(),
+        };
+        *dev.rgb_state.lock().unwrap() = Some(LightingState::DirectEffect {
+            id: original.effect_id.clone(),
+            params: original.params.clone(),
+        });
+        let mut pending: PendingWrites = HashMap::new();
+        pending.insert(
+            "dev0".into(),
+            (
+                dev.clone() as Arc<dyn Device>,
+                WriteGuard::Direct(original),
+                vec![("ring".into(), solid_colors(3))],
+            ),
+        );
+        *dev.rgb_state.lock().unwrap() = Some(LightingState::DirectEffect {
+            id: "breathing".into(),
+            params: [("speed".into(), EffectParamValue::Float(2.0))]
+                .into_iter()
+                .collect(),
         });
 
         engine.dispatch_writes(pending);
@@ -1753,6 +1860,7 @@ mod tests {
             "dev0".into(),
             (
                 dev.clone() as Arc<dyn Device>,
+                WriteGuard::Engine,
                 vec![("ring".into(), solid_colors(3))],
             ),
         );
