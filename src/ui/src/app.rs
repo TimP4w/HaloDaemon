@@ -206,7 +206,7 @@ impl App {
             .map(|mut queue| queue.drain(..).collect())
             .unwrap_or_default();
         if !incoming.is_empty() {
-            crate::ui::show_native_notifications(&incoming);
+            crate::ui::root::show_native_notifications(&incoming);
             crate::ui::screens::profile::observe_notifications(&mut self.profile_ui, &incoming);
             self.toasts.ingest(incoming, ctx.input(|input| input.time));
         }

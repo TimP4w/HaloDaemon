@@ -743,10 +743,8 @@ fn gui_config_dir() -> std::path::PathBuf {
     }
     #[cfg(target_os = "windows")]
     {
-        return std::path::PathBuf::from(
-            std::env::var("APPDATA").unwrap_or_else(|_| ".".to_owned()),
-        )
-        .join(halod_shared::app::APP_NAME);
+        std::path::PathBuf::from(std::env::var("APPDATA").unwrap_or_else(|_| ".".to_owned()))
+            .join(halod_shared::app::APP_NAME)
     }
     #[cfg(not(target_os = "windows"))]
     {
