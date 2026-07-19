@@ -531,31 +531,7 @@ fn interpolate(points: &[(f32, f32)], temp: f32) -> f32 {
         points.windows(2).all(|w| w[0].0 <= w[1].0),
         "interpolate requires ascending temperatures, got {points:?}"
     );
-    if points.is_empty() {
-        return 0.0;
-    }
-    if points.len() == 1 {
-        return points[0].1;
-    }
-    if temp <= points[0].0 {
-        return points[0].1;
-    }
-    let last = points.last().unwrap();
-    if temp >= last.0 {
-        return last.1;
-    }
-    for i in 0..points.len() - 1 {
-        let (x1, y1) = points[i];
-        let (x2, y2) = points[i + 1];
-        if temp >= x1 && temp <= x2 {
-            let span = x2 - x1;
-            if span <= 0.0 {
-                return y2;
-            }
-            return y1 + (y2 - y1) * (temp - x1) / span;
-        }
-    }
-    last.1
+    halod_shared::curve::duty_at_tuples(points, temp)
 }
 
 #[cfg(test)]

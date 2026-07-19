@@ -69,7 +69,10 @@ impl ChainLeaf {
     }
 
     async fn apply_state(&self, state: LightingState) -> Result<()> {
-        let led_count = self.rgb_descriptor.channels[0].leds.len();
+        let Some(zone) = self.rgb_descriptor.channels.first() else {
+            anyhow::bail!("chain leaf has no lighting channel");
+        };
+        let led_count = zone.leds.len();
         let dev_id = self.id.clone();
         match &state {
             LightingState::Static { color } => {
@@ -80,7 +83,6 @@ impl ChainLeaf {
             }
             LightingState::PerLed { channels } => {
                 if let Some(leds) = channels.get("ring") {
-                    let zone = &self.rgb_descriptor.channels[0];
                     let colors = transformed_zone_frame(zone, &self.rgb, leds);
                     self.chain_hub
                         .write_chain_slice(&self.channel_id, &dev_id, &colors)

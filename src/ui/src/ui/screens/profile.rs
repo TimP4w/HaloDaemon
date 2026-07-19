@@ -275,7 +275,9 @@ pub fn get_icon(
     if icon_name.is_empty() {
         return None;
     }
-    let mut map = cache.lock().unwrap();
+    let mut map = cache
+        .lock()
+        .unwrap_or_else(std::sync::PoisonError::into_inner);
     if let Some(state) = map.get(icon_name) {
         return match state {
             IconState::Ready(tex) => Some(tex.clone()),

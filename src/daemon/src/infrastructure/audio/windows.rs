@@ -4,15 +4,23 @@ use std::sync::Arc;
 use windows::Win32::Media::Audio::{
     eConsole, eRender, IAudioCaptureClient, IAudioClient, IMMDeviceEnumerator, MMDeviceEnumerator,
     AUDCLNT_BUFFERFLAGS_SILENT, AUDCLNT_E_DEVICE_INVALIDATED, AUDCLNT_SHAREMODE_SHARED,
-    AUDCLNT_STREAMFLAGS_LOOPBACK, WAVEFORMATEX,
+    AUDCLNT_STREAMFLAGS_LOOPBACK, WAVEFORMATEX, WAVEFORMATEXTENSIBLE,
 };
 use windows::Win32::Media::KernelStreaming::WAVE_FORMAT_EXTENSIBLE;
-use windows::Win32::Media::Multimedia::WAVE_FORMAT_IEEE_FLOAT;
+use windows::Win32::Media::Multimedia::{KSDATAFORMAT_SUBTYPE_IEEE_FLOAT, WAVE_FORMAT_IEEE_FLOAT};
 use windows::Win32::System::Com::{
-    CoCreateInstance, CoInitializeEx, CLSCTX_ALL, COINIT_MULTITHREADED,
+    CoCreateInstance, CoInitializeEx, CoTaskMemFree, CLSCTX_ALL, COINIT_MULTITHREADED,
 };
 
 use super::{dsp, dsp::SpectrumAnalyzer, AudioHandle, StopGuard, SESSION_RETRY_MS};
+
+struct CoTaskMem<T>(*mut T);
+
+impl<T> Drop for CoTaskMem<T> {
+    fn drop(&mut self) {
+        unsafe { CoTaskMemFree(Some(self.0.cast())) }
+    }
+}
 
 /// Spawns the WASAPI loopback capture thread. Returns immediately. The
 /// thread runs capture sessions until no consumer has read for the idle
@@ -46,14 +54,33 @@ fn run_capture(handle: Arc<AudioHandle>) {
 /// converting 16-bit PCM to f32 in [-1, 1] when needed.
 fn buffer_to_f32(bytes: &[u8], format: &WAVEFORMATEX) -> Vec<f32> {
     let is_float = format.wFormatTag as u32 == WAVE_FORMAT_IEEE_FLOAT
-        || (format.wFormatTag as u32 == WAVE_FORMAT_EXTENSIBLE && format.wBitsPerSample == 32);
+        || (format.wFormatTag as u32 == WAVE_FORMAT_EXTENSIBLE
+            && unsafe {
+                let extensible = format as *const WAVEFORMATEX as *const WAVEFORMATEXTENSIBLE;
+                std::ptr::addr_of!((*extensible).SubFormat).read_unaligned()
+                    == KSDATAFORMAT_SUBTYPE_IEEE_FLOAT
+            });
     if is_float {
         dsp::le_f32_samples(bytes)
     } else {
-        bytes
-            .chunks_exact(2)
-            .map(|c| i16::from_le_bytes([c[0], c[1]]) as f32 / i16::MAX as f32)
-            .collect()
+        match format.wBitsPerSample {
+            16 => bytes
+                .chunks_exact(2)
+                .map(|c| i16::from_le_bytes([c[0], c[1]]) as f32 / 32768.0)
+                .collect(),
+            24 => bytes
+                .chunks_exact(3)
+                .map(|c| {
+                    let sample = i32::from_le_bytes([c[0], c[1], c[2], 0]) << 8 >> 8;
+                    sample as f32 / 8_388_608.0
+                })
+                .collect(),
+            32 => bytes
+                .chunks_exact(4)
+                .map(|c| i32::from_le_bytes(c.try_into().unwrap()) as f32 / 2_147_483_648.0)
+                .collect(),
+            _ => Vec::new(),
+        }
     }
 }
 
@@ -64,8 +91,8 @@ fn capture_session(handle: &Arc<AudioHandle>) -> windows::core::Result<()> {
         let device = enumerator.GetDefaultAudioEndpoint(eRender, eConsole)?;
         let audio_client: IAudioClient = device.Activate(CLSCTX_ALL, None)?;
 
-        let mix_format = audio_client.GetMixFormat()?;
-        let format = *mix_format;
+        let mix_format = CoTaskMem(audio_client.GetMixFormat()?);
+        let format = *mix_format.0;
         let channels = format.nChannels as usize;
 
         audio_client.Initialize(
@@ -73,7 +100,7 @@ fn capture_session(handle: &Arc<AudioHandle>) -> windows::core::Result<()> {
             AUDCLNT_STREAMFLAGS_LOOPBACK,
             0, // buffer duration: 0 lets WASAPI pick a default for polling mode
             0,
-            mix_format,
+            mix_format.0,
             None,
         )?;
 

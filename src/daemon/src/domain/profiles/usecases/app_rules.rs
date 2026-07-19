@@ -5,8 +5,7 @@ use halod_shared::types::AppRule;
 use std::sync::Arc;
 
 fn normalize(name: &str) -> String {
-    let s = name.to_lowercase();
-    s.strip_suffix(".exe").unwrap_or(&s).to_string()
+    crate::domain::profiles::observers::active_window::normalize_name(name)
 }
 
 fn to_rule(process_names: Vec<String>, profile: String, enabled: bool) -> Result<AppRule> {

@@ -829,6 +829,36 @@ mod tests {
     }
 
     #[tokio::test]
+    async fn repo_update_disables_plugin_when_authority_widens() {
+        crate::test_support::with_tmp_config(|app| async move {
+            with_config_test_plugin(&app, || async {
+                {
+                    let mut cfg = app.config.write().await;
+                    cfg.plugins.enabled.push("cfgtest".into());
+                    cfg.plugins
+                        .accepted_authorities
+                        .insert("cfgtest".into(), Default::default());
+                    app.registry.replace_policy(&cfg.plugins);
+                }
+
+                apply_repo_plugins(app.clone(), vec!["cfgtest".into()])
+                    .await
+                    .unwrap();
+
+                let cfg = app.config.read().await;
+                assert!(!cfg.plugins.enabled.contains(&"cfgtest".to_owned()));
+                assert_eq!(
+                    cfg.plugins.accepted_authorities.get("cfgtest"),
+                    Some(&halod_shared::types::PluginAuthority::default()),
+                    "the accepted snapshot must remain for the consent diff"
+                );
+            })
+            .await;
+        })
+        .await;
+    }
+
+    #[tokio::test]
     async fn enable_batch_reports_duplicate_plugin_ids() {
         crate::test_support::with_tmp_config(|app| async move {
             with_config_test_plugin(&app, || async {

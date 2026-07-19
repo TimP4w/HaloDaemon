@@ -72,6 +72,14 @@ struct DeviceSlot {
 const FAIL_BACKOFF_THRESHOLD: u8 = 3;
 const BACKOFF_TICKS: u8 = 30;
 
+fn bump_fail_streak(streak: &mut u8) {
+    *streak = if *streak == u8::MAX {
+        BACKOFF_TICKS
+    } else {
+        *streak + 1
+    };
+}
+
 fn build_template(id: &str, params: &HashMap<String, EffectParamValue>) -> Option<CustomTemplate> {
     (id == "custom").then(|| CustomTemplate::from_params(params, &crate::config::lcd_images_dir()))
 }
@@ -379,7 +387,7 @@ impl LcdEngine {
             // Back off a device that keeps failing (disconnected but not yet
             // hotplug-removed) instead of rendering+pushing at full FPS.
             if slot.fail_streak >= FAIL_BACKOFF_THRESHOLD && slot.fail_streak % BACKOFF_TICKS != 0 {
-                slot.fail_streak = slot.fail_streak.saturating_add(1);
+                bump_fail_streak(&mut slot.fail_streak);
                 continue;
             }
 
@@ -412,7 +420,7 @@ impl LcdEngine {
                 if slot.fail_streak % BACKOFF_TICKS == 0 {
                     log::warn!("LCD engine: template render error for {device_id}: {e}");
                 }
-                slot.fail_streak = slot.fail_streak.saturating_add(1);
+                bump_fail_streak(&mut slot.fail_streak);
                 continue;
             };
             slot.last_sig = sig;
@@ -474,7 +482,7 @@ impl LcdEngine {
                     if slot.fail_streak % BACKOFF_TICKS == 0 {
                         log::warn!("LCD engine: stream_frame failed for {device_id}: {e}");
                     }
-                    slot.fail_streak = slot.fail_streak.saturating_add(1);
+                    bump_fail_streak(&mut slot.fail_streak);
                 }
             }
             log::trace!(
@@ -791,6 +799,14 @@ mod tests {
             frame_id, FAIL_BACKOFF_THRESHOLD as u64,
             "only FAIL_BACKOFF_THRESHOLD renders must fire before backoff kicks in"
         );
+    }
+
+    #[test]
+    fn saturated_fail_streak_returns_to_a_retry_boundary() {
+        let mut streak = u8::MAX;
+        bump_fail_streak(&mut streak);
+        assert_eq!(streak, BACKOFF_TICKS);
+        assert_eq!(streak % BACKOFF_TICKS, 0);
     }
 
     fn static_custom_params() -> HashMap<String, EffectParamValue> {

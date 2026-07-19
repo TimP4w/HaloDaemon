@@ -106,13 +106,12 @@ impl EffectiveStatePublisher {
         // Producers may deliberately check volatile projections on a cadence.
         // Keep that cheap on the wire: only a materially changed record creates
         // a revision and wakes IPC/GUI subscribers.
-        let current: std::collections::HashMap<_, _> = app
-            .data_bus
-            .state_snapshot(&[])
-            .records
-            .into_iter()
-            .map(|record| (record.key, record.value))
-            .collect();
+        let current = app.data_bus.state_values(
+            upserts
+                .iter()
+                .map(|(key, _)| key.as_str())
+                .chain(tombstones.iter().map(String::as_str)),
+        );
         upserts.retain(|(key, value)| {
             current
                 .get(key)

@@ -318,7 +318,10 @@ impl RgbEngine {
                                 interval.set_missed_tick_behavior(tokio::time::MissedTickBehavior::Skip);
                             }
                         }
-                        _ = cfg_rx.changed() => { break; }
+                        r = cfg_rx.changed() => {
+                            if !r { return; }
+                            break;
+                        }
                     }
                 }
             }
@@ -367,20 +370,16 @@ impl RgbEngine {
 
         self.dispatch_writes(pending);
 
-        let srgb: &[u8] = match &preview_srgb {
-            Some(v) => v,
-            None => {
-                // No default effect active — drop the reusable buffer to
-                // release its 480 KiB allocation back to the allocator.
-                if let Ok(mut buf) = self.preview_srgb_buf.try_lock() {
-                    if buf.capacity() > 0 {
-                        *buf = Vec::new();
-                    }
-                }
-                black_srgb()
-            }
-        };
-        self.publish_frame(srgb, frame_id, led_colors);
+        if let Some(mut srgb) = preview_srgb {
+            self.publish_frame(&srgb, frame_id, led_colors);
+            srgb.clear();
+            *self
+                .preview_srgb_buf
+                .try_lock()
+                .expect("single-threaded engine") = srgb;
+        } else {
+            self.publish_frame(black_srgb(), frame_id, led_colors);
+        }
         had_work
     }
 
@@ -510,6 +509,7 @@ impl RgbEngine {
         canvas_state
             .default_effect
             .as_ref()
+            .filter(|_| self.frame_tx.receiver_count() > 0)
             .and_then(|id| live.get(id))
             .map(|lp| {
                 let mut buf = self
@@ -688,14 +688,17 @@ impl RgbEngine {
             .flat_map(|s| s.placed_channels())
             .collect();
 
-        let devices: RgbDeviceMap = placed_zones
+        let available: RgbDeviceMap = devices_guard
             .iter()
-            .filter_map(|p| {
-                devices_guard
-                    .iter()
-                    .find(|d| d.id() == p.device_id && d.is_live() && d.as_lighting().is_some())
-                    .cloned()
-                    .map(|dev| (p.device_id.clone(), dev))
+            .filter(|device| device.is_live() && device.as_lighting().is_some())
+            .map(|device| (device.id().to_owned(), Arc::clone(device)))
+            .collect();
+        let devices = placed_zones
+            .iter()
+            .filter_map(|zone| {
+                available
+                    .get(&zone.device_id)
+                    .map(|device| (zone.device_id.clone(), Arc::clone(device)))
             })
             .collect();
 
@@ -758,12 +761,18 @@ impl RgbEngine {
                     None
                 };
                 if let Some(target) = target {
-                    if let Err(e) = rgb.apply(target).await {
-                        log::warn!(
-                            "reconcile_engine_mode: set {} to {} failed: {e}",
+                    match tokio::time::timeout(Duration::from_secs(2), rgb.apply(target)).await {
+                        Ok(Ok(())) => {}
+                        Ok(Err(error)) => log::warn!(
+                            "reconcile_engine_mode: set {} to {} failed: {error}",
                             device.id(),
                             if should_engine { "Engine" } else { "Static" }
-                        );
+                        ),
+                        Err(_) => log::warn!(
+                            "reconcile_engine_mode: set {} to {} timed out",
+                            device.id(),
+                            if should_engine { "Engine" } else { "Static" }
+                        ),
                     }
                     self.app_state.config.persistence().notify.notify_one();
                 }
@@ -779,6 +788,7 @@ impl RgbEngine {
     /// the rest of the canvas — the freshest frame always wins.
     fn dispatch_writes(&self, pending: PendingWrites) {
         let mut slots = self.write_slots.lock().expect("write slots poisoned");
+        slots.retain(|_, handle| !handle.is_finished());
         for (id, (dev, channels)) in pending {
             // Skip a device that went offline between state sync and dispatch.
             if !dev.is_live() || dev.active_state() == VisibilityState::Disabled {
@@ -792,6 +802,9 @@ impl RgbEngine {
                     return;
                 }
                 let Some(rgb) = dev.as_lighting() else { return };
+                if !matches!(rgb.current_state(), Some(LightingState::Engine)) {
+                    return;
+                }
                 let encoded: Vec<_> = channels
                     .into_iter()
                     .filter_map(|(channel_id, colors)| {
@@ -1682,7 +1695,7 @@ mod tests {
     #[tokio::test]
     async fn dispatch_writes_frame_when_device_is_free() {
         let engine = RgbEngine::new(make_app()).await;
-        let dev = MockRgbDevice::new("dev0", "ring", 3, false);
+        let dev = MockRgbDevice::new_engine_mode("dev0", "ring", false);
         let mut pending: PendingWrites = HashMap::new();
         pending.insert(
             "dev0".into(),
@@ -1696,6 +1709,28 @@ mod tests {
         assert_eq!(dev.batch_count.load(Ordering::SeqCst), 1);
         assert_eq!(dev.write_count.load(Ordering::SeqCst), 1);
         assert_eq!(dev.last_frame.lock().unwrap().len(), 3);
+    }
+
+    #[tokio::test]
+    async fn dispatch_drops_stale_frame_after_device_leaves_engine_mode() {
+        let engine = RgbEngine::new(make_app()).await;
+        let dev = MockRgbDevice::new_engine_mode("dev0", "ring", false);
+        let mut pending: PendingWrites = HashMap::new();
+        pending.insert(
+            "dev0".into(),
+            (
+                dev.clone() as Arc<dyn Device>,
+                vec![("ring".into(), solid_colors(3))],
+            ),
+        );
+        *dev.rgb_state.lock().unwrap() = Some(LightingState::Static {
+            color: RgbColor::default(),
+        });
+
+        engine.dispatch_writes(pending);
+        engine.drain_writes().await;
+
+        assert_eq!(dev.write_count.load(Ordering::SeqCst), 0);
     }
 
     #[tokio::test]

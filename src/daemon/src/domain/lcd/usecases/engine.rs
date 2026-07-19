@@ -46,6 +46,7 @@ pub async fn set_template(
     if let Some(video) = app.lcd.video() {
         video.stop(&device_id).await;
     }
+    slot.set_video_path(None);
     if let Some(lcd_engine) = app.lcd.engine() {
         lcd_engine
             .set_template_active(&device_id, &template_id, &params)

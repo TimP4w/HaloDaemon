@@ -190,6 +190,18 @@ pub struct CompatibleRevision {
     pub manifest: RepositoryManifest,
 }
 
+pub fn revision_is_at_or_after(repo_dir: &Path, candidate: &str, floor: &str) -> Result<bool> {
+    if candidate == floor {
+        return Ok(true);
+    }
+    let repo = git2::Repository::open(repo_dir)
+        .with_context(|| format!("opening repo at {}", repo_dir.display()))?;
+    let candidate = git2::Oid::from_str(candidate)?;
+    let floor = git2::Oid::from_str(floor)?;
+    repo.graph_descendant_of(candidate, floor)
+        .context("checking repository revision ancestry")
+}
+
 /// Walk the fetched branch's first-parent history from `tip_sha` and return
 /// the newest repository revision supported by this Halo build. Official
 /// candidates must also carry a valid signature. There is deliberately no

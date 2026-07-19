@@ -161,52 +161,61 @@ inventory::submit!(TransportScanner {
 });
 
 pub async fn scan_usb_non_hid(app: Arc<crate::application::state::AppState>) {
-    use rusb::{Context, UsbContext};
-    let ctx = match Context::new() {
-        Ok(c) => c,
-        Err(e) => {
-            log::error!("USB non-HID discovery failed: {e}");
+    let present = tokio::task::spawn_blocking(|| {
+        use rusb::{Context, UsbContext};
+        let ctx = Context::new().map_err(|error| error.to_string())?;
+        Ok::<_, String>(
+            ctx.devices()
+                .map(|devs| {
+                    devs.iter()
+                        .filter_map(|d| {
+                            let dd = d.device_descriptor().ok()?;
+                            let serial = d
+                                .open()
+                                .ok()
+                                .and_then(|h| h.read_serial_number_string_ascii(&dd).ok());
+                            let mut interfaces: Vec<u8> = d
+                                .active_config_descriptor()
+                                .ok()
+                                .map(|c| {
+                                    c.interfaces()
+                                        .flat_map(|i| i.descriptors())
+                                        .map(|i| i.interface_number())
+                                        .collect()
+                                })
+                                .unwrap_or_else(|| vec![0]);
+                            interfaces.sort_unstable();
+                            interfaces.dedup();
+                            Some((
+                                dd.vendor_id(),
+                                dd.product_id(),
+                                d.bus_number(),
+                                d.address(),
+                                d.port_numbers().unwrap_or_default(),
+                                serial,
+                                interfaces,
+                            ))
+                        })
+                        .collect()
+                })
+                .unwrap_or_else(|error| {
+                    log::warn!("USB non-HID: device list failed: {error}");
+                    Default::default()
+                }),
+        )
+    })
+    .await;
+    let present: Vec<(u16, u16, u8, u8, Vec<u8>, Option<String>, Vec<u8>)> = match present {
+        Ok(Ok(present)) => present,
+        Ok(Err(error)) => {
+            log::error!("USB non-HID discovery failed: {error}");
+            return;
+        }
+        Err(error) => {
+            log::error!("USB non-HID discovery task panicked: {error}");
             return;
         }
     };
-    let present: Vec<(u16, u16, u8, u8, Vec<u8>, Option<String>, Vec<u8>)> = ctx
-        .devices()
-        .map(|devs| {
-            devs.iter()
-                .filter_map(|d| {
-                    let dd = d.device_descriptor().ok()?;
-                    let serial = d
-                        .open()
-                        .ok()
-                        .and_then(|h| h.read_serial_number_string_ascii(&dd).ok());
-                    let mut interfaces: Vec<u8> = d
-                        .active_config_descriptor()
-                        .ok()
-                        .map(|c| {
-                            c.interfaces()
-                                .flat_map(|i| i.descriptors())
-                                .map(|i| i.interface_number())
-                                .collect()
-                        })
-                        .unwrap_or_else(|| vec![0]);
-                    interfaces.sort_unstable();
-                    interfaces.dedup();
-                    Some((
-                        dd.vendor_id(),
-                        dd.product_id(),
-                        d.bus_number(),
-                        d.address(),
-                        d.port_numbers().unwrap_or_default(),
-                        serial,
-                        interfaces,
-                    ))
-                })
-                .collect()
-        })
-        .unwrap_or_else(|e| {
-            log::warn!("USB non-HID: device list failed: {e}");
-            Default::default()
-        });
 
     for (vid, pid, bus, address, port_path, serial, interfaces) in &present {
         for interface_number in interfaces {

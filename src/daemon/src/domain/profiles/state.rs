@@ -23,11 +23,11 @@ impl FocusState {
         *self.ctrl_tx.lock().await = Some(tx);
     }
 
-    /// Best-effort control message to the running focus watcher; a no-op if
-    /// the engine hasn't started yet or the channel is full.
+    /// Send a control message when the focus watcher is running.
     pub async fn notify(&self, msg: ControlMsg) {
-        if let Some(tx) = &*self.ctrl_tx.lock().await {
-            let _ = tx.try_send(msg);
+        let tx = self.ctrl_tx.lock().await.clone();
+        if let Some(tx) = tx {
+            let _ = tx.send(msg).await;
         }
     }
 

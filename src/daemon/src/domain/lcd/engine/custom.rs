@@ -461,6 +461,8 @@ impl CustomTemplate {
         self.composite_cache
             .borrow_mut()
             .retain(|id, _| live.contains(id.as_str()));
+        self.plugin_sprites
+            .retain(|id, _| live.contains(id.as_str()));
         self.def = def;
     }
 

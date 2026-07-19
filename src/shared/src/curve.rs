@@ -8,31 +8,38 @@
 /// Linear-interpolated duty for `temp` on a `[temp, duty]` curve, clamped at the
 /// ends. An empty curve yields `0.0`; points are assumed sorted by temperature.
 ///
-/// NOTE: `daemon::engines::fan_curve::interpolate` implements the same algorithm
-/// on tuple points; keep the two in sync.
 pub fn duty_at(points: &[[f32; 2]], temp: f32) -> f32 {
+    duty_at_by(points, temp, |point| (point[0], point[1]))
+}
+
+pub fn duty_at_tuples(points: &[(f32, f32)], temp: f32) -> f32 {
+    duty_at_by(points, temp, |point| *point)
+}
+
+fn duty_at_by<T>(points: &[T], temp: f32, coordinates: impl Fn(&T) -> (f32, f32)) -> f32 {
     if points.is_empty() {
         return 0.0;
     }
-    if temp <= points[0][0] {
-        return points[0][1];
+    let first = coordinates(&points[0]);
+    if temp <= first.0 {
+        return first.1;
     }
-    let last = points[points.len() - 1];
-    if temp >= last[0] {
-        return last[1];
+    let last = coordinates(&points[points.len() - 1]);
+    if temp >= last.0 {
+        return last.1;
     }
     for w in points.windows(2) {
-        let (a, b) = (w[0], w[1]);
-        if temp >= a[0] && temp <= b[0] {
-            let span = b[0] - a[0];
+        let (a, b) = (coordinates(&w[0]), coordinates(&w[1]));
+        if temp >= a.0 && temp <= b.0 {
+            let span = b.0 - a.0;
             if span <= 0.0 {
-                return b[1];
+                return b.1;
             }
-            let t = (temp - a[0]) / span;
-            return a[1] + t * (b[1] - a[1]);
+            let t = (temp - a.0) / span;
+            return a.1 + t * (b.1 - a.1);
         }
     }
-    last[1]
+    last.1
 }
 
 #[cfg(test)]

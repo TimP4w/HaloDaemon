@@ -182,7 +182,10 @@ pub async fn engine_run_loop_idle<F, Fut, W, Wut, H, Hut>(
                     tick_fn(cfg).await;
                     if !has_work().await { break; }
                 }
-                _ = cfg_rx.changed() => { break; }
+                r = cfg_rx.changed() => {
+                    if !r { return; }
+                    break;
+                }
             }
         }
     }
@@ -226,7 +229,6 @@ mod tests {
                     config: crate::config::LcdConfig {
                         enabled: true,
                         fps: 200,
-                        ..Default::default()
                     },
                     ..Default::default()
                 }),
@@ -305,7 +307,6 @@ mod tests {
             fan_curve_enabled: false,
             fan_curve_tick_ms: 900,
             fan_failsafe_duty: 70,
-            ..Default::default()
         };
         bus.commit_state(
             "host.state",
@@ -327,7 +328,6 @@ mod tests {
             fan_curve_enabled: true,
             fan_curve_tick_ms: 1200,
             fan_failsafe_duty: 85,
-            ..Default::default()
         };
         bus.commit_state(
             "host.state",

@@ -150,6 +150,12 @@ impl HttpPolicy {
     /// Reject anything outside the declared scope before a request runs. Returns
     /// the request with its timeout clamped to the declared ceiling.
     pub fn admit(&self, mut req: HttpRequest) -> Result<HttpRequest> {
+        if !req.path.starts_with('/')
+            || req.path.starts_with("//")
+            || req.path.bytes().any(|byte| byte.is_ascii_control())
+        {
+            bail!("http path must be an absolute origin-relative path");
+        }
         let origin = canonical_origin(&req.origin);
         if !self.origins.iter().any(|o| canonical_origin(o) == origin) {
             bail!(
@@ -685,6 +691,23 @@ mod tests {
             ("Authorization".into(), "Bearer secret".into()),
         ]));
         assert!(admitted.is_ok());
+    }
+
+    #[test]
+    fn request_path_cannot_replace_the_admitted_authority() {
+        for path in [
+            "",
+            "@evil.example/v1",
+            "//evil.example/v1",
+            "/v1\r\nHost: evil.example",
+        ] {
+            let mut req = request(Vec::new());
+            req.path = path.into();
+            assert!(policy().admit(req).is_err(), "accepted path {path:?}");
+        }
+        let mut req = request(Vec::new());
+        req.path = "/v1?q=ok".into();
+        assert!(policy().admit(req).is_ok());
     }
 
     #[test]

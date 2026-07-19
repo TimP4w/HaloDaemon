@@ -167,8 +167,11 @@ fn cancel_macro_state(state: &Mutex<MacroState>) {
 
 /// Apply one step to `state`'s live held-input set, if a macro is running.
 fn track_held(state: &Mutex<MacroState>, atom: &MacroAtom) {
-    if let MacroState::Running { held, .. } = &mut *state.lock().unwrap() {
-        apply_held(held, atom);
+    match &mut *state.lock().unwrap() {
+        MacroState::Running { held, .. } | MacroState::Cancelling { held, .. } => {
+            apply_held(held, atom);
+        }
+        MacroState::Idle => {}
     }
 }
 
@@ -862,6 +865,15 @@ mod tests {
             }
             other => panic!("expected Cancelling, got {other:?}"),
         };
+    }
+
+    #[test]
+    fn key_pressed_during_cancellation_is_still_released() {
+        let state = Arc::new(Mutex::new(MacroState::Idle));
+        claim_macro_slot(&state, 7, Arc::new(tokio::sync::Notify::new()));
+        cancel_macro_state(&state);
+        track_held(&state, &MacroAtom::KeyDown { key: 30 });
+        assert_eq!(take_held(&state), vec![HeldInput::Key(30)]);
     }
 
     #[test]

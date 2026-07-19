@@ -405,6 +405,21 @@ impl DataBus {
         }
     }
 
+    pub fn state_values<'a>(
+        &self,
+        keys: impl IntoIterator<Item = &'a str>,
+    ) -> HashMap<String, BusValue> {
+        let inner = self.inner.lock().unwrap_or_else(|error| error.into_inner());
+        keys.into_iter()
+            .filter_map(|key| {
+                inner
+                    .state_records
+                    .get(key)
+                    .map(|record| (key.to_owned(), record.value.clone()))
+            })
+            .collect()
+    }
+
     pub fn publish_event(&self, payload: BusEventPayload) -> BusEvent {
         let mut inner = self.inner.lock().unwrap_or_else(|error| error.into_inner());
         inner.next_event_id = inner.next_event_id.wrapping_add(1).max(1);

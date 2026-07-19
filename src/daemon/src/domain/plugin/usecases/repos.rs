@@ -1019,6 +1019,20 @@ pub async fn update_repo(slug: String, app: Arc<AppState>) -> Result<()> {
         .ok_or_else(|| anyhow::anyhow!("repository has no revision compatible with this Halo"))?
     };
     let remote_sha = compatible.sha;
+    if !record.locked_sha.is_empty() {
+        let dir_for_floor = dir.clone();
+        let candidate = remote_sha.clone();
+        let floor = record.locked_sha.clone();
+        let floor_for_check = floor.clone();
+        let accepted = tokio::task::spawn_blocking(move || {
+            repo::revision_is_at_or_after(&dir_for_floor, &candidate, &floor_for_check)
+        })
+        .await
+        .context("repository rollback check task panicked")??;
+        if !accepted {
+            anyhow::bail!("repository update would roll back below installed revision {floor}");
+        }
+    }
     let manifest = {
         let dir = dir.clone();
         let sha = remote_sha.clone();

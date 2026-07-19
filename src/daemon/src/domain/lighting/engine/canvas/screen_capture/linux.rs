@@ -13,19 +13,31 @@ struct MmapCache {
     ptr: *mut libc::c_void,
     len: usize,
     fd: i32,
+    identity: Option<(libc::dev_t, libc::ino_t)>,
 }
 
 impl MmapCache {
     #[cfg(test)]
     fn new(ptr: *mut libc::c_void, len: usize, fd: i32) -> Self {
-        Self { ptr, len, fd }
+        Self {
+            ptr,
+            len,
+            fd,
+            identity: None,
+        }
     }
 
     /// Ensure the mapping covers `fd` (with size `len` at offset 0). Reuses
     /// an existing mapping when the fd matches, otherwise unmaps the old and
     /// maps the new. Returns a pointer to the mapped memory.
     fn ensure(&mut self, fd: i32, len: usize) -> Result<*mut libc::c_void, String> {
-        if fd == self.fd && len <= self.len {
+        let mut stat = std::mem::MaybeUninit::<libc::stat>::uninit();
+        if unsafe { libc::fstat(fd, stat.as_mut_ptr()) } != 0 {
+            return Err(format!("fstat failed: {}", std::io::Error::last_os_error()));
+        }
+        let stat = unsafe { stat.assume_init() };
+        let identity = (stat.st_dev, stat.st_ino);
+        if fd == self.fd && self.identity == Some(identity) && len <= self.len {
             // Same fd, mapping still valid.
             return Ok(self.ptr);
         }
@@ -47,6 +59,7 @@ impl MmapCache {
         self.ptr = ptr;
         self.len = len;
         self.fd = fd;
+        self.identity = Some(identity);
         Ok(ptr)
     }
 
@@ -56,6 +69,7 @@ impl MmapCache {
             self.ptr = std::ptr::null_mut();
             self.len = 0;
             self.fd = -1;
+            self.identity = None;
         }
     }
 }
@@ -376,6 +390,7 @@ fn run_pipewire(
         ptr: std::ptr::null_mut(),
         len: 0,
         fd: -1,
+        identity: None,
     }));
 
     // Actual delivered frame size. Seeded from the portal's reported size as a
@@ -386,6 +401,7 @@ fn run_pipewire(
     let frame_w = Arc::new(AtomicU32::new(width));
     let frame_h = Arc::new(AtomicU32::new(height));
     let (frame_w_pc, frame_h_pc) = (Arc::clone(&frame_w), Arc::clone(&frame_h));
+    let mut last_copied_frame = None::<std::time::Instant>;
 
     let _listener = match stream
         .add_local_listener_with_user_data(())
@@ -424,6 +440,13 @@ fn run_pipewire(
             }
         })
         .process(move |s, ()| {
+            let now = std::time::Instant::now();
+            if last_copied_frame
+                .is_some_and(|last| now.duration_since(last) < std::time::Duration::from_millis(33))
+            {
+                return;
+            }
+            last_copied_frame = Some(now);
             let Some(mut buf) = s.dequeue_buffer() else {
                 return;
             };

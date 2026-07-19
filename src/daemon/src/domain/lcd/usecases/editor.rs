@@ -31,9 +31,6 @@ pub async fn render(
         .as_lcd()
         .ok_or_else(|| anyhow::anyhow!("device does not support LCD: {device_id}"))?;
     let descriptor = lcd.lcd_descriptor();
-    lcd.lcd_state().set_editor_preview();
-    lcd.lcd_state()
-        .set_health(halod_shared::types::LcdHealth::Starting);
     let (cw, ch) = (descriptor.width.max(1), descriptor.height.max(1));
 
     if app
@@ -49,6 +46,9 @@ pub async fn render(
     {
         return Ok(());
     }
+    lcd.lcd_state().set_editor_preview();
+    lcd.lcd_state()
+        .set_health(halod_shared::types::LcdHealth::Starting);
     let images_dir = crate::config::lcd_images_dir();
     let render_device_id = device_id.clone();
     let mut session = app.lcd.editor_session().take();

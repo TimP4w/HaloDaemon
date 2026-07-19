@@ -10,16 +10,22 @@ use super::{
     parse_powercfg_active_guid, windows_guid_for, windows_profile_for_guid, PowerProfileBackend,
 };
 
+const POWERCFG_TIMEOUT: std::time::Duration = std::time::Duration::from_secs(5);
+
 pub struct WindowsPowerProfile;
 
 #[async_trait]
 impl PowerProfileBackend for WindowsPowerProfile {
     async fn current(&self) -> Option<&'static str> {
-        let out = tokio::process::Command::new("powercfg")
-            .arg("/getactivescheme")
-            .output()
-            .await
-            .ok()?;
+        let out = tokio::time::timeout(
+            POWERCFG_TIMEOUT,
+            tokio::process::Command::new("powercfg")
+                .arg("/getactivescheme")
+                .output(),
+        )
+        .await
+        .ok()?
+        .ok()?;
         if !out.status.success() {
             return None;
         }
@@ -31,10 +37,14 @@ impl PowerProfileBackend for WindowsPowerProfile {
     async fn apply(&self, id: &str) -> Result<()> {
         let guid =
             windows_guid_for(id).ok_or_else(|| anyhow::anyhow!("unknown power profile {id}"))?;
-        let status = tokio::process::Command::new("powercfg")
-            .args(["/setactive", guid])
-            .status()
-            .await?;
+        let status = tokio::time::timeout(
+            POWERCFG_TIMEOUT,
+            tokio::process::Command::new("powercfg")
+                .args(["/setactive", guid])
+                .status(),
+        )
+        .await
+        .map_err(|_| anyhow::anyhow!("powercfg /setactive timed out"))??;
         if status.success() {
             Ok(())
         } else {

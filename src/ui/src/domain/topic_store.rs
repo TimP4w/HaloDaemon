@@ -102,8 +102,10 @@ mod tests {
     #[test]
     fn transaction_upserts_and_removes_devices_atomically() {
         let mut store = TopicStore::default();
-        let mut first = WireDevice::default();
-        first.id = "first".into();
+        let first = WireDevice {
+            id: "first".into(),
+            ..Default::default()
+        };
         store.apply_transaction(BusTransaction {
             revision: 1,
             upserts: vec![record(
@@ -113,8 +115,10 @@ mod tests {
             )],
             tombstones: Vec::new(),
         });
-        let mut second = WireDevice::default();
-        second.id = "second".into();
+        let second = WireDevice {
+            id: "second".into(),
+            ..Default::default()
+        };
         store.apply_transaction(BusTransaction {
             revision: 2,
             upserts: vec![record(

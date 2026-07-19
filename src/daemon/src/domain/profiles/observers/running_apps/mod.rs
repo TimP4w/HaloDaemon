@@ -52,12 +52,16 @@ fn resolve_process_icons_uncached(process_names: &[String]) -> HashMap<String, S
 }
 
 pub async fn list(client: ClientHandle) -> Result<()> {
-    #[cfg(target_os = "linux")]
-    let apps = linux::build_apps();
-    #[cfg(target_os = "windows")]
-    let apps = windows::build_apps();
-    #[cfg(not(any(target_os = "linux", target_os = "windows")))]
-    let apps: Vec<halod_shared::types::RunningApp> = vec![];
+    let apps = tokio::task::spawn_blocking(|| {
+        #[cfg(target_os = "linux")]
+        return linux::build_apps();
+        #[cfg(target_os = "windows")]
+        return windows::build_apps();
+        #[cfg(not(any(target_os = "linux", target_os = "windows")))]
+        Vec::<halod_shared::types::RunningApp>::new()
+    })
+    .await
+    .map_err(|error| anyhow::anyhow!("running-app scan panicked: {error}"))?;
     client.send_json(&serde_json::json!({
         "type": "running_apps_list",
         "apps": apps,

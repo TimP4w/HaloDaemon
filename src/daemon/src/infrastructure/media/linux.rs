@@ -339,21 +339,26 @@ fn spawn_art_resolve(
         let Some(handle) = weak.upgrade() else {
             return;
         };
-        let art = {
-            let mut cache = cache.lock().await;
-            if let Some(cached) = cache.get(&url) {
-                Some(cached)
+        let cached = cache.lock().await.get(&url);
+        let art = if cached.is_some() {
+            cached
+        } else {
+            let u = url.clone();
+            let loaded = tokio::task::spawn_blocking(move || load_art_from_url(&u))
+                .await
+                .ok()
+                .flatten();
+            if let Some(image) = loaded {
+                let mut cache = cache.lock().await;
+                if let Some(cached) = cache.get(&url) {
+                    Some(cached)
+                } else {
+                    let image = Arc::new(image);
+                    cache.insert(url.clone(), image.clone());
+                    Some(image)
+                }
             } else {
-                let u = url.clone();
-                let loaded = tokio::task::spawn_blocking(move || load_art_from_url(&u))
-                    .await
-                    .ok()
-                    .flatten();
-                loaded.map(|img| {
-                    let arc = Arc::new(img);
-                    cache.insert(url.clone(), arc.clone());
-                    arc
-                })
+                None
             }
         };
         let Some(art) = art else { return };

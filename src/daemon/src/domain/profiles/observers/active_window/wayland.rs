@@ -49,6 +49,26 @@ impl AppData {
             self.disconnected = true;
         }
     }
+
+    fn report_no_app(&mut self) {
+        if self.active_app_id.take().is_some() && self.tx.blocking_send(FocusEvent::NoApp).is_err()
+        {
+            self.disconnected = true;
+        }
+    }
+
+    fn report_current_focus(&mut self) {
+        let focused = self
+            .toplevels
+            .values()
+            .find(|toplevel| toplevel.activated)
+            .and_then(|toplevel| toplevel.app_id.clone());
+        if let Some(app_id) = focused {
+            self.report_focus(&app_id);
+        } else {
+            self.report_no_app();
+        }
+    }
 }
 
 impl Dispatch<ZwlrForeignToplevelManagerV1, ()> for AppData {
@@ -89,17 +109,11 @@ impl Dispatch<ZwlrForeignToplevelHandleV1, ()> for AppData {
                 state.toplevels.entry(id).or_default().activated = is_activated;
             }
             zwlr_foreign_toplevel_handle_v1::Event::Done => {
-                let focused_app = state
-                    .toplevels
-                    .get(&id)
-                    .filter(|toplevel| toplevel.activated)
-                    .and_then(|toplevel| toplevel.app_id.clone());
-                if let Some(app_id) = focused_app {
-                    state.report_focus(&app_id);
-                }
+                state.report_current_focus();
             }
             zwlr_foreign_toplevel_handle_v1::Event::Closed => {
                 state.toplevels.remove(&id);
+                state.report_current_focus();
             }
             _ => {}
         }

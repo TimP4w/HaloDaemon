@@ -45,6 +45,16 @@ struct GifFrame {
     delay_ms: f64,
 }
 
+fn add_decoded_frame_bytes(total: u64, width: u32, height: u32) -> Result<u64, String> {
+    let total = total
+        .checked_add(u64::from(width) * u64::from(height) * 4)
+        .ok_or_else(|| "GIF decoded-byte count overflow".to_string())?;
+    if total > crate::util::image::MAX_DECODE_RGBA_BYTES {
+        return Err("GIF frames exceed the cumulative decoded-byte limit".into());
+    }
+    Ok(total)
+}
+
 /// Decode image bytes into `(frame, delay_ms)` pairs — one infinitely-held
 /// frame for a static image, one per frame for an animated GIF.
 pub(super) fn decode_image_frames(data: &[u8]) -> Result<Vec<(RgbaImage, f64)>, String> {
@@ -65,6 +75,7 @@ pub(super) fn decode_image_frames(data: &[u8]) -> Result<Vec<(RgbaImage, f64)>, 
     limits.max_image_height = Some(crate::util::image::MAX_DECODE_DIM);
     decoder.set_limits(limits).map_err(|e| e.to_string())?;
     let mut out = Vec::new();
+    let mut decoded_bytes = 0u64;
     for frame in decoder.into_frames() {
         let frame = frame.map_err(|e| e.to_string())?;
         let (num, den) = frame.delay().numer_denom_ms();
@@ -73,7 +84,9 @@ pub(super) fn decode_image_frames(data: &[u8]) -> Result<Vec<(RgbaImage, f64)>, 
         } else {
             (num as f64 / den as f64).max(10.0)
         };
-        out.push((frame.into_buffer(), delay_ms));
+        let image = frame.into_buffer();
+        decoded_bytes = add_decoded_frame_bytes(decoded_bytes, image.width(), image.height())?;
+        out.push((image, delay_ms));
     }
     Ok(out)
 }
@@ -257,6 +270,13 @@ pub(crate) fn encode_png(img: &RgbaImage) -> Result<Vec<u8>, String> {
 #[cfg(test)]
 mod tests {
     use super::*;
+
+    #[test]
+    fn gif_frame_budget_is_cumulative() {
+        let limit = crate::util::image::MAX_DECODE_RGBA_BYTES;
+        assert_eq!(add_decoded_frame_bytes(limit - 4, 1, 1).unwrap(), limit);
+        assert!(add_decoded_frame_bytes(limit, 1, 1).is_err());
+    }
 
     #[test]
     fn background_rejects_traversal_filename() {

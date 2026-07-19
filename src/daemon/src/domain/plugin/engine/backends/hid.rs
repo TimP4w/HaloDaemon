@@ -48,6 +48,9 @@ fn open(
     granted: &[halod_shared::types::Permission],
     limit: Option<halod_shared::types::WriteRateLimit>,
 ) -> Result<PluginIo> {
+    if !granted.contains(&halod_shared::types::Permission::Hid) {
+        bail!("HID permission was not granted");
+    }
     let DiscoveryHandle::Hid {
         path,
         vid,

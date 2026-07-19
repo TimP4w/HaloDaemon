@@ -504,7 +504,7 @@ fn handle_json(
                 tx.connected.send_replace(true);
                 repaint();
             }
-            return Reaction::default();
+            Reaction::default()
         }
         Some("bus_transaction") => {
             if let Some(transaction) = value
@@ -517,7 +517,7 @@ fn handle_json(
                 crate::ui::screens::settings::apply_locale(&tx.state.borrow().gui.language);
                 repaint();
             }
-            return Reaction::default();
+            Reaction::default()
         }
         Some("bus_event") => {
             if let Some(event) = value
@@ -527,7 +527,7 @@ fn handle_json(
             {
                 handle_bus_event(tx, event, repaint);
             }
-            return Reaction::default();
+            Reaction::default()
         }
         Some("bus_event_replay") => {
             if let Some(replay) = value
@@ -545,7 +545,7 @@ fn handle_json(
                     handle_bus_event(tx, event, repaint);
                 }
             }
-            return Reaction::default();
+            Reaction::default()
         }
         Some("debug_info") => {
             if let Some(data) = value.get("data").cloned() {
@@ -556,16 +556,15 @@ fn handle_json(
                     repaint();
                 }
             }
-            return Reaction::default();
+            Reaction::default()
         }
         Some("image_uploaded") => {
             // Upload finished; drop any stale progress and trigger a library
             // refresh on the next read-loop iteration.
             tx.lcd_upload.send_replace(None);
-            return Reaction {
+            Reaction {
                 relist_lcd_images: true,
-                ..Reaction::default()
-            };
+            }
         }
         Some("lcd_upload_progress") => {
             if let Some(p) = value
@@ -575,7 +574,7 @@ fn handle_json(
                 tx.lcd_upload.send_replace(Some(p));
                 repaint();
             }
-            return Reaction::default();
+            Reaction::default()
         }
         Some("lcd_engine_frame") => {
             if tx.hidden.load(Ordering::Relaxed) {
@@ -602,7 +601,7 @@ fn handle_json(
                     }
                 }
             }
-            return Reaction::default();
+            Reaction::default()
         }
         Some("lcd_editor_render") => {
             if tx.hidden.load(Ordering::Relaxed) {
@@ -638,7 +637,7 @@ fn handle_json(
                     repaint();
                 }
             }
-            return Reaction::default();
+            Reaction::default()
         }
         Some("canvas_frame") => {
             if tx.hidden.load(Ordering::Relaxed) {
@@ -650,7 +649,7 @@ fn handle_json(
                     repaint();
                 }
             }
-            return Reaction::default();
+            Reaction::default()
         }
         Some("error") => {
             // The plugin layer already sent a structured notification whose
@@ -678,7 +677,7 @@ fn handle_json(
                 },
                 repaint,
             );
-            return Reaction::default();
+            Reaction::default()
         }
         Some("running_apps_list") => {
             let apps: Vec<RunningApp> = value
@@ -687,7 +686,7 @@ fn handle_json(
                 .unwrap_or_default();
             tx.running_apps.send_replace(apps);
             repaint();
-            return Reaction::default();
+            Reaction::default()
         }
         Some("lcd_images") => {
             let names: Vec<String> = value
@@ -702,7 +701,7 @@ fn handle_json(
                 .unwrap_or_default();
             tx.lcd_images.send_replace(names);
             repaint();
-            return Reaction::default();
+            Reaction::default()
         }
         Some("plugin_asset") => {
             if tx.hidden.load(Ordering::Relaxed) {
@@ -721,7 +720,7 @@ fn handle_json(
                     repaint();
                 }
             }
-            return Reaction::default();
+            Reaction::default()
         }
         Some("lcd_widget_icon") => {
             if tx.hidden.load(Ordering::Relaxed) {
@@ -738,12 +737,12 @@ fn handle_json(
                     repaint();
                 }
             }
-            return Reaction::default();
+            Reaction::default()
         }
         Some("udev_rules_status") => {
             tx.udev_rules.send_replace(field_or_default(&value, "data"));
             repaint();
-            return Reaction::default();
+            Reaction::default()
         }
         Some("serial_ports") => {
             if let Some(ports) = value.get("ports").and_then(|p| {
@@ -752,7 +751,7 @@ fn handle_json(
                 tx.serial_ports.send_replace(ports);
                 repaint();
             }
-            return Reaction::default();
+            Reaction::default()
         }
         Some("repo_branches") => {
             let url = value.get("url").and_then(|u| u.as_str());
@@ -766,7 +765,7 @@ fn handle_json(
                 });
                 repaint();
             }
-            return Reaction::default();
+            Reaction::default()
         }
         Some("lcd_template") => {
             let name = value
@@ -780,7 +779,7 @@ fn handle_json(
                 tx.lcd_template.send_replace(Some((name, def)));
                 repaint();
             }
-            return Reaction::default();
+            Reaction::default()
         }
         Some("lcd_plugin_preset") => {
             let name = value
@@ -794,13 +793,13 @@ fn handle_json(
                 tx.lcd_template.send_replace(Some((name, def)));
                 repaint();
             }
-            return Reaction::default();
+            Reaction::default()
         }
         Some(unknown) => {
             log::debug!("IPC: dropping unknown frame type: {unknown:?}");
-            return Reaction::default();
+            Reaction::default()
         }
-        None => return Reaction::default(),
+        None => Reaction::default(),
     }
 }
 

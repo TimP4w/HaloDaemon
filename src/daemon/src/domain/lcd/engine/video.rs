@@ -7,6 +7,7 @@
 use std::collections::HashMap;
 use std::process::Stdio;
 use std::sync::{Arc, OnceLock};
+use std::time::Duration;
 
 use anyhow::{anyhow, Context, Result};
 use tokio::io::AsyncReadExt;
@@ -77,6 +78,7 @@ enum VideoStream {
 pub struct VideoEngine {
     app: Arc<AppState>,
     streams: Mutex<HashMap<String, VideoStream>>,
+    lifecycle: Mutex<()>,
     /// Sender shared with the LCD engine so video preview frames appear on the
     /// same `lcd_engine_frame` IPC channel the UI already subscribes to.
     preview_tx: FrameTx,
@@ -87,12 +89,14 @@ impl VideoEngine {
         Arc::new(Self {
             app,
             streams: Mutex::new(HashMap::new()),
+            lifecycle: Mutex::new(()),
             preview_tx,
         })
     }
 
     /// Start (or restart) playback after fully stopping any prior stream.
     pub async fn start(self: &Arc<Self>, device_id: &str, path: &str) -> Result<()> {
+        let _lifecycle = self.lifecycle.lock().await;
         let device = self
             .app
             .find_device_by_id(device_id)
@@ -118,7 +122,7 @@ impl VideoEngine {
             return Err(error);
         }
 
-        self.stop(device_id).await;
+        self.stop_inner(device_id).await;
         set_device_health(device.as_ref(), LcdHealth::Starting);
         self.streams
             .lock()
@@ -153,6 +157,18 @@ impl VideoEngine {
 
     /// Stopping kills ffmpeg and awaits its exit, then joins the reader task.
     pub async fn stop(self: &Arc<Self>, device_id: &str) {
+        let _lifecycle = self.lifecycle.lock().await;
+        self.stop_inner(device_id).await;
+    }
+
+    pub async fn stop_all(self: &Arc<Self>) {
+        let ids: Vec<_> = self.streams.lock().await.keys().cloned().collect();
+        for id in ids {
+            self.stop(&id).await;
+        }
+    }
+
+    async fn stop_inner(self: &Arc<Self>, device_id: &str) {
         let playing = {
             let mut streams = self.streams.lock().await;
             match streams.get(device_id) {
@@ -252,9 +268,19 @@ impl VideoEngine {
                 if let Err(e) = stdout.read_exact(&mut buf).await {
                     // No full frame arrived — surface ffmpeg's own error (bad
                     // file, unsupported codec, …) instead of a bare EOF.
+                    {
+                        let mut child = child_guard.lock().await;
+                        if child.try_wait().ok().flatten().is_none() {
+                            let _ = child.start_kill();
+                        }
+                    }
                     let mut err = String::new();
                     if let Some(se) = stderr.as_mut() {
-                        let _ = se.read_to_string(&mut err).await;
+                        let _ = tokio::time::timeout(
+                            Duration::from_secs(1),
+                            se.read_to_string(&mut err),
+                        )
+                        .await;
                     }
                     break match err.trim() {
                         "" => format!("stream ended ({e})"),

@@ -116,7 +116,9 @@ fn native_chrome() -> ChromeConfig {
         spawn_gnome_chrome_watcher();
         std::sync::RwLock::new(cfg)
     });
-    lock.read().unwrap().clone()
+    lock.read()
+        .unwrap_or_else(std::sync::PoisonError::into_inner)
+        .clone()
 }
 
 /// Watch GNOME's `button-layout` for changes and refresh [`NATIVE_CHROME`] live.

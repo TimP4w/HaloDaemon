@@ -80,6 +80,19 @@ impl FrameSource for ScreenSamplerEffect {
 fn blit_letterboxed(frame: &super::screen_capture::RawFrame, pixmap: &mut Pixmap) {
     use super::screen_capture::FrameRotation;
 
+    pixmap.fill(tiny_skia::Color::BLACK);
+    let valid_stride = frame
+        .width
+        .checked_mul(4)
+        .is_some_and(|packed| frame.stride >= packed);
+    let valid_len = frame
+        .stride
+        .checked_mul(frame.height)
+        .is_some_and(|bytes| frame.data.len() >= bytes as usize);
+    if frame.width == 0 || frame.height == 0 || !valid_stride || !valid_len {
+        return;
+    }
+
     let dst_w = pixmap.width();
     let dst_h = pixmap.height();
     let (logical_w, logical_h) = match frame.rotation {
@@ -92,8 +105,6 @@ fn blit_letterboxed(frame: &super::screen_capture::RawFrame, pixmap: &mut Pixmap
     let scaled_h = ((logical_h as f32 * scale).round() as u32).min(dst_h);
     let off_x = (dst_w - scaled_w) / 2;
     let off_y = (dst_h - scaled_h) / 2;
-
-    pixmap.fill(tiny_skia::Color::BLACK);
 
     let fw = frame.width;
     let fh = frame.height;

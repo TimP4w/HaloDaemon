@@ -597,15 +597,24 @@ pub fn package_hash(package_dir: &Path) -> Result<String> {
     Ok(format!("{:x}", hasher.finalize()))
 }
 
-/// Strip carriage returns from text files so CRLF and LF hash identically.
+/// Normalize CRLF pairs in text files so CRLF and LF hash identically.
 /// Binary files (any NUL byte, git's heuristic) are left untouched so asset
 /// bytes are never mangled.
 fn normalize_for_hash(bytes: Vec<u8>) -> Vec<u8> {
     if bytes.contains(&0) {
         return bytes;
     }
-    let mut normalized = bytes;
-    normalized.retain(|&byte| byte != b'\r');
+    let mut normalized = Vec::with_capacity(bytes.len());
+    let mut index = 0;
+    while index < bytes.len() {
+        if bytes[index] == b'\r' && bytes.get(index + 1) == Some(&b'\n') {
+            normalized.push(b'\n');
+            index += 2;
+        } else {
+            normalized.push(bytes[index]);
+            index += 1;
+        }
+    }
     normalized
 }
 
@@ -845,6 +854,12 @@ mod tests {
     fn normalize_for_hash_is_noop_on_lf() {
         let lf = b"id: demo\nversion: 1.0.0\n".to_vec();
         assert_eq!(normalize_for_hash(lf.clone()), lf);
+    }
+
+    #[test]
+    fn normalize_for_hash_preserves_lone_carriage_returns() {
+        let text = b"before\rafter\n".to_vec();
+        assert_eq!(normalize_for_hash(text.clone()), text);
     }
 
     #[test]

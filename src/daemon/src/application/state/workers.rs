@@ -5,6 +5,7 @@ use super::persistence::ConfigSaveState;
 use super::AppState;
 
 const SAVE_DEBOUNCE: std::time::Duration = std::time::Duration::from_millis(250);
+const SAVE_MAX_DEBOUNCE: std::time::Duration = std::time::Duration::from_secs(2);
 const SAVE_RETRY: std::time::Duration = std::time::Duration::from_secs(1);
 
 pub fn start_config_save_worker(app: Arc<AppState>) -> tokio::task::JoinHandle<()> {
@@ -24,9 +25,11 @@ pub fn start_config_save_worker(app: Arc<AppState>) -> tokio::task::JoinHandle<(
                 .persistence()
                 .save_state
                 .send_replace(ConfigSaveState::Debouncing);
+            let debounce_deadline = tokio::time::Instant::now() + SAVE_MAX_DEBOUNCE;
             loop {
                 tokio::select! {
                     _ = tokio::time::sleep(SAVE_DEBOUNCE) => break,
+                    _ = tokio::time::sleep_until(debounce_deadline) => break,
                     result = rx.changed() => if result.is_err() { return },
                     result = shutdown_rx.changed() => {
                         if result.is_err() || *shutdown_rx.borrow() { break; }
@@ -132,9 +135,16 @@ pub fn start_config_save_worker(app: Arc<AppState>) -> tokio::task::JoinHandle<(
 /// [`Persistence::notify`](super::Persistence). This keeps engines decoupled
 /// from the usecase layer.
 pub fn start_persist_worker(app: Arc<AppState>) -> tokio::task::JoinHandle<()> {
+    let mut shutdown_rx = app.config.persistence().shutdown_tx.subscribe();
     tokio::spawn(async move {
         loop {
-            app.config.persistence().notify.notified().await;
+            tokio::select! {
+                _ = app.config.persistence().notify.notified() => {}
+                changed = shutdown_rx.changed() => {
+                    if changed.is_err() || *shutdown_rx.borrow() { break; }
+                    continue;
+                }
+            }
             let devices = app.device_registry.read().await.clone();
             for device in &devices {
                 crate::domain::profiles::device_state::persist_device_state(&app, device.as_ref())
@@ -146,6 +156,9 @@ pub fn start_persist_worker(app: Arc<AppState>) -> tokio::task::JoinHandle<()> {
 
 pub async fn shutdown(app: Arc<AppState>) {
     log::info!("Gracefully shutting down...");
+    if let Some(video) = app.lcd.video() {
+        video.stop_all().await;
+    }
     let devices = app.device_registry.read().await.clone();
     for device in devices {
         let _ = tokio::time::timeout(std::time::Duration::from_secs(2), device.close()).await;

@@ -159,10 +159,13 @@ pub async fn add_profile(name: String, app: Arc<AppState>) -> Result<()> {
         }
         log::info!("[Profile] Adding '{name}'");
         cfg.profiles.insert(name.clone(), Profile::default());
-        cfg.active_profile = name;
+        cfg.active_profile = name.clone();
     }
     app.request_config_save();
     load_active_profile(app.clone()).await;
+    app.focus
+        .notify(ControlMsg::ManualSwitch { profile: name })
+        .await;
     app.record_change(crate::application::bus::coordinator::Change::ProfileSwitch)
         .await;
     Ok(())
@@ -189,6 +192,11 @@ pub async fn remove_profile(name: String, app: Arc<AppState>) -> Result<()> {
     app.request_config_save();
     if active_removed {
         load_active_profile(app.clone()).await;
+        app.focus
+            .notify(ControlMsg::ManualSwitch {
+                profile: DEFAULT_PROFILE_NAME.to_string(),
+            })
+            .await;
         app.record_change(crate::application::bus::coordinator::Change::ProfileSwitch)
             .await;
     } else {
@@ -206,7 +214,7 @@ pub async fn rename_profile(old_name: String, new_name: String, app: Arc<AppStat
         anyhow::bail!("profile name must not be empty");
     }
 
-    {
+    let active_renamed = {
         let mut cfg = app.config.write().await;
         if !cfg.profiles.contains_key(&old_name) {
             anyhow::bail!("profile not found: {old_name}");
@@ -217,11 +225,18 @@ pub async fn rename_profile(old_name: String, new_name: String, app: Arc<AppStat
         log::info!("[Profile] Renaming '{old_name}' → '{new_name}'");
         let profile = cfg.profiles.remove(&old_name).unwrap();
         cfg.profiles.insert(new_name.clone(), profile);
-        if cfg.active_profile == old_name {
-            cfg.active_profile = new_name;
+        let active_renamed = cfg.active_profile == old_name;
+        if active_renamed {
+            cfg.active_profile = new_name.clone();
         }
-    }
+        active_renamed
+    };
     app.request_config_save();
+    if active_renamed {
+        app.focus
+            .notify(ControlMsg::ManualSwitch { profile: new_name })
+            .await;
+    }
     app.record_change(crate::application::bus::coordinator::Change::Profiles)
         .await;
     Ok(())
