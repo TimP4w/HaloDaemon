@@ -33,6 +33,13 @@ const FONT_CAL: f32 = 0.78;
 /// Delegated to the shared widget helper.
 use widgets::rotation_handle_pos;
 
+fn index_widget_ids(ids: impl IntoIterator<Item = String>) -> HashMap<String, usize> {
+    ids.into_iter()
+        .enumerate()
+        .map(|(index, id)| (id, index))
+        .collect()
+}
+
 pub(super) fn stage(ui: &mut egui::Ui, ctx: &TabCtx, st: &mut DeviceUi, id: &str, lcd: &LcdStatus) {
     let avail = (ui.available_width() - 4.0).clamp(220.0, 520.0);
     let size_vec = panel_size(avail, lcd.descriptor.width, lcd.descriptor.height);
@@ -155,6 +162,7 @@ pub(super) fn stage(ui: &mut egui::Ui, ctx: &TabCtx, st: &mut DeviceUi, id: &str
         .iter()
         .map(|w| w.id.clone())
         .collect();
+    let widget_indices = index_widget_ids(ids.iter().cloned());
     let mut moved = false;
     let mut resized = false;
     let mut rotated = false;
@@ -170,10 +178,7 @@ pub(super) fn stage(ui: &mut egui::Ui, ctx: &TabCtx, st: &mut DeviceUi, id: &str
     if !ui.input(|i| i.pointer.primary_down()) {
         st.lcd.editor.resize_preview = None;
     }
-    for wid in &ids {
-        let Some(idx) = st.lcd.editor.def.widgets.iter().position(|w| &w.id == wid) else {
-            continue;
-        };
+    for (idx, wid) in ids.iter().enumerate() {
         let snapshot = st.lcd.editor.def.widgets[idx].clone();
         // `size` is the daemon's exact `widget_rect` output (shared formula), so
         // the stage stays pixel-proportional to the device — the fallback box
@@ -239,7 +244,10 @@ pub(super) fn stage(ui: &mut egui::Ui, ctx: &TabCtx, st: &mut DeviceUi, id: &str
                 vec![wid.clone()]
             };
             for tid in &targets {
-                if let Some(w) = st.lcd.editor.def.widgets.iter_mut().find(|w| &w.id == tid) {
+                if let Some(w) = widget_indices
+                    .get(tid)
+                    .and_then(|index| st.lcd.editor.def.widgets.get_mut(*index))
+                {
                     w.x = (w.x + dnx).clamp(0.0, 1.0);
                     w.y = (w.y + dny).clamp(0.0, 1.0);
                 }
@@ -976,6 +984,15 @@ impl RotPainter {
 #[cfg(test)]
 mod tests {
     use super::*;
+
+    #[test]
+    fn widget_id_index_preserves_stage_order_for_constant_time_lookup() {
+        let index = index_widget_ids(["clock", "image", "weather"].map(str::to_owned));
+        assert_eq!(index.get("clock"), Some(&0));
+        assert_eq!(index.get("image"), Some(&1));
+        assert_eq!(index.get("weather"), Some(&2));
+        assert_eq!(index.get("missing"), None);
+    }
 
     #[test]
     fn rotation_handle_sits_above_at_zero_and_right_at_90() {

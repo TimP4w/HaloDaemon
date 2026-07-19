@@ -71,8 +71,16 @@ impl App {
         self.tray.sync(ctx, &state);
         // Close handling (hide-to-tray vs quit) is decided by `close_action` and
         // applied by each backend after `draw` — not here, so it isn't run twice.
-        let debug = self.ui.debug.borrow().clone();
-        let udev_rules = self.ui.udev_rules.borrow().clone();
+        if let Some(debug) = crate::runtime::ipc::take_changed(&mut self.ui.debug, "debug") {
+            self.debug_cache = debug;
+        }
+        if let Some(status) =
+            crate::runtime::ipc::take_changed(&mut self.ui.udev_rules, "udev_rules")
+        {
+            self.udev_rules_cache = status;
+        }
+        let debug = self.debug_cache.as_ref();
+        let udev_rules = self.udev_rules_cache.as_ref();
         if let Some(imgs) = crate::runtime::ipc::take_changed(&mut self.ui.lcd_images, "lcd_images")
         {
             self.lcd_images_cache = std::sync::Arc::new(imgs);
@@ -117,29 +125,40 @@ impl App {
         // A terminal (`Done`/`Failed`) is consumed as a one-shot edge: `Some`
         // only on the frame it newly arrives, so a retained stale terminal
         // can't clear a freshly-armed upload spinner.
-        let lcd_upload_terminal =
-            crate::runtime::ipc::take_changed(&mut self.ui.lcd_upload, "lcd_upload")
-                .flatten()
-                .filter(|p| {
-                    matches!(
-                        p.stage,
-                        halod_shared::types::LcdUploadStage::Done
-                            | halod_shared::types::LcdUploadStage::Failed
-                    )
-                });
-        let lcd_upload = self.ui.lcd_upload.borrow().clone();
+        let lcd_upload_changed =
+            crate::runtime::ipc::take_changed(&mut self.ui.lcd_upload, "lcd_upload");
+        let lcd_upload_terminal = lcd_upload_changed
+            .as_ref()
+            .and_then(|progress| progress.clone())
+            .filter(|p| {
+                matches!(
+                    p.stage,
+                    halod_shared::types::LcdUploadStage::Done
+                        | halod_shared::types::LcdUploadStage::Failed
+                )
+            });
+        if let Some(progress) = lcd_upload_changed {
+            self.lcd_upload_cache = progress;
+        }
+        let lcd_upload = self.lcd_upload_cache.clone();
         if let Some(template) =
             crate::runtime::ipc::take_changed(&mut self.ui.lcd_template, "lcd_template")
         {
             self.pending_lcd_template = template;
         }
         let lcd_template = self.pending_lcd_template.take();
-        let canvas_frame = if self.page == Page::Lighting {
-            self.ui.canvas_frame.borrow().clone()
-        } else {
-            None
-        };
-        let running_apps = self.ui.running_apps.borrow().clone();
+        if let Some(frame) =
+            crate::runtime::ipc::take_changed(&mut self.ui.canvas_frame, "canvas_frame")
+        {
+            self.canvas_frame_cache = frame;
+        }
+        let canvas_frame = self.canvas_frame_cache.as_ref();
+        if let Some(apps) =
+            crate::runtime::ipc::take_changed(&mut self.ui.running_apps, "running_apps")
+        {
+            self.running_apps_cache = apps;
+        }
+        let running_apps = &self.running_apps_cache;
         let time = ctx.input(|i| i.time);
 
         // Suppress the startup healthcheck dialog until a settled snapshot.
@@ -207,10 +226,12 @@ impl App {
             self.toasts.ingest([notification], time);
         }
 
-        if let Some(ref frame) = canvas_frame {
-            crate::ui::screens::canvas::ingest_frame(ctx, &mut self.canvas_ui, frame);
+        if self.page == Page::Lighting {
+            if let Some(frame) = canvas_frame {
+                crate::ui::screens::canvas::ingest_frame(ctx, &mut self.canvas_ui, frame);
+            }
         } else if matches!(self.page, Page::Device(_)) {
-            if let Some(frame) = self.ui.canvas_frame.borrow().as_ref() {
+            if let Some(frame) = canvas_frame {
                 crate::ui::screens::canvas::ingest_led_colors(&mut self.canvas_ui, frame);
             }
         }
@@ -368,7 +389,7 @@ impl App {
                     connected,
                     &mut self.page,
                     &state.plugins.updates,
-                    udev_rules.as_ref(),
+                    udev_rules,
                 );
             });
 
@@ -410,7 +431,7 @@ impl App {
                             state: &state,
                             cmd: &self.cmd,
                             time,
-                            debug: debug.as_ref(),
+                            debug,
                             lcd_images: &lcd_images,
                             lcd_preview,
                             lcd_upload,
@@ -447,7 +468,7 @@ impl App {
                             &mut self.lighting_ui,
                             &mut self.canvas_ui,
                             &mut self.effect_designer_ui,
-                            canvas_frame.as_ref(),
+                            canvas_frame,
                             time,
                             &mut self.page,
                         );
@@ -461,7 +482,7 @@ impl App {
                             &state,
                             &self.cmd,
                             connected,
-                            debug.as_ref(),
+                            debug,
                             &mut self.settings_ui,
                         );
                     }
@@ -474,7 +495,7 @@ impl App {
                             &state.plugins.repo_updates,
                             &state.plugins.updates,
                             &self.repo_branches_cache,
-                            udev_rules.as_ref(),
+                            udev_rules,
                         );
                     }
                     Page::Integrations => {
@@ -502,7 +523,7 @@ impl App {
                             &mut self.profile_ui,
                             &name,
                             &mut self.page,
-                            &running_apps,
+                            running_apps,
                         );
                     }
                 }
@@ -534,7 +555,7 @@ impl App {
             let outcome = crate::ui::screens::onboarding::show(
                 ctx,
                 &state,
-                debug.as_ref(),
+                debug,
                 &self.cmd,
                 &mut self.onboarding_ui,
                 time,
@@ -560,7 +581,7 @@ impl App {
                 ctx,
                 &state,
                 &self.cmd,
-                debug.as_ref(),
+                debug,
                 connected,
                 within_grace,
                 &mut self.depcheck_ui,
@@ -570,7 +591,7 @@ impl App {
             && !tour_active
             && crate::ui::screens::depcheck::visible(
                 &state,
-                debug.as_ref(),
+                debug,
                 connected,
                 within_grace,
                 &self.depcheck_ui,

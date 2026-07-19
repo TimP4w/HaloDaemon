@@ -26,6 +26,11 @@ pub struct App {
     pub(crate) lcd_images_cache: Arc<Vec<String>>,
     /// Decoded plugin display assets, keyed by `ipc::plugin_asset_cache_key`.
     pub(crate) plugin_assets_cache: Arc<HashMap<String, Vec<u8>>>,
+    pub(crate) debug_cache: Option<halod_shared::debug_info::DebugInfo>,
+    pub(crate) udev_rules_cache: Option<halod_shared::types::UdevRulesStatus>,
+    pub(crate) running_apps_cache: Vec<halod_shared::types::RunningApp>,
+    pub(crate) lcd_upload_cache: Option<halod_shared::types::LcdUploadProgress>,
+    pub(crate) canvas_frame_cache: Option<halod_shared::types::CanvasFrame>,
     pub(crate) cmd: CommandTx,
     pub(crate) entered: bool,
     /// Plugin ids already toasted as quarantined (disabled for an on-disk
@@ -137,6 +142,11 @@ impl App {
             state_cache: Arc::new(TopicStore::default()),
             lcd_images_cache: Arc::new(Vec::new()),
             plugin_assets_cache: Arc::new(HashMap::new()),
+            debug_cache: None,
+            udev_rules_cache: None,
+            running_apps_cache: Vec::new(),
+            lcd_upload_cache: None,
+            canvas_frame_cache: None,
             cmd,
             entered: false,
             quarantine_toasted: std::collections::HashSet::new(),
