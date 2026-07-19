@@ -5,6 +5,7 @@
 pub mod components;
 pub mod icons;
 mod root;
+#[cfg(target_os = "linux")]
 pub(crate) use root::show_native_notifications;
 pub mod screens;
 pub mod shell;

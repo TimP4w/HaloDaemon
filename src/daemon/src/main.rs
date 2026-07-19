@@ -19,7 +19,9 @@ use crate::application::run_loop::{EngineConfigReceiver, EngineConfigTopic};
 use crate::application::state;
 use crate::application::{ipc, lifecycle, task_supervisor};
 use crate::domain::{cooling, device, input, lcd, lighting, plugin, profiles};
-use crate::infrastructure::{platform, secrets};
+#[cfg(unix)]
+use crate::infrastructure::platform;
+use crate::infrastructure::secrets;
 
 /// How this process was invoked, decided purely from argv.
 ///

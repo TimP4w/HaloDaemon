@@ -193,8 +193,12 @@ pub async fn spawn() -> anyhow::Result<mpsc::Receiver<FocusEvent>> {
                 break;
             }
             match bridge_rx.recv_timeout(std::time::Duration::from_millis(100)) {
-                Ok(event) if tx.blocking_send(event).is_err() => break,
-                Ok(_) | Err(std::sync::mpsc::RecvTimeoutError::Timeout) => {}
+                Ok(event) => {
+                    if tx.blocking_send(event).is_err() {
+                        break;
+                    }
+                }
+                Err(std::sync::mpsc::RecvTimeoutError::Timeout) => {}
                 Err(std::sync::mpsc::RecvTimeoutError::Disconnected) => break,
             }
         }
