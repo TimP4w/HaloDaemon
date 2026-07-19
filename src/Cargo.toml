@@ -3,7 +3,7 @@ members = ["shared", "hwaccess", "broker", "daemon", "ui", "plugin-signing"]
 resolver = "2"
 
 [workspace.package]
-version = "0.7.1"
+version = "0.8.0"
 edition = "2021"
 license = "GPL-3.0-or-later"
 repository = "https://github.com/TimP4w/Halod"
