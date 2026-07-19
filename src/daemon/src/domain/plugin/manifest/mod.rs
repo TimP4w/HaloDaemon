@@ -4021,13 +4021,15 @@ mod tests {
     #[test]
     fn directory_plugin_reads_experimental_marker() {
         let tmp = tempfile::tempdir().unwrap();
+        let integration =
+            "type: integration\nplatforms: [linux]\npermissions: [hwmon]\ntransports:\n  hwmon: {}\n";
         let experimental = write_plugin_dir(
             tmp.path(),
             "experimental_plugin",
-            "experimental: true\n",
+            &format!("{integration}experimental: true\n"),
             ENTRY_LUA,
         );
-        let stable = write_plugin_dir(tmp.path(), "stable_plugin", "", ENTRY_LUA);
+        let stable = write_plugin_dir(tmp.path(), "stable_plugin", integration, ENTRY_LUA);
 
         assert!(parse_manifest_from_dir(&experimental).unwrap().experimental);
         assert!(!parse_manifest_from_dir(&stable).unwrap().experimental);
