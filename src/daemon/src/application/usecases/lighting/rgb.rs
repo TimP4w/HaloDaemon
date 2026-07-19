@@ -5,9 +5,9 @@ use anyhow::{Context, Result};
 use std::sync::Arc;
 
 use crate::application::state::AppState;
+use crate::application::usecases::registry::settings;
 use crate::domain::profiles::device_state::persist_device_state;
 use crate::domain::registry::require_device_owned_id;
-use crate::domain::registry::usecases::settings;
 use halod_shared::types::{LightingChannel, LightingState, ZoneTopology};
 use halod_shared::zone_transform::ZoneContentTransform;
 

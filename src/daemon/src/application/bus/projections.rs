@@ -143,8 +143,9 @@ pub async fn produce(app: &AppState, cfg: &Config, requested: &[Topic]) -> Vec<(
 #[cfg(test)]
 mod tests {
     use super::*;
-    use crate::infrastructure::drivers::Device;
+    use crate::domain::device::Device;
     use crate::test_support::MockDevice;
+    use std::sync::Arc;
 
     #[tokio::test]
     async fn gui_projection_does_not_require_a_device_snapshot() {

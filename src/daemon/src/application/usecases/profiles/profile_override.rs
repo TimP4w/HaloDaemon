@@ -46,7 +46,7 @@ pub async fn remove_profile_override(target: OverrideTarget, app: Arc<AppState>)
         }
     }
     app.request_config_save();
-    super::profiles::load_active_profile(app.clone()).await;
+    super::lifecycle::load_active_profile(app.clone()).await;
     app.record_change(crate::domain::events::Change::ProfileSwitch)
         .await;
     Ok(())

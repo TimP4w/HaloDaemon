@@ -3,7 +3,6 @@ pub mod identity;
 pub mod model;
 pub mod observers;
 pub mod state;
-pub mod usecases;
 
 use anyhow::Result;
 use std::sync::Arc;
@@ -100,12 +99,12 @@ pub async fn initialize_app_state(
     // This is dirty-update metadata, not a consent or activation gate, and it
     // runs without network access. The dev repo is not a config record, so it is
     // never a subject here.
-    crate::domain::plugin::usecases::repos::quarantine_changed_plugins(app.clone()).await;
+    crate::application::usecases::plugin::repos::quarantine_changed_plugins(app.clone()).await;
     start_update_check(app.clone()).await;
     observers::discovery::discover_devices(app.clone()).await;
     seed_known_devices(app.clone()).await;
-    usecases::chain::restore_saved_chains(app.clone()).await;
-    crate::domain::profiles::usecases::profiles::load_active_profile(app.clone()).await;
+    crate::application::usecases::registry::chain::restore_saved_chains(app.clone()).await;
+    crate::application::usecases::profiles::lifecycle::load_active_profile(app.clone()).await;
 }
 
 /// Seed the non-removable official plugin repo record if absent, and clone it
@@ -331,11 +330,11 @@ pub(crate) async fn start_update_check(app: Arc<AppState>) {
         return;
     }
     app.discovery.lock().await.checking_updates = true;
-    crate::domain::registry::usecases::runtime::topology_changed(&app).await;
+    crate::application::usecases::registry::runtime::topology_changed(&app).await;
     tokio::spawn(async move {
-        crate::domain::plugin::usecases::repos::check_updates_broadcast(app.clone()).await;
+        crate::application::usecases::plugin::repos::check_updates_broadcast(app.clone()).await;
         app.discovery.lock().await.checking_updates = false;
-        crate::domain::registry::usecases::runtime::topology_changed(&app).await;
+        crate::application::usecases::registry::runtime::topology_changed(&app).await;
     });
 }
 

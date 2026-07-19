@@ -8,14 +8,7 @@ use tokio::sync::broadcast::error::RecvError;
 
 use super::{ClientHandle, LeaseState, SubscriptionTopic};
 use crate::application::state::AppState;
-use crate::domain::cooling;
-use crate::domain::device;
-use crate::domain::input;
-use crate::domain::lcd;
-use crate::domain::lighting;
-use crate::domain::plugin;
 use crate::domain::profiles;
-use crate::domain::registry;
 
 const LCD_PREVIEW_LEASE: Duration =
     Duration::from_secs(halod_shared::types::LCD_PREVIEW_LEASE_SECS);
@@ -325,142 +318,197 @@ async fn dispatch(
 ) -> anyhow::Result<()> {
     match cmd {
         DaemonCommand::SetRange { id, key, value } => {
-            device::usecases::capability::set_capability_param(
+            crate::application::usecases::device::capability::set_capability_param(
                 id,
-                device::usecases::capability::CapabilityParam::Range { key, value },
+                crate::application::usecases::device::capability::CapabilityParam::Range {
+                    key,
+                    value,
+                },
                 app,
             )
             .await
         }
         DaemonCommand::SetChoice { id, key, selected } => {
-            device::usecases::capability::set_capability_param(
+            crate::application::usecases::device::capability::set_capability_param(
                 id,
-                device::usecases::capability::CapabilityParam::Choice { key, selected },
+                crate::application::usecases::device::capability::CapabilityParam::Choice {
+                    key,
+                    selected,
+                },
                 app,
             )
             .await
         }
         DaemonCommand::SetBoolean { id, key, value } => {
-            device::usecases::capability::set_capability_param(
+            crate::application::usecases::device::capability::set_capability_param(
                 id,
-                device::usecases::capability::CapabilityParam::Boolean { key, value },
+                crate::application::usecases::device::capability::CapabilityParam::Boolean {
+                    key,
+                    value,
+                },
                 app,
             )
             .await
         }
         DaemonCommand::TriggerAction { id, key } => {
-            device::usecases::capability::set_capability_param(
+            crate::application::usecases::device::capability::set_capability_param(
                 id,
-                device::usecases::capability::CapabilityParam::Action { key },
+                crate::application::usecases::device::capability::CapabilityParam::Action { key },
                 app,
             )
             .await
         }
         DaemonCommand::AddProfile { name } => {
-            profiles::usecases::profiles::add_profile(name, app).await
+            crate::application::usecases::profiles::lifecycle::add_profile(name, app).await
         }
         DaemonCommand::RenameProfile { old_name, new_name } => {
-            profiles::usecases::profiles::rename_profile(old_name, new_name, app).await
+            crate::application::usecases::profiles::lifecycle::rename_profile(
+                old_name, new_name, app,
+            )
+            .await
         }
         DaemonCommand::RemoveProfile { name } => {
-            profiles::usecases::profiles::remove_profile(name, app).await
+            crate::application::usecases::profiles::lifecycle::remove_profile(name, app).await
         }
         DaemonCommand::SwitchProfile { name } => {
-            profiles::usecases::profiles::switch_profile(name, app).await
+            crate::application::usecases::profiles::lifecycle::switch_profile(name, app).await
         }
         DaemonCommand::RemoveProfileOverride { target } => {
-            profiles::usecases::profile_override::remove_profile_override(target, app).await
+            crate::application::usecases::profiles::profile_override::remove_profile_override(
+                target, app,
+            )
+            .await
         }
         DaemonCommand::SetLightingTargets {
             device_ids,
             channels,
-        } => profiles::usecases::profiles::set_lighting_targets(device_ids, channels, app).await,
+        } => {
+            crate::application::usecases::profiles::lifecycle::set_lighting_targets(
+                device_ids, channels, app,
+            )
+            .await
+        }
         DaemonCommand::AddAppRule {
             process_names,
             profile,
             enabled,
-        } => profiles::usecases::app_rules::add(process_names, profile, enabled, app).await,
+        } => {
+            crate::application::usecases::profiles::app_rules::add(
+                process_names,
+                profile,
+                enabled,
+                app,
+            )
+            .await
+        }
         DaemonCommand::UpdateAppRule {
             index,
             process_names,
             profile,
             enabled,
         } => {
-            profiles::usecases::app_rules::update(index, process_names, profile, enabled, app).await
+            crate::application::usecases::profiles::app_rules::update(
+                index,
+                process_names,
+                profile,
+                enabled,
+                app,
+            )
+            .await
         }
         DaemonCommand::RemoveAppRule { index } => {
-            profiles::usecases::app_rules::remove(index, app).await
+            crate::application::usecases::profiles::app_rules::remove(index, app).await
         }
-        DaemonCommand::Rediscover => registry::usecases::settings::rediscover(app).await,
+        DaemonCommand::Rediscover => {
+            crate::application::usecases::registry::settings::rediscover(app).await
+        }
         DaemonCommand::GetUdevRulesStatus => {
-            plugin::usecases::plugins::get_udev_rules_status(client, app).await
+            crate::application::usecases::plugin::plugins::get_udev_rules_status(client, app).await
         }
         DaemonCommand::SetPluginEnabled { id, enabled } => {
-            plugin::usecases::plugins::set_enabled(id, enabled, app).await
+            crate::application::usecases::plugin::plugins::set_enabled(id, enabled, app).await
         }
         DaemonCommand::ImportPluginRepository { source_path } => {
-            plugin::usecases::repos::import_local_repo(source_path, app).await
+            crate::application::usecases::plugin::repos::import_local_repo(source_path, app).await
         }
         DaemonCommand::ConfirmPluginEnable { id, authority } => {
-            plugin::usecases::plugins::confirm_enable(id, authority, app).await
+            crate::application::usecases::plugin::plugins::confirm_enable(id, authority, app).await
         }
         DaemonCommand::ConfirmPluginEnableBatch { plugins } => {
-            plugin::usecases::plugins::confirm_enable_batch(plugins, app).await
+            crate::application::usecases::plugin::plugins::confirm_enable_batch(plugins, app).await
         }
         DaemonCommand::SetPluginConfig { id, values } => {
-            plugin::usecases::plugins::set_config(id, values, app).await
+            crate::application::usecases::plugin::plugins::set_config(id, values, app).await
         }
         DaemonCommand::AddPluginRepo { url, branch } => {
-            plugin::usecases::repos::add_repo(url, branch, app).await
+            crate::application::usecases::plugin::repos::add_repo(url, branch, app).await
         }
         DaemonCommand::RemovePluginRepo { slug } => {
-            plugin::usecases::repos::remove_repo(slug, app).await
+            crate::application::usecases::plugin::repos::remove_repo(slug, app).await
         }
         DaemonCommand::ListRepoBranches { url } => {
-            plugin::usecases::repos::list_branches(url, client).await
+            crate::application::usecases::plugin::repos::list_branches(url, client).await
         }
         DaemonCommand::CheckPluginRepoUpdates => {
-            plugin::usecases::repos::check_repo_updates(app, client).await
+            crate::application::usecases::plugin::repos::check_repo_updates(app, client).await
         }
         DaemonCommand::UpdatePluginRepo { slug } => {
-            let result = plugin::usecases::repos::update_repo(slug, app.clone()).await;
+            let result =
+                crate::application::usecases::plugin::repos::update_repo(slug, app.clone()).await;
             // Refresh per-plugin update flags so the banners clear once the pull
             // lands (a single update, unlike update-all, otherwise leaves them stale).
-            plugin::usecases::repos::broadcast_plugin_updates(&app, None).await;
+            crate::application::usecases::plugin::repos::broadcast_plugin_updates(&app, None).await;
             result
         }
-        DaemonCommand::UpdateAllPlugins => plugin::usecases::repos::update_all_plugins(app).await,
+        DaemonCommand::UpdateAllPlugins => {
+            crate::application::usecases::plugin::repos::update_all_plugins(app).await
+        }
         DaemonCommand::SetIntegrationEnabled { id, enabled } => {
-            plugin::usecases::integrations::set_integration_enabled(id, enabled, app).await
+            crate::application::usecases::plugin::integrations::set_integration_enabled(
+                id, enabled, app,
+            )
+            .await
         }
         DaemonCommand::SetIntegrationConfig { id, values } => {
-            plugin::usecases::integrations::set_integration_config(id, values, app).await
+            crate::application::usecases::plugin::integrations::set_integration_config(
+                id, values, app,
+            )
+            .await
         }
         DaemonCommand::BeginIntegrationSetup { id } => {
-            plugin::usecases::integrations::begin_setup(id, app).await
+            crate::application::usecases::plugin::integrations::begin_setup(id, app).await
         }
         DaemonCommand::ResetIntegrationSetup { id } => {
-            plugin::usecases::integrations::reset_setup(id, app).await
+            crate::application::usecases::plugin::integrations::reset_setup(id, app).await
         }
         DaemonCommand::SelectIntegrationSetupMode { id, mode } => {
-            plugin::usecases::integrations::select_setup_mode(id, mode, app).await
+            crate::application::usecases::plugin::integrations::select_setup_mode(id, mode, app)
+                .await
         }
         DaemonCommand::SubmitIntegrationSetup {
             id,
             candidate_id,
             values,
-        } => plugin::usecases::integrations::submit_setup(id, candidate_id, values, app).await,
+        } => {
+            crate::application::usecases::plugin::integrations::submit_setup(
+                id,
+                candidate_id,
+                values,
+                app,
+            )
+            .await
+        }
         DaemonCommand::RetryIntegrationPairing { id } => {
-            plugin::usecases::integrations::retry_pairing(id, app).await
+            crate::application::usecases::plugin::integrations::retry_pairing(id, app).await
         }
         DaemonCommand::CancelIntegrationSetup { id } => {
-            plugin::usecases::integrations::cancel_setup(id, app).await
+            crate::application::usecases::plugin::integrations::cancel_setup(id, app).await
         }
         DaemonCommand::SetLogLevel { level } => {
-            registry::usecases::settings::set_log_level(level, app).await
+            crate::application::usecases::registry::settings::set_log_level(level, app).await
         }
         DaemonCommand::SetLanguage { lang } => {
-            registry::usecases::settings::set_language(lang, app).await
+            crate::application::usecases::registry::settings::set_language(lang, app).await
         }
         DaemonCommand::SetUiConfig {
             close_to_tray,
@@ -468,7 +516,7 @@ async fn dispatch(
             hide_window_controls,
             low_battery_notifications,
         } => {
-            registry::usecases::settings::set_ui_config(
+            crate::application::usecases::registry::settings::set_ui_config(
                 close_to_tray,
                 suppress_dependency_warning,
                 hide_window_controls,
@@ -478,56 +526,77 @@ async fn dispatch(
             .await
         }
         DaemonCommand::SetPluginDownloadConsent { allowed } => {
-            registry::usecases::settings::set_plugin_download_consent(allowed, app).await
+            crate::application::usecases::registry::settings::set_plugin_download_consent(
+                allowed, app,
+            )
+            .await
         }
         DaemonCommand::MarkTourSeen { tour } => {
-            registry::usecases::settings::mark_tour_seen(tour, app).await
+            crate::application::usecases::registry::settings::mark_tour_seen(tour, app).await
         }
-        DaemonCommand::ResetToursSeen => registry::usecases::settings::reset_tours_seen(app).await,
+        DaemonCommand::ResetToursSeen => {
+            crate::application::usecases::registry::settings::reset_tours_seen(app).await
+        }
         DaemonCommand::SetFanFailsafeDuty { duty } => {
-            cooling::usecases::failsafe::set_fan_failsafe_duty(duty, app).await
+            crate::application::usecases::cooling::failsafe::set_fan_failsafe_duty(duty, app).await
         }
         DaemonCommand::ResetAllButtonMappings { id } => {
-            input::usecases::key_remap::reset_all_button_mappings(id, app).await
+            crate::application::usecases::input::key_remap::reset_all_button_mappings(id, app).await
         }
         DaemonCommand::ResetButtonMapping { id, cid } => {
-            input::usecases::key_remap::reset_button_mapping(id, cid, app).await
+            crate::application::usecases::input::key_remap::reset_button_mapping(id, cid, app).await
         }
         DaemonCommand::SetEqPreset { id, preset_index } => {
-            device::usecases::capability::set_capability_param(
+            crate::application::usecases::device::capability::set_capability_param(
                 id,
-                device::usecases::capability::CapabilityParam::EqPreset { preset_index },
+                crate::application::usecases::device::capability::CapabilityParam::EqPreset {
+                    preset_index,
+                },
                 app,
             )
             .await
         }
         DaemonCommand::SetEqBands { id, values } => {
-            device::usecases::capability::set_capability_param(
+            crate::application::usecases::device::capability::set_capability_param(
                 id,
-                device::usecases::capability::CapabilityParam::EqBands { values },
+                crate::application::usecases::device::capability::CapabilityParam::EqBands {
+                    values,
+                },
                 app,
             )
             .await
         }
         DaemonCommand::SetDpiSteps { id, steps } => {
-            device::usecases::capability::set_capability_param(
+            crate::application::usecases::device::capability::set_capability_param(
                 id,
-                device::usecases::capability::CapabilityParam::DpiSteps { steps },
+                crate::application::usecases::device::capability::CapabilityParam::DpiSteps {
+                    steps,
+                },
                 app,
             )
             .await
         }
         DaemonCommand::SetDeviceVisibility { device_id, state } => {
-            device::usecases::visibility::set_device_visibility(device_id, state, app).await
+            crate::application::usecases::device::visibility::set_device_visibility(
+                device_id, state, app,
+            )
+            .await
         }
         DaemonCommand::SetSensorVisibility { sensor_id, state } => {
-            device::usecases::visibility::set_sensor_visibility(sensor_id, state, app).await
+            crate::application::usecases::device::visibility::set_sensor_visibility(
+                sensor_id, state, app,
+            )
+            .await
         }
         DaemonCommand::SetKeyboardLayout { id, selection } => {
-            device::usecases::keyboard_layout::set_keyboard_layout(id, selection, app).await
+            crate::application::usecases::device::keyboard_layout::set_keyboard_layout(
+                id, selection, app,
+            )
+            .await
         }
         DaemonCommand::SetDeviceName { device_id, name } => {
-            device::usecases::rename::set_device_name(device_id, name, app).await
+            crate::application::usecases::device::rename::set_device_name(device_id, name, app)
+                .await
         }
 
         DaemonCommand::SetCoolingCurvePoints {
@@ -536,7 +605,7 @@ async fn dispatch(
             points,
             sensor_id,
         } => {
-            cooling::usecases::fan_curve::set_cooling_curve_points(
+            crate::application::usecases::cooling::fan_curve::set_cooling_curve_points(
                 device_id, channel_id, points, sensor_id, app,
             )
             .await
@@ -547,7 +616,7 @@ async fn dispatch(
             preset,
             sensor_id,
         } => {
-            cooling::usecases::fan_curve::set_cooling_curve_preset(
+            crate::application::usecases::cooling::fan_curve::set_cooling_curve_preset(
                 device_id, channel_id, preset, sensor_id, app,
             )
             .await
@@ -555,16 +624,26 @@ async fn dispatch(
         DaemonCommand::RemoveCoolingCurve {
             device_id,
             channel_id,
-        } => cooling::usecases::fan_curve::remove_cooling_curve(device_id, channel_id, app).await,
+        } => {
+            crate::application::usecases::cooling::fan_curve::remove_cooling_curve(
+                device_id, channel_id, app,
+            )
+            .await
+        }
 
         DaemonCommand::LightingApply { id, state } => {
-            lighting::usecases::rgb::lighting_apply(id, state, app).await
+            crate::application::usecases::lighting::rgb::lighting_apply(id, state, app).await
         }
         DaemonCommand::LightingSetChannelTransform {
             id,
             channel_id,
             transform,
-        } => lighting::usecases::rgb::set_channel_transform(id, channel_id, transform, app).await,
+        } => {
+            crate::application::usecases::lighting::rgb::set_channel_transform(
+                id, channel_id, transform, app,
+            )
+            .await
+        }
         DaemonCommand::LightingAddSegment {
             id,
             channel_id,
@@ -572,7 +651,7 @@ async fn dispatch(
             led_count,
             topology,
         } => {
-            registry::usecases::chain::lighting_add_segment(
+            crate::application::usecases::registry::chain::lighting_add_segment(
                 id, channel_id, name, led_count, topology, app,
             )
             .await
@@ -582,7 +661,10 @@ async fn dispatch(
             channel_id,
             device_id,
         } => {
-            registry::usecases::chain::lighting_remove_segment(id, channel_id, device_id, app).await
+            crate::application::usecases::registry::chain::lighting_remove_segment(
+                id, channel_id, device_id, app,
+            )
+            .await
         }
         DaemonCommand::LightingReorderSegment {
             id,
@@ -590,89 +672,121 @@ async fn dispatch(
             device_id,
             new_index,
         } => {
-            registry::usecases::chain::lighting_reorder_segment(
+            crate::application::usecases::registry::chain::lighting_reorder_segment(
                 id, channel_id, device_id, new_index, app,
             )
             .await
         }
         DaemonCommand::LightingDetectSegments { id, channel_id } => {
-            registry::usecases::chain::lighting_detect_segments(id, channel_id, app).await
+            crate::application::usecases::registry::chain::lighting_detect_segments(
+                id, channel_id, app,
+            )
+            .await
         }
 
         DaemonCommand::SetButtonMapping { id, mapping } => {
-            input::usecases::key_remap::set_button_mapping(id, mapping, app).await
+            crate::application::usecases::input::key_remap::set_button_mapping(id, mapping, app)
+                .await
         }
         DaemonCommand::SetSoftwareDpiSteps { id, steps } => {
-            input::usecases::key_remap::set_software_dpi_steps(id, steps, app).await
+            crate::application::usecases::input::key_remap::set_software_dpi_steps(id, steps, app)
+                .await
         }
         DaemonCommand::PlayMacro { steps } => {
-            input::usecases::key_remap::play_macro(steps, app).await
+            crate::application::usecases::input::key_remap::play_macro(steps, app).await
         }
 
         DaemonCommand::OnboardProfileSwitch { id, slot } => {
-            input::usecases::onboard_profiles::switch_onboard_profile(id, slot, app).await
+            crate::application::usecases::input::onboard_profiles::switch_onboard_profile(
+                id, slot, app,
+            )
+            .await
         }
         DaemonCommand::OnboardProfileRestore { id, slot } => {
-            input::usecases::onboard_profiles::restore_onboard_profile(id, slot, app).await
+            crate::application::usecases::input::onboard_profiles::restore_onboard_profile(
+                id, slot, app,
+            )
+            .await
         }
         DaemonCommand::OnboardProfileSetEnabled { id, slot, enabled } => {
-            input::usecases::onboard_profiles::set_onboard_profile_enabled(id, slot, enabled, app)
-                .await
+            crate::application::usecases::input::onboard_profiles::set_onboard_profile_enabled(
+                id, slot, enabled, app,
+            )
+            .await
         }
 
         DaemonCommand::SetScreenImage {
             id,
             data_b64,
             request_id,
-        } => lcd::usecases::lcd::set_screen_image(id, data_b64, request_id, app, client).await,
+        } => {
+            crate::application::usecases::lcd::controls::set_screen_image(
+                id, data_b64, request_id, app, client,
+            )
+            .await
+        }
         DaemonCommand::SetScreenImageFromLibrary {
             id,
             filename,
             request_id,
         } => {
-            lcd::usecases::lcd::set_screen_image_from_library(id, filename, request_id, app, client)
-                .await
+            crate::application::usecases::lcd::controls::set_screen_image_from_library(
+                id, filename, request_id, app, client,
+            )
+            .await
         }
         DaemonCommand::SetScreenRotation { id, rotation } => {
-            lcd::usecases::lcd::set_screen_rotation(id, rotation, app).await
+            crate::application::usecases::lcd::controls::set_screen_rotation(id, rotation, app)
+                .await
         }
         DaemonCommand::SetScreenBrightness { id, brightness } => {
-            lcd::usecases::lcd::set_screen_brightness(id, brightness, app).await
+            crate::application::usecases::lcd::controls::set_screen_brightness(id, brightness, app)
+                .await
         }
         DaemonCommand::SetScreenDefault { id } => {
-            lcd::usecases::lcd::set_screen_default(id, app).await
+            crate::application::usecases::lcd::controls::set_screen_default(id, app).await
         }
         DaemonCommand::SetScreenRawStreaming { id, enabled } => {
-            lcd::usecases::lcd::set_screen_raw_streaming(id, enabled, app).await
+            crate::application::usecases::lcd::controls::set_screen_raw_streaming(id, enabled, app)
+                .await
         }
         DaemonCommand::SetScreenVideo { id, path } => {
-            lcd::usecases::lcd::set_screen_video(id, path, app).await
+            crate::application::usecases::lcd::controls::set_screen_video(id, path, app).await
         }
-        DaemonCommand::ListLcdImages => lcd::usecases::lcd::list_lcd_images(client).await,
+        DaemonCommand::ListLcdImages => {
+            crate::application::usecases::lcd::controls::list_lcd_images(client).await
+        }
         DaemonCommand::DeleteLcdImage { filename } => {
-            lcd::usecases::lcd::delete_lcd_image(filename, app).await
+            crate::application::usecases::lcd::controls::delete_lcd_image(filename, app).await
         }
         DaemonCommand::GetPluginAsset { plugin_id, name } => {
-            plugin::usecases::plugins::get_asset(plugin_id, name, client, app).await
+            crate::application::usecases::plugin::plugins::get_asset(plugin_id, name, client, app)
+                .await
         }
         DaemonCommand::GetLcdWidgetIcon { catalog_id } => {
-            plugin::usecases::plugins::get_lcd_widget_icon(catalog_id, client, app).await
+            crate::application::usecases::plugin::plugins::get_lcd_widget_icon(
+                catalog_id, client, app,
+            )
+            .await
         }
         DaemonCommand::GetLcdPluginPreset { catalog_id } => {
-            plugin::usecases::plugins::get_lcd_preset(catalog_id, client, app).await
+            crate::application::usecases::plugin::plugins::get_lcd_preset(catalog_id, client, app)
+                .await
         }
         DaemonCommand::ListSerialPorts => {
-            plugin::usecases::plugins::list_serial_ports(client).await
+            crate::application::usecases::plugin::plugins::list_serial_ports(client).await
         }
 
         DaemonCommand::CanvasUpsertEffect { instance_id, def } => {
-            lighting::usecases::canvas::upsert_effect(instance_id, def, app).await
+            crate::application::usecases::lighting::canvas::upsert_effect(instance_id, def, app)
+                .await
         }
         DaemonCommand::CanvasRemoveEffect { instance_id } => {
-            lighting::usecases::canvas::remove_effect(instance_id, app).await
+            crate::application::usecases::lighting::canvas::remove_effect(instance_id, app).await
         }
         DaemonCommand::CanvasSetDefaultEffect { instance_id } => {
-            lighting::usecases::canvas::set_default_effect(instance_id, app).await
+            crate::application::usecases::lighting::canvas::set_default_effect(instance_id, app)
+                .await
         }
         DaemonCommand::CanvasPlaceZone {
             device_id,
@@ -685,7 +799,7 @@ async fn dispatch(
             effect,
             sampling_mode,
         } => {
-            lighting::usecases::canvas::place_zone(
+            crate::application::usecases::lighting::canvas::place_zone(
                 device_id,
                 channel_id,
                 x,
@@ -702,7 +816,10 @@ async fn dispatch(
         DaemonCommand::CanvasRemoveZone {
             device_id,
             channel_id,
-        } => lighting::usecases::canvas::remove_zone(device_id, channel_id, app).await,
+        } => {
+            crate::application::usecases::lighting::canvas::remove_zone(device_id, channel_id, app)
+                .await
+        }
         DaemonCommand::CanvasMoveZone {
             device_id,
             channel_id,
@@ -714,7 +831,7 @@ async fn dispatch(
             effect,
             sampling_mode,
         } => {
-            lighting::usecases::canvas::move_zone(
+            crate::application::usecases::lighting::canvas::move_zone(
                 device_id,
                 channel_id,
                 x,
@@ -729,9 +846,11 @@ async fn dispatch(
             .await
         }
         DaemonCommand::CanvasSetSampleRadius { radius } => {
-            lighting::usecases::canvas::set_sample_radius(radius, app).await
+            crate::application::usecases::lighting::canvas::set_sample_radius(radius, app).await
         }
-        DaemonCommand::CanvasStop => lighting::usecases::canvas::stop(app).await,
+        DaemonCommand::CanvasStop => {
+            crate::application::usecases::lighting::canvas::stop(app).await
+        }
         DaemonCommand::CanvasSubscribe => {
             if client.try_subscribe_canvas() {
                 let c2 = client.clone();
@@ -750,9 +869,17 @@ async fn dispatch(
             device_id,
             template_id,
             params,
-        } => lcd::usecases::engine::set_template(device_id, template_id, params, app).await,
+        } => {
+            crate::application::usecases::lcd::engine::set_template(
+                device_id,
+                template_id,
+                params,
+                app,
+            )
+            .await
+        }
         DaemonCommand::LcdEngineDeactivate { device_id } => {
-            lcd::usecases::engine::deactivate(device_id, app).await
+            crate::application::usecases::lcd::engine::deactivate(device_id, app).await
         }
         DaemonCommand::LcdEngineSubscribe => {
             client.touch_lcd_preview();
@@ -763,39 +890,49 @@ async fn dispatch(
             Ok(())
         }
         DaemonCommand::SaveLcdTemplate { name, def } => {
-            lcd::usecases::templates::save_template(name, def, app).await
+            crate::application::usecases::lcd::templates::save_template(name, def, app).await
         }
         DaemonCommand::LoadLcdTemplate { name } => {
-            lcd::usecases::templates::load_template(name, client).await
+            crate::application::usecases::lcd::templates::load_template(name, client).await
         }
         DaemonCommand::DeleteLcdTemplate { name } => {
-            lcd::usecases::templates::delete_template(name, app).await
+            crate::application::usecases::lcd::templates::delete_template(name, app).await
         }
         DaemonCommand::RenderLcdEditor {
             device_id,
             def,
             known,
-        } => lcd::usecases::editor::render(device_id, def, known, app, client).await,
+        } => {
+            crate::application::usecases::lcd::editor::render(device_id, def, known, app, client)
+                .await
+        }
 
         DaemonCommand::SaveCustomEffect { name, params } => {
-            lighting::usecases::custom_effects::save_custom_effect(name, params, app).await
+            crate::application::usecases::lighting::custom_effects::save_custom_effect(
+                name, params, app,
+            )
+            .await
         }
         DaemonCommand::DeleteCustomEffect { name } => {
-            lighting::usecases::custom_effects::delete_custom_effect(name, app).await
+            crate::application::usecases::lighting::custom_effects::delete_custom_effect(name, app)
+                .await
         }
 
         DaemonCommand::ReceiverStartPairing { id, timeout_secs } => {
-            registry::usecases::receiver::start_pairing(id, timeout_secs, app).await
+            crate::application::usecases::registry::receiver::start_pairing(id, timeout_secs, app)
+                .await
         }
         DaemonCommand::ReceiverStopPairing { id } => {
-            registry::usecases::receiver::stop_pairing(id, app).await
+            crate::application::usecases::registry::receiver::stop_pairing(id, app).await
         }
         DaemonCommand::ReceiverUnpair { id, slot } => {
-            registry::usecases::receiver::unpair(id, slot, app).await
+            crate::application::usecases::registry::receiver::unpair(id, slot, app).await
         }
 
         DaemonCommand::ListRunningApps => profiles::observers::running_apps::list(client).await,
-        DaemonCommand::GetDebugInfo => registry::usecases::debug::get_debug_info(client, app).await,
+        DaemonCommand::GetDebugInfo => {
+            crate::application::usecases::registry::debug::get_debug_info(client, app).await
+        }
         DaemonCommand::SetEngineConfig {
             engine,
             enabled,
@@ -803,7 +940,7 @@ async fn dispatch(
             fps,
             failsafe_duty,
         } => {
-            registry::usecases::settings::set_engine_config(
+            crate::application::usecases::registry::settings::set_engine_config(
                 engine,
                 enabled,
                 tick_ms,

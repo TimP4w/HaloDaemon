@@ -1,6 +1,7 @@
 // SPDX-License-Identifier: GPL-3.0-or-later
 //! Coordinates authoritative effective/observed state commits.
 
+#[cfg(test)]
 use std::sync::Arc;
 use tokio::sync::Mutex;
 
@@ -109,23 +110,23 @@ fn same_bus_value(left: &halod_shared::bus::BusValue, right: &halod_shared::bus:
 #[cfg(test)]
 mod tests {
     use super::*;
-    use crate::{config::Config, infrastructure::drivers::Device, test_support::MockDevice};
+    use crate::{config::Config, domain::device::Device, test_support::MockDevice};
 
     #[test]
     fn semantic_changes_own_their_topic_dependency_graph() {
         assert_eq!(
-            Change::LightingDevice("kbd".into()).topics(),
+            topics(&Change::LightingDevice("kbd".into())),
             vec![Topic::Lighting, Topic::Device("kbd".into())]
         );
         assert_eq!(
-            Change::AppRules.topics(),
+            topics(&Change::AppRules),
             vec![Topic::Profiles, Topic::ProcessIcons]
         );
-        assert_eq!(Change::Gui.topics(), vec![Topic::Gui]);
-        assert_eq!(Change::LightingCatalog.topics(), vec![Topic::Lighting]);
-        assert_eq!(Change::LcdCatalog.topics(), vec![Topic::Lcd]);
+        assert_eq!(topics(&Change::Gui), vec![Topic::Gui]);
+        assert_eq!(topics(&Change::LightingCatalog), vec![Topic::Lighting]);
+        assert_eq!(topics(&Change::LcdCatalog), vec![Topic::Lcd]);
         assert_eq!(
-            Change::CanvasDevice("kbd".into()).topics(),
+            topics(&Change::CanvasDevice("kbd".into())),
             vec![Topic::Lighting, Topic::Device("kbd".into())]
         );
     }

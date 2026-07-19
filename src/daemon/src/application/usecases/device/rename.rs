@@ -81,7 +81,7 @@ async fn rename_chain_link(
         .expect("parent passed chain-host check above");
     chain.rename_link(&channel_id, child_id, &new_name)?;
 
-    crate::domain::registry::usecases::chain::persist_layout(app, parent.as_ref()).await?;
+    crate::application::usecases::registry::chain::persist_layout(app, parent.as_ref()).await?;
     app.record_change(crate::domain::events::Change::LightingDevice(
         child_id.to_owned(),
     ))

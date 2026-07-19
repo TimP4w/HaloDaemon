@@ -1,8 +1,6 @@
 // SPDX-License-Identifier: GPL-3.0-or-later
 //! Projects lighting runtime state into its retained bus representation.
 
-use std::sync::Arc;
-
 use crate::application::state::AppState;
 use crate::config::{Config, PlacedZone};
 

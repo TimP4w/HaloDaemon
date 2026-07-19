@@ -1,12 +1,10 @@
 // SPDX-License-Identifier: GPL-3.0-or-later
 //! Projects LCD runtime state into its retained bus representation.
 
-use std::collections::HashMap;
-use std::sync::Arc;
-
 use crate::application::state::AppState;
 use crate::config::Config;
 use halod_shared::types::EffectParamValue;
+use std::collections::HashMap;
 
 pub async fn project(
     app: &AppState,

@@ -242,7 +242,7 @@ pub(crate) async fn refresh_requirements(app: &Arc<AppState>) -> Result<()> {
 pub(crate) async fn refresh_recommendations(app: &Arc<AppState>) {
     let hid_usb = tokio::task::spawn_blocking(|| {
         (
-            crate::domain::registry::usecases::debug::enumerate_hid(),
+            crate::application::usecases::registry::debug::enumerate_hid(),
             crate::domain::plugin::recommend::enumerate_usb(),
         )
     });
@@ -421,7 +421,7 @@ async fn teardown_owned_devices(app: &Arc<AppState>, plugins: &[String]) {
     let mut torn_down: std::collections::HashSet<String> = std::collections::HashSet::new();
     for id in &owned_ids {
         let removed =
-            crate::domain::registry::usecases::registration::unregister_device_and_children(
+            crate::application::usecases::registry::registration::unregister_device_and_children(
                 app, id,
             )
             .await;
@@ -513,7 +513,7 @@ async fn reconcile_plugin_set(app: &Arc<AppState>, plugins: &[String]) {
     //    leave alone (mirroring the integration scoped path).
     app.set_discovery_scope(DiscoveryScope::Clean).await;
     crate::domain::registry::seed_known_devices(Arc::clone(app)).await;
-    crate::domain::registry::usecases::chain::restore_saved_chains(Arc::clone(app)).await;
+    crate::application::usecases::registry::chain::restore_saved_chains(Arc::clone(app)).await;
     app.record_change(crate::domain::events::Change::PluginTopology)
         .await;
 }

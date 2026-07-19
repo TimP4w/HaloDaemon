@@ -35,7 +35,7 @@ pub struct LcdEngineState {
 impl LcdEngineState {
     pub fn new() -> Self {
         Self {
-            templates: RwLock::new(crate::domain::lcd::usecases::templates::list_templates()),
+            templates: RwLock::new(crate::application::usecases::lcd::templates::list_templates()),
             editor_session: Mutex::new(None),
             editor_rendering: std::sync::atomic::AtomicBool::new(false),
             editor_generation: std::sync::atomic::AtomicU64::new(0),
@@ -76,7 +76,7 @@ impl LcdEngineState {
     /// after a save/delete mutates `lcd/`; the serializer reads the cache
     /// instead of hitting the filesystem on every broadcast.
     pub async fn refresh_templates(&self) {
-        let names = crate::domain::lcd::usecases::templates::list_templates();
+        let names = crate::application::usecases::lcd::templates::list_templates();
         *self.templates.write().await = names;
     }
 

@@ -11,7 +11,7 @@ async fn discover(app: Arc<AppState>) {
     else {
         return;
     };
-    crate::domain::registry::usecases::registration::register_device(&app, device).await;
+    crate::application::usecases::registry::registration::register_device(&app, device).await;
 }
 
 inventory::submit!(

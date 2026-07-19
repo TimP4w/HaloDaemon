@@ -21,7 +21,7 @@ use super::direct::{self, DirectLedEffect};
 use crate::{
     application::state::AppState,
     config::{CanvasState, PlacedZone},
-    infrastructure::drivers::Device,
+    domain::device::Device,
 };
 
 const CANVAS_W: u32 = 400;
@@ -1651,7 +1651,7 @@ mod tests {
             .await
             .push(dev.clone() as Arc<dyn Device>);
 
-        crate::domain::device::usecases::telemetry::observe(&app).await;
+        crate::application::usecases::device::telemetry::observe(&app).await;
         let engine = RgbEngine::new(app).await;
         engine.tick(0.1, 1.0, 0).await;
         engine.drain_writes().await;
@@ -2062,14 +2062,14 @@ mod tests {
     }
 
     async fn set_default_effect(app: &Arc<AppState>, def: EffectDef) {
-        crate::domain::lighting::usecases::canvas::upsert_effect(
+        crate::application::usecases::lighting::canvas::upsert_effect(
             "inst".to_string(),
             def,
             Arc::clone(app),
         )
         .await
         .unwrap();
-        crate::domain::lighting::usecases::canvas::set_default_effect(
+        crate::application::usecases::lighting::canvas::set_default_effect(
             Some("inst".to_string()),
             Arc::clone(app),
         )

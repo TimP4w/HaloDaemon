@@ -19,7 +19,6 @@ pub mod plugin_test;
 pub mod projection;
 pub(crate) mod recommend;
 pub mod repo;
-pub mod usecases;
 
 pub use engine::device::LuaDevice;
 use engine::device::{LuaDeviceParts, LuaDeviceSpawnParts, LuaDeviceWorker};
@@ -940,7 +939,7 @@ impl Registry {
                     return;
                 }
                 log::info!("retrying plugin '{plugin_id}' after a runtime failure");
-                crate::domain::plugin::usecases::plugins::reconcile_plugins(
+                crate::application::usecases::plugin::plugins::reconcile_plugins(
                     &app,
                     std::slice::from_ref(&plugin_id),
                 )

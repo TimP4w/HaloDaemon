@@ -828,7 +828,7 @@ impl LuaDevice {
                                 // before its pairing table exposes the new slot.
                                 // Retry briefly, as the built-in receiver does.
                                 for _ in 0..8 {
-                                    if crate::domain::registry::usecases::receiver::reconcile_owned_children(
+                                    if crate::application::usecases::registry::receiver::reconcile_owned_children(
                                         &root, &app,
                                     )
                                     .await
@@ -838,10 +838,10 @@ impl LuaDevice {
                                     tokio::time::sleep(Duration::from_millis(500)).await;
                                 }
                             }
-                            crate::domain::plugin::usecases::runtime::topology_changed(&app).await;
+                            crate::application::usecases::plugin::runtime::topology_changed(&app).await;
                         }
                         if outcome.state_changed {
-                            crate::domain::plugin::usecases::runtime::device_changed(&app, &device_id).await;
+                            crate::application::usecases::plugin::runtime::device_changed(&app, &device_id).await;
                         }
                         if outcome.button_events.pressed.is_empty()
                             && outcome.button_events.released.is_empty()
@@ -920,7 +920,7 @@ impl LuaDevice {
                                     detail,
                                 )
                                 .await;
-                            crate::domain::plugin::usecases::runtime::device_status_changed(
+                            crate::application::usecases::plugin::runtime::device_status_changed(
                                 &app,
                                 &poll_device_id,
                             )
@@ -975,7 +975,7 @@ impl LuaDevice {
                                     }
                                 }
                                 if let Some(app) = poll_notify.upgrade() {
-                                    crate::domain::plugin::usecases::runtime::device_changed(
+                                    crate::application::usecases::plugin::runtime::device_changed(
                                         &app,
                                         &poll_device_id,
                                     )
@@ -1015,7 +1015,7 @@ impl LuaDevice {
                                             detail,
                                         )
                                         .await;
-                                    crate::domain::plugin::usecases::runtime::device_status_changed(
+                                    crate::application::usecases::plugin::runtime::device_status_changed(
                                         &app,
                                         &poll_device_id,
                                     )
@@ -1036,7 +1036,7 @@ impl LuaDevice {
                                     }
                                 }
                                 if let Some(app) = poll_notify.upgrade() {
-                                    crate::domain::plugin::usecases::runtime::device_changed(
+                                    crate::application::usecases::plugin::runtime::device_changed(
                                         &app,
                                         &poll_device_id,
                                     )
@@ -1064,7 +1064,7 @@ impl LuaDevice {
                     .await;
                     if observed_changed {
                         if let Some(app) = poll_notify.upgrade() {
-                            crate::domain::plugin::usecases::runtime::device_changed(
+                            crate::application::usecases::plugin::runtime::device_changed(
                                 &app,
                                 &poll_device_id,
                             )
@@ -1406,7 +1406,7 @@ fn effective_keyboard_layout(
     descriptor: &InitKeyboard,
     slot: &KeyboardLayoutSlot,
 ) -> (KeyVariant, KeyboardLayout) {
-    crate::infrastructure::drivers::effective_layout(
+    crate::domain::device::effective_layout(
         slot.selection(),
         descriptor.detected_language,
         descriptor

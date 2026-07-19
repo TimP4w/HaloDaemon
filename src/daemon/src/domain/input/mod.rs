@@ -2,7 +2,6 @@
 pub mod engine;
 mod event_bus;
 pub mod state;
-pub mod usecases;
 pub mod validate;
 
 pub use event_bus::InputEventBus;

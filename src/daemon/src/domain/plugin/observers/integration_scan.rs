@@ -15,10 +15,10 @@ use halod_shared::types::Permission;
 use crate::domain::device::Device;
 
 use crate::application::state::AppState;
-use crate::domain::registry::observers::discovery::{DiscoveryHandle, TransportScanner};
-use crate::domain::registry::usecases::registration::{
+use crate::application::usecases::registry::registration::{
     register_device_and_children, unregister_device_and_children,
 };
+use crate::domain::registry::observers::discovery::{DiscoveryHandle, TransportScanner};
 
 use crate::domain::plugin::engine::device::{
     LuaDevice, LuaDeviceParts, LuaDeviceSpawnParts, LuaDeviceWorker,
@@ -263,7 +263,7 @@ async fn report_connect_failure(app: &Arc<AppState>, manifest: &PluginManifest, 
     app.registry
         .report_connect_error(app, &manifest.plugin_id, &manifest.display_name(), detail)
         .await;
-    crate::domain::plugin::usecases::runtime::topology_changed(app).await;
+    crate::application::usecases::plugin::runtime::topology_changed(app).await;
 }
 
 async fn discover(app: Arc<AppState>) {

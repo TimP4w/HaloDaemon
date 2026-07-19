@@ -1093,7 +1093,7 @@ fn official_repo_slug(slug: &str) -> bool {
 #[cfg(test)]
 mod tests {
     use super::*;
-    use crate::domain::plugin::usecases::plugins::reload_registry;
+    use crate::application::usecases::plugin::plugins::reload_registry;
 
     /// A `file://` URL for a local path — `add_repo`/`clone` now require an
     /// explicit scheme, so tests clone local source repos through one.
@@ -1489,7 +1489,7 @@ mod tests {
             assert!(!plugin.unwrap().enabled);
 
             let authority = app.registry.authority_for(&slug).unwrap();
-            crate::domain::plugin::usecases::plugins::confirm_enable(
+            crate::application::usecases::plugin::plugins::confirm_enable(
                 slug.clone(),
                 authority,
                 app.clone(),

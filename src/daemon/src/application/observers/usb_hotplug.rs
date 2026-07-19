@@ -23,7 +23,7 @@ pub async fn run(app: Arc<AppState>) {
                 .collect::<Vec<_>>()
         };
         for id in stale_usb_ids(&registered, &present) {
-            crate::domain::registry::usecases::registration::unregister_device_and_children(
+            crate::application::usecases::registry::registration::unregister_device_and_children(
                 &app, &id,
             )
             .await;

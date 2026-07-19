@@ -226,9 +226,7 @@ impl ChoiceCapability for ComputerDevice {
 pub async fn make_device() -> Option<Arc<dyn Device>> {
     // Metrics are the always-available baseline; without them (unsupported OS)
     // there's nothing to register.
-    let Some(metrics) = metrics::make_backend() else {
-        return None;
-    };
+    let metrics = metrics::make_backend()?;
     let keep_awake = keep_awake::make_backend();
     let power_profile = power_profile::make_backend().await;
     Some(Arc::new(ComputerDevice::new(

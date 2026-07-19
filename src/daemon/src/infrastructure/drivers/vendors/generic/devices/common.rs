@@ -6,9 +6,7 @@ use std::collections::HashMap;
 
 pub use crate::domain::device::lighting_segment::{ring_led_positions, transformed_zone_frame};
 #[cfg(test)]
-use halod_shared::types::{
-    CategoryLayout, ConnectionType, DeviceCapability, DeviceType, RgbColor, WireDevice,
-};
+use halod_shared::types::RgbColor;
 use halod_shared::types::{LedPosition, LightingChannel, LightingDivision, ZoneTopology};
 
 /// Assemble a fixed-length per-LED colour frame from one zone's
@@ -47,104 +45,6 @@ pub fn linear_lighting_channel(id: &str, name: &str, led_count: usize) -> Lighti
         leds,
         color_order: Default::default(),
         division: LightingDivision::Indivisible,
-    }
-}
-
-/// Builder for [`WireDevice`], seeded from a [`Device`]'s identity getters; `device_type` defaults to [`DeviceType::Other`] and `connected` to `true`.
-#[cfg(test)]
-pub struct WireDeviceBuilder {
-    id: String,
-    name: String,
-    vendor: String,
-    model: String,
-    device_type: DeviceType,
-    connected: bool,
-    capabilities: Vec<DeviceCapability>,
-    connection_type: Option<ConnectionType>,
-    serial_number: Option<String>,
-    integration_id: Option<String>,
-    control_layout: Vec<CategoryLayout>,
-}
-
-#[cfg(test)]
-impl WireDeviceBuilder {
-    /// Seed a builder from raw string parts — used by the Device trait default
-    /// serialize impl where coercing `&Self` to `&dyn Device` is not possible.
-    pub fn from_parts(id: String, name: String, vendor: String, model: String) -> Self {
-        Self {
-            id,
-            name,
-            vendor,
-            model,
-            device_type: DeviceType::Other,
-            connected: true,
-            capabilities: Vec::new(),
-            connection_type: None,
-            serial_number: None,
-            integration_id: None,
-            control_layout: Vec::new(),
-        }
-    }
-
-    pub fn device_type(mut self, device_type: DeviceType) -> Self {
-        self.device_type = device_type;
-        self
-    }
-
-    pub fn connected(mut self, connected: bool) -> Self {
-        self.connected = connected;
-        self
-    }
-
-    pub fn capabilities(mut self, capabilities: Vec<DeviceCapability>) -> Self {
-        self.capabilities = capabilities;
-        self
-    }
-
-    pub fn connection_type(mut self, connection_type: Option<ConnectionType>) -> Self {
-        self.connection_type = connection_type;
-        self
-    }
-
-    pub fn serial_number(mut self, serial_number: Option<String>) -> Self {
-        self.serial_number = serial_number;
-        self
-    }
-
-    /// Mark this device as the root of an integration (owned by `plugin_id`)
-    /// rather than a real device. `None` (the default) for everything else,
-    /// including the devices an integration exposes as children.
-    pub fn integration_id(mut self, integration_id: Option<String>) -> Self {
-        self.integration_id = integration_id;
-        self
-    }
-
-    pub fn control_layout(mut self, control_layout: Vec<CategoryLayout>) -> Self {
-        self.control_layout = control_layout;
-        self
-    }
-
-    pub fn build(self) -> WireDevice {
-        WireDevice {
-            id: self.id,
-            name: self.name,
-            vendor: self.vendor,
-            model: self.model,
-            device_type: self.device_type,
-            connected: self.connected,
-            capabilities: self.capabilities,
-            connection_type: self.connection_type,
-            serial_number: self.serial_number,
-            active_state: Default::default(),
-            // The serializer overlays the real transport for HID devices.
-            transport: None,
-            // The serializer overlays live write-rate stats when the device
-            // reports them.
-            write_rate: Default::default(),
-            control_layout: self.control_layout,
-            integration_id: self.integration_id,
-            conflict: None,
-        }
     }
 }
 

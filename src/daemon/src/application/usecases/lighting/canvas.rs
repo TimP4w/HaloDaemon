@@ -276,7 +276,7 @@ pub async fn place_zone(
         rgb.apply(LightingState::Engine).await?;
     }
 
-    crate::domain::registry::usecases::settings::set_engine_config(
+    crate::application::usecases::registry::settings::set_engine_config(
         EngineKind::Canvas,
         Some(true),
         None,
@@ -887,7 +887,7 @@ pub(crate) const STOP_DRAIN_MS: u64 = 60;
 /// driving (revert from `Engine` mode to static black).
 pub async fn stop(app: Arc<AppState>) -> Result<()> {
     // Disable the engine (persists config + pushes the run config to the engine).
-    crate::domain::registry::usecases::settings::set_engine_config(
+    crate::application::usecases::registry::settings::set_engine_config(
         EngineKind::Canvas,
         Some(false),
         None,

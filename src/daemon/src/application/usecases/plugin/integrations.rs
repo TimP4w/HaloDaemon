@@ -22,8 +22,8 @@ use sha2::{Digest, Sha256};
 use std::time::Duration;
 
 use crate::application::state::AppState;
+use crate::application::usecases::registry::registration::unregister_device_and_children;
 use crate::domain::plugin::observers::integration_scan;
-use crate::domain::registry::usecases::registration::unregister_device_and_children;
 
 fn setup_worker(
     app: &Arc<AppState>,
@@ -901,7 +901,7 @@ mod tests {
                 cfg.plugins.enabled.push("resettable".into());
                 app.registry.replace_policy(&cfg.plugins);
             }
-            crate::domain::plugin::usecases::plugins::persist_config_values(
+            crate::application::usecases::plugin::plugins::persist_config_values(
                 "resettable",
                 &HashMap::from([
                     ("host".into(), "192.0.2.10".into()),

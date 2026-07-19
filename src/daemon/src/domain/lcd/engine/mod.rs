@@ -221,7 +221,7 @@ impl LcdEngine {
                     lcd.lcd_state().end_editor_preview();
                     lcd.lcd_state()
                         .set_health(halod_shared::types::LcdHealth::Stable);
-                    crate::domain::lcd::usecases::runtime::device_changed(
+                    crate::application::usecases::lcd::runtime::device_changed(
                         &self.app_state,
                         &device_id,
                     )
@@ -668,7 +668,8 @@ mod tests {
         let engine = LcdEngine::new(Arc::clone(&app));
         install_engines(&app, &engine).await;
 
-        crate::domain::profiles::usecases::profiles::load_active_profile(Arc::clone(&app)).await;
+        crate::application::usecases::profiles::lifecycle::load_active_profile(Arc::clone(&app))
+            .await;
 
         assert_eq!(
             dev.lcd.as_ref().unwrap().lcd_template_id().as_deref(),
@@ -698,7 +699,8 @@ mod tests {
             .set_template_active("lcd0", "custom", &HashMap::new())
             .await;
 
-        crate::domain::profiles::usecases::profiles::load_active_profile(Arc::clone(&app)).await;
+        crate::application::usecases::profiles::lifecycle::load_active_profile(Arc::clone(&app))
+            .await;
 
         assert!(
             dev.lcd.as_ref().unwrap().lcd_template_id().is_none(),
@@ -719,7 +721,7 @@ mod tests {
         install_engines(&app, &engine).await;
 
         let mut frames = engine.subscribe();
-        crate::domain::registry::usecases::runtime::bootstrap(&app).await;
+        crate::application::usecases::registry::runtime::bootstrap(&app).await;
         let cfg_rx = crate::application::run_loop::EngineConfigReceiver::new(
             app.data_bus.clone(),
             crate::application::run_loop::EngineConfigTopic::Lcd,
@@ -728,7 +730,8 @@ mod tests {
         // Let the engine park idle before the profile load.
         tokio::time::sleep(std::time::Duration::from_millis(50)).await;
 
-        crate::domain::profiles::usecases::profiles::load_active_profile(Arc::clone(&app)).await;
+        crate::application::usecases::profiles::lifecycle::load_active_profile(Arc::clone(&app))
+            .await;
 
         let frame = tokio::time::timeout(std::time::Duration::from_secs(5), frames.recv())
             .await

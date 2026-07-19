@@ -293,10 +293,10 @@ pub(crate) async fn handle_hid_key_removed(app: Arc<AppState>, key: String) {
             }
         }
         for d in &to_close {
-            crate::domain::registry::usecases::registration::close_device(&app, d).await;
+            crate::application::usecases::registry::registration::close_device(&app, d).await;
         }
         log::info!("Hotplug: removed device(s) for key {key}");
-        crate::domain::registry::usecases::runtime::topology_changed(&app).await;
+        crate::application::usecases::registry::runtime::topology_changed(&app).await;
 
         // The device may now be available through its paired receiver, whose
         // pairing table only shows the slot once the cable is gone — rescan
@@ -318,7 +318,7 @@ pub(crate) async fn handle_hid_key_removed(app: Arc<AppState>, key: String) {
                         if let Some(ctrl) = ctrl_dev.as_controller() {
                             let children = ctrl.rescan_children().await;
                             for child in children {
-                                crate::domain::registry::usecases::registration::register_device(
+                                crate::application::usecases::registry::registration::register_device(
                                     &app2, child,
                                 )
                                 .await;
@@ -391,7 +391,8 @@ async fn add_hid_device(
 
     // Register as a new primary device via the centralised registration lifecycle.
     let registered =
-        crate::domain::registry::usecases::registration::register_device(app, impl_.clone()).await;
+        crate::application::usecases::registry::registration::register_device(app, impl_.clone())
+            .await;
     if !registered {
         return;
     }
@@ -399,7 +400,8 @@ async fn add_hid_device(
     if impl_.active_state() != halod_shared::types::VisibilityState::Disabled {
         if let Some(ctrl) = impl_.as_controller() {
             for child in ctrl.discover_children().await {
-                crate::domain::registry::usecases::registration::register_device(app, child).await;
+                crate::application::usecases::registry::registration::register_device(app, child)
+                    .await;
             }
         }
     }

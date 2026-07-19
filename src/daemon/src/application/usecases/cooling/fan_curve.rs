@@ -275,7 +275,7 @@ mod tests {
             let mut devices = app.device_registry.try_write().unwrap();
             devices.push(device.clone() as Arc<dyn crate::domain::device::Device>);
         }
-        crate::domain::device::usecases::telemetry::observe(&app).await;
+        crate::application::usecases::device::telemetry::observe(&app).await;
         let err = set_cooling_curve_points(
             "fan_0".into(),
             "default".into(),

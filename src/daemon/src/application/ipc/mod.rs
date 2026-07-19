@@ -972,13 +972,14 @@ mod handle_tests {
             self.calls.fetch_add(1, std::sync::atomic::Ordering::SeqCst);
             self.entered.notify_one();
             self.release.notified().await;
-            crate::infrastructure::drivers::vendors::generic::devices::common::WireDeviceBuilder::from_parts(
-                self.id().to_string(),
-                self.name().to_string(),
-                self.vendor().to_string(),
-                self.model().to_string(),
-            )
-            .build()
+            halod_shared::types::WireDevice {
+                id: self.id().to_owned(),
+                name: self.name().to_owned(),
+                vendor: self.vendor().to_owned(),
+                model: self.model().to_owned(),
+                connected: true,
+                ..Default::default()
+            }
         }
 
         fn capabilities(&self) -> Vec<crate::infrastructure::drivers::CapabilityRef<'_>> {
@@ -1187,7 +1188,7 @@ mod handle_tests {
             transactions,
             events,
         ));
-        crate::domain::registry::usecases::runtime::gui_changed(&app).await;
+        crate::application::usecases::registry::runtime::gui_changed(&app).await;
         tokio::task::yield_now().await;
 
         let queued = rx.recv().await.unwrap();
@@ -1228,7 +1229,7 @@ mod handle_tests {
 
         let first = tokio::spawn({
             let app = app.clone();
-            async move { crate::domain::registry::usecases::runtime::topology_changed(&app).await }
+            async move { crate::application::usecases::registry::runtime::topology_changed(&app).await }
         });
         tokio::time::timeout(Duration::from_secs(1), entered.notified())
             .await
@@ -1236,7 +1237,7 @@ mod handle_tests {
 
         let second = tokio::spawn({
             let app = app.clone();
-            async move { crate::domain::registry::usecases::runtime::topology_changed(&app).await }
+            async move { crate::application::usecases::registry::runtime::topology_changed(&app).await }
         });
         tokio::task::yield_now().await;
         assert_eq!(

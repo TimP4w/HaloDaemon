@@ -8,7 +8,6 @@ pub mod policies;
 pub mod projection;
 mod slots;
 mod traits;
-pub mod usecases;
 
 pub use capabilities::*;
 pub use slots::*;

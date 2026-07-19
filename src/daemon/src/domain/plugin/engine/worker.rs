@@ -1326,7 +1326,7 @@ fn validate_runtime_controls(controls: &InitControls) -> Result<()> {
 /// http transport and holds the network grant. Returns `None` (with a log) when
 /// the transport is absent, ungranted, or its policy fails to build, so a plugin
 /// simply lacks `halod.http` rather than failing to spawn.
-pub(in crate::domain::plugin) fn http_runtime_for(
+pub(crate) fn http_runtime_for(
     manifest: &crate::domain::plugin::manifest::PluginManifest,
     granted: &[Permission],
     config: &crate::domain::plugin::ResolvedConfig,
@@ -1376,7 +1376,7 @@ pub(in crate::domain::plugin) fn http_runtime_for(
 /// plugin's configured destination, or `None` when the transport is absent,
 /// ungranted, or its socket fails to connect — a plugin simply lacks `halod.udp`
 /// rather than failing to spawn.
-pub(in crate::domain::plugin) fn udp_runtime_for(
+pub(crate) fn udp_runtime_for(
     manifest: &crate::domain::plugin::manifest::PluginManifest,
     granted: &[Permission],
     config: &crate::domain::plugin::ResolvedConfig,

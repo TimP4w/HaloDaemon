@@ -250,8 +250,10 @@ pub async fn discover_handle(
         return;
     }
     if let Some(device) = app.registry.make_device(app, handle) {
-        crate::domain::registry::usecases::registration::register_device_and_children(app, device)
-            .await;
+        crate::application::usecases::registry::registration::register_device_and_children(
+            app, device,
+        )
+        .await;
     }
 }
 
@@ -268,7 +270,7 @@ pub async fn set_discovery_detail(
         let mut discovery = app.discovery.lock().await;
         discovery.detail = detail;
     }
-    crate::domain::registry::usecases::runtime::topology_changed(app).await;
+    crate::application::usecases::registry::runtime::topology_changed(app).await;
 }
 
 pub async fn discover_devices(app: Arc<AppState>) {
@@ -295,7 +297,7 @@ pub async fn discover_devices(app: Arc<AppState>) {
         let mut discovery = app.discovery.lock().await;
         discovery.phase = DiscoveryPhase::Discovering;
     }
-    crate::domain::registry::usecases::runtime::topology_changed(&app).await;
+    crate::application::usecases::registry::runtime::topology_changed(&app).await;
 
     // Unit tests drive the usecase/reconcile layer with synthetic handles and a
     // `MockDevice` registry; enumerating the host's real USB/HID/SMBus hardware
@@ -333,7 +335,7 @@ pub async fn discover_devices(app: Arc<AppState>) {
         discovery.phase = DiscoveryPhase::Complete;
         discovery.detail = Default::default();
     }
-    crate::domain::registry::usecases::runtime::topology_changed(&app).await;
+    crate::application::usecases::registry::runtime::topology_changed(&app).await;
 
     if owns_scope {
         app.set_discovery_scope(DiscoveryScope::Clean).await;

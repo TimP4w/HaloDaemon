@@ -39,7 +39,7 @@ async fn dpi_cycle(direction: &CycleDir, device_id: &str, app: Arc<AppState>) {
     if let Err(e) = sw.set_dpi_index(next).await {
         log::warn!("ActionExecutor: dpi_cycle: {e}");
     } else {
-        crate::domain::input::usecases::runtime::device_changed(&app, device_id).await;
+        crate::application::usecases::input::runtime::device_changed(&app, device_id).await;
     }
 }
 
@@ -75,7 +75,7 @@ async fn profile_cycle(direction: &CycleDir, device_id: &str, app: Arc<AppState>
     if let Err(e) = op.switch_profile(enabled[next]).await {
         log::warn!("ActionExecutor: profile_cycle: {e}");
     } else {
-        crate::domain::input::usecases::runtime::device_changed(&app, device_id).await;
+        crate::application::usecases::input::runtime::device_changed(&app, device_id).await;
     }
 }
 
@@ -746,7 +746,7 @@ impl ActionExecutor {
 #[cfg(test)]
 mod tests {
     use super::*;
-    use crate::{config::Config, infrastructure::drivers::Device, test_support::MockDevice};
+    use crate::{config::Config, domain::device::Device, test_support::MockDevice};
     use halod_shared::types::CycleDir;
 
     #[test]

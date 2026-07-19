@@ -326,7 +326,7 @@ impl VideoEngine {
                 }
             };
             if changed {
-                crate::domain::lcd::usecases::runtime::device_changed(&engine.app, &device_id)
+                crate::application::usecases::lcd::runtime::device_changed(&engine.app, &device_id)
                     .await;
             }
         });
@@ -382,7 +382,7 @@ fn encode_preview(rgba: Vec<u8>, w: u32, h: u32) -> Option<String> {
 mod tests {
     use super::*;
     use crate::{
-        application::state::AppState, config::Config, infrastructure::drivers::Device,
+        application::state::AppState, config::Config, domain::device::Device,
         test_support::MockDevice,
     };
 

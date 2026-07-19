@@ -263,12 +263,12 @@ async fn run_daemon(
 
     // Prime the requirement cache so the first UI poll doesn't trigger a probe
     // per plugin; refreshed thereafter only at reconcile (no continuous polling).
-    crate::domain::plugin::usecases::plugins::refresh_requirements(&app).await?;
+    crate::application::usecases::plugin::plugins::refresh_requirements(&app).await?;
 
     // Compute passive HID/USB/SMBus recommendations once at startup. The same
     // snapshot is refreshed when repository manifests change.
-    crate::domain::plugin::usecases::plugins::refresh_recommendations(&app).await;
-    crate::domain::registry::usecases::runtime::bootstrap(&app).await;
+    crate::application::usecases::plugin::plugins::refresh_recommendations(&app).await;
+    crate::application::usecases::registry::runtime::bootstrap(&app).await;
 
     // Started only once startup is done — the grace clock must not elapse
     // before a client has had any chance to connect.
@@ -342,7 +342,9 @@ async fn run_daemon(
         move || {
             let app = Arc::clone(&sensor_app);
             Box::pin(async move {
-                task_supervisor::TaskHandle(tokio::spawn(device::usecases::telemetry::run(app)))
+                task_supervisor::TaskHandle(tokio::spawn(
+                    crate::application::usecases::device::telemetry::run(app),
+                ))
             })
         },
         || {},

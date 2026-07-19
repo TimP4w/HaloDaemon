@@ -1,6 +1,7 @@
 // SPDX-License-Identifier: GPL-3.0-or-later
 //! Projects plugin registry, repository, and runtime status into retained state.
 
+#[cfg(test)]
 use std::sync::Arc;
 
 use crate::application::state::AppState;

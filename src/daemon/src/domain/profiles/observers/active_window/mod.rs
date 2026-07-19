@@ -3,7 +3,7 @@ use std::sync::Arc;
 use tokio::sync::mpsc;
 
 use crate::application::state::AppState;
-use crate::domain::profiles::usecases::profiles::switch_profile_direct;
+use crate::application::usecases::profiles::lifecycle::switch_profile_direct;
 
 #[cfg(target_os = "linux")]
 pub mod gnome_shell;

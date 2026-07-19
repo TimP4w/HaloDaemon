@@ -260,7 +260,7 @@ mod tests {
             .await
             .push(dev2 as std::sync::Arc<dyn crate::infrastructure::drivers::Device>);
 
-        crate::domain::device::usecases::telemetry::observe(&app).await;
+        crate::application::usecases::device::telemetry::observe(&app).await;
         let snapshot = app.data_bus.sensors();
         assert_eq!(snapshot.len(), 2);
         assert_eq!(snapshot.get("temp1").unwrap().value, 45.5);
@@ -297,7 +297,7 @@ mod tests {
             .await
             .push(dev as std::sync::Arc<dyn crate::infrastructure::drivers::Device>);
 
-        crate::domain::device::usecases::telemetry::observe(&app).await;
+        crate::application::usecases::device::telemetry::observe(&app).await;
         let snapshot = app.data_bus.sensors();
         assert!(snapshot.is_empty());
     }
@@ -320,11 +320,11 @@ mod tests {
             ]),
         );
         app.device_registry.write().await.push(device.clone());
-        crate::domain::device::usecases::telemetry::observe(&app).await;
+        crate::application::usecases::device::telemetry::observe(&app).await;
         assert!(app.data_bus.sensors().contains_key("temp1"));
 
         device.live.store(false, Ordering::SeqCst);
-        crate::domain::device::usecases::telemetry::observe(&app).await;
+        crate::application::usecases::device::telemetry::observe(&app).await;
         assert!(app.data_bus.sensors().is_empty());
         assert_eq!(
             app.data_bus
@@ -343,7 +343,7 @@ mod tests {
             .await
             .push(dev as std::sync::Arc<dyn crate::infrastructure::drivers::Device>);
 
-        crate::domain::device::usecases::telemetry::observe(&app).await;
+        crate::application::usecases::device::telemetry::observe(&app).await;
         let snapshot = app.data_bus.sensors();
         assert!(snapshot.is_empty());
     }
@@ -358,7 +358,7 @@ mod tests {
             .await
             .push(dev as std::sync::Arc<dyn crate::infrastructure::drivers::Device>);
 
-        crate::domain::device::usecases::telemetry::observe(&app).await;
+        crate::application::usecases::device::telemetry::observe(&app).await;
         let snapshot = app.data_bus.sensors();
         assert_eq!(
             snapshot.get("cooling_fan0_default_rpm").map(|s| s.value),

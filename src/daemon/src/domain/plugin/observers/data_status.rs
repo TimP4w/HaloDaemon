@@ -17,10 +17,10 @@ pub async fn run(app: Arc<AppState>) {
                 while let Ok(_) | Err(broadcast::error::TryRecvError::Lagged(_)) =
                     changes.try_recv()
                 {}
-                crate::domain::plugin::usecases::runtime::data_changed(&app).await;
+                crate::application::usecases::plugin::runtime::data_changed(&app).await;
             }
             Err(broadcast::error::RecvError::Lagged(_)) => {
-                crate::domain::plugin::usecases::runtime::data_changed(&app).await;
+                crate::application::usecases::plugin::runtime::data_changed(&app).await;
             }
             Err(broadcast::error::RecvError::Closed) => return,
         }

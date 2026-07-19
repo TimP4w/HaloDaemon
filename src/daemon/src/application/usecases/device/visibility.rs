@@ -36,11 +36,11 @@ pub async fn set_device_visibility(
 
         // Clear slots before state change (gates check active_state == Visible).
         if new_state != VisibilityState::Visible {
-            crate::domain::registry::usecases::registration::clear_engine_slots(device);
+            crate::application::usecases::registry::registration::clear_engine_slots(device);
         }
 
         if new_state == VisibilityState::Disabled {
-            crate::domain::registry::usecases::registration::close_device(&app, device).await;
+            crate::application::usecases::registry::registration::close_device(&app, device).await;
         }
 
         if new_state != VisibilityState::Disabled {
@@ -67,7 +67,7 @@ pub async fn set_device_visibility(
         new_state == VisibilityState::Visible && prev_state == Some(VisibilityState::Disabled);
     if enabling_from_disabled {
         if let Some(plugin_id) = owning_plugin_id {
-            crate::domain::plugin::usecases::plugins::reconcile_plugins(
+            crate::application::usecases::plugin::plugins::reconcile_plugins(
                 &app,
                 std::slice::from_ref(&plugin_id),
             )
@@ -78,7 +78,7 @@ pub async fn set_device_visibility(
             .write()
             .await
             .retain(|d| d.id() != device_id);
-        crate::domain::plugin::usecases::plugins::reconcile_full(&app).await;
+        crate::application::usecases::plugin::plugins::reconcile_full(&app).await;
         return Ok(());
     }
 
@@ -183,7 +183,7 @@ mod tests {
             },
         );
         push_device(&app, device.clone());
-        crate::domain::registry::usecases::registration::clear_engine_slots(
+        crate::application::usecases::registry::registration::clear_engine_slots(
             &(device.clone() as Arc<dyn crate::domain::device::Device>),
         );
         app.config.write().await.known_devices.insert(
@@ -226,7 +226,7 @@ mod tests {
         let app = make_app();
         let device = Arc::new(MockDevice::new("fan0").with_fan());
         push_device(&app, device.clone());
-        crate::domain::device::usecases::telemetry::observe(&app).await;
+        crate::application::usecases::device::telemetry::observe(&app).await;
 
         set_sensor_visibility(
             "cooling_fan0_default_duty".into(),
@@ -266,7 +266,7 @@ mod tests {
             },
         ]));
         push_device(&app, device);
-        crate::domain::device::usecases::telemetry::observe(&app).await;
+        crate::application::usecases::device::telemetry::observe(&app).await;
 
         set_sensor_visibility("temp1".into(), VisibilityState::Hidden, app.clone())
             .await
@@ -293,7 +293,7 @@ mod tests {
             },
         ]));
         push_device(&app, device);
-        crate::domain::device::usecases::telemetry::observe(&app).await;
+        crate::application::usecases::device::telemetry::observe(&app).await;
 
         set_sensor_visibility("temp1".into(), VisibilityState::Hidden, app.clone())
             .await

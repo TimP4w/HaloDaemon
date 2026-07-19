@@ -32,7 +32,7 @@ pub(crate) async fn reconcile_owned_children(
     let mut registered = std::collections::HashSet::new();
     for child in added {
         let child_id = child.id().to_owned();
-        if crate::domain::registry::usecases::registration::register_device(app, child).await {
+        if crate::application::usecases::registry::registration::register_device(app, child).await {
             registered.insert(child_id);
         }
     }

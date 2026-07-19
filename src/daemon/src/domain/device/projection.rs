@@ -269,7 +269,7 @@ mod tests {
                 .with_fan_rpm(1500),
         );
         app.device_registry.write().await.push(dev);
-        crate::domain::device::usecases::telemetry::observe(&app).await;
+        crate::application::usecases::device::telemetry::observe(&app).await;
         let cfg = app.config.read().await.clone();
         let snap = app.snapshot_devices(&cfg).await;
         let sensors = snap.devices[0].sensors().expect("fan sensors present");
@@ -339,7 +339,7 @@ mod tests {
         let app = Arc::new(AppState::new(Config::default()));
         let dev: Arc<dyn Device> = Arc::new(MockDevice::new("fan").with_fan_rpm(900));
         app.device_registry.write().await.push(dev);
-        crate::domain::device::usecases::telemetry::observe(&app).await;
+        crate::application::usecases::device::telemetry::observe(&app).await;
         assert!(app.cooling.record_applied_duty("fan", "default", 100).await);
 
         let snapshot = app.snapshot_devices(&app.config.read().await.clone()).await;
@@ -364,7 +364,7 @@ mod tests {
         let app = Arc::new(AppState::new(cfg));
         let dev: Arc<dyn Device> = Arc::new(MockDevice::new("test_device").with_fan());
         app.device_registry.write().await.push(dev);
-        crate::domain::device::usecases::telemetry::observe(&app).await;
+        crate::application::usecases::device::telemetry::observe(&app).await;
         let cfg = app.config.read().await.clone();
         let snap = app.snapshot_devices(&cfg).await;
         let sensors = snap.devices[0].sensors().expect("fan sensors present");
@@ -396,7 +396,7 @@ mod tests {
             visibility: VisibilityState::Visible,
         }]));
         app.device_registry.write().await.push(dev);
-        crate::domain::device::usecases::telemetry::observe(&app).await;
+        crate::application::usecases::device::telemetry::observe(&app).await;
         let cfg = app.config.read().await.clone();
         let snap = app.snapshot_devices(&cfg).await;
         let sensors = snap.devices[0].sensors().expect("sensors present");

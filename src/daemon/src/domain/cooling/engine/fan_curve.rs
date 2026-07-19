@@ -297,7 +297,7 @@ impl FanCurveEngine {
             }
         };
         if changed {
-            crate::domain::cooling::usecases::runtime::status_changed(&self.app_state).await;
+            crate::application::usecases::cooling::runtime::status_changed(&self.app_state).await;
         }
     }
 
@@ -371,7 +371,7 @@ impl FanCurveEngine {
                     );
                     return FanCurveStatus::WriteError(e.to_string());
                 }
-                crate::domain::cooling::usecases::runtime::duty_applied(
+                crate::application::usecases::cooling::runtime::duty_applied(
                     &self.app_state,
                     &curve_target.device_id,
                     &curve_target.channel_id,
@@ -476,7 +476,7 @@ impl FanCurveEngine {
             match apply_duty(device, &target.channel_id, duty).await {
                 Ok(()) => {
                     self.clear_failsafe_error(key);
-                    crate::domain::cooling::usecases::runtime::duty_applied(
+                    crate::application::usecases::cooling::runtime::duty_applied(
                         &self.app_state,
                         &target.device_id,
                         &target.channel_id,
@@ -838,7 +838,7 @@ mod tests {
         let fan = MockFan::new("fan_0");
         let sensor = MockSensor::new("sensor_0", 42.0);
         let app = make_app(fan, Some(sensor));
-        crate::domain::device::usecases::telemetry::observe(&app).await;
+        crate::application::usecases::device::telemetry::observe(&app).await;
         let sensors = app.data_bus.sensors();
         assert_eq!(sensors.get("sensor_0").map(|s| s.value), Some(42.0));
     }
@@ -854,7 +854,7 @@ mod tests {
         let fan = MockFan::new_with_curve("fan_0", record);
         let sensor = MockSensor::new("sensor_0", 70.0);
         let app = make_app(fan.clone(), Some(sensor));
-        crate::domain::device::usecases::telemetry::observe(&app).await;
+        crate::application::usecases::device::telemetry::observe(&app).await;
         let engine = FanCurveEngine::new(app);
         engine.tick(75).await;
         assert_ne!(fan.last_duty(), 20, "duty should have been updated from 20");
@@ -871,7 +871,7 @@ mod tests {
         let fan = MockFan::new_with_curve("fan_0", record);
         let sensor = MockSensor::new("sensor_0", 50.0);
         let app = make_app(fan.clone(), Some(sensor));
-        crate::domain::device::usecases::telemetry::observe(&app).await;
+        crate::application::usecases::device::telemetry::observe(&app).await;
         let engine = FanCurveEngine::new(app);
         engine.tick(75).await;
         assert_eq!(
@@ -919,7 +919,7 @@ mod tests {
         let fan = MockFan::new_with_curve("fan_0", record);
         let sensor = MockSensor::new("sensor_0", f64::NAN);
         let app = make_app(fan.clone(), Some(sensor));
-        crate::domain::device::usecases::telemetry::observe(&app).await;
+        crate::application::usecases::device::telemetry::observe(&app).await;
 
         let engine = FanCurveEngine::new(app.clone());
         engine.tick(75).await;
@@ -1114,7 +1114,7 @@ mod tests {
         let app = Arc::new(AppState::new(Config::default()));
         *app.device_registry.try_write().unwrap() = vec![sensor as Arc<dyn Device>];
         let engine = FanCurveEngine::new(app.clone());
-        crate::domain::device::usecases::telemetry::observe(&app).await;
+        crate::application::usecases::device::telemetry::observe(&app).await;
         let sensors = app.data_bus.sensors();
         let record = FanCurveRecord {
             sensor_id: Some("s".to_string()),
@@ -1138,7 +1138,7 @@ mod tests {
         let app = make_app(fan.clone(), Some(sensor));
         let initial_duty = fan.last_duty();
         let engine = FanCurveEngine::new(app.clone());
-        crate::domain::device::usecases::telemetry::observe(&app).await;
+        crate::application::usecases::device::telemetry::observe(&app).await;
         let sensors = app.data_bus.sensors();
 
         let status = engine.process_fan("fan_0", &record, &sensors, 75).await;
@@ -1426,7 +1426,7 @@ mod tests {
         let sensor = MockSensor::new("sensor_0", 50.0);
         *app.device_registry.try_write().unwrap() =
             vec![pump.clone() as Arc<dyn Device>, sensor as Arc<dyn Device>];
-        crate::domain::device::usecases::telemetry::observe(&app).await;
+        crate::application::usecases::device::telemetry::observe(&app).await;
         let engine = FanCurveEngine::new(app);
         engine.tick(75).await;
         assert_ne!(pump.last_duty(), 50, "pump duty should have been updated");

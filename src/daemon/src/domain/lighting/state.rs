@@ -28,14 +28,14 @@ impl CustomEffectsState {
     pub fn new() -> Self {
         Self {
             effects: RwLock::new(
-                crate::domain::lighting::usecases::custom_effects::list_custom_effects(),
+                crate::application::usecases::lighting::custom_effects::list_custom_effects(),
             ),
         }
     }
 
     /// Re-read saved effects from disk into the cache.
     pub async fn refresh(&self) {
-        let effects = crate::domain::lighting::usecases::custom_effects::list_custom_effects();
+        let effects = crate::application::usecases::lighting::custom_effects::list_custom_effects();
         *self.effects.write().await = effects;
     }
 }

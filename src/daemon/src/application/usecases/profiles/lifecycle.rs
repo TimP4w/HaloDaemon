@@ -391,7 +391,7 @@ mod tests {
         let app = make_app();
         add_profile("Gaming".into(), app.clone()).await.unwrap();
         assert_eq!(app.config.read().await.active_profile, "Gaming");
-        crate::domain::profiles::usecases::profiles::switch_profile_direct(
+        crate::application::usecases::profiles::lifecycle::switch_profile_direct(
             "default".into(),
             app.clone(),
         )

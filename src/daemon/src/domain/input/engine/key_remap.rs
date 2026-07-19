@@ -230,7 +230,8 @@ impl KeyRemapEngine {
             held.insert(key, MomentaryDpiState::RestorePending { original });
         } else {
             held.remove(&key);
-            crate::domain::input::usecases::runtime::device_changed(&self.app, device_id).await;
+            crate::application::usecases::input::runtime::device_changed(&self.app, device_id)
+                .await;
         }
     }
 
@@ -292,7 +293,7 @@ impl KeyRemapEngine {
                                         temporary: *dpi,
                                     },
                                 );
-                                crate::domain::input::usecases::runtime::device_changed(
+                                crate::application::usecases::input::runtime::device_changed(
                                     &self.app, device_id,
                                 )
                                 .await;
@@ -317,7 +318,7 @@ impl KeyRemapEngine {
 #[cfg(test)]
 mod tests {
     use super::*;
-    use crate::{config::Config, infrastructure::drivers::Device, test_support::MockDevice};
+    use crate::{config::Config, domain::device::Device, test_support::MockDevice};
 
     fn mapping(cid: u16, base: ButtonAction, shifted: ButtonAction) -> ButtonMapping {
         ButtonMapping { cid, base, shifted }
