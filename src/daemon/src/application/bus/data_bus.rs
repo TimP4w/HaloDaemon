@@ -1190,6 +1190,7 @@ impl crate::infrastructure::media::MediaPublisher for DataBus {
 #[cfg(test)]
 mod tests {
     use super::*;
+    use crate::infrastructure::media::{MediaInfo, MediaPublisher, PlaybackStatus};
 
     fn policy(ms: u64) -> DataPolicy {
         DataPolicy {
@@ -1435,5 +1436,25 @@ mod tests {
         let cursor = replay.events[EVENT_RING_CAPACITY - 2].id;
         let tail = bus.replay_events(Some(cursor));
         assert_eq!(tail.events.len(), 1);
+    }
+
+    #[test]
+    fn media_publisher_adapter_updates_and_invalidates_the_bus_record() {
+        let bus = DataBus::default();
+        bus.publish_media(&MediaInfo {
+            title: "Track".into(),
+            artist: "Artist".into(),
+            status: PlaybackStatus::Playing,
+            art: None,
+        });
+        let snapshot = bus.read("host.media.playback");
+        assert!(matches!(
+            &snapshot.value,
+            Some(DataValue::Map(value))
+                if value.get("title") == Some(&DataValue::String("Track".into()))
+        ));
+
+        bus.invalidate_media();
+        assert!(bus.read("host.media.playback").value.is_none());
     }
 }
