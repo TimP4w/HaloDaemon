@@ -1752,6 +1752,27 @@ fn open_device(
         let handle = handle.clone();
         dev_table
             .set(
+                "set_button_mapping",
+                lua.create_function(move |lua, (_self, mapping): (Table, Table)| {
+                    let mapping = lua.from_value(Value::Table(mapping)).map_err(mlua_err)?;
+                    handle
+                        .block_on(
+                            crate::domain::device::KeyRemapCapability::set_button_mapping(
+                                &*device, mapping,
+                            ),
+                        )
+                        .map_err(mlua_err)
+                })
+                .anyhow()?,
+            )
+            .anyhow()?;
+    }
+
+    {
+        let device = device.clone();
+        let handle = handle.clone();
+        dev_table
+            .set(
                 "set_choice",
                 lua.create_function(move |_, (_self, key, selected): (Table, String, usize)| {
                     handle
