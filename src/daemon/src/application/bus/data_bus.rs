@@ -424,6 +424,15 @@ impl DataBus {
             .collect()
     }
 
+    pub fn state_revision(&self, key: &str) -> Option<u64> {
+        self.inner
+            .lock()
+            .unwrap_or_else(|error| error.into_inner())
+            .state_records
+            .get(key)
+            .map(|record| record.revision)
+    }
+
     pub fn publish_event(&self, payload: BusEventPayload) -> BusEvent {
         let mut inner = self.inner.lock().unwrap_or_else(|error| error.into_inner());
         inner.next_event_id = inner.next_event_id.wrapping_add(1).max(1);

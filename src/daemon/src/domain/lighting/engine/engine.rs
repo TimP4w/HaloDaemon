@@ -85,6 +85,15 @@ pub struct RgbEngine {
     /// still running has its frame dropped this tick rather than queued, so a
     /// slow (e.g. rate-limited) device never paces the rest of the canvas.
     write_slots: std::sync::Mutex<HashMap<String, tokio::task::JoinHandle<()>>>,
+    tick_cache: Mutex<Option<TickStateCache>>,
+}
+
+struct TickStateCache {
+    lighting_revision: u64,
+    registry_revision: u64,
+    canvas: Arc<CanvasState>,
+    devices: Arc<RgbDeviceMap>,
+    registry_devices: Arc<Vec<Arc<dyn Device>>>,
 }
 
 #[derive(Clone, Debug, PartialEq)]
@@ -275,6 +284,7 @@ impl RgbEngine {
             engine_mode_intent: Mutex::new(HashMap::new()),
             preview_srgb_buf: Mutex::new(Vec::new()),
             write_slots: std::sync::Mutex::new(HashMap::new()),
+            tick_cache: Mutex::new(None),
         })
     }
 
@@ -717,51 +727,79 @@ impl RgbEngine {
         }
     }
 
-    async fn sync_tick_state(&self) -> (CanvasState, RgbDeviceMap, Vec<DirectDevice>) {
-        let (sample_radius, effects, default_effect) = self
+    async fn sync_tick_state(&self) -> (Arc<CanvasState>, Arc<RgbDeviceMap>, Vec<DirectDevice>) {
+        let lighting_revision = self
             .app_state
             .data_bus
-            .state_snapshot(&[halod_shared::bus::topic::LIGHTING.into()])
-            .records
-            .into_iter()
-            .find_map(|record| match record.value {
-                halod_shared::bus::BusValue::Lighting(state) => Some((
-                    state.canvas.sample_radius,
-                    state.canvas.effects,
-                    state.canvas.default_effect,
-                )),
-                _ => None,
-            })
-            .unwrap_or_else(|| {
-                log::warn!("effective lighting topic unavailable; using an empty canvas state");
-                let state = CanvasState::default();
-                (state.sample_radius, state.effects, state.default_effect)
+            .state_revision(halod_shared::bus::topic::LIGHTING)
+            .unwrap_or(0);
+        let registry_revision = self.app_state.device_registry.revision();
+        let mut cache = self.tick_cache.lock().await;
+        if cache.as_ref().is_none_or(|cached| {
+            cached.lighting_revision != lighting_revision
+                || cached.registry_revision != registry_revision
+        }) {
+            let (sample_radius, effects, default_effect) = self
+                .app_state
+                .data_bus
+                .state_snapshot(&[halod_shared::bus::topic::LIGHTING.into()])
+                .records
+                .into_iter()
+                .find_map(|record| match record.value {
+                    halod_shared::bus::BusValue::Lighting(state) => Some((
+                        state.canvas.sample_radius,
+                        state.canvas.effects,
+                        state.canvas.default_effect,
+                    )),
+                    _ => None,
+                })
+                .unwrap_or_else(|| {
+                    log::warn!("effective lighting topic unavailable; using an empty canvas state");
+                    let state = CanvasState::default();
+                    (state.sample_radius, state.effects, state.default_effect)
+                });
+
+            let devices_guard = self.app_state.device_registry.read().await;
+            // Skip offline devices so the engine never queues a frame for a dead socket.
+            let placed_zones: Vec<PlacedZone> = devices_guard
+                .iter()
+                .filter(|d| d.is_live() && d.active_state() != VisibilityState::Disabled)
+                .filter_map(|d| d.as_lighting())
+                .flat_map(|s| s.placed_channels())
+                .collect();
+
+            let available: RgbDeviceMap = devices_guard
+                .iter()
+                .filter(|device| device.is_live() && device.as_lighting().is_some())
+                .map(|device| (device.id().to_owned(), Arc::clone(device)))
+                .collect();
+            let devices = placed_zones
+                .iter()
+                .filter_map(|zone| {
+                    available
+                        .get(&zone.device_id)
+                        .map(|device| (zone.device_id.clone(), Arc::clone(device)))
+                })
+                .collect();
+
+            let canvas = Arc::new(CanvasState {
+                effects,
+                default_effect,
+                placed_zones,
+                sample_radius,
+                ..Default::default()
             });
-
-        let devices_guard = self.app_state.device_registry.read().await;
-        // Skip offline devices so the engine never queues a frame for a dead socket.
-        let placed_zones: Vec<PlacedZone> = devices_guard
-            .iter()
-            .filter(|d| d.is_live() && d.active_state() != VisibilityState::Disabled)
-            .filter_map(|d| d.as_lighting())
-            .flat_map(|s| s.placed_channels())
-            .collect();
-
-        let available: RgbDeviceMap = devices_guard
-            .iter()
-            .filter(|device| device.is_live() && device.as_lighting().is_some())
-            .map(|device| (device.id().to_owned(), Arc::clone(device)))
-            .collect();
-        let devices = placed_zones
-            .iter()
-            .filter_map(|zone| {
-                available
-                    .get(&zone.device_id)
-                    .map(|device| (zone.device_id.clone(), Arc::clone(device)))
-            })
-            .collect();
-
-        let direct_devices: Vec<DirectDevice> = devices_guard
+            *cache = Some(TickStateCache {
+                lighting_revision,
+                registry_revision,
+                canvas,
+                devices: Arc::new(devices),
+                registry_devices: Arc::new(devices_guard.clone()),
+            });
+        }
+        let cached = cache.as_ref().expect("tick cache populated");
+        let direct_devices = cached
+            .registry_devices
             .iter()
             .filter(|d| d.is_live() && d.active_state() != VisibilityState::Disabled)
             .filter_map(|d| match d.as_lighting()?.current_state() {
@@ -771,15 +809,11 @@ impl RgbEngine {
                 _ => None,
             })
             .collect();
-
-        let canvas_state = CanvasState {
-            effects,
-            default_effect,
-            placed_zones,
-            sample_radius,
-            ..Default::default()
-        };
-        (canvas_state, devices, direct_devices)
+        (
+            Arc::clone(&cached.canvas),
+            Arc::clone(&cached.devices),
+            direct_devices,
+        )
     }
 
     // Acts only when a device's desired mode differs from the intent last acted
@@ -792,9 +826,18 @@ impl RgbEngine {
             .map(|z| z.device_id.clone())
             .collect();
 
-        let devices = self.app_state.device_registry.read().await.clone();
+        let devices = match self
+            .tick_cache
+            .lock()
+            .await
+            .as_ref()
+            .map(|cached| Arc::clone(&cached.registry_devices))
+        {
+            Some(devices) => devices,
+            None => Arc::new(self.app_state.device_registry.read().await.clone()),
+        };
         let mut intent = self.engine_mode_intent.lock().await;
-        for device in &devices {
+        for device in devices.iter() {
             if device.active_state() == VisibilityState::Disabled {
                 intent.remove(device.id());
                 continue;
@@ -1445,6 +1488,29 @@ mod tests {
         let (_, _, direct) = engine.sync_tick_state().await;
         assert_eq!(direct.len(), 1);
         assert_eq!(direct[0].1, "breathing");
+    }
+
+    #[tokio::test]
+    async fn tick_state_reuses_prepared_arcs_until_registry_revision_changes() {
+        let app = make_app();
+        app.device_registry
+            .write()
+            .await
+            .push(MockRgbDevice::new_engine_mode("dev0", "ring", false) as Arc<dyn Device>);
+        let engine = RgbEngine::new(app.clone()).await;
+
+        let (canvas_a, devices_a, _) = engine.sync_tick_state().await;
+        let (canvas_b, devices_b, _) = engine.sync_tick_state().await;
+        assert!(Arc::ptr_eq(&canvas_a, &canvas_b));
+        assert!(Arc::ptr_eq(&devices_a, &devices_b));
+
+        app.device_registry
+            .write()
+            .await
+            .push(MockRgbDevice::new_engine_mode("dev1", "ring", false) as Arc<dyn Device>);
+        let (canvas_c, devices_c, _) = engine.sync_tick_state().await;
+        assert!(!Arc::ptr_eq(&canvas_b, &canvas_c));
+        assert!(!Arc::ptr_eq(&devices_b, &devices_c));
     }
 
     #[tokio::test]
