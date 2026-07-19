@@ -183,12 +183,9 @@ impl App {
             .lock()
             .map(|mut q| q.drain(..).collect())
             .unwrap_or_default();
-        // Native delivery belongs to the same authoritative ingestion point as
-        // in-app toasts. Doing it in the IPC reader made delivery depend on a
-        // background transport thread and obscured whether an event had
-        // actually reached the UI. This path also runs while the Wayland
-        // window is destroyed and the application is resident in the tray.
-        show_native_notifications(&incoming);
+        // Native delivery already happened at IPC ingestion. This queue is
+        // drained on a frame only for in-app toasts and UI observers; a hidden
+        // Wayland tray application may not receive frames at all.
         if onboarding_active {
             incoming.retain(|notification| {
                 !matches!(

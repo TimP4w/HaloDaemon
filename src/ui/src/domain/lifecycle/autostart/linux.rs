@@ -49,8 +49,9 @@ fn desktop_entry(exec: &str) -> String {
          StartupNotify=true\n\
          Terminal=false\n\
          Type=Application\n\
-         Categories=Utility;Settings;HardwareSettings;\n\
-         X-GNOME-Autostart-enabled=true\n"
+         Categories=Utility;HardwareSettings;\n\
+         X-GNOME-Autostart-enabled=true\n\
+         X-GNOME-UsesNotifications=true\n"
     )
 }
 
@@ -124,6 +125,10 @@ mod tests {
         assert!(entry.starts_with("[Desktop Entry]\n"));
         assert!(entry.contains("Exec=/opt/halod/halod-gui --background\n"));
         assert!(entry.contains("Type=Application\n"));
+        assert!(entry.contains("X-GNOME-UsesNotifications=true\n"));
+        // GNOME's Notifications panel classifies entries in the exact
+        // `Settings` category as system services and deliberately hides them.
+        assert!(!entry.contains(";Settings;"));
     }
 
     #[test]

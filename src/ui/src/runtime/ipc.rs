@@ -439,6 +439,13 @@ where
 /// Append a notification to the shared inbox and wake the UI. A poisoned lock
 /// only drops the notification — it never panics the IPC thread.
 fn push_notification(tx: &UiTx, n: Notification, repaint: &impl Fn()) {
+    // Native delivery must not depend on an egui frame. On Linux the Wayland
+    // window is destroyed while HaloDaemon is resident in the tray, so there
+    // may be no frame to drain this inbox until the user opens the window
+    // again. Deliver at the authoritative IPC ingestion point and retain the
+    // queue solely for in-app toasts and UI observers.
+    #[cfg(not(test))]
+    crate::ui::show_native_notifications(std::slice::from_ref(&n));
     if let Ok(mut q) = tx.notifications.lock() {
         q.push(n);
     }

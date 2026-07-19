@@ -6,6 +6,6 @@ Icon=halod
 StartupNotify=true
 Terminal=false
 Type=Application
-Categories=Utility;Settings;HardwareSettings;
+Categories=Utility;HardwareSettings;
 Keywords=peripheral;mouse;keyboard;fan;rgb;lighting;
 X-GNOME-UsesNotifications=true
