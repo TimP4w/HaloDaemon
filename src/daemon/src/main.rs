@@ -401,13 +401,13 @@ async fn run_daemon(
         },
         || {},
     );
-    let rgb_engine = Arc::clone(&rgb);
+    let lighting_engine = Arc::clone(&rgb);
     let rgb_bus = app.data_bus.clone();
     supervisor.register(
         "RGB engine",
         "RGB engine exited unexpectedly; RGB animations will stop.",
         move || {
-            let engine = Arc::clone(&rgb_engine);
+            let engine = Arc::clone(&lighting_engine);
             let cfg = EngineConfigReceiver::new(rgb_bus.clone(), EngineConfigTopic::Lighting);
             Box::pin(async move { task_supervisor::TaskHandle(engine.start(cfg).await) })
         },

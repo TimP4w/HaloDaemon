@@ -110,6 +110,12 @@ pub async fn switch_profile_direct(name: String, app: Arc<AppState>) {
     load_active_profile(app.clone()).await;
     app.record_change(crate::application::bus::coordinator::Change::ProfileSwitch)
         .await;
+    let profile = app.config.read().await.active_profile.clone();
+    crate::infrastructure::platform::notify::send(
+        &app,
+        halod_shared::types::NotificationCode::ProfileSwitched { profile },
+    )
+    .await;
 }
 
 pub async fn switch_profile(name: String, app: Arc<AppState>) -> Result<()> {
@@ -372,6 +378,16 @@ mod tests {
         .await;
         let cfg = app.config.read().await;
         assert_eq!(cfg.active_profile, DEFAULT_PROFILE_NAME);
+        let replay = app.data_bus.replay_events(None);
+        assert!(replay.events.iter().any(|event| matches!(
+            &event.payload,
+            halod_shared::bus::BusEventPayload::Notification(notification)
+                if matches!(
+                    &notification.code,
+                    halod_shared::types::NotificationCode::ProfileSwitched { profile }
+                        if profile == DEFAULT_PROFILE_NAME
+                ) && notification.show_native
+        )));
     }
 
     #[tokio::test]

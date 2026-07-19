@@ -134,7 +134,7 @@ pub(super) fn assign_zone_cmd(
 }
 
 /// Translated display label for a canvas-effect param, keyed by its `id`
-/// (stable across effects — see `daemon::engines::rgb_engine::canvas::effects`).
+/// (stable across effects — see `daemon::domain::lighting::engine::canvas::effects`).
 fn effect_param_label(param: &EffectParamDescriptor) -> String {
     t!(format!("canvas.effect_param_{}", param.id)).to_string()
 }
@@ -269,7 +269,7 @@ mod tests {
     #[test]
     fn every_canvas_effect_param_and_enum_option_is_translated() {
         // Mirrors the ids emitted by
-        // `daemon::engines::rgb_engine::canvas::effects::builtin_descriptors()`
+        // `daemon::domain::lighting::engine::canvas::effects::builtin_descriptors()`
         // (Range/Boolean params only — Color params render no label, and
         // `monitor`'s enum options are OS-provided device names, not copy).
         for id in [

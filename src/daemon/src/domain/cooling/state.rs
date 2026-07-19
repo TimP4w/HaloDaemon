@@ -13,6 +13,9 @@ struct Engine;
 pub struct CoolingEngineState {
     /// Per-fan curve status written by the engine, read by the serializer.
     pub statuses: Mutex<HashMap<String, FanCurveStatus>>,
+    /// Last duty command successfully accepted by each device channel. This is
+    /// effective commanded state; RPM remains independently observed telemetry.
+    pub applied_duties: Mutex<HashMap<String, u8>>,
     engine: OnceLock<Engine>,
 }
 
@@ -20,12 +23,21 @@ impl CoolingEngineState {
     pub fn new() -> Self {
         Self {
             statuses: Mutex::new(HashMap::new()),
+            applied_duties: Mutex::new(HashMap::new()),
             engine: OnceLock::new(),
         }
     }
 
     pub fn set_engine(&self) {
         let _ = self.engine.set(Engine);
+    }
+
+    pub async fn record_applied_duty(&self, device_id: &str, channel_id: &str, duty: u8) -> bool {
+        self.applied_duties
+            .lock()
+            .await
+            .insert(curve_key(device_id, channel_id), duty)
+            != Some(duty)
     }
 
     /// Join device-collected fan curve records with the engine's live statuses.

@@ -76,8 +76,11 @@ pub struct ChainLinkSpec {
 /// its parent controller.
 #[async_trait]
 pub trait CoolingHub: Send + Sync + 'static {
-    async fn get_cooling_status(&self, channel: u8) -> Result<CoolingChannel>;
-    async fn set_cooling_duty(&self, channel: u8, duty: u8) -> Result<()>;
+    async fn get_cooling_status(&self, channel: &str) -> Result<CoolingChannel>;
+    async fn set_cooling_duty(&self, channel: &str, duty: u8) -> Result<()>;
+    fn cached_cooling_status(&self, _channel: &str) -> Option<CoolingChannel> {
+        None
+    }
 }
 
 /// Unified cooling surface for one or more independently addressable outputs.
@@ -87,6 +90,14 @@ pub trait CoolingCapability: Send + Sync {
     async fn get_cooling_status(&self, channel_id: &str) -> Result<CoolingChannel>;
     async fn set_cooling_duty(&self, channel_id: &str, duty: u8) -> Result<()>;
     fn cooling_state(&self) -> &CoolingStateSlot;
+
+    /// Most recent device-owned status sample, when the driver has an
+    /// event/poll cache newer than the host's synthesized sensor records.
+    /// Projection applies this last; empty means retained sensors are the
+    /// authoritative fallback.
+    fn cached_cooling_status(&self) -> Vec<CoolingChannel> {
+        Vec::new()
+    }
 
     fn curves(&self) -> HashMap<String, crate::domain::cooling::model::FanCurveRecord> {
         self.cooling_state().curves()
@@ -105,13 +116,13 @@ pub trait CoolingCapability: Send + Sync {
     }
 
     async fn to_wire(&self) -> Option<DeviceCapability> {
-        let mut channels = self.cooling_channels();
-        for channel in &mut channels {
-            if let Ok(status) = self.get_cooling_status(&channel.id).await {
-                *channel = status;
-            }
-        }
-        Some(DeviceCapability::Cooling(CoolingStatus { channels }))
+        // Live duty/RPM are observed by the device telemetry use case and
+        // overlaid by device projection. Projection must not perform another
+        // hardware read: one slow controller would otherwise block unrelated
+        // device transactions behind the global commit lock.
+        Some(DeviceCapability::Cooling(CoolingStatus {
+            channels: self.cooling_channels(),
+        }))
     }
 
     fn state_key(&self) -> &'static str {

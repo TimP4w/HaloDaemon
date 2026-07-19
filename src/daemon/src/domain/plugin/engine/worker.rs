@@ -58,6 +58,12 @@ pub struct PollOutcome {
     #[serde(default)]
     pub children_changed: bool,
     #[serde(default)]
+    pub ranges: HashMap<String, i32>,
+    #[serde(default)]
+    pub choices: HashMap<String, usize>,
+    #[serde(default)]
+    pub cooling: Vec<halod_shared::types::CoolingChannel>,
+    #[serde(default)]
     pub button_events: PollButtonEvents,
 }
 
@@ -266,6 +272,10 @@ pub struct InitDpi {
 pub struct InitCooling {
     #[serde(default)]
     pub channels: Vec<InitCoolingChannel>,
+    /// Keep channels on the controller internally, but expose each one as a
+    /// separate connected device instead of a parent cooling capability.
+    #[serde(default)]
+    pub as_devices: bool,
 }
 
 #[derive(Debug, Clone, Deserialize)]
@@ -1104,17 +1114,6 @@ impl PluginHandle {
         Ok(controllers)
     }
 
-    pub async fn hub_cooling_status(
-        &self,
-        channel: u8,
-    ) -> Result<halod_shared::types::CoolingChannel> {
-        self.cooling_status(&channel.to_string()).await
-    }
-
-    pub async fn hub_set_cooling_duty(&self, channel: u8, duty: u8) -> Result<()> {
-        self.cooling_set_duty(&channel.to_string(), duty).await
-    }
-
     pub async fn lcd_stream_frame(
         &self,
         rgba: Vec<u8>,
@@ -1768,6 +1767,7 @@ mod tests {
                 end_label: None,
                 display: Default::default(),
                 default: 1,
+                visible_when: None,
             }],
             ..Default::default()
         };
@@ -2022,6 +2022,22 @@ mod tests {
         let events = h.poll().await.unwrap().button_events;
         assert_eq!(events.pressed, vec![3, 7]);
         assert_eq!(events.released, vec![2]);
+        h.close().await.unwrap();
+    }
+
+    #[tokio::test]
+    async fn poll_extracts_hardware_changed_control_values() {
+        let h = spawn(
+            r#"return {
+                read_status = function(dev)
+                  return { ranges = { level = 7 }, choices = { mode = 2 } }
+                end,
+            }"#,
+            vec![],
+        );
+        let outcome = h.poll().await.unwrap();
+        assert_eq!(outcome.ranges.get("level"), Some(&7));
+        assert_eq!(outcome.choices.get("mode"), Some(&2));
         h.close().await.unwrap();
     }
 

@@ -1,46 +1,94 @@
 // SPDX-License-Identifier: GPL-3.0-or-later
 //! Records observed device telemetry as authoritative retained state.
 
-use std::sync::Arc;
+use std::{collections::HashMap, sync::Arc};
 
 use crate::application::state::AppState;
+use crate::infrastructure::drivers::Device;
+use halod_shared::types::{Sensor, VisibilityState};
+
+const DEVICE_SAMPLE_TIMEOUT: std::time::Duration = std::time::Duration::from_secs(2);
 
 /// Observe cached hardware samples and update the host-owned dynamic sensor
-/// records. The returned ids identify effective device records that changed.
+/// records. Every sampled device is returned so its complete observed
+/// projection (telemetry, controls, throughput, etc.) can be checked for a
+/// change; the coordinator suppresses identical records.
 pub(crate) async fn observe(app: &AppState) -> std::collections::HashSet<String> {
     let known = app.config.read().await.known_devices.clone();
-    let visibility = app.config.read().await.sensor_visibility.clone();
+    let visibility = Arc::new(app.config.read().await.sensor_visibility.clone());
     let devices = app.device_registry.read().await.clone();
+    let eligible: Vec<_> = devices
+        .into_iter()
+        .filter(|device| {
+            let disabled = known.get(device.id()).is_some_and(|record| {
+                record.active_state == halod_shared::types::VisibilityState::Disabled
+            });
+            !disabled && device.is_live()
+        })
+        .collect();
+    let sampled_ids = eligible
+        .iter()
+        .map(|device| device.id().to_owned())
+        .collect::<std::collections::HashSet<_>>();
+
+    // A slow or wedged device must not hold every device behind it. Calls for
+    // one device remain sequential (important for shared HID transports), while
+    // independent devices are sampled concurrently with a modest bound.
+    let mut tasks = tokio::task::JoinSet::new();
     let mut sensors = Vec::new();
-    for device in &devices {
-        let disabled = known.get(device.id()).is_some_and(|record| {
-            record.active_state == halod_shared::types::VisibilityState::Disabled
-        });
-        if disabled || !device.is_live() {
-            continue;
-        }
-        if let Some(capability) = device.as_sensor_capability() {
-            if let Ok(readings) = capability.get_sensors().await {
-                for mut sensor in readings {
-                    if let Some(state) = visibility.get(&sensor.id) {
-                        sensor.visibility = state.clone();
-                    }
-                    sensors.push((device.id().to_owned(), sensor));
-                }
+    for device in eligible {
+        if tasks.len() >= 8 {
+            if let Some(Ok(sampled)) = tasks.join_next().await {
+                sensors.extend(sampled);
             }
         }
-        for mut sensor in crate::infrastructure::drivers::fan_sensors(device.as_ref()).await {
+        tasks.spawn(sample_device(device, Arc::clone(&visibility)));
+    }
+    while let Some(result) = tasks.join_next().await {
+        if let Ok(sampled) = result {
+            sensors.extend(sampled);
+        }
+    }
+
+    let mut affected = app.data_bus.replace_host_sensors(sensors);
+    affected.extend(sampled_ids);
+    affected
+}
+
+async fn sample_device(
+    device: Arc<dyn Device>,
+    visibility: Arc<HashMap<String, VisibilityState>>,
+) -> Vec<(String, Sensor)> {
+    let mut sensors = Vec::new();
+    if let Some(capability) = device.as_sensor_capability() {
+        if let Ok(Ok(readings)) =
+            tokio::time::timeout(DEVICE_SAMPLE_TIMEOUT, capability.get_sensors()).await
+        {
+            for mut sensor in readings {
+                if let Some(state) = visibility.get(&sensor.id) {
+                    sensor.visibility = state.clone();
+                }
+                sensors.push((device.id().to_owned(), sensor));
+            }
+        }
+    }
+    if let Ok(readings) = tokio::time::timeout(
+        DEVICE_SAMPLE_TIMEOUT,
+        crate::infrastructure::drivers::fan_sensors(device.as_ref()),
+    )
+    .await
+    {
+        for mut sensor in readings {
             if let Some(state) = visibility.get(&sensor.id) {
                 sensor.visibility = state.clone();
             }
             sensors.push((device.id().to_owned(), sensor));
         }
     }
-
-    app.data_bus.replace_host_sensors(sensors)
+    sensors
 }
 
-/// Refresh once and commit only device records whose effective telemetry changed.
+/// Refresh once and commit device records whose complete observed projection changed.
 pub async fn refresh(app: &Arc<AppState>) {
     let changed = observe(app).await;
     if !changed.is_empty() {

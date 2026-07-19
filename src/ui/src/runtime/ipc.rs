@@ -120,6 +120,7 @@ pub(crate) struct UiTx {
     notifications: NotifyQueue,
     hidden: Arc<AtomicBool>,
     last_event_id: Arc<AtomicU64>,
+    event_session_id: Arc<AtomicU64>,
 }
 
 #[derive(Clone)]
@@ -224,6 +225,7 @@ fn channels(hidden: Arc<AtomicBool>) -> (UiTx, UiRx, FrameSinks) {
         notifications: Arc::clone(&notifications),
         hidden,
         last_event_id: Arc::new(AtomicU64::new(0)),
+        event_session_id: Arc::new(AtomicU64::new(0)),
     };
     let rx = UiRx {
         state: state_r,
@@ -348,6 +350,7 @@ where
     let subscription = BusSubscribe {
         prefixes: Vec::new(),
         last_event_id: Some(tx.last_event_id.load(Ordering::Acquire)),
+        event_session_id: Some(tx.event_session_id.load(Ordering::Acquire)),
     };
     let mut subscription = serde_json::to_value(subscription)?;
     subscription["type"] = serde_json::Value::String("bus_subscribe".into());
@@ -442,23 +445,6 @@ fn push_notification(tx: &UiTx, n: Notification, repaint: &impl Fn()) {
     repaint();
 }
 
-fn show_native_notification(notification: &Notification) {
-    if !notification.show_native {
-        return;
-    }
-    let (title, message) =
-        crate::domain::models::notifications::notification_text(&notification.code);
-    show_native(&title, &message);
-}
-
-#[cfg(not(test))]
-fn show_native(title: &str, message: &str) {
-    crate::domain::native_notification::show(title, message);
-}
-
-#[cfg(test)]
-fn show_native(_title: &str, _message: &str) {}
-
 fn handle_bus_event(tx: &UiTx, event: BusEvent, repaint: &impl Fn()) {
     let mut observed = tx.last_event_id.load(Ordering::Acquire);
     loop {
@@ -477,7 +463,6 @@ fn handle_bus_event(tx: &UiTx, event: BusEvent, repaint: &impl Fn()) {
     }
     match event.payload {
         BusEventPayload::Notification(notification) => {
-            show_native_notification(&notification);
             push_notification(tx, notification, repaint);
         }
     }
@@ -550,6 +535,12 @@ fn handle_json(
                 .cloned()
                 .and_then(|data| serde_json::from_value::<BusEventReplay>(data).ok())
             {
+                let previous = tx
+                    .event_session_id
+                    .swap(replay.session_id, Ordering::AcqRel);
+                if previous != replay.session_id {
+                    tx.last_event_id.store(0, Ordering::Release);
+                }
                 for event in replay.events {
                     handle_bus_event(tx, event, repaint);
                 }
@@ -837,6 +828,7 @@ mod tests {
             notifications: Arc::new(Mutex::new(Vec::new())),
             hidden: Arc::new(AtomicBool::new(false)),
             last_event_id: Arc::new(AtomicU64::new(0)),
+            event_session_id: Arc::new(AtomicU64::new(0)),
         };
         (tx, upload_r)
     }
@@ -849,6 +841,40 @@ mod tests {
         let got = rx.borrow().clone().expect("progress routed");
         assert_eq!(got.device_id, "lcd");
         assert_eq!(got.percent, Some(42));
+    }
+
+    #[test]
+    fn new_daemon_event_session_resets_stale_notification_cursor() {
+        let (tx, _) = test_tx();
+        tx.event_session_id.store(11, Ordering::Release);
+        tx.last_event_id.store(900, Ordering::Release);
+        let replay = BusEventReplay {
+            session_id: 12,
+            oldest_available_id: Some(1),
+            events: vec![BusEvent {
+                id: 1,
+                payload: BusEventPayload::Notification(Notification {
+                    code: NotificationCode::ProfileSwitched {
+                        profile: "Gaming".into(),
+                    },
+                    show_native: true,
+                    timestamp_ms: 1,
+                }),
+            }],
+        };
+        let payload = serde_json::to_vec(&serde_json::json!({
+            "type": "bus_event_replay",
+            "data": replay,
+        }))
+        .unwrap();
+
+        handle_json(&payload, &tx, &|| {}, &mut None);
+
+        assert_eq!(tx.event_session_id.load(Ordering::Acquire), 12);
+        assert_eq!(tx.last_event_id.load(Ordering::Acquire), 1);
+        let notifications = tx.notifications.lock().unwrap();
+        assert_eq!(notifications.len(), 1);
+        assert!(notifications[0].show_native);
     }
 
     #[test]

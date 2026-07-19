@@ -384,6 +384,40 @@ mod tests {
     }
 
     #[tokio::test]
+    async fn set_eq_preset_publishes_updated_device_record() {
+        let dev = eq_dev("arctis");
+        let app = make_app(vec![dev as Arc<dyn Device>]);
+        let mut transactions = app.data_bus.subscribe_transactions();
+
+        set_capability_param(
+            "arctis".into(),
+            CapabilityParam::EqPreset { preset_index: 2 },
+            app,
+        )
+        .await
+        .unwrap();
+
+        let transaction = transactions.recv().await.unwrap();
+        let device = transaction
+            .upserts
+            .into_iter()
+            .find_map(|record| match record.value {
+                halod_shared::bus::BusValue::Device(device) => Some(device),
+                _ => None,
+            })
+            .expect("capability mutation must publish its device record");
+        let equalizer = device
+            .capabilities
+            .into_iter()
+            .find_map(|capability| match capability {
+                halod_shared::types::DeviceCapability::Equalizer(equalizer) => Some(equalizer),
+                _ => None,
+            })
+            .expect("updated device record must contain equalizer state");
+        assert_eq!(equalizer.selected_preset, 2);
+    }
+
+    #[tokio::test]
     async fn set_eq_preset_persists_state() {
         let dev = eq_dev("dev1");
         let app = make_app(vec![dev.clone() as Arc<dyn Device>]);

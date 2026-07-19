@@ -228,6 +228,19 @@ pub fn is_active(st: &TourState) -> bool {
     st.active.is_some()
 }
 
+/// Once authoritative GUI config arrives, discard a tour that was already
+/// persisted as seen. This also repairs an activation from an earlier,
+/// incomplete bus snapshot in the same GUI session.
+pub fn reconcile_seen(st: &mut TourState, daemon_seen: &BTreeSet<String>) {
+    if st
+        .active
+        .as_ref()
+        .is_some_and(|active| daemon_seen.contains(active.key.id()))
+    {
+        st.active = None;
+    }
+}
+
 /// Start `key`'s tour unless one is already active or it's already seen.
 /// Returns whether it started.
 pub fn maybe_start(st: &mut TourState, daemon_seen: &BTreeSet<String>, key: TourKey) -> bool {
@@ -363,6 +376,14 @@ mod tests {
             &seen(&["page:home"]),
             TourKey::PageHome
         ));
+        assert!(st.active.is_none());
+    }
+
+    #[test]
+    fn authoritative_seen_state_cancels_a_prematurely_started_tour() {
+        let mut st = TourState::default();
+        assert!(maybe_start(&mut st, &seen(&[]), TourKey::PageHome));
+        reconcile_seen(&mut st, &seen(&["page:home"]));
         assert!(st.active.is_none());
     }
 

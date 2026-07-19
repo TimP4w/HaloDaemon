@@ -131,6 +131,10 @@ pub struct KeysTab {
     /// In-progress layer-shift action for the selected button, same seeding
     /// rules as `keys_action`.
     pub keys_shifted_action: Option<ButtonAction>,
+    /// Last daemon-projected mapping used to seed the editor. Keeping this
+    /// separately lets bus updates refresh a clean editor without overwriting
+    /// an incomplete local draft (for example a newly selected empty macro).
+    pub observed_mapping: Option<(u16, ButtonAction, ButtonAction)>,
     /// Active macro recording (at most one across cid/layer); None = idle.
     pub macro_rec: Option<macro_editor::RecState>,
     /// In-flight macro pill reorder drag.

@@ -669,6 +669,8 @@ pub struct RangeDef {
     pub display: RangeDisplay,
     /// Value shown before the host learns the device's actual value.
     pub default: i32,
+    #[serde(default)]
+    pub visible_when: Option<halod_shared::types::VisibleWhen>,
 }
 
 fn default_range_step() -> i32 {
@@ -1185,6 +1187,9 @@ pub struct PluginManifest {
     pub plugin_type: PluginKind,
     /// Opt in to runtime child devices returned by `enumerate_controllers`.
     pub dynamic_children: bool,
+    /// Status polling cadence for hardware whose controls can change outside
+    /// HaloDaemon. Defaults to one second; latency-sensitive devices opt in.
+    pub poll_interval_ms: u64,
     pub effects: Vec<EffectManifest>,
     pub widgets: Vec<WidgetManifest>,
     pub presets: Vec<PresetManifest>,
@@ -1252,6 +1257,8 @@ pub struct PluginMeta {
     pub capabilities: Vec<String>,
     #[serde(default)]
     pub dynamic_children: bool,
+    #[serde(default = "default_plugin_poll_interval_ms")]
+    pub poll_interval_ms: u64,
     #[serde(default)]
     pub effects: Vec<EffectManifest>,
     #[serde(default)]
@@ -1325,6 +1332,10 @@ const fn default_data_notify_interval_ms() -> u64 {
 
 fn default_entry() -> String {
     "main.lua".to_owned()
+}
+
+fn default_plugin_poll_interval_ms() -> u64 {
+    1_000
 }
 
 /// Conventional logo filename adopted when `plugin.yaml` declares no `logo`.
@@ -3246,6 +3257,7 @@ pub(super) fn build_manifest_from_dir(dir: &Path) -> Result<PluginManifest> {
         effect_thumbnails: meta.effect_assets,
         plugin_type: meta.plugin_type,
         dynamic_children: meta.dynamic_children,
+        poll_interval_ms: meta.poll_interval_ms.clamp(50, 60_000),
         effects: meta.effects,
         widgets: meta.widgets,
         presets: meta.presets,

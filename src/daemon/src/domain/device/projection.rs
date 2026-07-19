@@ -24,7 +24,20 @@ pub struct DevicesSnapshot {
 
 impl AppState {
     pub async fn snapshot_devices(&self, cfg: &Config) -> DevicesSnapshot {
-        let device_list: Vec<Arc<dyn Device>> = self.device_registry.read().await.clone();
+        self.snapshot_selected_devices(cfg, None).await
+    }
+
+    pub async fn snapshot_selected_devices(
+        &self,
+        cfg: &Config,
+        selected_ids: Option<&std::collections::HashSet<String>>,
+    ) -> DevicesSnapshot {
+        let all_devices: Vec<Arc<dyn Device>> = self.device_registry.read().await.clone();
+        let device_list: Vec<Arc<dyn Device>> = all_devices
+            .iter()
+            .filter(|device| selected_ids.is_none_or(|ids| ids.contains(device.id())))
+            .cloned()
+            .collect();
         let mut devices = Vec::with_capacity(device_list.len());
         for d in &device_list {
             devices.push(d.serialize().await);
@@ -69,6 +82,7 @@ impl AppState {
         // Overlay pass: record name/state, LCD-engine mode, and per-zone RGB
         // transforms onto each device's wire struct.
         let hid_tracked = self.hid.tracked_ids().await;
+        let applied_duties = self.cooling.applied_duties.lock().await.clone();
 
         for (device, wire) in device_list.iter().zip(devices.iter_mut()) {
             // Byte-movement transport: a driver-declared label wins; otherwise HID
@@ -93,6 +107,10 @@ impl AppState {
             }
 
             let transforms = device.as_lighting().map(|r| r.channel_transforms());
+            let cached_cooling = device
+                .as_cooling()
+                .map(|cooling| cooling.cached_cooling_status())
+                .unwrap_or_default();
 
             wire.capabilities
                 .retain(|capability| !matches!(capability, DeviceCapability::Sensors(_)));
@@ -106,10 +124,6 @@ impl AppState {
                     sensor.visibility = state.clone();
                 }
             }
-            if !sensors.is_empty() {
-                wire.capabilities.push(DeviceCapability::Sensors(sensors));
-            }
-
             for cap in &mut wire.capabilities {
                 match cap {
                     DeviceCapability::Lcd(_) => {}
@@ -120,28 +134,67 @@ impl AppState {
                             }
                         }
                     }
+                    DeviceCapability::Cooling(status) => {
+                        for channel in &mut status.channels {
+                            let prefix = format!("cooling_{}_{}", device.id(), channel.id);
+                            if let Some(sensor) = sensors
+                                .iter()
+                                .find(|sensor| sensor.id == format!("{prefix}_rpm"))
+                            {
+                                channel.rpm = Some(sensor.value.max(0.0).round() as u32);
+                            }
+                            if let Some(sensor) = sensors
+                                .iter()
+                                .find(|sensor| sensor.id == format!("{prefix}_duty"))
+                            {
+                                channel.duty = Some(sensor.value.clamp(0.0, 100.0).round() as u8);
+                            }
+                            // A device poll/event cache is newer than the
+                            // separately retained synthesized sensors that may
+                            // still represent the previous sampling cycle.
+                            overlay_cached_cooling(channel, &cached_cooling);
+                            if let Some(duty) = applied_duties.get(
+                                &crate::domain::cooling::state::curve_key(device.id(), &channel.id),
+                            ) {
+                                channel.duty = Some(*duty);
+                            }
+                        }
+                    }
                     DeviceCapability::Sensors(_) => {}
                     _ => {}
                 }
             }
+            if !sensors.is_empty() {
+                wire.capabilities.push(DeviceCapability::Sensors(sensors));
+            }
         }
 
-        let conflicts = detect_conflicts(
-            &device_list
-                .iter()
-                .zip(devices.iter())
-                .map(|(device, wire)| ConflictEntry {
+        let conflict_entries: Vec<_> = all_devices
+            .iter()
+            .map(|device| {
+                let active_state = cfg
+                    .known_devices
+                    .get(device.id())
+                    .map(|record| record.active_state.clone())
+                    .unwrap_or_else(|| device.active_state());
+                ConflictEntry {
                     id: device.id().to_owned(),
                     identity: device.identity(),
                     origin: device.conflict_origin(),
-                    connected: wire.connected,
-                    active_state: wire.active_state.clone(),
-                    integration_root: wire.integration_id.is_some(),
-                })
-                .collect::<Vec<_>>(),
-        );
-        for (wire, conflict) in devices.iter_mut().zip(conflicts) {
-            wire.conflict = conflict;
+                    connected: device.is_live(),
+                    active_state,
+                    integration_root: device.integration_id().is_some(),
+                }
+            })
+            .collect();
+        let all_conflicts = detect_conflicts(&conflict_entries);
+        let conflicts_by_id: HashMap<_, _> = conflict_entries
+            .iter()
+            .zip(all_conflicts)
+            .map(|(entry, conflict)| (entry.id.clone(), conflict))
+            .collect();
+        for wire in &mut devices {
+            wire.conflict = conflicts_by_id.get(&wire.id).cloned().flatten();
         }
 
         DevicesSnapshot {
@@ -151,6 +204,17 @@ impl AppState {
             lcd_templates,
             lcd_template_params,
         }
+    }
+}
+
+fn overlay_cached_cooling(
+    channel: &mut halod_shared::types::CoolingChannel,
+    cached: &[halod_shared::types::CoolingChannel],
+) {
+    if let Some(current) = cached.iter().find(|current| current.id == channel.id) {
+        channel.rpm = current.rpm;
+        channel.duty = current.duty;
+        channel.controllable = current.controllable;
     }
 }
 
@@ -215,6 +279,79 @@ mod tests {
         assert!(sensors
             .iter()
             .any(|s| s.id == "cooling_test_device_default_rpm" && s.value == 1500.0));
+    }
+
+    #[tokio::test]
+    async fn retained_rpm_observation_overlays_cooling_channel() {
+        use halod_shared::types::{Sensor, SensorType, SensorUnit, VisibilityState};
+
+        let app = Arc::new(AppState::new(Config::default()));
+        let dev: Arc<dyn Device> = Arc::new(MockDevice::new("fan").with_fan_rpm(900));
+        app.device_registry.write().await.push(dev);
+        app.data_bus.replace_host_sensors(vec![(
+            "fan".into(),
+            Sensor {
+                id: "cooling_fan_default_rpm".into(),
+                name: "Fan RPM".into(),
+                value: 1777.0,
+                unit: SensorUnit::Rpm,
+                sensor_type: SensorType::FanSpeed,
+                visibility: VisibilityState::Visible,
+            },
+        )]);
+
+        let snapshot = app.snapshot_devices(&app.config.read().await.clone()).await;
+        let rpm = snapshot.devices[0]
+            .capabilities
+            .iter()
+            .find_map(|capability| match capability {
+                DeviceCapability::Cooling(cooling) => cooling.channels[0].rpm,
+                _ => None,
+            });
+        assert_eq!(rpm, Some(1777));
+    }
+
+    #[test]
+    fn fresh_device_cache_wins_over_stale_retained_rpm() {
+        use halod_shared::types::{CoolingChannel, CoolingChannelKind};
+        let mut projected = CoolingChannel {
+            id: "fan1".into(),
+            name: "Fan".into(),
+            kind: CoolingChannelKind::Fan,
+            controllable: true,
+            rpm: Some(900),
+            duty: Some(28),
+        };
+        let fresh = CoolingChannel {
+            rpm: Some(2200),
+            duty: Some(100),
+            ..projected.clone()
+        };
+
+        overlay_cached_cooling(&mut projected, &[fresh]);
+
+        assert_eq!(projected.rpm, Some(2200));
+        assert_eq!(projected.duty, Some(100));
+    }
+
+    #[tokio::test]
+    async fn successfully_applied_duty_overlays_stale_telemetry() {
+        let app = Arc::new(AppState::new(Config::default()));
+        let dev: Arc<dyn Device> = Arc::new(MockDevice::new("fan").with_fan_rpm(900));
+        app.device_registry.write().await.push(dev);
+        crate::domain::device::usecases::telemetry::observe(&app).await;
+        assert!(app.cooling.record_applied_duty("fan", "default", 100).await);
+
+        let snapshot = app.snapshot_devices(&app.config.read().await.clone()).await;
+        let duty =
+            snapshot.devices[0]
+                .capabilities
+                .iter()
+                .find_map(|capability| match capability {
+                    DeviceCapability::Cooling(cooling) => cooling.channels[0].duty,
+                    _ => None,
+                });
+        assert_eq!(duty, Some(100));
     }
 
     #[tokio::test]

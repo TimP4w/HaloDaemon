@@ -43,25 +43,30 @@ pub async fn produce(
     cfg: &Config,
     requested: &[Topic],
 ) -> Vec<(String, BusValue)> {
-    let needs_devices = requested.iter().any(|topic| {
+    let needs_all_devices = requested.iter().any(|topic| {
         matches!(
             topic,
-            Topic::Device(_)
-                | Topic::Devices
-                | Topic::Cooling
-                | Topic::Lighting
-                | Topic::Lcd
-                | Topic::Plugins
+            Topic::Devices | Topic::Cooling | Topic::Lighting | Topic::Lcd | Topic::Plugins
         )
     });
+    let selected_ids: std::collections::HashSet<String> = requested
+        .iter()
+        .filter_map(|topic| match topic {
+            Topic::Device(id) => Some(id.clone()),
+            _ => None,
+        })
+        .collect();
     let DevicesSnapshot {
         devices,
         fan_curves,
         placed_zones,
         lcd_templates,
         lcd_template_params,
-    } = if needs_devices {
+    } = if needs_all_devices {
         app.snapshot_devices(cfg).await
+    } else if !selected_ids.is_empty() {
+        app.snapshot_selected_devices(cfg, Some(&selected_ids))
+            .await
     } else {
         DevicesSnapshot::default()
     };

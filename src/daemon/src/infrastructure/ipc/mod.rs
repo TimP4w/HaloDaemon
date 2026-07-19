@@ -567,7 +567,12 @@ where
     let transactions = app.data_bus.subscribe_transactions();
     let events = app.data_bus.subscribe_events();
     send_bus_snapshot(&app, &handle, &subscription.prefixes);
-    send_event_replay(&app, &handle, subscription.last_event_id);
+    send_event_replay(
+        &app,
+        &handle,
+        subscription.last_event_id,
+        subscription.event_session_id,
+    );
     let bus_task = tokio::spawn(bus_forward_loop(
         app.clone(),
         handle.clone(),
@@ -790,7 +795,16 @@ fn send_bus_snapshot(app: &Arc<AppState>, handle: &ClientHandle, prefixes: &[Str
     handle.send_json(&json!({ "type": "bus_snapshot", "data": snapshot }));
 }
 
-fn send_event_replay(app: &Arc<AppState>, handle: &ClientHandle, cursor: Option<u64>) {
+fn send_event_replay(
+    app: &Arc<AppState>,
+    handle: &ClientHandle,
+    cursor: Option<u64>,
+    client_session_id: Option<u64>,
+) {
+    let current = app.data_bus.replay_events(None);
+    let cursor = (client_session_id == Some(current.session_id))
+        .then_some(cursor)
+        .flatten();
     let replay: BusEventReplay = app.data_bus.replay_events(cursor);
     handle.send_json(&json!({ "type": "bus_event_replay", "data": replay }));
 }

@@ -5,6 +5,7 @@
 pub mod components;
 pub mod icons;
 mod root;
+pub(crate) use root::show_native_notifications;
 pub mod screens;
 pub mod shell;
 pub mod theme;

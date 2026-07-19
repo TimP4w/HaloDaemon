@@ -1836,6 +1836,7 @@ fn record_invalid_plugin_dir(
                 effect_thumbnails: vec![],
                 plugin_type: PluginKind::Device,
                 dynamic_children: false,
+                poll_interval_ms: 1_000,
                 effects: vec![],
                 widgets: vec![],
                 presets: vec![],

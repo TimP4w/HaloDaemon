@@ -185,6 +185,21 @@ impl App {
         if let Some(state) = crate::runtime::ipc::take_changed(&mut self.ui.state, "state") {
             self.accept_state(state);
         }
+        // With the Wayland surface destroyed there are no egui frames, so the
+        // normal `update` ingestion path cannot deliver notifications. Drain
+        // them here, issue native notifications, and retain their in-app toast
+        // state for the next time the window is opened.
+        let incoming: Vec<_> = self
+            .ui
+            .notifications
+            .lock()
+            .map(|mut queue| queue.drain(..).collect())
+            .unwrap_or_default();
+        if !incoming.is_empty() {
+            crate::ui::show_native_notifications(&incoming);
+            crate::ui::screens::profile::observe_notifications(&mut self.profile_ui, &incoming);
+            self.toasts.ingest(incoming, ctx.input(|input| input.time));
+        }
         self.tray.sync(ctx, &self.state_cache);
     }
 }

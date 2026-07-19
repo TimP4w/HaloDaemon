@@ -16,10 +16,17 @@ pub async fn data_changed(app: &Arc<AppState>) {
 }
 
 pub async fn device_changed(app: &Arc<AppState>, device_id: &str) {
-    app.record_change(crate::application::bus::coordinator::Change::Device(
-        device_id.to_owned(),
-    ))
-    .await;
+    let mut ids = vec![device_id.to_owned()];
+    ids.extend(
+        app.device_registry
+            .read()
+            .await
+            .iter()
+            .filter(|device| device.state_source_id() == Some(device_id))
+            .map(|device| device.id().to_owned()),
+    );
+    app.record_change(crate::application::bus::coordinator::Change::Devices(ids))
+        .await;
 }
 
 pub async fn device_status_changed(app: &Arc<AppState>, device_id: &str) {

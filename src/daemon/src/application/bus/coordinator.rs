@@ -12,6 +12,7 @@ pub enum Change {
     Bootstrap,
     DiscoveryTopology,
     Device(String),
+    Devices(Vec<String>),
     SensorTelemetry(Vec<String>),
     Lighting,
     LightingDevice(String),
@@ -46,6 +47,7 @@ impl Change {
                 Topic::Plugins,
             ],
             Self::Device(id) => vec![Topic::Device(id.clone())],
+            Self::Devices(ids) => ids.iter().cloned().map(Topic::Device).collect(),
             Self::SensorTelemetry(ids) => ids.iter().cloned().map(Topic::Device).collect(),
             Self::Lighting => vec![Topic::Lighting],
             Self::LightingDevice(id) => vec![Topic::Lighting, Topic::Device(id.clone())],
@@ -87,8 +89,8 @@ impl EffectiveStatePublisher {
     async fn commit(&self, app: &Arc<AppState>, topics: &[Topic]) {
         let _commit = self.commit_lock.lock().await;
         let cfg = app.config.read().await.clone();
-        let upserts = projections::produce(app, &cfg, topics).await;
-        let tombstones = if topics.contains(&Topic::Devices) {
+        let mut upserts = projections::produce(app, &cfg, topics).await;
+        let mut tombstones = if topics.contains(&Topic::Devices) {
             let new_keys: std::collections::HashSet<_> =
                 upserts.iter().map(|(key, _)| key.clone()).collect();
             app.data_bus
@@ -101,9 +103,35 @@ impl EffectiveStatePublisher {
         } else {
             Vec::new()
         };
+        // Producers may deliberately check volatile projections on a cadence.
+        // Keep that cheap on the wire: only a materially changed record creates
+        // a revision and wakes IPC/GUI subscribers.
+        let current: std::collections::HashMap<_, _> = app
+            .data_bus
+            .state_snapshot(&[])
+            .records
+            .into_iter()
+            .map(|record| (record.key, record.value))
+            .collect();
+        upserts.retain(|(key, value)| {
+            current
+                .get(key)
+                .is_none_or(|old| !same_bus_value(old, value))
+        });
+        tombstones.retain(|key| current.contains_key(key));
+        if upserts.is_empty() && tombstones.is_empty() {
+            return;
+        }
         if let Err(error) = app.data_bus.commit_state("host.state", upserts, tombstones) {
             log::error!("failed to publish state transaction: {error:#}");
         }
+    }
+}
+
+fn same_bus_value(left: &halod_shared::bus::BusValue, right: &halod_shared::bus::BusValue) -> bool {
+    match (serde_json::to_value(left), serde_json::to_value(right)) {
+        (Ok(left), Ok(right)) => left == right,
+        _ => false,
     }
 }
 
@@ -151,5 +179,28 @@ mod tests {
             halod_shared::bus::topic::device("mouse")
         );
         assert!(transaction.tombstones.is_empty());
+    }
+
+    #[tokio::test]
+    async fn unchanged_projection_does_not_emit_a_transaction() {
+        let app = Arc::new(AppState::new(Config::default()));
+        app.device_registry
+            .write()
+            .await
+            .push(Arc::new(MockDevice::new("mouse")) as Arc<dyn Device>);
+        app.effective_state
+            .record(&app, Change::Device("mouse".into()))
+            .await;
+        let mut transactions = app.data_bus.subscribe_transactions();
+
+        app.effective_state
+            .record(&app, Change::Device("mouse".into()))
+            .await;
+
+        assert!(
+            tokio::time::timeout(std::time::Duration::from_millis(20), transactions.recv())
+                .await
+                .is_err()
+        );
     }
 }

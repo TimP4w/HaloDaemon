@@ -93,10 +93,13 @@ pub struct BusSubscribe {
     pub prefixes: Vec<String>,
     #[serde(default)]
     pub last_event_id: Option<u64>,
+    #[serde(default)]
+    pub event_session_id: Option<u64>,
 }
 
 #[derive(Debug, Clone, Serialize, Deserialize)]
 pub struct BusEventReplay {
+    pub session_id: u64,
     pub oldest_available_id: Option<u64>,
     pub events: Vec<BusEvent>,
 }

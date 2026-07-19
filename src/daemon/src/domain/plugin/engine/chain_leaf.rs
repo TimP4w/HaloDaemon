@@ -24,6 +24,7 @@ use super::manifest::AccessoryManifest;
 
 pub struct ChainLeaf {
     id: String,
+    parent_id: String,
     name: String,
     vendor: String,
     /// Chain channel this leaf sits on (string id used with the `LightingDivisionHub`).
@@ -42,6 +43,7 @@ pub struct ChainLeaf {
 impl ChainLeaf {
     pub fn new(
         id: String,
+        parent_id: String,
         vendor: String,
         channel_id: String,
         fan_channel: u8,
@@ -51,6 +53,7 @@ impl ChainLeaf {
     ) -> Self {
         Self {
             id,
+            parent_id,
             name: accessory.name.clone(),
             vendor,
             channel_id,
@@ -137,6 +140,10 @@ impl Device for ChainLeaf {
     fn debug_transport(&self) -> Option<&'static str> {
         Some("child")
     }
+
+    fn state_source_id(&self) -> Option<&str> {
+        Some(&self.parent_id)
+    }
 }
 
 #[async_trait]
@@ -188,7 +195,7 @@ impl CoolingCapability for ChainLeaf {
         anyhow::ensure!(channel_id == "fan", "unknown cooling channel: {channel_id}");
         let status = self
             .cooling_hub
-            .get_cooling_status(self.fan_channel)
+            .get_cooling_status(&self.fan_channel.to_string())
             .await?;
         Ok(CoolingChannel {
             id: "fan".to_string(),
@@ -202,10 +209,25 @@ impl CoolingCapability for ChainLeaf {
     async fn set_cooling_duty(&self, channel_id: &str, duty: u8) -> Result<()> {
         anyhow::ensure!(channel_id == "fan", "unknown cooling channel: {channel_id}");
         self.cooling_hub
-            .set_cooling_duty(self.fan_channel, duty)
+            .set_cooling_duty(&self.fan_channel.to_string(), duty)
             .await
     }
     fn cooling_state(&self) -> &CoolingStateSlot {
         &self.cooling
+    }
+
+    fn cached_cooling_status(&self) -> Vec<CoolingChannel> {
+        self.cooling_hub
+            .cached_cooling_status(&self.fan_channel.to_string())
+            .map(|status| CoolingChannel {
+                id: "fan".to_string(),
+                name: self.name.clone(),
+                kind: CoolingChannelKind::Fan,
+                controllable: status.controllable,
+                rpm: status.rpm,
+                duty: status.duty,
+            })
+            .into_iter()
+            .collect()
     }
 }

@@ -135,29 +135,6 @@ impl EngineConfigReceiver {
 }
 use tokio::time::MissedTickBehavior;
 
-/// Shared outer watch-loop + inner interval-tick pattern used by all engines.
-/// `tick_fn` runs once per tick; the loop exits when `cfg_rx` closes.
-pub async fn engine_run_loop<F, Fut>(
-    engine_name: &'static str,
-    cfg_rx: EngineConfigReceiver,
-    missed_tick: MissedTickBehavior,
-    tick_fn: F,
-) where
-    F: FnMut(EngineRunConfig) -> Fut,
-    Fut: std::future::Future<Output = ()>,
-{
-    // No idle gate: always has work, so `wait_for_work` is never awaited.
-    engine_run_loop_idle(
-        engine_name,
-        cfg_rx,
-        missed_tick,
-        tick_fn,
-        std::future::pending::<()>,
-        || std::future::ready(true),
-    )
-    .await
-}
-
 /// `engine_run_loop` with an extra idle gate: while enabled but `has_work`
 /// returns false, the engine parks on `wait_for_work` (and config changes)
 /// instead of ticking — zero work when there is nothing to do. `wait_for_work`

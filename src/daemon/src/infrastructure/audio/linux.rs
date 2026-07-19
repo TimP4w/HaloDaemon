@@ -7,7 +7,7 @@ use std::sync::{
 use super::{dsp, dsp::SpectrumAnalyzer, AudioHandle, StopGuard, SESSION_RETRY_MS};
 
 /// Typed, Send-safe wrapper around `*mut pw_main_loop` — mirrors the pattern
-/// in `engines/rgb_engine/canvas/screen_capture/linux.rs`.
+/// in `domain/lighting/engine/canvas/screen_capture/linux.rs`.
 struct MainLoopPtr(*mut pipewire::sys::pw_main_loop);
 // SAFETY: pw_main_loop_quit is the only operation performed on this pointer,
 // and it is protected by the Mutex that prevents concurrent access.

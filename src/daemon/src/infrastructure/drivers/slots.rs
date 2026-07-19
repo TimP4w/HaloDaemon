@@ -91,8 +91,15 @@ impl<V> Default for KvStateCache<V> {
 }
 
 impl<V: Clone + Serialize + DeserializeOwned> KvStateCache<V> {
-    pub fn record(&self, key: &str, value: V) {
-        self.0.lock().unwrap().insert(key.to_string(), value);
+    pub fn record(&self, key: &str, value: V) -> bool
+    where
+        V: PartialEq,
+    {
+        self.0
+            .lock()
+            .unwrap()
+            .insert(key.to_string(), value.clone())
+            != Some(value)
     }
 
     pub fn get(&self, key: &str) -> Option<V>

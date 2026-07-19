@@ -281,13 +281,38 @@ fn commit(
     steps: Vec<MacroStep>,
     immediate: bool,
 ) {
-    let action = ButtonAction::Macro { steps };
+    commit_action(
+        ctx,
+        st,
+        id,
+        cid,
+        layer,
+        ButtonAction::Macro { steps },
+        immediate,
+    );
+}
+
+fn commit_action(
+    ctx: &TabCtx,
+    st: &mut DeviceUi,
+    id: &str,
+    cid: u16,
+    layer: Layer,
+    action: ButtonAction,
+    immediate: bool,
+) {
     let (base, shifted) = layer.pair(st, action.clone());
     layer.set(st, action);
     let cmd = DaemonCommand::SetButtonMapping {
         id: id.to_string(),
         mapping: ButtonMapping { cid, base, shifted },
     };
+    let DaemonCommand::SetButtonMapping { mapping, .. } = &cmd else {
+        unreachable!()
+    };
+    if !super::keys::mapping_is_complete(&mapping.base, &mapping.shifted) {
+        return;
+    }
     if immediate {
         st.last_edit = ctx.time;
         crate::runtime::ipc::send(ctx.cmd, cmd);
@@ -511,7 +536,10 @@ fn header_row(
                 );
             }
             if widgets::pill(ui, &t!("misc.macro_clear"), false) {
-                commit(ctx, st, id, cid, layer, Vec::new(), true);
+                // Empty macros are deliberately invalid at the daemon
+                // boundary. Clearing means restoring this layer's native
+                // action, while preserving the other layer.
+                commit_action(ctx, st, id, cid, layer, ButtonAction::Native, true);
             }
         }
     });
@@ -1227,6 +1255,38 @@ mod tests {
         );
         assert!(rx.try_recv().is_err());
         assert!(st.pending.contains_key("btn:macro:7:shifted"));
+    }
+
+    #[test]
+    fn clearing_macro_restores_native_layer_and_sends_valid_mapping() {
+        let state = TopicStore::default();
+        let dev = WireDevice::default();
+        let (tx, mut rx) = tokio::sync::mpsc::unbounded_channel();
+        let ctx = test_ctx(&state, &dev, &tx);
+        let mut st = DeviceUi::new("dev1".into());
+        st.keys.keys_action = Some(ButtonAction::Macro {
+            steps: vec![key_step(30, true), key_step(30, false)],
+        });
+        st.keys.keys_shifted_action = Some(ButtonAction::Disable);
+
+        commit_action(
+            &ctx,
+            &mut st,
+            "dev1",
+            7,
+            Layer::Base,
+            ButtonAction::Native,
+            true,
+        );
+
+        assert_eq!(Layer::Base.get(&st), Some(ButtonAction::Native));
+        match rx.try_recv().unwrap() {
+            DaemonCommand::SetButtonMapping { mapping, .. } => {
+                assert_eq!(mapping.base, ButtonAction::Native);
+                assert_eq!(mapping.shifted, ButtonAction::Disable);
+            }
+            other => panic!("unexpected command: {other:?}"),
+        }
     }
 
     #[test]

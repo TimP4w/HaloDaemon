@@ -6,6 +6,7 @@ pub(crate) mod backends;
 mod bytebuf;
 mod chain_leaf;
 pub(crate) mod command_resolve;
+mod cooling_channel_leaf;
 pub(crate) mod data_api;
 pub(crate) mod device;
 pub(crate) mod effect_worker;

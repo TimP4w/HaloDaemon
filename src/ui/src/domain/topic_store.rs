@@ -12,6 +12,9 @@ use halod_shared::types::{
 #[derive(Clone, Default)]
 pub struct TopicStore {
     pub revision: u64,
+    /// Whether the authoritative `config.gui` topic has been received. A bus
+    /// snapshot may legally arrive before daemon bootstrap and omit it.
+    pub gui_present: bool,
     pub discovery: DiscoveryStatus,
     pub devices: Vec<WireDevice>,
     pub profiles: ProfileState,
@@ -66,7 +69,10 @@ impl TopicStore {
             BusValue::Cooling(value) => self.cooling = value,
             BusValue::Lighting(value) => self.lighting = value,
             BusValue::Lcd(value) => self.lcd = value,
-            BusValue::Gui(value) => self.gui = value,
+            BusValue::Gui(value) => {
+                self.gui = value;
+                self.gui_present = true;
+            }
             BusValue::Health(value) => self.health = value,
             BusValue::ProcessIcons(value) => self.process_icons = value,
             BusValue::Plugins(value) => self.plugins = value,
@@ -139,5 +145,26 @@ mod tests {
             tombstones: Vec::new(),
         });
         assert!(store.config_dir.is_empty());
+    }
+
+    #[test]
+    fn incomplete_snapshot_does_not_claim_gui_authority() {
+        let mut store = TopicStore::default();
+        store.replace_snapshot(BusSnapshot {
+            revision: 1,
+            records: Vec::new(),
+        });
+        assert!(!store.gui_present);
+
+        store.apply_transaction(BusTransaction {
+            revision: 2,
+            upserts: vec![record(
+                halod_shared::bus::topic::GUI,
+                2,
+                BusValue::Gui(GuiConfig::default()),
+            )],
+            tombstones: Vec::new(),
+        });
+        assert!(store.gui_present);
     }
 }

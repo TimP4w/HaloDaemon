@@ -218,7 +218,7 @@ impl FanCurveEngine {
         cfg_rx: crate::application::run_loop::EngineConfigReceiver,
     ) -> tokio::task::JoinHandle<()> {
         tokio::spawn(async move {
-            crate::application::run_loop::engine_run_loop(
+            crate::application::run_loop::engine_run_loop_idle(
                 "FanCurve",
                 cfg_rx,
                 tokio::time::MissedTickBehavior::Skip,
@@ -227,6 +227,8 @@ impl FanCurveEngine {
                     let duty = _cfg.failsafe_duty.unwrap_or(100);
                     async move { this.tick(duty).await }
                 },
+                std::future::pending::<()>,
+                || std::future::ready(true),
             )
             .await;
         })
@@ -302,28 +304,37 @@ impl FanCurveEngine {
             self.apply_failsafe(key, curve_target, failsafe_duty).await;
             return FanCurveStatus::WriteError(format!("invalid fan curve configuration: {e}"));
         }
-        let Some(sensor_id) = &record.sensor_id else {
-            self.apply_failsafe(key, curve_target, failsafe_duty).await;
-            return FanCurveStatus::NoSensor;
+        let constant_duty = record.points.first().map(|point| point.1).filter(|first| {
+            record
+                .points
+                .iter()
+                .all(|point| (point.1 - *first).abs() <= f32::EPSILON)
+        });
+        let target = if let Some(duty) = constant_duty {
+            duty
+        } else {
+            let Some(sensor_id) = &record.sensor_id else {
+                self.apply_failsafe(key, curve_target, failsafe_duty).await;
+                return FanCurveStatus::NoSensor;
+            };
+            let Some(sensor) = sensors.get(sensor_id) else {
+                log::debug!("[FanCurve] Sensor not found: {sensor_id}");
+                self.apply_failsafe(key, curve_target, failsafe_duty).await;
+                return FanCurveStatus::NoSensor;
+            };
+            if sensor.sensor_type != halod_shared::types::SensorType::Temperature {
+                log::warn!("[FanCurve] Sensor {sensor_id} is not a temperature sensor");
+                self.apply_failsafe(key, curve_target, failsafe_duty).await;
+                return FanCurveStatus::NoSensor;
+            }
+            if !sensor.value.is_finite() {
+                log::warn!("[FanCurve] Sensor {sensor_id} returned a non-finite temperature");
+                self.apply_failsafe(key, curve_target, failsafe_duty).await;
+                return FanCurveStatus::NoSensor;
+            }
+            let temp = self.update_control_temp(key, sensor.value as f32);
+            interpolate(&record.points, temp)
         };
-
-        let Some(sensor) = sensors.get(sensor_id) else {
-            log::debug!("[FanCurve] Sensor not found: {sensor_id}");
-            self.apply_failsafe(key, curve_target, failsafe_duty).await;
-            return FanCurveStatus::NoSensor;
-        };
-        if sensor.sensor_type != halod_shared::types::SensorType::Temperature {
-            log::warn!("[FanCurve] Sensor {sensor_id} is not a temperature sensor");
-            self.apply_failsafe(key, curve_target, failsafe_duty).await;
-            return FanCurveStatus::NoSensor;
-        }
-        if !sensor.value.is_finite() {
-            log::warn!("[FanCurve] Sensor {sensor_id} returned a non-finite temperature");
-            self.apply_failsafe(key, curve_target, failsafe_duty).await;
-            return FanCurveStatus::NoSensor;
-        }
-        let temp = self.update_control_temp(key, sensor.value as f32);
-        let target = interpolate(&record.points, temp);
         let fan_device = self
             .app_state
             .find_device_by_id(&curve_target.device_id)
@@ -346,6 +357,13 @@ impl FanCurveEngine {
                     );
                     return FanCurveStatus::WriteError(e.to_string());
                 }
+                crate::domain::cooling::usecases::runtime::duty_applied(
+                    &self.app_state,
+                    &curve_target.device_id,
+                    &curve_target.channel_id,
+                    duty,
+                )
+                .await;
             }
             return self
                 .check_stall_channel(key, device, &curve_target.channel_id, target)
@@ -444,6 +462,13 @@ impl FanCurveEngine {
             match apply_duty(device, &target.channel_id, duty).await {
                 Ok(()) => {
                     self.clear_failsafe_error(key);
+                    crate::domain::cooling::usecases::runtime::duty_applied(
+                        &self.app_state,
+                        &target.device_id,
+                        &target.channel_id,
+                        duty,
+                    )
+                    .await;
                 }
                 Err(e) => {
                     if self.mark_failsafe_error(key) {
@@ -935,6 +960,20 @@ mod tests {
             statuses[&curve_key("fan_0", "default")],
             FanCurveStatus::NoSensor
         );
+    }
+
+    #[tokio::test]
+    async fn constant_duty_curve_does_not_need_a_sensor() {
+        let record = FanCurveRecord {
+            sensor_id: Some("disabled_hwmon_sensor".to_string()),
+            points: vec![(0.0, 100.0), (100.0, 100.0)],
+        };
+        let fan = MockFan::new_with_curve("fan_0", record);
+        let app = make_app(fan.clone(), None);
+
+        FanCurveEngine::new(app).tick(75).await;
+
+        assert_eq!(fan.last_duty(), 100);
     }
 
     #[tokio::test]

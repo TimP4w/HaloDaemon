@@ -268,13 +268,30 @@ struct Record {
     stale_task: Option<tokio::task::AbortHandle>,
 }
 
-#[derive(Default)]
 struct Inner {
     records: HashMap<String, Record>,
     state_records: HashMap<String, StateRecord>,
     events: VecDeque<BusEvent>,
     revision: u64,
     next_event_id: u64,
+    event_session_id: u64,
+}
+
+impl Default for Inner {
+    fn default() -> Self {
+        let now = std::time::SystemTime::now()
+            .duration_since(std::time::UNIX_EPOCH)
+            .unwrap_or_default()
+            .as_nanos() as u64;
+        Self {
+            records: HashMap::new(),
+            state_records: HashMap::new(),
+            events: VecDeque::new(),
+            revision: 0,
+            next_event_id: 0,
+            event_session_id: now ^ u64::from(std::process::id()),
+        }
+    }
 }
 
 struct StateRecord {
@@ -407,6 +424,7 @@ impl DataBus {
     pub fn replay_events(&self, last_event_id: Option<u64>) -> BusEventReplay {
         let inner = self.inner.lock().unwrap_or_else(|error| error.into_inner());
         BusEventReplay {
+            session_id: inner.event_session_id,
             oldest_available_id: inner.events.front().map(|event| event.id),
             events: inner
                 .events

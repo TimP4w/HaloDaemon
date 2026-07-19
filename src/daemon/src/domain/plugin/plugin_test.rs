@@ -686,7 +686,7 @@ fn validate_lcd_widgets(runtime: &tokio::runtime::Handle, manifest: &PluginManif
         ),
     );
     let font = ab_glyph::FontArc::try_from_slice(include_bytes!(
-        "../../../assets/fonts/NotoSans-Regular.ttf"
+        "../../../../assets/fonts/NotoSans-Regular.ttf"
     ))
     .expect("bundled test font is valid");
     for widget in &manifest.widgets {
@@ -1338,30 +1338,34 @@ fn open_device(
                 .map(|usb| usb as Arc<dyn UsbCollection>),
         },
     };
-    let device = Arc::new(LuaDevice::new(LuaDeviceParts {
-        id: "plugin-test".to_owned(),
-        manifest,
-        spec: Some(spec),
-        notify: std::sync::Weak::new(),
-        runtime: Some(Arc::new(std::sync::Mutex::new(
-            super::engine::device::RuntimeState::OpeningTransport,
-        ))),
-        worker: LuaDeviceWorker::Spawn(Box::new(LuaDeviceSpawnParts {
-            dev_match,
-            transport,
-            handle: handle.clone(),
-            // The harness grants every declared permission (so gated transports
-            // open), uses no config, and has no `AppState` to notify.
-            granted: manifest.permissions.clone(),
-            config: std::collections::HashMap::new(),
-            data: super::engine::data_api::DataRuntime::new(
-                data_bus,
-                manifest.plugin_id.clone(),
-                &manifest.provides,
-                manifest.consumes.clone(),
-            ),
-        })),
-    }));
+    let device = Arc::new_cyclic(|weak| {
+        let mut device = LuaDevice::new(LuaDeviceParts {
+            id: "plugin-test".to_owned(),
+            manifest,
+            spec: Some(spec),
+            notify: std::sync::Weak::new(),
+            runtime: Some(Arc::new(std::sync::Mutex::new(
+                super::engine::device::RuntimeState::OpeningTransport,
+            ))),
+            worker: LuaDeviceWorker::Spawn(Box::new(LuaDeviceSpawnParts {
+                dev_match,
+                transport,
+                handle: handle.clone(),
+                // The harness grants every declared permission (so gated transports
+                // open), uses no config, and has no `AppState` to notify.
+                granted: manifest.permissions.clone(),
+                config: std::collections::HashMap::new(),
+                data: super::engine::data_api::DataRuntime::new(
+                    data_bus,
+                    manifest.plugin_id.clone(),
+                    &manifest.provides,
+                    manifest.consumes.clone(),
+                ),
+            })),
+        });
+        device.set_self_ref(weak.clone());
+        device
+    });
 
     let dev_table = lua.create_table().anyhow()?;
 
@@ -1702,6 +1706,23 @@ fn open_device(
                 lua.create_function(move |_, (_self, state): (Table, Table)| {
                     let rgb_state = table_to_rgb_state(&state).map_err(mlua_err)?;
                     handle.block_on(device.apply(rgb_state)).map_err(mlua_err)
+                })
+                .anyhow()?,
+            )
+            .anyhow()?;
+    }
+
+    {
+        let device = device.clone();
+        dev_table
+            .set(
+                "cached_cooling",
+                lua.create_function(move |lua, _self: Table| {
+                    lua.to_value(
+                        &crate::infrastructure::drivers::CoolingCapability::cached_cooling_status(
+                            &*device,
+                        ),
+                    )
                 })
                 .anyhow()?,
             )

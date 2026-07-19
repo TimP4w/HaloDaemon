@@ -33,6 +33,7 @@ use crate::infrastructure::drivers::{
 };
 
 use super::chain_leaf::ChainLeaf;
+use super::cooling_channel_leaf::CoolingChannelLeaf;
 use super::manifest::{
     topology_from, AccessoryManifest, ActionDef, BooleanDef, ChoiceDef, DeviceSpec, PluginManifest,
     RangeDef,
@@ -231,37 +232,66 @@ impl StatusPollCaps {
 async fn sample_status(
     worker: &PluginHandle,
     caps: StatusPollCaps,
+    cooling_channels: &OnceLock<Vec<CoolingChannel>>,
+    cooling_cache: &Mutex<HashMap<String, CoolingChannel>>,
     sensor_cache: &Mutex<Vec<Sensor>>,
     boolean_cache: &Mutex<Vec<Boolean>>,
     battery_cache: &Mutex<Vec<Battery>>,
     connection_cache: &Mutex<Option<ConnectionStatus>>,
     eq_cache: &Mutex<Option<Equalizer>>,
-) {
+) -> bool {
+    let mut changed = false;
+    if caps.cooling {
+        if let Some(channels) = cooling_channels.get() {
+            let mut observed = HashMap::with_capacity(channels.len());
+            for channel in channels {
+                if let Ok(status) = worker.cooling_status(&channel.id).await {
+                    observed.insert(channel.id.clone(), status);
+                }
+            }
+            if !observed.is_empty() {
+                changed |= replace_if_changed(cooling_cache, observed);
+            }
+        }
+    }
     if caps.sensor {
         if let Ok(sensors) = worker.get_sensors().await {
-            *sensor_cache.lock_recover() = sensors;
+            changed |= replace_if_changed(sensor_cache, sensors);
         }
     }
     if caps.boolean {
         if let Ok(booleans) = worker.boolean_get().await {
-            *boolean_cache.lock_recover() = booleans;
+            changed |= replace_if_changed(boolean_cache, booleans);
         }
     }
     if caps.battery {
         if let Ok(batteries) = worker.battery_get().await {
-            *battery_cache.lock_recover() = batteries;
+            changed |= replace_if_changed(battery_cache, batteries);
         }
     }
     if caps.connection {
         if let Ok(connection) = worker.connection_get().await {
-            *connection_cache.lock_recover() = connection;
+            changed |= replace_if_changed(connection_cache, connection);
         }
     }
     if caps.equalizer {
         if let Ok(equalizer) = worker.equalizer_get().await {
-            *eq_cache.lock_recover() = Some(equalizer);
+            changed |= replace_if_changed(eq_cache, Some(equalizer));
         }
     }
+    changed
+}
+
+fn replace_if_changed<T: serde::Serialize>(cache: &Mutex<T>, next: T) -> bool {
+    let mut current = cache.lock_recover();
+    let changed = match (serde_json::to_value(&*current), serde_json::to_value(&next)) {
+        (Ok(current), Ok(next)) => current != next,
+        _ => true,
+    };
+    if changed {
+        *current = next;
+    }
+    changed
 }
 
 #[cfg(test)]
@@ -280,9 +310,9 @@ mod status_poll_tests {
 #[derive(Default)]
 struct Controls {
     choices: Vec<ChoiceDef>,
-    choice_cache: ChoiceStateCache,
+    choice_cache: Arc<ChoiceStateCache>,
     ranges: Vec<RangeDef>,
-    range_cache: RangeStateCache,
+    range_cache: Arc<RangeStateCache>,
     /// Boolean values are read live from `get_booleans`; the cache only backs
     /// save/restore of the last-known write.
     booleans: Vec<BooleanDef>,
@@ -345,7 +375,7 @@ impl Controls {
             start_label: r.start_label.clone(),
             end_label: r.end_label.clone(),
             display: r.display.clone(),
-            visible_when: None,
+            visible_when: r.visible_when.clone(),
         })
     }
 
@@ -479,14 +509,14 @@ pub struct LuaDevice {
     /// Capability sections the manifest declared, in advertised order. Drives
     /// `capabilities()` (chain also implies `Controller`; integration adds one).
     allowed_caps: Vec<Cap>,
-    caps: RwLock<Vec<Cap>>,
+    caps: Arc<RwLock<Vec<Cap>>>,
 
     dpi_state: Mutex<DpiState>,
     dpi_config: Mutex<DpiConfig>,
 
     /// Declared choice/range/boolean/action controls + their value caches.
     controls: Controls,
-    dynamic_controls: OnceLock<Controls>,
+    dynamic_controls: Arc<OnceLock<Controls>>,
 
     /// Last status samples. Full IPC serialization reads these caches instead
     /// of queueing callbacks on the worker used by interactive commands.
@@ -494,6 +524,7 @@ pub struct LuaDevice {
     boolean_cache: Arc<Mutex<Vec<Boolean>>>,
     battery_cache: Arc<Mutex<Vec<Battery>>>,
     connection_cache: Arc<Mutex<Option<ConnectionStatus>>>,
+    cooling_cache: Arc<Mutex<HashMap<String, CoolingChannel>>>,
 
     key_remap: RwLock<KeyRemapDescriptor>,
     /// Host-cached mappings that differ from `ButtonAction::Native`.
@@ -517,7 +548,8 @@ pub struct LuaDevice {
     dynamic_rgb_iso_descriptor: OnceLock<LightingDescriptor>,
     rgb_slot: LightingStateSlot,
     cooling_slot: CoolingStateSlot,
-    cooling_channels: OnceLock<Vec<CoolingChannel>>,
+    cooling_channels: Arc<OnceLock<Vec<CoolingChannel>>>,
+    cooling_as_devices: AtomicBool,
 
     /// Last sensor telemetry sampled by the status poll.
     sensor_cache: Arc<Mutex<Vec<Sensor>>>,
@@ -843,14 +875,17 @@ impl LuaDevice {
             && !(manifest.plugin_type == PluginKind::Integration && spec.is_none())
         {
             dev.poll_paused.store(true, Ordering::Relaxed);
-            let interval = Duration::from_secs(1);
+            let interval = Duration::from_millis(manifest.poll_interval_ms);
             let paused = dev.poll_paused.clone();
-            let poll_caps = StatusPollCaps::from_caps(&dev.caps.read().unwrap());
+            let poll_caps = Arc::clone(&dev.caps);
             let sensor_cache = dev.sensor_cache.clone();
             let boolean_cache = dev.boolean_cache.clone();
             let battery_cache = dev.battery_cache.clone();
             let connection_cache = dev.connection_cache.clone();
             let eq_cache = dev.eq_cache.clone();
+            let dynamic_controls = Arc::clone(&dev.dynamic_controls);
+            let cooling_cache = Arc::clone(&dev.cooling_cache);
+            let cooling_channels = Arc::clone(&dev.cooling_channels);
             let closed = dev.closed.clone();
             let unrecoverable = dev.unrecoverable.clone();
             let runtime = dev.runtime.clone();
@@ -901,8 +936,29 @@ impl LuaDevice {
                     if paused.load(Ordering::Relaxed) {
                         continue;
                     }
+                    let mut observed_changed = false;
                     match worker.poll().await {
                         Ok(events) => {
+                            if let Some(controls) = dynamic_controls.get() {
+                                for (key, value) in &events.ranges {
+                                    observed_changed |= controls.range_cache.record(key, *value);
+                                }
+                                for (key, selected) in &events.choices {
+                                    observed_changed |=
+                                        controls.choice_cache.record(key, *selected);
+                                }
+                            }
+                            if !events.cooling.is_empty() {
+                                observed_changed |= replace_if_changed(
+                                    &cooling_cache,
+                                    events
+                                        .cooling
+                                        .iter()
+                                        .cloned()
+                                        .map(|channel| (channel.id.clone(), channel))
+                                        .collect(),
+                                );
+                            }
                             let recovered = consecutive_failures >= POLL_FAILURE_DEGRADE_THRESHOLD;
                             consecutive_failures = 0;
                             if recovered {
@@ -926,15 +982,7 @@ impl LuaDevice {
                                     .await;
                                 }
                             }
-                            if events.state_changed {
-                                if let Some(app) = poll_notify.upgrade() {
-                                    crate::domain::plugin::usecases::runtime::device_changed(
-                                        &app,
-                                        &poll_device_id,
-                                    )
-                                    .await;
-                                }
-                            }
+                            observed_changed |= events.state_changed;
                             if !events.button_events.pressed.is_empty()
                                 || !events.button_events.released.is_empty()
                             {
@@ -998,9 +1046,15 @@ impl LuaDevice {
                             continue;
                         }
                     }
-                    sample_status(
+                    let current_poll_caps = {
+                        let caps = poll_caps.read().unwrap();
+                        StatusPollCaps::from_caps(&caps)
+                    };
+                    observed_changed |= sample_status(
                         &worker,
-                        poll_caps,
+                        current_poll_caps,
+                        &cooling_channels,
+                        &cooling_cache,
                         &sensor_cache,
                         &boolean_cache,
                         &battery_cache,
@@ -1008,6 +1062,15 @@ impl LuaDevice {
                         &eq_cache,
                     )
                     .await;
+                    if observed_changed {
+                        if let Some(app) = poll_notify.upgrade() {
+                            crate::domain::plugin::usecases::runtime::device_changed(
+                                &app,
+                                &poll_device_id,
+                            )
+                            .await;
+                        }
+                    }
                 }
             }));
         }
@@ -1016,7 +1079,7 @@ impl LuaDevice {
         }
         if receiver_root {
             dev.caps
-                .get_mut()
+                .write()
                 .unwrap()
                 .retain(|cap| matches!(cap, Cap::Pairing));
         }
@@ -1025,7 +1088,7 @@ impl LuaDevice {
             // children own the individual PWM channels; retaining `Cooling`
             // here makes the controller itself appear in the Cooling UI.
             dev.caps
-                .get_mut()
+                .write()
                 .unwrap()
                 .retain(|cap| !matches!(cap, Cap::Cooling));
         }
@@ -1067,7 +1130,7 @@ impl LuaDevice {
             root_manifest: None,
             runtime: None,
             allowed_caps: declared_caps(manifest),
-            caps: RwLock::new(declared_caps(manifest)),
+            caps: Arc::new(RwLock::new(declared_caps(manifest))),
             lcd_descriptor: OnceLock::new(),
             lcd_slot: LcdStateSlot::default(),
             lcd_needs_rgb_restore: AtomicBool::new(false),
@@ -1086,11 +1149,12 @@ impl LuaDevice {
             // Canonical package controls are runtime descriptors returned by
             // initialize. Keep the pre-initialize surface empty.
             controls: Controls::default(),
-            dynamic_controls: OnceLock::new(),
+            dynamic_controls: Arc::new(OnceLock::new()),
             eq_cache: Arc::new(Mutex::new(None)),
             boolean_cache: Arc::new(Mutex::new(Vec::new())),
             battery_cache: Arc::new(Mutex::new(Vec::new())),
             connection_cache: Arc::new(Mutex::new(None)),
+            cooling_cache: Arc::new(Mutex::new(HashMap::new())),
             key_remap: RwLock::new(KeyRemapDescriptor::default()),
             key_remap_mappings: Mutex::new(HashMap::new()),
             keyboard_layout: KeyboardLayoutSlot::default(),
@@ -1103,7 +1167,8 @@ impl LuaDevice {
             dynamic_rgb_iso_descriptor: OnceLock::new(),
             rgb_slot: LightingStateSlot::default(),
             cooling_slot: CoolingStateSlot::default(),
-            cooling_channels: OnceLock::new(),
+            cooling_channels: Arc::new(OnceLock::new()),
+            cooling_as_devices: AtomicBool::new(false),
             sensor_cache: Arc::new(Mutex::new(Vec::new())),
             poll_task: None,
             poll_paused: Arc::new(AtomicBool::new(false)),
@@ -1209,6 +1274,8 @@ impl LuaDevice {
         sample_status(
             worker,
             caps,
+            &self.cooling_channels,
+            &self.cooling_cache,
             &self.sensor_cache,
             &self.boolean_cache,
             &self.battery_cache,
@@ -1220,7 +1287,25 @@ impl LuaDevice {
 
     #[cfg(feature = "plugin-test")]
     pub(in crate::domain::plugin) async fn poll_once(&self) -> Result<()> {
-        self.worker()?.poll().await?;
+        let outcome = self.worker()?.poll().await?;
+        if let Some(controls) = self.dynamic_controls.get() {
+            for (key, value) in outcome.ranges {
+                controls.range_cache.record(&key, value);
+            }
+            for (key, selected) in outcome.choices {
+                controls.choice_cache.record(&key, selected);
+            }
+        }
+        if !outcome.cooling.is_empty() {
+            replace_if_changed(
+                &self.cooling_cache,
+                outcome
+                    .cooling
+                    .into_iter()
+                    .map(|channel| (channel.id.clone(), channel))
+                    .collect(),
+            );
+        }
         self.refresh_status_cache().await;
         Ok(())
     }
@@ -1664,6 +1749,8 @@ impl Device for LuaDevice {
             *self.dpi_state.lock_recover() = dpi_state_from_runtime(&dpi);
         }
         if let Some(cooling) = outcome.cooling {
+            self.cooling_as_devices
+                .store(cooling.as_devices, Ordering::Release);
             let _ = self.cooling_channels.set(
                 cooling
                     .channels
@@ -1817,7 +1904,10 @@ impl Device for LuaDevice {
         for cap in &active {
             match cap {
                 Cap::Lighting => caps.push(CapabilityRef::Lighting(self)),
-                Cap::Cooling => caps.push(CapabilityRef::Cooling(self)),
+                Cap::Cooling if !self.cooling_as_devices.load(Ordering::Acquire) => {
+                    caps.push(CapabilityRef::Cooling(self));
+                }
+                Cap::Cooling => {}
                 Cap::Sensor => caps.push(CapabilityRef::Sensor(self)),
                 Cap::Lcd => caps.push(CapabilityRef::Lcd(self)),
                 Cap::Dpi => caps.push(CapabilityRef::Dpi(self)),
@@ -1838,6 +1928,13 @@ impl Device for LuaDevice {
             }
         }
         if self.plugin_type == PluginKind::Integration || self.dynamic_children {
+            caps.push(CapabilityRef::Controller(self));
+        }
+        if self.cooling_as_devices.load(Ordering::Acquire)
+            && !caps
+                .iter()
+                .any(|cap| matches!(cap, CapabilityRef::Controller(_)))
+        {
             caps.push(CapabilityRef::Controller(self));
         }
         caps
@@ -1932,10 +2029,20 @@ fn apply_per_led_transforms(
 #[async_trait]
 impl CoolingCapability for LuaDevice {
     fn cooling_channels(&self) -> Vec<CoolingChannel> {
-        self.cooling_channels.get().cloned().unwrap_or_default()
+        let mut channels = self.cooling_channels.get().cloned().unwrap_or_default();
+        let observed = self.cooling_cache.lock_recover();
+        for channel in &mut channels {
+            if let Some(current) = observed.get(&channel.id) {
+                *channel = current.clone();
+            }
+        }
+        channels
     }
 
     async fn get_cooling_status(&self, channel_id: &str) -> Result<CoolingChannel> {
+        if let Some(channel) = self.cooling_cache.lock_recover().get(channel_id).cloned() {
+            return Ok(channel);
+        }
         self.track(self.worker()?.cooling_status(channel_id).await)
             .await
     }
@@ -1947,6 +2054,14 @@ impl CoolingCapability for LuaDevice {
 
     fn cooling_state(&self) -> &CoolingStateSlot {
         &self.cooling_slot
+    }
+
+    fn cached_cooling_status(&self) -> Vec<CoolingChannel> {
+        self.cooling_cache
+            .lock_recover()
+            .values()
+            .cloned()
+            .collect()
     }
 }
 
@@ -1970,7 +2085,9 @@ impl Controller for LuaDevice {
         if self.plugin_type == PluginKind::Integration || self.dynamic_children {
             return self.discover_controllers().await;
         }
-        self.discover_chain_accessories().await
+        let mut children = self.discover_cooling_channel_devices().await;
+        children.extend(self.discover_chain_accessories().await);
+        children
     }
 
     /// Diff the live server's controllers against `existing`: build only new
@@ -2040,6 +2157,31 @@ fn child_device_id(root: &str, controller: &DetectedController) -> String {
 }
 
 impl LuaDevice {
+    async fn discover_cooling_channel_devices(&self) -> Vec<Arc<dyn Device>> {
+        if !self.cooling_as_devices.load(Ordering::Acquire) {
+            return Vec::new();
+        }
+        let Some(parent) = self.self_ref.upgrade() else {
+            return Vec::new();
+        };
+        let hub: Arc<dyn CoolingHub> = parent;
+        self.cooling_channels
+            .get()
+            .into_iter()
+            .flatten()
+            .cloned()
+            .map(|channel| {
+                Arc::new(CoolingChannelLeaf::new(
+                    format!("{}_cooling_{}", self.id, channel.id),
+                    self.id.clone(),
+                    self.vendor.clone(),
+                    channel,
+                    hub.clone(),
+                )) as Arc<dyn Device>
+            })
+            .collect()
+    }
+
     async fn discover_chain_accessories(&self) -> Vec<Arc<dyn Device>> {
         let (Some(worker), Some(host)) = (&self.worker, self.chain_host.get()) else {
             return Vec::new();
@@ -2081,6 +2223,7 @@ impl LuaDevice {
             let channel_str = d.channel.to_string();
             let leaf: Arc<dyn Device> = Arc::new(ChainLeaf::new(
                 format!("{}_acc_{}_{}", self.id, channel_str, d.accessory),
+                self.id.clone(),
                 self.vendor.clone(),
                 channel_str.clone(),
                 d.channel,
@@ -2774,11 +2917,17 @@ impl LightingDivisionAdapter for LuaDevice {
 
 #[async_trait]
 impl CoolingHub for LuaDevice {
-    async fn get_cooling_status(&self, channel: u8) -> Result<CoolingChannel> {
-        self.worker()?.hub_cooling_status(channel).await
+    async fn get_cooling_status(&self, channel: &str) -> Result<CoolingChannel> {
+        if let Some(status) = self.cooling_cache.lock_recover().get(channel).cloned() {
+            return Ok(status);
+        }
+        self.worker()?.cooling_status(channel).await
     }
-    async fn set_cooling_duty(&self, channel: u8, duty: u8) -> Result<()> {
-        self.worker()?.hub_set_cooling_duty(channel, duty).await
+    async fn set_cooling_duty(&self, channel: &str, duty: u8) -> Result<()> {
+        self.worker()?.cooling_set_duty(channel, duty).await
+    }
+    fn cached_cooling_status(&self, channel: &str) -> Option<CoolingChannel> {
+        self.cooling_cache.lock_recover().get(channel).cloned()
     }
 }
 
@@ -2982,7 +3131,7 @@ mod tests {
     #[test]
     fn runtime_controls_validate_cache_and_render_wire_state() {
         let runtime: InitControls = serde_yaml::from_str(
-            "choices:\n  - key: mode\n    label: Mode\n    options:\n      - { id: a, label: A }\n      - { id: b, label: B }\n    default: 0\nranges:\n  - key: hz\n    label: Hz\n    min: 100\n    max: 1000\n    default: 500\nbooleans:\n  - key: snap\n    label: Angle Snap\n    category: Mouse\nactions:\n  - key: calibrate\n    label: Calibrate\n",
+            "choices:\n  - key: mode\n    label: Mode\n    options:\n      - { id: a, label: A }\n      - { id: b, label: B }\n    default: 0\nranges:\n  - key: hz\n    label: Hz\n    min: 100\n    max: 1000\n    default: 500\n    visible_when: { key: mode, equals: [1] }\nbooleans:\n  - key: snap\n    label: Angle Snap\n    category: Mouse\nactions:\n  - key: calibrate\n    label: Calibrate\n",
         )
         .unwrap();
         let controls = Controls::from_runtime(runtime);
@@ -3000,6 +3149,8 @@ mod tests {
             panic!("range capability missing");
         };
         assert_eq!(ranges[0].value, 1000);
+        assert_eq!(ranges[0].visible_when.as_ref().unwrap().key, "mode");
+        assert_eq!(ranges[0].visible_when.as_ref().unwrap().equals, vec![1]);
 
         let mut booleans = vec![Boolean {
             key: "snap".into(),

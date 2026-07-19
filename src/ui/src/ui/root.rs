@@ -62,13 +62,15 @@ impl App {
             self.accept_state(state);
         }
         let state = std::sync::Arc::clone(&self.state_cache);
-        let onboarding_active =
-            crate::ui::screens::plugins::onboarding_pending(&state.gui.seen_tours)
-                && !self.onboarding_completed;
+        let connected = *self.ui.connected.borrow();
+        let onboarding_active = onboarding_is_active(
+            state.gui_present,
+            crate::ui::screens::plugins::onboarding_pending(&state.gui.seen_tours),
+            self.onboarding_completed,
+        );
         self.tray.sync(ctx, &state);
         // Close handling (hide-to-tray vs quit) is decided by `close_action` and
         // applied by each backend after `draw` — not here, so it isn't run twice.
-        let connected = *self.ui.connected.borrow();
         let debug = self.ui.debug.borrow().clone();
         let udev_rules = self.ui.udev_rules.borrow().clone();
         if let Some(imgs) = crate::runtime::ipc::take_changed(&mut self.ui.lcd_images, "lcd_images")
@@ -162,6 +164,12 @@ impl App {
             .lock()
             .map(|mut q| q.drain(..).collect())
             .unwrap_or_default();
+        // Native delivery belongs to the same authoritative ingestion point as
+        // in-app toasts. Doing it in the IPC reader made delivery depend on a
+        // background transport thread and obscured whether an event had
+        // actually reached the UI. This path also runs while the Wayland
+        // window is destroyed and the application is resident in the tray.
+        show_native_notifications(&incoming);
         if onboarding_active {
             incoming.retain(|notification| {
                 !matches!(
@@ -327,7 +335,10 @@ impl App {
             &self.tour,
             &state.gui.seen_tours,
         );
-        if !onboarding_active {
+        if state.gui_present {
+            domain::tour::reconcile_seen(&mut self.tour, &state.gui.seen_tours);
+        }
+        if state.gui_present && !onboarding_active {
             if let Some(key) = tour_key {
                 domain::tour::maybe_start(&mut self.tour, &state.gui.seen_tours, key);
             }
@@ -592,7 +603,7 @@ impl App {
             &self.cmd,
             tour_key,
             connected,
-            depcheck_visible || onboarding_shown,
+            depcheck_visible || onboarding_shown || !state.gui_present,
         );
 
         // Toasts overlay everything, including the daemon-down scrim.
@@ -623,7 +634,7 @@ impl App {
     }
 }
 
-fn show_native_notifications(notifications: &[halod_shared::types::Notification]) {
+pub(crate) fn show_native_notifications(notifications: &[halod_shared::types::Notification]) {
     for notification in notifications {
         if !notification.show_native {
             continue;
@@ -662,6 +673,23 @@ fn tour_key_for(
         Page::EffectDesigner => Some(domain::tour::TourKey::EffectDesigner),
         Page::Plugins => Some(domain::tour::TourKey::PagePlugins),
         Page::Integrations => Some(domain::tour::TourKey::PageIntegrations),
+    }
+}
+
+fn onboarding_is_active(gui_present: bool, pending: bool, completed: bool) -> bool {
+    gui_present && pending && !completed
+}
+
+#[cfg(test)]
+mod hydration_tests {
+    use super::onboarding_is_active;
+
+    #[test]
+    fn onboarding_waits_for_authoritative_snapshot() {
+        assert!(!onboarding_is_active(false, true, false));
+        assert!(onboarding_is_active(true, true, false));
+        assert!(!onboarding_is_active(true, false, false));
+        assert!(!onboarding_is_active(true, true, true));
     }
 }
 

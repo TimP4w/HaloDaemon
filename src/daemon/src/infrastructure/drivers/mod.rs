@@ -172,6 +172,12 @@ pub trait Device: Send + Sync {
         None
     }
 
+    /// Device whose observed state also drives this projected device. Used to
+    /// publish parent-owned channel children in the same bus transaction.
+    fn state_source_id(&self) -> Option<&str> {
+        None
+    }
+
     async fn wire_connection_type(&self) -> Option<ConnectionType> {
         None
     }

@@ -20,6 +20,10 @@ pub async fn set_device_visibility(
 
     // Capture the previous state before mutating anything.
     let prev_state = device.as_ref().map(|d| d.active_state());
+    // Dynamic integration children (hwmon sensors/fans, OpenRGB devices, …)
+    // can only be reconstructed by their owning root. Remember the owner
+    // before close/removal so enabling can reconcile the whole subtree.
+    let owning_plugin_id = device.as_ref().and_then(|device| device.owning_plugin_id());
 
     if let Some(device) = &device {
         // Gate engines and command lookups before awaiting close, so no new
@@ -60,6 +64,14 @@ pub async fn set_device_visibility(
     let enabling_from_disabled =
         new_state == VisibilityState::Visible && prev_state == Some(VisibilityState::Disabled);
     if enabling_from_disabled {
+        if let Some(plugin_id) = owning_plugin_id {
+            crate::domain::plugin::usecases::plugins::reconcile_plugins(
+                &app,
+                std::slice::from_ref(&plugin_id),
+            )
+            .await;
+            return Ok(());
+        }
         app.device_registry
             .write()
             .await

@@ -383,6 +383,7 @@ fn is_registered_child(id: &str, root_id: &str) -> bool {
         .is_some_and(|marker| {
             marker.starts_with("ctrl_")
                 || marker.starts_with("acc_")
+                || marker.starts_with("cooling_")
                 || marker.starts_with("chain_")
         })
 }
