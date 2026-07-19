@@ -232,7 +232,7 @@ impl CustomTemplate {
                     .iter()
                     .any(|key| key == "host.media.playback");
             if media_updates && self.media.is_none() {
-                self.media = Some(media::shared_with_bus(app.data_bus.clone()));
+                self.media = Some(media::shared_with_publisher(app.data_bus.clone()));
             }
             media_active |= media_updates;
             let (_, _, size) = widget_rect(widget.x, widget.y, widget.scale, ctx.width, ctx.height);

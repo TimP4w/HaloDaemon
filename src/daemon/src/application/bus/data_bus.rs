@@ -1157,6 +1157,39 @@ pub fn publish_environment(bus: &DataBus) {
     );
 }
 
+impl crate::infrastructure::media::MediaPublisher for DataBus {
+    fn publish_media(&self, info: &crate::infrastructure::media::MediaInfo) {
+        let mut value = BTreeMap::new();
+        value.insert("title".into(), DataValue::String(info.title.clone()));
+        value.insert("artist".into(), DataValue::String(info.artist.clone()));
+        value.insert(
+            "status".into(),
+            DataValue::String(
+                match info.status {
+                    crate::infrastructure::media::PlaybackStatus::Playing => "playing",
+                    crate::infrastructure::media::PlaybackStatus::Paused => "paused",
+                    crate::infrastructure::media::PlaybackStatus::Stopped => "stopped",
+                }
+                .into(),
+            ),
+        );
+        value.insert(
+            "art_available".into(),
+            DataValue::Bool(info.art.is_some()),
+        );
+        let _ = self.publish(
+            "host",
+            "host.media.playback",
+            DataValue::Map(value),
+            host_policy(Duration::from_secs(30)),
+        );
+    }
+
+    fn invalidate_media(&self) {
+        let _ = self.invalidate("host", "host.media.playback", "unavailable");
+    }
+}
+
 #[cfg(test)]
 mod tests {
     use super::*;

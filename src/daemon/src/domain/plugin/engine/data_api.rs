@@ -29,7 +29,7 @@ impl DataRuntime {
         let media = consumes
             .iter()
             .any(|key| key == "host.media.playback")
-            .then(|| crate::infrastructure::media::shared_with_bus(bus.clone()));
+            .then(|| crate::infrastructure::media::shared_with_publisher(bus.clone()));
         Self {
             bus,
             plugin_id,
