@@ -22,7 +22,7 @@ use tokio::sync::Mutex as TokioMutex;
 
 use halod_shared::types::{
     ColorOrder, DeviceCapability, LightingChannel, LightingDescriptor, LightingDivision,
-    LightingSegmentInfo, LightingStatus, RgbColor, ZoneTopology,
+    LightingSegmentInfo, RgbColor, ZoneTopology,
 };
 
 use super::lighting_segment::LightingSegmentDevice;
@@ -565,7 +565,9 @@ pub async fn children_to_wire(host: &LightingDivisionHost) -> Option<DeviceCapab
     Some(DeviceCapability::Children(wires))
 }
 
-/// Merge a host's divisible channels into the parent lighting capability.
+/// Merge a host's divisible channels into an existing parent lighting
+/// capability. A routing-only hub has no lighting surface of its own; its
+/// chain leaves advertise lighting instead.
 pub fn enrich_wire_capabilities(host: &LightingDivisionHost, caps: &mut Vec<DeviceCapability>) {
     let channels = host.lighting_channels();
     if channels.is_empty() {
@@ -587,18 +589,6 @@ pub fn enrich_wire_capabilities(host: &LightingDivisionHost, caps: &mut Vec<Devi
                 lighting.descriptor.channels.push(channel);
             }
         }
-    } else {
-        caps.insert(
-            0,
-            DeviceCapability::Lighting(LightingStatus {
-                descriptor: LightingDescriptor {
-                    channels: vec![],
-                    native_effects: vec![],
-                },
-                state: None,
-                channel_transforms: HashMap::new(),
-            }),
-        );
     }
 }
 
