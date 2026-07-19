@@ -241,20 +241,21 @@ pub async fn scan_usb_non_hid(app: Arc<crate::application::state::AppState>) {
 pub async fn discover_handle(
     app: &Arc<crate::application::state::AppState>,
     handle: DiscoveryHandle<'_>,
-) {
+) -> bool {
     let scoped = matches!(
         *app.discovery_scope.read().await,
         DiscoveryScope::PluginSet { .. }
     );
     if scoped && !app.handle_in_scope(&handle).await {
-        return;
+        return false;
     }
     if let Some(device) = app.registry.make_device(app, handle) {
-        crate::application::usecases::registry::registration::register_device_and_children(
+        return crate::application::usecases::registry::registration::register_device_and_children(
             app, device,
         )
         .await;
     }
+    false
 }
 
 use crate::application::state::AppState;
