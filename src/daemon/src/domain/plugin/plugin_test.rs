@@ -1469,6 +1469,16 @@ fn open_device(
         device.set_self_ref(weak.clone());
         device
     });
+    if manifest
+        .capabilities
+        .iter()
+        .any(|capability| capability == "lighting_division")
+    {
+        let adapter: Arc<dyn crate::domain::device::chain::LightingDivisionAdapter> =
+            device.clone();
+        let host = crate::domain::device::chain::LightingDivisionHost::new(adapter);
+        device.install_chain_host(host);
+    }
 
     let dev_table = lua.create_table().anyhow()?;
 
@@ -1738,6 +1748,8 @@ fn open_device(
                         item.set("id", controller.id())?;
                         item.set("name", controller.name())?;
                         item.set("device_type", lua.to_value(&controller.wire_device_type())?)?;
+                        item.set("has_cooling", controller.as_cooling().is_some())?;
+                        item.set("has_lighting", controller.as_lighting().is_some())?;
                         out.set(i + 1, item)?;
                     }
                     Ok(out)

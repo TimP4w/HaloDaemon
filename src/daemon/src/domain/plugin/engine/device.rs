@@ -13,10 +13,10 @@ use async_trait::async_trait;
 use halod_shared::keyboard::{KeyId, KeyVariant, KeyboardLayoutStatus, VisualKey};
 use halod_shared::types::{
     Action, Battery, Boolean, ButtonAction, ButtonDescriptor, ButtonMapping, CategoryLayout,
-    Choice, ConnectionStatus, CoolingChannel, DeviceCapability, DeviceType, DpiMode, DpiStatus,
-    Equalizer, KeyRemapStatus, KeyboardFormFactor, KeyboardLayout, LcdDescriptor, LightingChannel,
-    LightingDescriptor, LightingState, NativeEffect, Permission, PluginKind, Range, ScreenRotation,
-    ScreenShape, Sensor, WriteRateStatus,
+    Choice, ConnectionStatus, CoolingChannel, CoolingChannelKind, DeviceCapability, DeviceType,
+    DpiMode, DpiStatus, Equalizer, KeyRemapStatus, KeyboardFormFactor, KeyboardLayout,
+    LcdDescriptor, LightingChannel, LightingDescriptor, LightingState, NativeEffect, Permission,
+    PluginKind, Range, ScreenRotation, ScreenShape, Sensor, WriteRateStatus,
 };
 use halod_shared::zone_transform::build_permutation;
 
@@ -2118,7 +2118,37 @@ impl Controller for LuaDevice {
             return self.discover_controllers().await;
         }
         let mut children = self.discover_cooling_channel_devices().await;
-        children.extend(self.discover_chain_accessories().await);
+        let accessories = self.discover_chain_accessories().await;
+
+        // A fan-capable chain accessory is the physical fan represented by a
+        // cooling-only channel leaf, not another device beside it. Coalesce one
+        // cooling-only fan per combined RGB+fan accessory while preserving
+        // pumps and any unmatched/non-RGB fan channels.
+        let mut combined_fans = accessories
+            .iter()
+            .filter(|child| {
+                child.wire_device_type() == DeviceType::Fan
+                    && child.as_lighting().is_some()
+                    && child.as_cooling().is_some()
+            })
+            .count();
+        children.retain(|child| {
+            let cooling_only_fan = child.as_lighting().is_none()
+                && child.as_cooling().is_some_and(|cooling| {
+                    cooling
+                        .cooling_channels()
+                        .first()
+                        .is_some_and(|channel| channel.kind == CoolingChannelKind::Fan)
+                });
+            let redundant = combined_fans > 0
+                && child.wire_device_type() == DeviceType::Fan
+                && cooling_only_fan;
+            if redundant {
+                combined_fans -= 1;
+            }
+            !redundant
+        });
+        children.extend(accessories);
         children
     }
 
