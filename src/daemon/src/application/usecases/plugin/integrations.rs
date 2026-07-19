@@ -724,6 +724,83 @@ mod tests {
         app.registry.load_all(std::path::Path::new("/nonexistent"));
     }
 
+    #[tokio::test(flavor = "multi_thread", worker_threads = 1)]
+    async fn resolving_secure_config_does_not_block_the_async_runtime() {
+        struct BlockingSecrets {
+            entered: std::sync::mpsc::Sender<()>,
+            release: std::sync::Mutex<std::sync::mpsc::Receiver<()>>,
+        }
+
+        impl crate::infrastructure::secrets::SecretStore for BlockingSecrets {
+            fn set(&self, _plugin_id: &str, _key: &str, _plaintext: &str) -> Result<()> {
+                Ok(())
+            }
+
+            fn get(&self, _plugin_id: &str, _key: &str) -> Result<Option<String>> {
+                self.entered.send(()).unwrap();
+                self.release.lock().unwrap().recv().unwrap();
+                Ok(Some("secret".into()))
+            }
+
+            fn delete(&self, _plugin_id: &str, _key: &str) -> Result<()> {
+                Ok(())
+            }
+        }
+
+        let (entered_tx, entered_rx) = std::sync::mpsc::channel();
+        let (release_tx, release_rx) = std::sync::mpsc::channel();
+        let (entered_async_tx, entered_async_rx) = tokio::sync::oneshot::channel();
+        let (completed_tx, completed_rx) = std::sync::mpsc::channel();
+        let fallback_release = release_tx.clone();
+        let watchdog = std::thread::spawn(move || {
+            entered_rx
+                .recv_timeout(std::time::Duration::from_secs(1))
+                .unwrap();
+            let _ = entered_async_tx.send(());
+            if completed_rx
+                .recv_timeout(std::time::Duration::from_secs(1))
+                .is_err()
+            {
+                let _ = fallback_release.send(());
+            }
+        });
+
+        let app = Arc::new(
+            AppState::new(crate::config::Config::default()).with_secret_store(Arc::new(
+                BlockingSecrets {
+                    entered: entered_tx,
+                    release: std::sync::Mutex::new(release_rx),
+                },
+            )),
+        );
+        with_integration_config_test_plugin(&app, || async {
+            let started = std::time::Instant::now();
+            let task = tokio::spawn({
+                let app = app.clone();
+                async move {
+                    resolved_config(
+                        &app,
+                        "inttest",
+                        &[halod_shared::types::Permission::SecureStorage],
+                    )
+                    .await
+                }
+            });
+
+            entered_async_rx.await.unwrap();
+            let responsive_after = started.elapsed();
+            release_tx.send(()).unwrap();
+            completed_tx.send(()).unwrap();
+            task.await.unwrap().unwrap();
+            assert!(
+                responsive_after < std::time::Duration::from_millis(500),
+                "secret-store access blocked the sole async worker for {responsive_after:?}"
+            );
+        })
+        .await;
+        watchdog.join().unwrap();
+    }
+
     #[tokio::test]
     async fn set_integration_enabled_persists_the_policy() {
         crate::test_support::with_tmp_config(|app| async move {

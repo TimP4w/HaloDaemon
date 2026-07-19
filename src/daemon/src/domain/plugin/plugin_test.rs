@@ -2196,6 +2196,19 @@ fn table_to_rgb_state(state: &Table) -> Result<LightingState> {
 mod tests {
     use super::*;
 
+    #[tokio::test]
+    async fn recording_stream_injects_write_failures_without_recording_data() {
+        let stream =
+            RecordingStream::with_options(Vec::new(), true, Some("simulated write failure".into()));
+
+        assert!(Transport::write(&stream, &[1]).await.is_err());
+        assert!(HidTransport::send_feature_report(&stream, &[2])
+            .await
+            .is_err());
+        assert!(HidTransport::write_companion(&stream, &[3]).await.is_err());
+        assert!(stream.written.lock().unwrap().is_empty());
+    }
+
     fn write_fixture(dir: &Path, test_lua: &str) {
         std::fs::create_dir_all(dir).unwrap();
         std::fs::write(
