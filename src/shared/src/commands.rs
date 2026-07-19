@@ -533,7 +533,6 @@ pub enum DaemonCommand {
     // Misc
     ListRunningApps,
     GetDebugInfo,
-    RequestState,
     SetEngineConfig {
         engine: EngineKind,
         #[serde(default, skip_serializing_if = "Option::is_none")]

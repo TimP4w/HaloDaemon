@@ -1,6 +1,5 @@
 device:
   # keys.rs - Keys/Buttons tab
-  keys_host_mode_required: "Host mode is required. Remapping is applied while the daemon controls this device."
   keys_tab_buttons: Buttons
   keys_tab_keys: Keys
   keys_select_button_hint: Select a button to remap it

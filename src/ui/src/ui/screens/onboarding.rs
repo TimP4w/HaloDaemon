@@ -5,11 +5,12 @@
 
 use std::collections::HashMap;
 
+use crate::domain::topic_store::TopicStore;
 use egui::{RichText, Sense, Stroke, Vec2};
 use halod_shared::commands::DaemonCommand;
 use halod_shared::debug_info::DebugInfo;
 use halod_shared::types::{
-    AppState, PluginDownloadConsent, PluginInfo, PluginKind, PluginRecommendation, PluginSource,
+    PluginDownloadConsent, PluginInfo, PluginKind, PluginRecommendation, PluginSource,
 };
 
 use crate::runtime::ipc::{self, CommandTx};
@@ -49,7 +50,7 @@ pub enum Outcome {
     Finished,
 }
 
-fn plugins_on(st: &OnboardingUi, state: &AppState) -> bool {
+fn plugins_on(st: &OnboardingUi, state: &TopicStore) -> bool {
     st.plugin_downloads
         .unwrap_or(state.gui.plugin_downloads == PluginDownloadConsent::Allowed)
 }
@@ -141,7 +142,7 @@ const SCAN_LINES: &[&str] = &[
 
 pub fn show(
     ctx: &egui::Context,
-    state: &AppState,
+    state: &TopicStore,
     debug: Option<&DebugInfo>,
     cmd: &CommandTx,
     st: &mut OnboardingUi,
@@ -342,7 +343,7 @@ fn pref_card(ui: &mut egui::Ui, title: &str, desc: &str, control: impl FnOnce(&m
         });
 }
 
-fn step_prefs(ui: &mut egui::Ui, st: &mut OnboardingUi, state: &AppState, cmd: &CommandTx) {
+fn step_prefs(ui: &mut egui::Ui, st: &mut OnboardingUi, state: &TopicStore, cmd: &CommandTx) {
     step_shell(
         ui,
         &t!("onboarding.prefs_title"),
@@ -451,7 +452,7 @@ fn plugin_toggle_row(ui: &mut egui::Ui, plugin: &PluginInfo, on: bool) -> bool {
 fn step_plugins(
     ui: &mut egui::Ui,
     st: &mut OnboardingUi,
-    state: &AppState,
+    state: &TopicStore,
     cmd: &CommandTx,
     time: f64,
 ) {
@@ -543,7 +544,7 @@ fn step_plugins(
     );
 }
 
-fn step_done(ui: &mut egui::Ui, st: &OnboardingUi, state: &AppState, plugins: &[PluginInfo]) {
+fn step_done(ui: &mut egui::Ui, st: &OnboardingUi, state: &TopicStore, plugins: &[PluginInfo]) {
     // The completion composition is roughly 180 px tall including its wrapped
     // summary. Center it in the fixed onboarding body rather than aligning it
     // with the top-biased form pages.
@@ -577,7 +578,7 @@ fn footer(
     st: &mut OnboardingUi,
     active: usize,
     outcome: &mut Outcome,
-    state: &AppState,
+    state: &TopicStore,
     cmd: &CommandTx,
 ) {
     ui.add_space(theme::SPACE_3);
@@ -642,7 +643,7 @@ fn dots(ui: &mut egui::Ui, step: u8) {
 
 fn advance_primary(
     st: &mut OnboardingUi,
-    state: &AppState,
+    state: &TopicStore,
     cmd: &CommandTx,
     outcome: &mut Outcome,
 ) {
@@ -693,7 +694,7 @@ fn advance_primary(
 
 fn send_ui_config(
     cmd: &CommandTx,
-    state: &AppState,
+    state: &TopicStore,
     tray: Option<bool>,
     hide_controls: Option<bool>,
 ) {
@@ -733,7 +734,7 @@ mod tests {
     #[test]
     fn disabled_downloads_still_continue_to_bundled_plugin_scan() {
         let (cmd, mut rx) = tokio::sync::mpsc::unbounded_channel();
-        let mut state = AppState::default();
+        let mut state = TopicStore::default();
         state.gui.plugin_downloads = PluginDownloadConsent::Denied;
         let mut st = OnboardingUi {
             step: PREFS,
@@ -750,7 +751,7 @@ mod tests {
 
     #[test]
     fn onboarding_choice_overrides_stale_persisted_download_consent() {
-        let mut state = AppState::default();
+        let mut state = TopicStore::default();
         state.gui.plugin_downloads = PluginDownloadConsent::Allowed;
         let st = OnboardingUi {
             plugin_downloads: Some(false),
@@ -817,7 +818,7 @@ mod tests {
     #[test]
     fn plugin_selection_grants_authority_before_completion() {
         let (cmd, mut rx) = tokio::sync::mpsc::unbounded_channel();
-        let mut state = AppState::default();
+        let mut state = TopicStore::default();
         state.plugins.plugins = vec![plugin("a", false)];
         let mut st = OnboardingUi {
             step: PLUGINS,

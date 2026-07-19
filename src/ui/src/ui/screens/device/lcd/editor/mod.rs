@@ -16,6 +16,8 @@ mod stage;
 
 use std::collections::{HashMap, HashSet};
 
+#[cfg(test)]
+use crate::domain::topic_store::TopicStore;
 use egui::{Pos2, Rect, Vec2};
 use halod_shared::commands::DaemonCommand;
 use halod_shared::lcd_custom::{CustomTemplateDef, WIDGETS_JSON_PARAM};
@@ -327,7 +329,7 @@ mod tests {
     /// Minimal `TabCtx` for exercising the editor's daemon-facing state logic
     /// (`seed_if_needed`, `send_def`) without an egui frame.
     fn test_ctx<'a>(
-        state: &'a halod_shared::types::AppState,
+        state: &'a TopicStore,
         dev: &'a WireDevice,
         tx: &'a tokio::sync::mpsc::UnboundedSender<DaemonCommand>,
     ) -> TabCtx<'a> {
@@ -362,7 +364,7 @@ mod tests {
     fn seed_if_needed_populates_def_from_daemon_params_once() {
         let mut def = CustomTemplateDef::default();
         def.widgets.push(widget("w7", 0.2, 0.3));
-        let mut state = halod_shared::types::AppState::default();
+        let mut state = TopicStore::default();
         state
             .lcd
             .engine
@@ -378,7 +380,7 @@ mod tests {
         assert_eq!(st.lcd.editor.def, def);
 
         // A second snapshot must not re-seed (would drop edits made since).
-        let mut later = halod_shared::types::AppState::default();
+        let mut later = TopicStore::default();
         later.lcd.engine.device_template_params.insert(
             "lcd".to_string(),
             params_with(&CustomTemplateDef::default()),
@@ -395,7 +397,7 @@ mod tests {
     fn seed_if_needed_waits_until_the_daemon_reports_params() {
         // No params for this device yet (no template active) → stay unseeded so
         // a snapshot arriving later still seeds instead of the default winning.
-        let state = halod_shared::types::AppState::default();
+        let state = TopicStore::default();
         let (tx, _rx) = tokio::sync::mpsc::unbounded_channel();
         let dev = WireDevice::default();
         let ctx = test_ctx(&state, &dev, &tx);
@@ -419,7 +421,7 @@ mod tests {
         st.lcd.editor.def.widgets.clear();
         st.lcd.editor.def.widgets.push(widget("w1", 0.5, 0.5));
 
-        let state = halod_shared::types::AppState::default();
+        let state = TopicStore::default();
         send_def(&test_ctx(&state, &dev, &tx), &mut st, "lcd", true);
         assert!(
             st.lcd.editor.seeded,
@@ -427,7 +429,7 @@ mod tests {
         );
 
         // A stale (empty) snapshot arrives afterwards.
-        let mut late = halod_shared::types::AppState::default();
+        let mut late = TopicStore::default();
         late.lcd.engine.device_template_params.insert(
             "lcd".to_string(),
             params_with(&CustomTemplateDef::default()),
@@ -487,7 +489,7 @@ mod tests {
         // A stale snapshot arriving afterwards must not clobber the loaded def.
         let (tx, _rx) = tokio::sync::mpsc::unbounded_channel();
         let dev = WireDevice::default();
-        let mut late = halod_shared::types::AppState::default();
+        let mut late = TopicStore::default();
         late.lcd.engine.device_template_params.insert(
             "lcd".to_string(),
             params_with(&CustomTemplateDef::default()),

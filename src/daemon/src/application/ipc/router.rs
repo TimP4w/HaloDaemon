@@ -1,0 +1,1325 @@
+// SPDX-License-Identifier: GPL-3.0-or-later
+use halod_shared::commands::DaemonCommand;
+use serde::{Deserialize, Serialize};
+use serde_json::{json, Value};
+use std::sync::Arc;
+use std::time::Duration;
+use tokio::sync::broadcast::error::RecvError;
+
+use super::{ClientHandle, LeaseState, SubscriptionTopic};
+use crate::application::state::AppState;
+use crate::domain::profiles;
+
+const LCD_PREVIEW_LEASE: Duration =
+    Duration::from_secs(halod_shared::types::LCD_PREVIEW_LEASE_SECS);
+
+const IPC_MAX_DEPTH: usize = 64;
+const IPC_MAX_NODES: usize = 200_000;
+
+/// Reject a command whose JSON nests too deep or holds too many collection nodes,
+/// so a small frame can't expand into excessive nested work.
+fn check_ipc_bounds(v: &Value) -> Result<(), String> {
+    crate::util::json::check_bounds(v, IPC_MAX_DEPTH, IPC_MAX_NODES)
+}
+
+/// Lease-gated LCD preview forwarder; drops the broadcast receiver once the lease goes `Expired`.
+async fn lcd_preview_forward_loop(app: Arc<AppState>, client: ClientHandle) {
+    let mut lease = client.lcd_lease_rx();
+    loop {
+        // Paused: no active lease. Wait for a keepalive (re-subscribe) or client teardown.
+        let is_live = matches!(
+            *lease.borrow_and_update(),
+            LeaseState::Active { last_keepalive } if last_keepalive.elapsed() < LCD_PREVIEW_LEASE
+        );
+        if !is_live {
+            tokio::select! {
+                _ = client.tx.closed() => return,
+                c = lease.changed() => { if c.is_err() { return; } continue; }
+            }
+        }
+        // Engine may not be set yet at startup — same readiness dance as
+        // engine_subscribe_loop, plus the closed() escape.
+        let mut ready = app.engines_ready.subscribe();
+        let mut rx = loop {
+            if let Some(e) = app.lcd.engine() {
+                break e.subscribe();
+            }
+            tokio::select! {
+                _ = client.tx.closed() => return,
+                r = ready.changed() => { if r.is_err() { return; } }
+            }
+        };
+        // Active: forward frames until the lease expires, then drop rx.
+        loop {
+            let deadline = match *lease.borrow_and_update() {
+                LeaseState::Active { last_keepalive } => last_keepalive + LCD_PREVIEW_LEASE,
+                LeaseState::Unsubscribed | LeaseState::Expired => break,
+            };
+            tokio::select! {
+                _ = client.tx.closed() => return,
+                _ = tokio::time::sleep_until(deadline) => { client.expire_lcd_lease(); break; }
+                res = rx.recv() => match res {
+                    Ok(frame) => client.send_lcd_preview(frame.wire.clone()),
+                    Err(RecvError::Lagged(n)) =>
+                        log::debug!("lcd_engine_frame subscriber lagged {n} frame(s)"),
+                    Err(RecvError::Closed) => return,
+                },
+            }
+        }
+    }
+}
+
+async fn engine_subscribe_loop<T, F>(
+    app: Arc<AppState>,
+    client: ClientHandle,
+    get_receiver: F,
+    frame_type: &'static str,
+) where
+    T: Serialize + Send + Sync + 'static,
+    F: Fn(&AppState) -> Option<tokio::sync::broadcast::Receiver<Arc<T>>>,
+{
+    // The domain engine is set once during startup, possibly after this client
+    // subscribes. Wake on the readiness signal rather than polling; re-check
+    // each round so a flip that races the subscribe is never missed.
+    let mut ready = app.engines_ready.subscribe();
+    let mut rx = loop {
+        if let Some(rx) = get_receiver(&app) {
+            break rx;
+        }
+        if ready.changed().await.is_err() {
+            return; // daemon shutting down
+        }
+    };
+    loop {
+        match rx.recv().await {
+            Ok(frame) => {
+                if client.tx.is_closed() {
+                    break;
+                }
+                client.send_json(&json!({"type": frame_type, "data": *frame}));
+            }
+            Err(RecvError::Lagged(n)) => log::debug!("{frame_type} subscriber lagged {n} frame(s)"),
+            Err(RecvError::Closed) => break,
+        }
+    }
+}
+
+pub async fn handle_message(msg: Value, client: ClientHandle, app: Arc<AppState>) {
+    let Some(cmd) = msg["type"].as_str() else {
+        log::warn!("IPC: frame missing string 'type' field");
+        client
+            .send_json(&json!({"type": "error", "message": "missing or non-string 'type' field"}));
+        return;
+    };
+
+    if cmd == "ping" {
+        client.send_json(&json!({"type": "pong"}));
+        return;
+    }
+
+    let req_id = msg["request_id"].as_str();
+
+    if let Err(e) = check_ipc_bounds(&msg) {
+        reply_error(&client, cmd, req_id, anyhow::anyhow!("frame rejected: {e}"));
+        return;
+    }
+
+    let typed = match DaemonCommand::deserialize(&msg) {
+        Ok(typed) => typed,
+        Err(e) => {
+            reply_error(
+                &client,
+                cmd,
+                req_id,
+                anyhow::anyhow!("failed to parse: {e}"),
+            );
+            return;
+        }
+    };
+
+    // Device-scoped commands run off the reader on a per-device lock: commands
+    // to the same device stay ordered and never overlap, while commands to
+    // other devices run concurrently. This keeps one slow / timing-out device
+    // (e.g. an unreachable wireless controller) from stalling every other
+    // command. Global commands run inline in read order.
+    match command_target(&typed) {
+        Some(id) => {
+            let writes_device = command_writes_device(&typed);
+            let id = id.to_string();
+            let cmd = cmd.to_string();
+            let req_id = req_id.map(str::to_string);
+            tokio::spawn(async move {
+                let lock = app.device_lock(&id).await;
+                let _guard = lock.lock().await;
+                if let Err(e) = dispatch(typed, client.clone(), Arc::clone(&app)).await {
+                    let plugin_handled = e
+                        .downcast_ref::<crate::domain::plugin::SurfacedPluginError>()
+                        .is_some();
+                    if writes_device && !plugin_handled {
+                        let device = {
+                            let devices = app.device_registry.read().await;
+                            devices
+                                .iter()
+                                .find(|device| device.id() == id)
+                                .map(|device| device.name().to_string())
+                                .unwrap_or_else(|| id.clone())
+                        };
+                        crate::application::notifications::send(
+                            &app,
+                            halod_shared::types::NotificationCode::DeviceWriteFailed {
+                                device,
+                                detail: format!("{e:#}"),
+                            },
+                        )
+                        .await;
+                    }
+                    reply_error_with_handled(&client, &cmd, req_id.as_deref(), e, writes_device);
+                }
+            });
+        }
+        None => {
+            if let Err(e) = dispatch(typed, client.clone(), app).await {
+                reply_error(&client, cmd, req_id, e);
+            }
+        }
+    }
+}
+
+/// Send an `error` reply frame for a failed command, echoing `request_id` when
+/// the client supplied one so it can correlate the failure.
+fn reply_error(client: &ClientHandle, cmd: &str, req_id: Option<&str>, e: anyhow::Error) {
+    reply_error_with_handled(client, cmd, req_id, e, false);
+}
+
+fn reply_error_with_handled(
+    client: &ClientHandle,
+    cmd: &str,
+    req_id: Option<&str>,
+    e: anyhow::Error,
+    handled: bool,
+) {
+    log::warn!("command '{cmd}' failed: {e:#}");
+    let mut reply = json!({"type": "error", "message": e.to_string()});
+    if e.is::<halod_plugin_signing::RepositorySignatureMismatch>() {
+        reply["code"] = halod_shared::types::ERROR_REPOSITORY_SIGNATURE_VERIFICATION_FAILED.into();
+    }
+    if handled
+        || e.downcast_ref::<crate::domain::plugin::SurfacedPluginError>()
+            .is_some()
+    {
+        reply["handled"] = true.into();
+    }
+    if let Some(req_id) = req_id {
+        reply["request_id"] = req_id.into();
+    }
+    client.send_json(&reply);
+}
+
+/// Whether failure means a requested hardware write did not reach the device.
+/// Device-scoped configuration-only commands deliberately stay on the generic
+/// error path.
+fn command_writes_device(cmd: &DaemonCommand) -> bool {
+    use DaemonCommand::*;
+    matches!(
+        cmd,
+        SetChoice { .. }
+            | SetRange { .. }
+            | SetBoolean { .. }
+            | TriggerAction { .. }
+            | ResetAllButtonMappings { .. }
+            | ResetButtonMapping { .. }
+            | SetEqPreset { .. }
+            | SetEqBands { .. }
+            | SetDpiSteps { .. }
+            | LightingApply { .. }
+            | LightingDetectSegments { .. }
+            | SetButtonMapping { .. }
+            | SetSoftwareDpiSteps { .. }
+            | OnboardProfileSwitch { .. }
+            | OnboardProfileRestore { .. }
+            | OnboardProfileSetEnabled { .. }
+            | SetScreenImage { .. }
+            | SetScreenImageFromLibrary { .. }
+            | SetScreenRotation { .. }
+            | SetScreenBrightness { .. }
+            | SetScreenDefault { .. }
+            | SetScreenRawStreaming { .. }
+            | SetScreenVideo { .. }
+            | ReceiverStartPairing { .. }
+            | ReceiverStopPairing { .. }
+            | ReceiverUnpair { .. }
+            | SetKeyboardLayout { .. }
+    )
+}
+
+/// The device id a command targets, or `None` for global commands (profiles,
+/// settings, canvas-wide effects, …). Determines the [`AppState::device_lock`]
+/// used to serialize per-device work; see [`handle_message`].
+fn command_target(cmd: &DaemonCommand) -> Option<&str> {
+    use DaemonCommand::*;
+    match cmd {
+        SetChoice { id, .. }
+        | SetRange { id, .. }
+        | SetBoolean { id, .. }
+        | TriggerAction { id, .. }
+        | ResetAllButtonMappings { id, .. }
+        | ResetButtonMapping { id, .. }
+        | SetEqPreset { id, .. }
+        | SetEqBands { id, .. }
+        | SetDpiSteps { id, .. }
+        | LightingApply { id, .. }
+        | LightingSetChannelTransform { id, .. }
+        | LightingAddSegment { id, .. }
+        | LightingRemoveSegment { id, .. }
+        | LightingReorderSegment { id, .. }
+        | LightingDetectSegments { id, .. }
+        | SetButtonMapping { id, .. }
+        | SetSoftwareDpiSteps { id, .. }
+        | OnboardProfileSwitch { id, .. }
+        | OnboardProfileRestore { id, .. }
+        | OnboardProfileSetEnabled { id, .. }
+        | SetScreenImage { id, .. }
+        | SetScreenImageFromLibrary { id, .. }
+        | SetScreenRotation { id, .. }
+        | SetScreenBrightness { id, .. }
+        | SetScreenDefault { id, .. }
+        | SetScreenRawStreaming { id, .. }
+        | SetScreenVideo { id, .. }
+        | ReceiverStartPairing { id, .. }
+        | ReceiverStopPairing { id, .. }
+        | ReceiverUnpair { id, .. }
+        | SetKeyboardLayout { id, .. }
+        | BeginIntegrationSetup { id }
+        | ResetIntegrationSetup { id }
+        | SelectIntegrationSetupMode { id, .. }
+        | SubmitIntegrationSetup { id, .. }
+        | RetryIntegrationPairing { id }
+        | CancelIntegrationSetup { id } => Some(id),
+        SetCoolingCurvePoints { device_id, .. }
+        | SetCoolingCurvePreset { device_id, .. }
+        | RemoveCoolingCurve { device_id, .. } => Some(device_id),
+        SetDeviceVisibility { device_id, .. }
+        | SetDeviceName { device_id, .. }
+        | CanvasPlaceZone { device_id, .. }
+        | CanvasRemoveZone { device_id, .. }
+        | CanvasMoveZone { device_id, .. }
+        | LcdEngineSetTemplate { device_id, .. }
+        | LcdEngineDeactivate { device_id, .. }
+        | RenderLcdEditor { device_id, .. } => Some(device_id),
+        _ => None,
+    }
+}
+
+/// Dispatch a typed `DaemonCommand` to the matching use-case.
+async fn dispatch(
+    cmd: DaemonCommand,
+    client: ClientHandle,
+    app: Arc<AppState>,
+) -> anyhow::Result<()> {
+    match cmd {
+        DaemonCommand::SetRange { id, key, value } => {
+            crate::application::usecases::device::capability::set_capability_param(
+                id,
+                crate::application::usecases::device::capability::CapabilityParam::Range {
+                    key,
+                    value,
+                },
+                app,
+            )
+            .await
+        }
+        DaemonCommand::SetChoice { id, key, selected } => {
+            crate::application::usecases::device::capability::set_capability_param(
+                id,
+                crate::application::usecases::device::capability::CapabilityParam::Choice {
+                    key,
+                    selected,
+                },
+                app,
+            )
+            .await
+        }
+        DaemonCommand::SetBoolean { id, key, value } => {
+            crate::application::usecases::device::capability::set_capability_param(
+                id,
+                crate::application::usecases::device::capability::CapabilityParam::Boolean {
+                    key,
+                    value,
+                },
+                app,
+            )
+            .await
+        }
+        DaemonCommand::TriggerAction { id, key } => {
+            crate::application::usecases::device::capability::set_capability_param(
+                id,
+                crate::application::usecases::device::capability::CapabilityParam::Action { key },
+                app,
+            )
+            .await
+        }
+        DaemonCommand::AddProfile { name } => {
+            crate::application::usecases::profiles::lifecycle::add_profile(name, app).await
+        }
+        DaemonCommand::RenameProfile { old_name, new_name } => {
+            crate::application::usecases::profiles::lifecycle::rename_profile(
+                old_name, new_name, app,
+            )
+            .await
+        }
+        DaemonCommand::RemoveProfile { name } => {
+            crate::application::usecases::profiles::lifecycle::remove_profile(name, app).await
+        }
+        DaemonCommand::SwitchProfile { name } => {
+            crate::application::usecases::profiles::lifecycle::switch_profile(name, app).await
+        }
+        DaemonCommand::RemoveProfileOverride { target } => {
+            crate::application::usecases::profiles::profile_override::remove_profile_override(
+                target, app,
+            )
+            .await
+        }
+        DaemonCommand::SetLightingTargets {
+            device_ids,
+            channels,
+        } => {
+            crate::application::usecases::profiles::lifecycle::set_lighting_targets(
+                device_ids, channels, app,
+            )
+            .await
+        }
+        DaemonCommand::AddAppRule {
+            process_names,
+            profile,
+            enabled,
+        } => {
+            crate::application::usecases::profiles::app_rules::add(
+                process_names,
+                profile,
+                enabled,
+                app,
+            )
+            .await
+        }
+        DaemonCommand::UpdateAppRule {
+            index,
+            process_names,
+            profile,
+            enabled,
+        } => {
+            crate::application::usecases::profiles::app_rules::update(
+                index,
+                process_names,
+                profile,
+                enabled,
+                app,
+            )
+            .await
+        }
+        DaemonCommand::RemoveAppRule { index } => {
+            crate::application::usecases::profiles::app_rules::remove(index, app).await
+        }
+        DaemonCommand::Rediscover => {
+            crate::application::usecases::registry::settings::rediscover(app).await
+        }
+        DaemonCommand::GetUdevRulesStatus => {
+            crate::application::usecases::plugin::plugins::get_udev_rules_status(client, app).await
+        }
+        DaemonCommand::SetPluginEnabled { id, enabled } => {
+            crate::application::usecases::plugin::plugins::set_enabled(id, enabled, app).await
+        }
+        DaemonCommand::ImportPluginRepository { source_path } => {
+            crate::application::usecases::plugin::repos::import_local_repo(source_path, app).await
+        }
+        DaemonCommand::ConfirmPluginEnable { id, authority } => {
+            crate::application::usecases::plugin::plugins::confirm_enable(id, authority, app).await
+        }
+        DaemonCommand::ConfirmPluginEnableBatch { plugins } => {
+            crate::application::usecases::plugin::plugins::confirm_enable_batch(plugins, app).await
+        }
+        DaemonCommand::SetPluginConfig { id, values } => {
+            crate::application::usecases::plugin::plugins::set_config(id, values, app).await
+        }
+        DaemonCommand::AddPluginRepo { url, branch } => {
+            crate::application::usecases::plugin::repos::add_repo(url, branch, app).await
+        }
+        DaemonCommand::RemovePluginRepo { slug } => {
+            crate::application::usecases::plugin::repos::remove_repo(slug, app).await
+        }
+        DaemonCommand::ListRepoBranches { url } => {
+            crate::application::usecases::plugin::repos::list_branches(url, client).await
+        }
+        DaemonCommand::CheckPluginRepoUpdates => {
+            crate::application::usecases::plugin::repos::check_repo_updates(app, client).await
+        }
+        DaemonCommand::UpdatePluginRepo { slug } => {
+            let result =
+                crate::application::usecases::plugin::repos::update_repo(slug, app.clone()).await;
+            // Refresh per-plugin update flags so the banners clear once the pull
+            // lands (a single update, unlike update-all, otherwise leaves them stale).
+            crate::application::usecases::plugin::repos::broadcast_plugin_updates(&app, None).await;
+            result
+        }
+        DaemonCommand::UpdateAllPlugins => {
+            crate::application::usecases::plugin::repos::update_all_plugins(app).await
+        }
+        DaemonCommand::SetIntegrationEnabled { id, enabled } => {
+            crate::application::usecases::plugin::integrations::set_integration_enabled(
+                id, enabled, app,
+            )
+            .await
+        }
+        DaemonCommand::SetIntegrationConfig { id, values } => {
+            crate::application::usecases::plugin::integrations::set_integration_config(
+                id, values, app,
+            )
+            .await
+        }
+        DaemonCommand::BeginIntegrationSetup { id } => {
+            crate::application::usecases::plugin::integrations::begin_setup(id, app).await
+        }
+        DaemonCommand::ResetIntegrationSetup { id } => {
+            crate::application::usecases::plugin::integrations::reset_setup(id, app).await
+        }
+        DaemonCommand::SelectIntegrationSetupMode { id, mode } => {
+            crate::application::usecases::plugin::integrations::select_setup_mode(id, mode, app)
+                .await
+        }
+        DaemonCommand::SubmitIntegrationSetup {
+            id,
+            candidate_id,
+            values,
+        } => {
+            crate::application::usecases::plugin::integrations::submit_setup(
+                id,
+                candidate_id,
+                values,
+                app,
+            )
+            .await
+        }
+        DaemonCommand::RetryIntegrationPairing { id } => {
+            crate::application::usecases::plugin::integrations::retry_pairing(id, app).await
+        }
+        DaemonCommand::CancelIntegrationSetup { id } => {
+            crate::application::usecases::plugin::integrations::cancel_setup(id, app).await
+        }
+        DaemonCommand::SetLogLevel { level } => {
+            crate::application::usecases::registry::settings::set_log_level(level, app).await
+        }
+        DaemonCommand::SetLanguage { lang } => {
+            crate::application::usecases::registry::settings::set_language(lang, app).await
+        }
+        DaemonCommand::SetUiConfig {
+            close_to_tray,
+            suppress_dependency_warning,
+            hide_window_controls,
+            low_battery_notifications,
+        } => {
+            crate::application::usecases::registry::settings::set_ui_config(
+                close_to_tray,
+                suppress_dependency_warning,
+                hide_window_controls,
+                low_battery_notifications,
+                app,
+            )
+            .await
+        }
+        DaemonCommand::SetPluginDownloadConsent { allowed } => {
+            crate::application::usecases::registry::settings::set_plugin_download_consent(
+                allowed, app,
+            )
+            .await
+        }
+        DaemonCommand::MarkTourSeen { tour } => {
+            crate::application::usecases::registry::settings::mark_tour_seen(tour, app).await
+        }
+        DaemonCommand::ResetToursSeen => {
+            crate::application::usecases::registry::settings::reset_tours_seen(app).await
+        }
+        DaemonCommand::SetFanFailsafeDuty { duty } => {
+            crate::application::usecases::cooling::failsafe::set_fan_failsafe_duty(duty, app).await
+        }
+        DaemonCommand::ResetAllButtonMappings { id } => {
+            crate::application::usecases::input::key_remap::reset_all_button_mappings(id, app).await
+        }
+        DaemonCommand::ResetButtonMapping { id, cid } => {
+            crate::application::usecases::input::key_remap::reset_button_mapping(id, cid, app).await
+        }
+        DaemonCommand::SetEqPreset { id, preset_index } => {
+            crate::application::usecases::device::capability::set_capability_param(
+                id,
+                crate::application::usecases::device::capability::CapabilityParam::EqPreset {
+                    preset_index,
+                },
+                app,
+            )
+            .await
+        }
+        DaemonCommand::SetEqBands { id, values } => {
+            crate::application::usecases::device::capability::set_capability_param(
+                id,
+                crate::application::usecases::device::capability::CapabilityParam::EqBands {
+                    values,
+                },
+                app,
+            )
+            .await
+        }
+        DaemonCommand::SetDpiSteps { id, steps } => {
+            crate::application::usecases::device::capability::set_capability_param(
+                id,
+                crate::application::usecases::device::capability::CapabilityParam::DpiSteps {
+                    steps,
+                },
+                app,
+            )
+            .await
+        }
+        DaemonCommand::SetDeviceVisibility { device_id, state } => {
+            crate::application::usecases::device::visibility::set_device_visibility(
+                device_id, state, app,
+            )
+            .await
+        }
+        DaemonCommand::SetSensorVisibility { sensor_id, state } => {
+            crate::application::usecases::device::visibility::set_sensor_visibility(
+                sensor_id, state, app,
+            )
+            .await
+        }
+        DaemonCommand::SetKeyboardLayout { id, selection } => {
+            crate::application::usecases::device::keyboard_layout::set_keyboard_layout(
+                id, selection, app,
+            )
+            .await
+        }
+        DaemonCommand::SetDeviceName { device_id, name } => {
+            crate::application::usecases::device::rename::set_device_name(device_id, name, app)
+                .await
+        }
+
+        DaemonCommand::SetCoolingCurvePoints {
+            device_id,
+            channel_id,
+            points,
+            sensor_id,
+        } => {
+            crate::application::usecases::cooling::fan_curve::set_cooling_curve_points(
+                device_id, channel_id, points, sensor_id, app,
+            )
+            .await
+        }
+        DaemonCommand::SetCoolingCurvePreset {
+            device_id,
+            channel_id,
+            preset,
+            sensor_id,
+        } => {
+            crate::application::usecases::cooling::fan_curve::set_cooling_curve_preset(
+                device_id, channel_id, preset, sensor_id, app,
+            )
+            .await
+        }
+        DaemonCommand::RemoveCoolingCurve {
+            device_id,
+            channel_id,
+        } => {
+            crate::application::usecases::cooling::fan_curve::remove_cooling_curve(
+                device_id, channel_id, app,
+            )
+            .await
+        }
+
+        DaemonCommand::LightingApply { id, state } => {
+            crate::application::usecases::lighting::rgb::lighting_apply(id, state, app).await
+        }
+        DaemonCommand::LightingSetChannelTransform {
+            id,
+            channel_id,
+            transform,
+        } => {
+            crate::application::usecases::lighting::rgb::set_channel_transform(
+                id, channel_id, transform, app,
+            )
+            .await
+        }
+        DaemonCommand::LightingAddSegment {
+            id,
+            channel_id,
+            name,
+            led_count,
+            topology,
+        } => {
+            crate::application::usecases::registry::chain::lighting_add_segment(
+                id, channel_id, name, led_count, topology, app,
+            )
+            .await
+        }
+        DaemonCommand::LightingRemoveSegment {
+            id,
+            channel_id,
+            device_id,
+        } => {
+            crate::application::usecases::registry::chain::lighting_remove_segment(
+                id, channel_id, device_id, app,
+            )
+            .await
+        }
+        DaemonCommand::LightingReorderSegment {
+            id,
+            channel_id,
+            device_id,
+            new_index,
+        } => {
+            crate::application::usecases::registry::chain::lighting_reorder_segment(
+                id, channel_id, device_id, new_index, app,
+            )
+            .await
+        }
+        DaemonCommand::LightingDetectSegments { id, channel_id } => {
+            crate::application::usecases::registry::chain::lighting_detect_segments(
+                id, channel_id, app,
+            )
+            .await
+        }
+
+        DaemonCommand::SetButtonMapping { id, mapping } => {
+            crate::application::usecases::input::key_remap::set_button_mapping(id, mapping, app)
+                .await
+        }
+        DaemonCommand::SetSoftwareDpiSteps { id, steps } => {
+            crate::application::usecases::input::key_remap::set_software_dpi_steps(id, steps, app)
+                .await
+        }
+        DaemonCommand::PlayMacro { steps } => {
+            crate::application::usecases::input::key_remap::play_macro(steps, app).await
+        }
+
+        DaemonCommand::OnboardProfileSwitch { id, slot } => {
+            crate::application::usecases::input::onboard_profiles::switch_onboard_profile(
+                id, slot, app,
+            )
+            .await
+        }
+        DaemonCommand::OnboardProfileRestore { id, slot } => {
+            crate::application::usecases::input::onboard_profiles::restore_onboard_profile(
+                id, slot, app,
+            )
+            .await
+        }
+        DaemonCommand::OnboardProfileSetEnabled { id, slot, enabled } => {
+            crate::application::usecases::input::onboard_profiles::set_onboard_profile_enabled(
+                id, slot, enabled, app,
+            )
+            .await
+        }
+
+        DaemonCommand::SetScreenImage {
+            id,
+            data_b64,
+            request_id,
+        } => {
+            crate::application::usecases::lcd::controls::set_screen_image(
+                id, data_b64, request_id, app, client,
+            )
+            .await
+        }
+        DaemonCommand::SetScreenImageFromLibrary {
+            id,
+            filename,
+            request_id,
+        } => {
+            crate::application::usecases::lcd::controls::set_screen_image_from_library(
+                id, filename, request_id, app, client,
+            )
+            .await
+        }
+        DaemonCommand::SetScreenRotation { id, rotation } => {
+            crate::application::usecases::lcd::controls::set_screen_rotation(id, rotation, app)
+                .await
+        }
+        DaemonCommand::SetScreenBrightness { id, brightness } => {
+            crate::application::usecases::lcd::controls::set_screen_brightness(id, brightness, app)
+                .await
+        }
+        DaemonCommand::SetScreenDefault { id } => {
+            crate::application::usecases::lcd::controls::set_screen_default(id, app).await
+        }
+        DaemonCommand::SetScreenRawStreaming { id, enabled } => {
+            crate::application::usecases::lcd::controls::set_screen_raw_streaming(id, enabled, app)
+                .await
+        }
+        DaemonCommand::SetScreenVideo { id, path } => {
+            crate::application::usecases::lcd::controls::set_screen_video(id, path, app).await
+        }
+        DaemonCommand::ListLcdImages => {
+            crate::application::usecases::lcd::controls::list_lcd_images(client).await
+        }
+        DaemonCommand::DeleteLcdImage { filename } => {
+            crate::application::usecases::lcd::controls::delete_lcd_image(filename, app).await
+        }
+        DaemonCommand::GetPluginAsset { plugin_id, name } => {
+            crate::application::usecases::plugin::plugins::get_asset(plugin_id, name, client, app)
+                .await
+        }
+        DaemonCommand::GetLcdWidgetIcon { catalog_id } => {
+            crate::application::usecases::plugin::plugins::get_lcd_widget_icon(
+                catalog_id, client, app,
+            )
+            .await
+        }
+        DaemonCommand::GetLcdPluginPreset { catalog_id } => {
+            crate::application::usecases::plugin::plugins::get_lcd_preset(catalog_id, client, app)
+                .await
+        }
+        DaemonCommand::ListSerialPorts => {
+            crate::application::usecases::plugin::plugins::list_serial_ports(client).await
+        }
+
+        DaemonCommand::CanvasUpsertEffect { instance_id, def } => {
+            crate::application::usecases::lighting::canvas::upsert_effect(instance_id, def, app)
+                .await
+        }
+        DaemonCommand::CanvasRemoveEffect { instance_id } => {
+            crate::application::usecases::lighting::canvas::remove_effect(instance_id, app).await
+        }
+        DaemonCommand::CanvasSetDefaultEffect { instance_id } => {
+            crate::application::usecases::lighting::canvas::set_default_effect(instance_id, app)
+                .await
+        }
+        DaemonCommand::CanvasPlaceZone {
+            device_id,
+            channel_id,
+            x,
+            y,
+            w,
+            h,
+            rotation,
+            effect,
+            sampling_mode,
+        } => {
+            crate::application::usecases::lighting::canvas::place_zone(
+                device_id,
+                channel_id,
+                x,
+                y,
+                w,
+                h,
+                rotation,
+                effect,
+                sampling_mode,
+                app,
+            )
+            .await
+        }
+        DaemonCommand::CanvasRemoveZone {
+            device_id,
+            channel_id,
+        } => {
+            crate::application::usecases::lighting::canvas::remove_zone(device_id, channel_id, app)
+                .await
+        }
+        DaemonCommand::CanvasMoveZone {
+            device_id,
+            channel_id,
+            x,
+            y,
+            w,
+            h,
+            rotation,
+            effect,
+            sampling_mode,
+        } => {
+            crate::application::usecases::lighting::canvas::move_zone(
+                device_id,
+                channel_id,
+                x,
+                y,
+                w,
+                h,
+                rotation,
+                effect,
+                sampling_mode,
+                app,
+            )
+            .await
+        }
+        DaemonCommand::CanvasSetSampleRadius { radius } => {
+            crate::application::usecases::lighting::canvas::set_sample_radius(radius, app).await
+        }
+        DaemonCommand::CanvasStop => {
+            crate::application::usecases::lighting::canvas::stop(app).await
+        }
+        DaemonCommand::CanvasSubscribe => {
+            if client.try_subscribe_canvas() {
+                let c2 = client.clone();
+                let task = tokio::spawn(engine_subscribe_loop(
+                    app,
+                    c2,
+                    |a| a.lighting.engine().map(|e| e.subscribe()),
+                    "canvas_frame",
+                ));
+                client.track_subscription(SubscriptionTopic::Canvas, task);
+            }
+            Ok(())
+        }
+
+        DaemonCommand::LcdEngineSetTemplate {
+            device_id,
+            template_id,
+            params,
+        } => {
+            crate::application::usecases::lcd::engine::set_template(
+                device_id,
+                template_id,
+                params,
+                app,
+            )
+            .await
+        }
+        DaemonCommand::LcdEngineDeactivate { device_id } => {
+            crate::application::usecases::lcd::engine::deactivate(device_id, app).await
+        }
+        DaemonCommand::LcdEngineSubscribe => {
+            client.touch_lcd_preview();
+            if client.try_subscribe_lcd() {
+                let task = tokio::spawn(lcd_preview_forward_loop(app, client.clone()));
+                client.track_subscription(SubscriptionTopic::Lcd, task);
+            }
+            Ok(())
+        }
+        DaemonCommand::SaveLcdTemplate { name, def } => {
+            crate::application::usecases::lcd::templates::save_template(name, def, app).await
+        }
+        DaemonCommand::LoadLcdTemplate { name } => {
+            crate::application::usecases::lcd::templates::load_template(name, client).await
+        }
+        DaemonCommand::DeleteLcdTemplate { name } => {
+            crate::application::usecases::lcd::templates::delete_template(name, app).await
+        }
+        DaemonCommand::RenderLcdEditor {
+            device_id,
+            def,
+            known,
+        } => {
+            crate::application::usecases::lcd::editor::render(device_id, def, known, app, client)
+                .await
+        }
+
+        DaemonCommand::SaveCustomEffect { name, params } => {
+            crate::application::usecases::lighting::custom_effects::save_custom_effect(
+                name, params, app,
+            )
+            .await
+        }
+        DaemonCommand::DeleteCustomEffect { name } => {
+            crate::application::usecases::lighting::custom_effects::delete_custom_effect(name, app)
+                .await
+        }
+
+        DaemonCommand::ReceiverStartPairing { id, timeout_secs } => {
+            crate::application::usecases::registry::receiver::start_pairing(id, timeout_secs, app)
+                .await
+        }
+        DaemonCommand::ReceiverStopPairing { id } => {
+            crate::application::usecases::registry::receiver::stop_pairing(id, app).await
+        }
+        DaemonCommand::ReceiverUnpair { id, slot } => {
+            crate::application::usecases::registry::receiver::unpair(id, slot, app).await
+        }
+
+        DaemonCommand::ListRunningApps => profiles::observers::running_apps::list(client).await,
+        DaemonCommand::GetDebugInfo => {
+            crate::application::usecases::registry::debug::get_debug_info(client, app).await
+        }
+        DaemonCommand::SetEngineConfig {
+            engine,
+            enabled,
+            tick_ms,
+            fps,
+            failsafe_duty,
+        } => {
+            crate::application::usecases::registry::settings::set_engine_config(
+                engine,
+                enabled,
+                tick_ms,
+                fps,
+                failsafe_duty,
+                app,
+            )
+            .await
+        }
+        DaemonCommand::Ping => Ok(()),
+        DaemonCommand::Shutdown => {
+            log::info!("Shutdown requested by a client");
+            request_shutdown(&app);
+            Ok(())
+        }
+    }
+}
+
+/// Handle an IPC `shutdown` command (the tray's "Quit").
+///
+/// In the Windows service `--worker`, the worker asks the SCM to stop the whole
+/// `HalodDaemon` service — letting the worker merely exit would have the
+/// supervisor relaunch it. The worker carries the elevated token, so it has the
+/// rights to do so; the supervisor's stop handler then terminates this process.
+///
+/// In a dev/plain run there is no service, so just trigger a graceful shutdown.
+///
+/// Also used by the idle-shutdown watcher ([`crate::application::lifecycle`]) — a client
+/// `Shutdown` command and "no client has been connected for a while" both
+/// route through the same stop path.
+pub(crate) fn request_shutdown(app: &Arc<AppState>) {
+    // The daemon is a plain user process launched by the GUI — nothing
+    // relaunches it, so exiting is the whole shutdown. (The on-demand broker
+    // service self-stops once this worker's register-bus connections drop.)
+    app.shutdown.notify_one();
+}
+
+#[cfg(test)]
+mod tests {
+    use super::ClientHandle;
+    use super::*;
+    use crate::config::Config;
+    use std::time::Duration;
+    use tokio::sync::mpsc;
+
+    #[test]
+    fn ipc_bounds_reject_deep_nesting() {
+        let mut v = json!(0);
+        for _ in 0..IPC_MAX_DEPTH + 2 {
+            v = json!([v]);
+        }
+        assert!(check_ipc_bounds(&v).is_err());
+    }
+
+    #[test]
+    fn ipc_bounds_reject_too_many_nodes() {
+        let v = json!(vec![0u8; IPC_MAX_NODES + 1]);
+        assert!(check_ipc_bounds(&v).is_err());
+    }
+
+    #[test]
+    fn ipc_bounds_allow_large_string_single_node() {
+        let v = json!({ "data": "x".repeat(5_000_000) });
+        assert!(check_ipc_bounds(&v).is_ok());
+    }
+
+    #[tokio::test]
+    async fn error_reply_echoes_request_id() {
+        let (tx, mut rx) = mpsc::channel::<std::sync::Arc<Vec<u8>>>(8);
+        let client = ClientHandle {
+            id: 0,
+            tx,
+            subs: std::sync::Arc::default(),
+        };
+        let app = Arc::new(AppState::new(Config::default()));
+
+        handle_message(
+            json!({"type": "definitely_not_a_command", "request_id": "req-42"}),
+            client,
+            app.clone(),
+        )
+        .await;
+
+        let frame = rx.recv().await.expect("an error frame");
+        let reply: Value = serde_json::from_slice(&frame[5..]).unwrap();
+        assert_eq!(reply["type"], "error");
+        assert_eq!(reply["request_id"], "req-42");
+    }
+
+    #[tokio::test]
+    async fn signature_failure_reply_has_localizable_code_and_raw_log_message() {
+        let (tx, mut rx) = mpsc::channel::<std::sync::Arc<Vec<u8>>>(1);
+        let client = ClientHandle {
+            id: 0,
+            tx,
+            subs: std::sync::Arc::default(),
+        };
+        reply_error(
+            &client,
+            "add_plugin_repo",
+            None,
+            halod_plugin_signing::RepositorySignatureMismatch.into(),
+        );
+
+        let frame = rx.recv().await.unwrap();
+        let reply: Value = serde_json::from_slice(&frame[5..]).unwrap();
+        assert_eq!(
+            reply["code"],
+            halod_shared::types::ERROR_REPOSITORY_SIGNATURE_VERIFICATION_FAILED
+        );
+        assert_eq!(
+            reply["message"],
+            "repository signature does not match repository.yaml"
+        );
+    }
+
+    #[tokio::test]
+    async fn failed_device_write_sends_detail_notification_and_handled_error() {
+        let (tx, mut rx) = mpsc::channel::<std::sync::Arc<Vec<u8>>>(8);
+        let client = ClientHandle {
+            id: 0,
+            tx,
+            subs: std::sync::Arc::default(),
+        };
+        let app = Arc::new(AppState::new(Config::default()));
+        app.clients.lock().await.push(client.clone());
+
+        handle_message(
+            json!({
+                "type": "lighting_apply",
+                "id": "missing-device",
+                "state": {"mode": "static", "color": {"r": 1, "g": 2, "b": 3}},
+                "request_id": "write-1"
+            }),
+            client,
+            app.clone(),
+        )
+        .await;
+
+        let frame = tokio::time::timeout(Duration::from_secs(1), rx.recv())
+            .await
+            .expect("response timed out")
+            .expect("response channel closed");
+        let error: Value = serde_json::from_slice(&frame[5..]).unwrap();
+        assert_eq!(error["request_id"], "write-1");
+        assert_eq!(error["handled"], true);
+
+        let replay = app.data_bus.replay_events(None);
+        let notification = replay.events.last().expect("device-write event");
+        let halod_shared::bus::BusEventPayload::Notification(notification) = &notification.payload;
+        assert!(matches!(
+            &notification.code,
+            halod_shared::types::NotificationCode::DeviceWriteFailed { device, detail }
+                if device == "missing-device" && detail.contains("missing-device")
+        ));
+    }
+
+    #[test]
+    fn only_hardware_commands_are_classified_as_device_writes() {
+        use halod_shared::types::{LightingState, RgbColor};
+        assert!(command_writes_device(&DaemonCommand::LightingApply {
+            id: "kbd".into(),
+            state: LightingState::Static {
+                color: RgbColor { r: 1, g: 2, b: 3 },
+            },
+        }));
+        assert!(!command_writes_device(&DaemonCommand::SetDeviceName {
+            device_id: "kbd".into(),
+            name: "Desk keyboard".into(),
+        }));
+    }
+
+    #[test]
+    fn command_target_routes_device_commands_and_leaves_globals_unlocked() {
+        use halod_shared::types::{LightingState, RgbColor};
+        // Device-scoped commands map to their device id (by whichever field
+        // names it) so same-device work serializes on one lock.
+        assert_eq!(
+            command_target(&DaemonCommand::LightingApply {
+                id: "kbd".into(),
+                state: LightingState::Static {
+                    color: RgbColor { r: 0, g: 0, b: 0 }
+                },
+            }),
+            Some("kbd")
+        );
+        assert_eq!(
+            command_target(&DaemonCommand::RemoveCoolingCurve {
+                device_id: "fan0".into(),
+                channel_id: "fan".into(),
+            }),
+            Some("fan0")
+        );
+        assert_eq!(
+            command_target(&DaemonCommand::CanvasMoveZone {
+                device_id: "ram".into(),
+                channel_id: "leds".into(),
+                x: 0.0,
+                y: 0.0,
+                w: None,
+                h: None,
+                rotation: None,
+                effect: None,
+                sampling_mode: None,
+            }),
+            Some("ram")
+        );
+        assert_eq!(
+            command_target(&DaemonCommand::RetryIntegrationPairing { id: "hue".into() }),
+            Some("hue")
+        );
+        // Global commands run inline (no device lock) so a stuck device can't
+        // stall them.
+        assert_eq!(command_target(&DaemonCommand::CanvasStop), None);
+        assert_eq!(command_target(&DaemonCommand::Rediscover), None);
+        assert_eq!(
+            command_target(&DaemonCommand::SwitchProfile {
+                name: "gaming".into()
+            }),
+            None
+        );
+    }
+
+    #[tokio::test]
+    async fn shutdown_request_signals_a_plain_daemon() {
+        let app = Arc::new(AppState::new(Config::default()));
+
+        request_shutdown(&app);
+
+        tokio::time::timeout(Duration::from_millis(200), app.shutdown.notified())
+            .await
+            .expect("shutdown should have been signalled");
+    }
+
+    /// Test helper: `AppState` with a live `LcdEngine`.
+    fn app_with_lcd_engine() -> (Arc<AppState>, Arc<crate::domain::lcd::engine::LcdEngine>) {
+        use crate::domain::lcd::engine::{video::VideoEngine, LcdEngine};
+
+        let app = Arc::new(AppState::new(Config::default()));
+        let engine = LcdEngine::new(Arc::clone(&app));
+        app.lcd.set_engine(
+            Arc::clone(&engine),
+            VideoEngine::new(Arc::clone(&app), engine.frame_sender()),
+        );
+        let _ = app.engines_ready.send(true);
+        (app, engine)
+    }
+
+    #[tokio::test(start_paused = true)]
+    async fn lcd_preview_forwarder_holds_receiver_only_while_leased() {
+        let (app, engine) = app_with_lcd_engine();
+        let (tx, _rx) = mpsc::channel::<std::sync::Arc<Vec<u8>>>(8);
+        let client = ClientHandle {
+            id: 0,
+            tx,
+            subs: Arc::default(),
+        };
+        client.touch_lcd_preview();
+
+        let handle = tokio::spawn(lcd_preview_forward_loop(app, client.clone()));
+        // Let the forwarder subscribe.
+        for _ in 0..50 {
+            if engine.frame_sender().receiver_count() == 1 {
+                break;
+            }
+            tokio::task::yield_now().await;
+        }
+        assert_eq!(engine.frame_sender().receiver_count(), 1);
+
+        // Advance past the lease with no renewal: the forwarder drops rx.
+        tokio::time::advance(LCD_PREVIEW_LEASE + Duration::from_millis(50)).await;
+        for _ in 0..50 {
+            if engine.frame_sender().receiver_count() == 0 {
+                break;
+            }
+            tokio::task::yield_now().await;
+        }
+        assert_eq!(engine.frame_sender().receiver_count(), 0);
+
+        // Renew: the forwarder re-subscribes.
+        client.touch_lcd_preview();
+        for _ in 0..50 {
+            if engine.frame_sender().receiver_count() == 1 {
+                break;
+            }
+            tokio::task::yield_now().await;
+        }
+        assert_eq!(engine.frame_sender().receiver_count(), 1);
+
+        handle.abort();
+    }
+
+    #[tokio::test(start_paused = true)]
+    async fn lcd_lease_state_is_observably_expired_after_the_deadline() {
+        let (app, engine) = app_with_lcd_engine();
+        let (tx, _rx) = mpsc::channel::<std::sync::Arc<Vec<u8>>>(8);
+        let client = ClientHandle {
+            id: 0,
+            tx,
+            subs: Arc::default(),
+        };
+        client.touch_lcd_preview();
+        assert!(matches!(
+            *client.lcd_lease_rx().borrow(),
+            LeaseState::Active { .. }
+        ));
+
+        let handle = tokio::spawn(lcd_preview_forward_loop(app, client.clone()));
+        for _ in 0..50 {
+            if engine.frame_sender().receiver_count() == 1 {
+                break;
+            }
+            tokio::task::yield_now().await;
+        }
+
+        tokio::time::advance(LCD_PREVIEW_LEASE + Duration::from_millis(50)).await;
+        for _ in 0..50 {
+            if *client.lcd_lease_rx().borrow() == LeaseState::Expired {
+                break;
+            }
+            tokio::task::yield_now().await;
+        }
+        assert_eq!(*client.lcd_lease_rx().borrow(), LeaseState::Expired);
+
+        handle.abort();
+    }
+
+    #[tokio::test]
+    async fn lcd_preview_forwarder_exits_when_client_disconnects_while_paused() {
+        let (app, _engine) = app_with_lcd_engine();
+        let (tx, rx) = mpsc::channel::<std::sync::Arc<Vec<u8>>>(8);
+        let client = ClientHandle {
+            id: 0,
+            tx,
+            subs: Arc::default(),
+        };
+        // A default lease is `Unsubscribed` (never entered the active branch), so the loop is already paused.
+        drop(rx);
+
+        let handle = tokio::spawn(lcd_preview_forward_loop(app, client));
+        tokio::time::timeout(Duration::from_secs(2), handle)
+            .await
+            .expect("forwarder must exit once the client disconnects")
+            .expect("task must not panic");
+    }
+
+    #[tokio::test]
+    async fn lcd_preview_forwarder_delivers_a_broadcast_frame_while_leased() {
+        let (app, engine) = app_with_lcd_engine();
+        let (tx, _rx) = mpsc::channel::<std::sync::Arc<Vec<u8>>>(8);
+        let client = ClientHandle {
+            id: 0,
+            tx,
+            subs: Arc::default(),
+        };
+        client.touch_lcd_preview();
+        let mut preview_rx = client.subs.lcd_preview.subscribe();
+
+        let handle = tokio::spawn(lcd_preview_forward_loop(app, client.clone()));
+        for _ in 0..50 {
+            if engine.frame_sender().receiver_count() == 1 {
+                break;
+            }
+            tokio::task::yield_now().await;
+        }
+
+        let frame =
+            crate::domain::lcd::engine::encode_wire_frame("lcd0", 1, "").expect("wire encode");
+        let _ = engine.frame_sender().send(frame);
+
+        tokio::time::timeout(Duration::from_secs(2), preview_rx.changed())
+            .await
+            .expect("a frame must reach the preview slot")
+            .expect("slot must stay open");
+        let wire = preview_rx.borrow().clone().expect("frame present");
+        let reply: Value = serde_json::from_slice(&wire[5..]).unwrap();
+        assert_eq!(reply["type"], "lcd_engine_frame");
+        assert_eq!(reply["data"]["device_id"], "lcd0");
+
+        handle.abort();
+    }
+}

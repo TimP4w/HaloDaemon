@@ -2856,6 +2856,7 @@ dependencies = [
  "windows 0.62.2",
  "windows-service",
  "wmi",
+ "x11rb",
  "x509-parser",
  "zbus 4.4.0",
  "zeroize",

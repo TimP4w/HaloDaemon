@@ -6,9 +6,10 @@
 
 use std::collections::{HashMap, HashSet};
 
+use crate::domain::topic_store::TopicStore;
 use egui::{Align2, Pos2, Rect, Sense, Stroke, Vec2};
 use halod_shared::types::{
-    AppState, PluginDownloadConsent, PluginInfo, PluginIssue, PluginIssueKind, PluginProvenance,
+    PluginDownloadConsent, PluginInfo, PluginIssue, PluginIssueKind, PluginProvenance,
     PluginRecommendation, PluginRepoInfo, PluginRepoLocation, PluginRequirement,
     PluginRequirementStatus, PluginSource, PluginUpdateStatus, RepoCompatibilityStatus,
     RepoSignatureStatus, RepoUpdateStatus, RequirementImpact,
@@ -92,11 +93,10 @@ pub struct PluginsUi {
     updating: HashMap<String, f64>,
     /// "Update all" in flight → egui time it began, cleared the same way.
     updating_all: Option<f64>,
-    /// The repo whose whole-repo update is in flight → (slug, egui time it began).
-    /// The Update-repo button shows a spinner until the repo drops its "update
-    /// available" plugins (the daemon re-broadcasts once the pull lands) or it
-    /// times out.
-    updating_repo: Option<(String, f64)>,
+    /// Repositories whose whole-repo update is in flight → egui start time.
+    /// Entries are reconciled centrally so progress ends even when another
+    /// detail pane is selected. "Update all" inserts every affected repo.
+    updating_repos: HashMap<String, f64>,
     /// The open plugin-issue Details modal (title + detail), when the user
     /// clicked Details on a plugin's issue banner.
     issue_modal: Option<(String, String)>,
@@ -129,7 +129,7 @@ impl PluginsUi {
     pub fn show(
         &mut self,
         ui: &mut egui::Ui,
-        state: &AppState,
+        state: &TopicStore,
         cmd: &CommandTx,
         plugin_assets: &HashMap<String, Vec<u8>>,
         repo_updates: &[RepoUpdateStatus],
@@ -228,12 +228,13 @@ impl PluginsUi {
             plugin_updates,
             now,
         );
+        clear_finished_repo_updates(&mut self.updating_repos, plugin_updates, now);
     }
 
     fn body(
         &mut self,
         ui: &mut egui::Ui,
-        state: &AppState,
+        state: &TopicStore,
         cmd: &CommandTx,
         repo_updates: &[RepoUpdateStatus],
         plugin_updates: &[PluginUpdateStatus],
@@ -249,7 +250,10 @@ impl PluginsUi {
         );
         let now = ui.input(|i| i.time);
         self.sync_update_progress(plugin_updates, now);
-        if self.updating_all.is_some() || !self.updating.is_empty() {
+        if self.updating_all.is_some()
+            || !self.updating.is_empty()
+            || !self.updating_repos.is_empty()
+        {
             // Keep the timeout advancing and the spinner animating.
             ui.ctx().request_repaint();
         }
@@ -298,7 +302,7 @@ impl PluginsUi {
     fn sidebar(
         &mut self,
         ui: &mut egui::Ui,
-        state: &AppState,
+        state: &TopicStore,
         cmd: &CommandTx,
         repo_updates: &[RepoUpdateStatus],
         plugin_updates: &[PluginUpdateStatus],
@@ -358,6 +362,9 @@ impl PluginsUi {
         if due > 0 {
             if update_all_banner(ui, due, self.updating_all.is_some()) {
                 self.updating_all = Some(now);
+                for status in plugin_updates.iter().filter(|s| s.update_available) {
+                    self.updating_repos.insert(status.slug.clone(), now);
+                }
                 crate::runtime::ipc::send(
                     cmd,
                     halod_shared::commands::DaemonCommand::UpdateAllPlugins,
@@ -381,7 +388,7 @@ impl PluginsUi {
     fn plugin_list(
         &mut self,
         ui: &mut egui::Ui,
-        state: &AppState,
+        state: &TopicStore,
         cmd: &CommandTx,
         plugin_updates: &[PluginUpdateStatus],
         udev_status: Option<&halod_shared::types::UdevRulesStatus>,
@@ -443,7 +450,7 @@ impl PluginsUi {
     fn repositories(
         &mut self,
         ui: &mut egui::Ui,
-        state: &AppState,
+        state: &TopicStore,
         repo_updates: &[RepoUpdateStatus],
     ) {
         ui.add_space(theme::SPACE_9);
@@ -484,7 +491,7 @@ impl PluginsUi {
         }
     }
 
-    fn skipped_notice(&mut self, ui: &mut egui::Ui, state: &AppState) {
+    fn skipped_notice(&mut self, ui: &mut egui::Ui, state: &TopicStore) {
         if state.plugins.skipped.is_empty() {
             return;
         }
@@ -560,7 +567,7 @@ impl PluginsUi {
     fn detail_column(
         &mut self,
         ui: &mut egui::Ui,
-        state: &AppState,
+        state: &TopicStore,
         cmd: &CommandTx,
         plugin_updates: &[PluginUpdateStatus],
         udev_status: Option<&halod_shared::types::UdevRulesStatus>,
@@ -635,21 +642,11 @@ impl PluginsUi {
                 let updates_enabled = plugin_updates_enabled(state.gui.plugin_downloads);
 
                 // The whole repo is updatable when any of its plugins report an
-                // upstream update. Drop the spinner once they clear (the daemon
-                // re-broadcasts after the pull) or it times out.
+                // upstream update. Progress is reconciled before rendering.
                 let repo_has_updates = plugin_updates
                     .iter()
                     .any(|s| s.slug == r.slug && s.update_available);
-                if let Some((upd_slug, started)) = &self.updating_repo {
-                    if *upd_slug == r.slug && (!repo_has_updates || now - *started > UPDATE_TIMEOUT)
-                    {
-                        self.updating_repo = None;
-                    }
-                }
-                let updating_repo = self
-                    .updating_repo
-                    .as_ref()
-                    .is_some_and(|(s, _)| s == &r.slug);
+                let updating_repo = self.updating_repos.contains_key(&r.slug);
 
                 let mut select_plugin = None;
                 let mut start_check = false;
@@ -686,7 +683,7 @@ impl PluginsUi {
                     );
                 }
                 if start_update {
-                    self.updating_repo = Some((r.slug.clone(), now));
+                    self.updating_repos.insert(r.slug.clone(), now);
                     crate::runtime::ipc::send(
                         cmd,
                         halod_shared::commands::DaemonCommand::UpdatePluginRepo {
@@ -900,7 +897,7 @@ impl PluginsUi {
     /// declares permissions (or right after importing one). Lists each
     /// permission with what it lets the plugin do; "Grant & Enable" accepts and
     /// activates, "Cancel" leaves the plugin installed but off.
-    fn consent_modal(&mut self, ctx: &egui::Context, state: &AppState, cmd: &CommandTx) {
+    fn consent_modal(&mut self, ctx: &egui::Context, state: &TopicStore, cmd: &CommandTx) {
         let Some(id) = self.pending_consent.clone() else {
             return;
         };
@@ -1077,7 +1074,7 @@ fn repo_integrity_failed(slug: &str, plugins: &[PluginInfo]) -> bool {
     })
 }
 
-fn repository_integrity_problem(state: &AppState) -> Option<RepoIntegrityProblem> {
+fn repository_integrity_problem(state: &TopicStore) -> Option<RepoIntegrityProblem> {
     state.plugins.repos.iter().find_map(|repo| {
         repo_integrity_failed(&repo.slug, &state.plugins.plugins).then(|| RepoIntegrityProblem {
             slug: repo.slug.clone(),
@@ -1363,6 +1360,19 @@ fn clear_finished_updates(
             *updating_all = None;
         }
     }
+}
+
+fn clear_finished_repo_updates(
+    updating_repos: &mut HashMap<String, f64>,
+    plugin_updates: &[PluginUpdateStatus],
+    now: f64,
+) {
+    updating_repos.retain(|slug, started| {
+        plugin_updates
+            .iter()
+            .any(|status| status.slug == *slug && status.update_available)
+            && now - *started < UPDATE_TIMEOUT
+    });
 }
 
 /// Decode any newly-arrived asset bytes into GPU textures, keyed like the
@@ -3503,6 +3513,20 @@ mod tests {
     }
 
     #[test]
+    fn repository_update_progress_tracks_multiple_repositories_independently() {
+        let mut updating = HashMap::from([("repo-a".to_owned(), 0.0), ("repo-b".to_owned(), 0.0)]);
+        let mut repo_a = status("a", false);
+        repo_a.slug = "repo-a".into();
+        let mut repo_b = status("b", true);
+        repo_b.slug = "repo-b".into();
+
+        clear_finished_repo_updates(&mut updating, &[repo_a, repo_b], 1.0);
+
+        assert!(!updating.contains_key("repo-a"));
+        assert!(updating.contains_key("repo-b"));
+    }
+
+    #[test]
     fn format_last_sync_trims_fractional_seconds_and_offset() {
         let now = chrono::DateTime::parse_from_rfc3339("2026-07-11T23:46:00+00:00")
             .unwrap()
@@ -3975,7 +3999,7 @@ mod tests {
 
     #[test]
     fn repository_integrity_problem_repairs_only_verified_sources() {
-        let mut state = AppState::default();
+        let mut state = TopicStore::default();
         state.plugins.repos = vec![repo("publisher", "aaaaaaaa")];
         state.plugins.plugins = vec![integrity_failed_plugin("publisher")];
 

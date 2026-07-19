@@ -1,7 +1,8 @@
 // SPDX-License-Identifier: GPL-3.0-or-later
-//! Sensor list derived from the daemon's `AppState`, for the home dashboard.
+//! Sensor list derived from the daemon's `TopicStore`, for the home dashboard.
 
-use halod_shared::types::{AppState, DeviceCapability, VisibilityState};
+use crate::domain::topic_store::TopicStore;
+use halod_shared::types::{DeviceCapability, VisibilityState};
 
 use super::device::unit;
 
@@ -17,7 +18,7 @@ pub struct SensorView {
 /// Sensors across all devices, in device order. Hidden sensors are included only
 /// when `include_hidden` is set. Sensors without their own name (e.g. an hwmon
 /// channel with a blank `_label`) fall back to the device name.
-pub fn sensors(state: &AppState, include_hidden: bool) -> Vec<SensorView> {
+pub fn sensors(state: &TopicStore, include_hidden: bool) -> Vec<SensorView> {
     let mut out = Vec::new();
     for d in &state.devices {
         for cap in &d.capabilities {
@@ -48,7 +49,7 @@ pub fn sensors(state: &AppState, include_hidden: bool) -> Vec<SensorView> {
 
 /// Number of hidden sensors across all devices. Used to decide whether the
 /// home "show hidden" toggle should be offered even when no device is hidden.
-pub fn hidden_count(state: &AppState) -> usize {
+pub fn hidden_count(state: &TopicStore) -> usize {
     state
         .devices
         .iter()
@@ -96,7 +97,7 @@ mod tests {
                 sensor("hid", SensorType::Temperature, VisibilityState::Hidden),
             ])],
         );
-        let state = AppState {
+        let state = TopicStore {
             devices: vec![d],
             ..Default::default()
         };
@@ -122,7 +123,7 @@ mod tests {
                 sensor("hid2", SensorType::Load, VisibilityState::Hidden),
             ])],
         );
-        let state = AppState {
+        let state = TopicStore {
             devices: vec![d],
             ..Default::default()
         };
@@ -138,7 +139,7 @@ mod tests {
                 sensor("temp", SensorType::Temperature, VisibilityState::Visible),
             ])],
         );
-        let state = AppState {
+        let state = TopicStore {
             devices: vec![d],
             ..Default::default()
         };
@@ -160,7 +161,7 @@ mod tests {
             }])],
         );
         d.name = "My Device".into();
-        let state = AppState {
+        let state = TopicStore {
             devices: vec![d],
             ..Default::default()
         };
@@ -190,7 +191,7 @@ mod tests {
                     visibility: VisibilityState::Visible,
                 }])],
             );
-            let state = AppState {
+            let state = TopicStore {
                 devices: vec![d],
                 ..Default::default()
             };

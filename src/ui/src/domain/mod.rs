@@ -6,10 +6,10 @@
 //! boundary lives in `runtime`. The composition root that ties this state to
 //! `ui` presentation types is `App`, at the crate root (`crate::app`).
 
-pub mod battery_notification;
 pub mod lifecycle;
 pub mod models;
 pub mod native_notification;
 pub mod state;
+pub mod topic_store;
 pub mod tour;
 pub mod tray;

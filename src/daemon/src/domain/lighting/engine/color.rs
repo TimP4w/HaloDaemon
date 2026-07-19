@@ -1,0 +1,90 @@
+// SPDX-License-Identifier: GPL-3.0-or-later
+// Shared by the pixmap (canvas) and direct effect paths so a direct and a
+// pixmap rendering of equal params match on the wire.
+#[derive(Debug, Clone, Copy)]
+pub struct LinearColor {
+    pub r: f32,
+    pub g: f32,
+    pub b: f32,
+}
+
+pub fn srgb_to_linear_unit(value: f64) -> f64 {
+    let value = value.clamp(0.0, 1.0);
+    if value <= 0.04045 {
+        value / 12.92
+    } else {
+        ((value + 0.055) / 1.055).powf(2.4)
+    }
+}
+
+pub fn linear_to_srgb_unit(value: f64) -> f64 {
+    let value = value.clamp(0.0, 1.0);
+    if value <= 0.003_130_8 {
+        value * 12.92
+    } else {
+        1.055 * value.powf(1.0 / 2.4) - 0.055
+    }
+}
+
+pub fn srgb_to_linear(c: u8) -> f32 {
+    srgb_to_linear_unit(c as f64 / 255.0) as f32
+}
+
+pub fn linear_to_srgb(c: f32) -> u8 {
+    let c = linear_to_srgb_unit(c as f64) as f32;
+    (c.clamp(0.0, 1.0) * 255.0).round() as u8
+}
+
+pub fn linear_to_led(c: f32, gamma: f32) -> u8 {
+    (c.clamp(0.0, 1.0).powf(1.0 / gamma) * 255.0).round() as u8
+}
+
+#[cfg(test)]
+mod tests {
+    use super::*;
+
+    #[test]
+    fn linear_to_led_applies_gamma_exactly() {
+        assert_eq!(linear_to_led(0.25, 2.0), 128);
+        assert_eq!(linear_to_led(1.0, 1.0), 255);
+        assert_eq!(linear_to_led(0.0, 2.0), 0);
+    }
+}
+
+#[cfg(test)]
+mod prop_tests {
+    use super::{linear_to_led, linear_to_srgb, srgb_to_linear};
+    use proptest::prelude::*;
+
+    proptest! {
+        #[test]
+        fn srgb_linear_round_trips(c in any::<u8>()) {
+            let back = linear_to_srgb(srgb_to_linear(c));
+            prop_assert!((back as i16 - c as i16).abs() <= 1, "{c} -> {back}");
+        }
+
+        #[test]
+        fn srgb_to_linear_is_monotonic(a in any::<u8>(), b in any::<u8>()) {
+            let (lo, hi) = (a.min(b), a.max(b));
+            prop_assert!(srgb_to_linear(lo) <= srgb_to_linear(hi));
+        }
+
+        #[test]
+        fn linear_to_srgb_is_monotonic(a in 0.0f32..1.0, b in 0.0f32..1.0) {
+            let (lo, hi) = if a <= b { (a, b) } else { (b, a) };
+            prop_assert!(linear_to_srgb(lo) <= linear_to_srgb(hi));
+        }
+
+        #[test]
+        fn linear_to_led_clamps_and_is_monotonic(
+            a in -1.0f32..2.0,
+            b in -1.0f32..2.0,
+            gamma in 0.5f32..4.0,
+        ) {
+            let (lo, hi) = if a <= b { (a, b) } else { (b, a) };
+            prop_assert!(linear_to_led(lo, gamma) <= linear_to_led(hi, gamma));
+            prop_assert_eq!(linear_to_led(2.0, gamma), 255);
+            prop_assert_eq!(linear_to_led(-1.0, gamma), 0);
+        }
+    }
+}

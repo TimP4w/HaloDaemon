@@ -1,4 +1,5 @@
 pub mod app;
+pub mod bus;
 pub mod capability;
 pub mod commands;
 pub mod curve;

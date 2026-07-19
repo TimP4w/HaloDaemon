@@ -9,11 +9,10 @@ use std::collections::{HashMap, VecDeque};
 use std::sync::atomic::{AtomicBool, Ordering};
 use std::sync::Arc;
 
-use halod_shared::types::AppState;
-
 use crate::domain::{
     self,
     state::{Page, Rename, Variant},
+    topic_store::TopicStore,
 };
 use crate::runtime::ipc::{self, CommandTx, FrameSinks, UiRx};
 use crate::ui;
@@ -21,12 +20,17 @@ use crate::ui;
 pub struct App {
     pub(crate) ui: UiRx,
     pub(crate) frame_sinks: FrameSinks,
-    /// Last daemon `AppState`, re-cloned only when its watch channel changes.
-    pub(crate) state_cache: Arc<AppState>,
+    /// Last atomic bus state, re-cloned only when its watch channel changes.
+    pub(crate) state_cache: Arc<TopicStore>,
     /// LCD library filenames, re-cloned only when the watch channel changes.
     pub(crate) lcd_images_cache: Arc<Vec<String>>,
     /// Decoded plugin display assets, keyed by `ipc::plugin_asset_cache_key`.
     pub(crate) plugin_assets_cache: Arc<HashMap<String, Vec<u8>>>,
+    pub(crate) debug_cache: Option<halod_shared::debug_info::DebugInfo>,
+    pub(crate) udev_rules_cache: Option<halod_shared::types::UdevRulesStatus>,
+    pub(crate) running_apps_cache: Vec<halod_shared::types::RunningApp>,
+    pub(crate) lcd_upload_cache: Option<halod_shared::types::LcdUploadProgress>,
+    pub(crate) canvas_frame_cache: Option<halod_shared::types::CanvasFrame>,
     pub(crate) cmd: CommandTx,
     pub(crate) entered: bool,
     /// Plugin ids already toasted as quarantined (disabled for an on-disk
@@ -86,10 +90,6 @@ pub struct App {
     /// rather than going back to `None`.
     pub(crate) lcd_editor_render_cache: Option<ipc::DecodedEditorRender>,
     pub(crate) depcheck_grace: ui::screens::depcheck::GraceState,
-    /// Latest repo update-check result; persists like `lcd_editor_render_cache`.
-    pub(crate) repo_updates_cache: Vec<halod_shared::types::RepoUpdateStatus>,
-    /// Latest per-plugin update-check result; persists like `repo_updates_cache`.
-    pub(crate) plugin_updates_cache: Vec<halod_shared::types::PluginUpdateStatus>,
     /// Remote branch lists keyed by repo URL, for the Add-repository picker.
     pub(crate) repo_branches_cache: std::collections::HashMap<String, Vec<String>>,
     /// Host serial ports, for the `serial_port` config-field dropdown.
@@ -139,9 +139,14 @@ impl App {
         App {
             ui,
             frame_sinks,
-            state_cache: Arc::new(AppState::default()),
+            state_cache: Arc::new(TopicStore::default()),
             lcd_images_cache: Arc::new(Vec::new()),
             plugin_assets_cache: Arc::new(HashMap::new()),
+            debug_cache: None,
+            udev_rules_cache: None,
+            running_apps_cache: Vec::new(),
+            lcd_upload_cache: None,
+            canvas_frame_cache: None,
             cmd,
             entered: false,
             quarantine_toasted: std::collections::HashSet::new(),
@@ -178,9 +183,7 @@ impl App {
             pending_lcd_template: None,
             lcd_editor_render_cache: None,
             depcheck_grace: ui::screens::depcheck::GraceState::default(),
-            repo_updates_cache: Vec::new(),
             repo_branches_cache: std::collections::HashMap::new(),
-            plugin_updates_cache: Vec::new(),
             serial_ports_cache: Vec::new(),
             serial_ports_requested: false,
         }
@@ -191,6 +194,21 @@ impl App {
     pub(crate) fn sync_tray_background(&mut self, ctx: &egui::Context) {
         if let Some(state) = crate::runtime::ipc::take_changed(&mut self.ui.state, "state") {
             self.accept_state(state);
+        }
+        // With the Wayland surface destroyed there are no egui frames, so the
+        // normal `update` ingestion path cannot deliver notifications. Drain
+        // them here, issue native notifications, and retain their in-app toast
+        // state for the next time the window is opened.
+        let incoming: Vec<_> = self
+            .ui
+            .notifications
+            .lock()
+            .map(|mut queue| queue.drain(..).collect())
+            .unwrap_or_default();
+        if !incoming.is_empty() {
+            crate::ui::show_native_notifications(&incoming);
+            crate::ui::screens::profile::observe_notifications(&mut self.profile_ui, &incoming);
+            self.toasts.ingest(incoming, ctx.input(|input| input.time));
         }
         self.tray.sync(ctx, &self.state_cache);
     }

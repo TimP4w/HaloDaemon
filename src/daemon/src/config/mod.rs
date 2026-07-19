@@ -11,8 +11,8 @@ use serde::{Deserialize, Serialize};
 use std::collections::{HashMap, HashSet};
 use std::path::{Path, PathBuf};
 
-use crate::profiles::config::Profile;
-use crate::registry::config::{DeviceLayout, DeviceRecord};
+use crate::domain::profiles::model::Profile;
+use crate::domain::registry::model::{DeviceLayout, DeviceRecord};
 use halod_shared::keyboard::KeyboardLayoutSelection;
 
 // ── On-disk layout ───────────────────────────────────────────────────────────
@@ -149,7 +149,7 @@ fn load_profiles() -> Result<HashMap<String, Profile>> {
         let raw = read_bounded(&path, "profile")?;
         let mut file: ProfileFile = serde_yaml::from_str(&raw)
             .map_err(|e| anyhow::anyhow!("Failed to parse profile at {}: {e}", path.display()))?;
-        crate::profiles::validate::validate_profile(&file.name, &file.profile)?;
+        crate::domain::profiles::validate::validate_profile(&file.name, &file.profile)?;
         if let Some(canvas) = file.profile.lighting.canvas.as_mut() {
             canvas.sanitize();
         }

@@ -4,7 +4,7 @@
 
 /// UUID of the `halod@halod` GNOME Shell extension used for focus tracking.
 #[cfg(target_os = "linux")]
-pub const GNOME_EXTENSION_UUID: &str = "halod@halod";
+pub const GNOME_EXTENSION_UUID: &str = "companion@halod.timp4w.dev";
 
 /// D-Bus interface the `halod@halod` GNOME Shell extension emits its
 /// `FocusChanged` signal on.
@@ -34,7 +34,7 @@ pub const OFFICIAL_PLUGIN_REPO_URL: &str = "https://github.com/TimP4w/HaloDaemon
 
 /// Fixed slug for the official plugin repo record — never derived from the
 /// URL, so a future URL change can't orphan the non-removable guard in
-/// `plugin::usecases::repos::remove_repo`.
+/// `crate::application::usecases::plugin::repos::remove_repo`.
 pub const OFFICIAL_PLUGIN_REPO_SLUG: &str = "official";
 
 /// Trusted release keys for the official plugin repository. Keys are indexed

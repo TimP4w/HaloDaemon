@@ -10,7 +10,7 @@ use crate::domain::state::Page;
 const DEPCHECK_GRACE_SECS: f64 = 4.0;
 
 impl App {
-    pub(crate) fn accept_state(&mut self, state: halod_shared::types::AppState) {
+    pub(crate) fn accept_state(&mut self, state: crate::domain::topic_store::TopicStore) {
         crate::ui::screens::settings::apply_locale(&state.gui.language);
         self.state_cache = std::sync::Arc::new(state);
     }
@@ -62,15 +62,25 @@ impl App {
             self.accept_state(state);
         }
         let state = std::sync::Arc::clone(&self.state_cache);
-        let onboarding_active =
-            crate::ui::screens::plugins::onboarding_pending(&state.gui.seen_tours)
-                && !self.onboarding_completed;
+        let connected = *self.ui.connected.borrow();
+        let onboarding_active = onboarding_is_active(
+            state.gui_present,
+            crate::ui::screens::plugins::onboarding_pending(&state.gui.seen_tours),
+            self.onboarding_completed,
+        );
         self.tray.sync(ctx, &state);
         // Close handling (hide-to-tray vs quit) is decided by `close_action` and
         // applied by each backend after `draw` — not here, so it isn't run twice.
-        let connected = *self.ui.connected.borrow();
-        let debug = self.ui.debug.borrow().clone();
-        let udev_rules = self.ui.udev_rules.borrow().clone();
+        if let Some(debug) = crate::runtime::ipc::take_changed(&mut self.ui.debug, "debug") {
+            self.debug_cache = debug;
+        }
+        if let Some(status) =
+            crate::runtime::ipc::take_changed(&mut self.ui.udev_rules, "udev_rules")
+        {
+            self.udev_rules_cache = status;
+        }
+        let debug = self.debug_cache.as_ref();
+        let udev_rules = self.udev_rules_cache.as_ref();
         if let Some(imgs) = crate::runtime::ipc::take_changed(&mut self.ui.lcd_images, "lcd_images")
         {
             self.lcd_images_cache = std::sync::Arc::new(imgs);
@@ -82,16 +92,6 @@ impl App {
             self.plugin_assets_cache = std::sync::Arc::new(assets);
         }
         let plugin_assets = std::sync::Arc::clone(&self.plugin_assets_cache);
-        if let Some(updates) =
-            crate::runtime::ipc::take_changed(&mut self.ui.repo_updates, "repo_updates")
-        {
-            self.repo_updates_cache = updates;
-        }
-        if let Some(updates) =
-            crate::runtime::ipc::take_changed(&mut self.ui.plugin_updates, "plugin_updates")
-        {
-            self.plugin_updates_cache = updates;
-        }
         if let Some(branches) =
             crate::runtime::ipc::take_changed(&mut self.ui.repo_branches, "repo_branches")
         {
@@ -125,29 +125,40 @@ impl App {
         // A terminal (`Done`/`Failed`) is consumed as a one-shot edge: `Some`
         // only on the frame it newly arrives, so a retained stale terminal
         // can't clear a freshly-armed upload spinner.
-        let lcd_upload_terminal =
-            crate::runtime::ipc::take_changed(&mut self.ui.lcd_upload, "lcd_upload")
-                .flatten()
-                .filter(|p| {
-                    matches!(
-                        p.stage,
-                        halod_shared::types::LcdUploadStage::Done
-                            | halod_shared::types::LcdUploadStage::Failed
-                    )
-                });
-        let lcd_upload = self.ui.lcd_upload.borrow().clone();
+        let lcd_upload_changed =
+            crate::runtime::ipc::take_changed(&mut self.ui.lcd_upload, "lcd_upload");
+        let lcd_upload_terminal = lcd_upload_changed
+            .as_ref()
+            .and_then(|progress| progress.clone())
+            .filter(|p| {
+                matches!(
+                    p.stage,
+                    halod_shared::types::LcdUploadStage::Done
+                        | halod_shared::types::LcdUploadStage::Failed
+                )
+            });
+        if let Some(progress) = lcd_upload_changed {
+            self.lcd_upload_cache = progress;
+        }
+        let lcd_upload = self.lcd_upload_cache.clone();
         if let Some(template) =
             crate::runtime::ipc::take_changed(&mut self.ui.lcd_template, "lcd_template")
         {
             self.pending_lcd_template = template;
         }
         let lcd_template = self.pending_lcd_template.take();
-        let canvas_frame = if self.page == Page::Lighting {
-            self.ui.canvas_frame.borrow().clone()
-        } else {
-            None
-        };
-        let running_apps = self.ui.running_apps.borrow().clone();
+        if let Some(frame) =
+            crate::runtime::ipc::take_changed(&mut self.ui.canvas_frame, "canvas_frame")
+        {
+            self.canvas_frame_cache = frame;
+        }
+        let canvas_frame = self.canvas_frame_cache.as_ref();
+        if let Some(apps) =
+            crate::runtime::ipc::take_changed(&mut self.ui.running_apps, "running_apps")
+        {
+            self.running_apps_cache = apps;
+        }
+        let running_apps = &self.running_apps_cache;
         let time = ctx.input(|i| i.time);
 
         // Suppress the startup healthcheck dialog until a settled snapshot.
@@ -172,6 +183,12 @@ impl App {
             .lock()
             .map(|mut q| q.drain(..).collect())
             .unwrap_or_default();
+        // Native delivery belongs to the same authoritative ingestion point as
+        // in-app toasts. Doing it in the IPC reader made delivery depend on a
+        // background transport thread and obscured whether an event had
+        // actually reached the UI. This path also runs while the Wayland
+        // window is destroyed and the application is resident in the tray.
+        show_native_notifications(&incoming);
         if onboarding_active {
             incoming.retain(|notification| {
                 !matches!(
@@ -209,23 +226,39 @@ impl App {
             self.toasts.ingest([notification], time);
         }
 
-        if let Some(ref frame) = canvas_frame {
-            crate::ui::screens::canvas::ingest_frame(ctx, &mut self.canvas_ui, frame);
+        if self.page == Page::Lighting {
+            if let Some(frame) = canvas_frame {
+                crate::ui::screens::canvas::ingest_frame(ctx, &mut self.canvas_ui, frame);
+            }
         } else if matches!(self.page, Page::Device(_)) {
-            if let Some(frame) = self.ui.canvas_frame.borrow().as_ref() {
+            if let Some(frame) = canvas_frame {
                 crate::ui::screens::canvas::ingest_led_colors(&mut self.canvas_ui, frame);
             }
         }
 
         if time - self.last_sample >= 1.0 {
             self.last_sample = time;
-            for s in domain::models::sensors::sensors(&state, true) {
+            let sensors = domain::models::sensors::sensors(&state, true);
+            let sensor_ids = sensors
+                .iter()
+                .map(|s| s.id.as_str())
+                .collect::<std::collections::HashSet<_>>();
+            self.sensor_history
+                .retain(|id, _| sensor_ids.contains(id.as_str()));
+            for s in sensors {
                 let h = self.sensor_history.entry(s.id).or_default();
                 h.push_back(s.value as f32);
                 if h.len() > domain::state::HISTORY_LEN {
                     h.pop_front();
                 }
             }
+            let device_ids = state
+                .devices
+                .iter()
+                .map(|dev| dev.id.as_str())
+                .collect::<std::collections::HashSet<_>>();
+            self.write_rate_history
+                .retain(|id, _| device_ids.contains(id.as_str()));
             for dev in &state.devices {
                 let Some(wr) = domain::models::device::effective_write_rate(&state, dev) else {
                     continue;
@@ -250,7 +283,7 @@ impl App {
         if !onboarding_active {
             let quarantine = crate::ui::screens::plugins::quarantine_toasts(
                 &state.plugins.plugins,
-                &self.plugin_updates_cache,
+                &state.plugins.updates,
                 &mut self.quarantine_toasted,
                 (time * 1000.0) as u64,
             );
@@ -337,7 +370,10 @@ impl App {
             &self.tour,
             &state.gui.seen_tours,
         );
-        if !onboarding_active {
+        if state.gui_present {
+            domain::tour::reconcile_seen(&mut self.tour, &state.gui.seen_tours);
+        }
+        if state.gui_present && !onboarding_active {
             if let Some(key) = tour_key {
                 domain::tour::maybe_start(&mut self.tour, &state.gui.seen_tours, key);
             }
@@ -366,8 +402,8 @@ impl App {
                     &state,
                     connected,
                     &mut self.page,
-                    &self.plugin_updates_cache,
-                    udev_rules.as_ref(),
+                    &state.plugins.updates,
+                    udev_rules,
                 );
             });
 
@@ -409,7 +445,7 @@ impl App {
                             state: &state,
                             cmd: &self.cmd,
                             time,
-                            debug: debug.as_ref(),
+                            debug,
                             lcd_images: &lcd_images,
                             lcd_preview,
                             lcd_upload,
@@ -446,7 +482,7 @@ impl App {
                             &mut self.lighting_ui,
                             &mut self.canvas_ui,
                             &mut self.effect_designer_ui,
-                            canvas_frame.as_ref(),
+                            canvas_frame,
                             time,
                             &mut self.page,
                         );
@@ -460,7 +496,7 @@ impl App {
                             &state,
                             &self.cmd,
                             connected,
-                            debug.as_ref(),
+                            debug,
                             &mut self.settings_ui,
                         );
                     }
@@ -470,10 +506,10 @@ impl App {
                             &state,
                             &self.cmd,
                             &plugin_assets,
-                            &self.repo_updates_cache,
-                            &self.plugin_updates_cache,
+                            &state.plugins.repo_updates,
+                            &state.plugins.updates,
                             &self.repo_branches_cache,
-                            udev_rules.as_ref(),
+                            udev_rules,
                         );
                     }
                     Page::Integrations => {
@@ -501,7 +537,7 @@ impl App {
                             &mut self.profile_ui,
                             &name,
                             &mut self.page,
-                            &running_apps,
+                            running_apps,
                         );
                     }
                 }
@@ -533,7 +569,7 @@ impl App {
             let outcome = crate::ui::screens::onboarding::show(
                 ctx,
                 &state,
-                debug.as_ref(),
+                debug,
                 &self.cmd,
                 &mut self.onboarding_ui,
                 time,
@@ -559,7 +595,7 @@ impl App {
                 ctx,
                 &state,
                 &self.cmd,
-                debug.as_ref(),
+                debug,
                 connected,
                 within_grace,
                 &mut self.depcheck_ui,
@@ -569,7 +605,7 @@ impl App {
             && !tour_active
             && crate::ui::screens::depcheck::visible(
                 &state,
-                debug.as_ref(),
+                debug,
                 connected,
                 within_grace,
                 &self.depcheck_ui,
@@ -602,7 +638,7 @@ impl App {
             &self.cmd,
             tour_key,
             connected,
-            depcheck_visible || onboarding_shown,
+            depcheck_visible || onboarding_shown || !state.gui_present,
         );
 
         // Toasts overlay everything, including the daemon-down scrim.
@@ -633,7 +669,7 @@ impl App {
     }
 }
 
-fn show_native_notifications(notifications: &[halod_shared::types::Notification]) {
+pub(crate) fn show_native_notifications(notifications: &[halod_shared::types::Notification]) {
     for notification in notifications {
         if !notification.show_native {
             continue;
@@ -672,6 +708,23 @@ fn tour_key_for(
         Page::EffectDesigner => Some(domain::tour::TourKey::EffectDesigner),
         Page::Plugins => Some(domain::tour::TourKey::PagePlugins),
         Page::Integrations => Some(domain::tour::TourKey::PageIntegrations),
+    }
+}
+
+fn onboarding_is_active(gui_present: bool, pending: bool, completed: bool) -> bool {
+    gui_present && pending && !completed
+}
+
+#[cfg(test)]
+mod hydration_tests {
+    use super::onboarding_is_active;
+
+    #[test]
+    fn onboarding_waits_for_authoritative_snapshot() {
+        assert!(!onboarding_is_active(false, true, false));
+        assert!(onboarding_is_active(true, true, false));
+        assert!(!onboarding_is_active(true, false, false));
+        assert!(!onboarding_is_active(true, true, true));
     }
 }
 

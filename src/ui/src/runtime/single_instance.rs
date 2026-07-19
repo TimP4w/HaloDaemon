@@ -108,7 +108,7 @@ fn report_unguarded(res_tx: &mpsc::Sender<Report>) {
 }
 
 #[cfg(unix)]
-async fn run_guard(path: String, res_tx: mpsc::Sender<Report>) {
+async fn run_guard(path: std::path::PathBuf, res_tx: mpsc::Sender<Report>) {
     use tokio::io::{AsyncReadExt, AsyncWriteExt};
     use tokio::net::{UnixListener, UnixStream};
 
@@ -217,16 +217,15 @@ mod tests {
     use std::sync::Arc;
     use std::time::Duration;
 
-    fn temp_socket() -> (tempfile::TempDir, String) {
+    fn temp_socket() -> (tempfile::TempDir, std::path::PathBuf) {
         let dir = tempfile::tempdir().unwrap();
         let path = dir.path().join(halod_shared::app::GUI_SOCKET_FILENAME);
-        let path = path.to_str().unwrap().to_string();
         (dir, path)
     }
 
     /// Spawn the real `run_guard` on the current runtime and return the report
     /// once it has finished binding.
-    fn spawn_guard(path: String) -> mpsc::Receiver<Report> {
+    fn spawn_guard(path: std::path::PathBuf) -> mpsc::Receiver<Report> {
         let (tx, rx) = mpsc::channel::<Report>();
         tokio::spawn(run_guard(path, tx));
         rx

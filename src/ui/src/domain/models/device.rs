@@ -1,14 +1,15 @@
 // SPDX-License-Identifier: GPL-3.0-or-later
-//! Maps the daemon's `WireDevice`/`AppState` onto the fields the Prism design
+//! Maps the daemon's `WireDevice`/`TopicStore` onto the fields the Prism design
 //! expects (short code, accent hue, two headline metrics, status). All values
 //! are derived from real device capabilities — there is no mock data. Colors
 //! themselves are a presentation concern; this module only classifies (see
 //! [`BatteryLevel`], [`hue_index`]) and `ui::theme` maps the classification
 //! to a `Color32`.
 
+use crate::domain::topic_store::TopicStore;
 use halod_shared::types::{
-    AppState, BatteryStatus, ConflictConfidence, ConnectionType, DeviceCapability, DeviceType,
-    SensorType, SensorUnit, VisibilityState, WireDevice, WriteRateStatus,
+    BatteryStatus, ConflictConfidence, ConnectionType, DeviceCapability, DeviceType, SensorType,
+    SensorUnit, VisibilityState, WireDevice, WriteRateStatus,
 };
 
 #[derive(Debug, Clone, PartialEq, Eq)]
@@ -54,7 +55,7 @@ pub fn conflict_presentation(
 /// Find the parent hub whose RGB chain lists `device_id` and return its
 /// write-rate status. Chain accessories share their parent's transport, so
 /// their own `write_rate` is always `None`.
-pub(crate) fn find_hub_write_rate(state: &AppState, device_id: &str) -> Option<WriteRateStatus> {
+pub(crate) fn find_hub_write_rate(state: &TopicStore, device_id: &str) -> Option<WriteRateStatus> {
     state.devices.iter().find_map(|parent| {
         let is_hub_for_device = parent.lighting().is_some_and(|lighting| {
             lighting.descriptor.channels.iter().any(|channel| {
@@ -71,7 +72,10 @@ pub(crate) fn find_hub_write_rate(state: &AppState, device_id: &str) -> Option<W
 
 /// A device's own write-rate status, falling back to its parent hub's when
 /// it hasn't wired up its own (chain accessories).
-pub(crate) fn effective_write_rate(state: &AppState, dev: &WireDevice) -> Option<WriteRateStatus> {
+pub(crate) fn effective_write_rate(
+    state: &TopicStore,
+    dev: &WireDevice,
+) -> Option<WriteRateStatus> {
     dev.write_rate
         .or_else(|| find_hub_write_rate(state, &dev.id))
 }
@@ -680,7 +684,7 @@ mod tests {
             write_rate: Some(own_rate),
             ..Default::default()
         };
-        let state = AppState {
+        let state = TopicStore {
             devices: vec![hub, child.clone()],
             ..Default::default()
         };
@@ -703,7 +707,7 @@ mod tests {
             write_rate: None,
             ..Default::default()
         };
-        let state = AppState {
+        let state = TopicStore {
             devices: vec![hub, child.clone()],
             ..Default::default()
         };
@@ -722,7 +726,7 @@ mod tests {
             current_bytes_per_sec: 480.0,
             rejected_total: 0,
         };
-        let state = AppState {
+        let state = TopicStore {
             devices: vec![hub_with_child("hub1", "fan1", Some(hub_rate))],
             ..Default::default()
         };
@@ -733,7 +737,7 @@ mod tests {
 
     #[test]
     fn find_hub_write_rate_none_when_hub_has_not_wired_up_stats() {
-        let state = AppState {
+        let state = TopicStore {
             devices: vec![hub_with_child("hub1", "fan1", None)],
             ..Default::default()
         };

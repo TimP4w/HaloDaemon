@@ -2,7 +2,7 @@
 #![cfg(test)]
 //! Shared mock device + builders for unit tests. Test-only.
 
-use crate::drivers::{
+use crate::domain::device::{
     ActionCapability, BooleanCapability, CapabilityRef, ChoiceCapability, ChoiceStateCache,
     CoolingCapability, CoolingStateSlot, Device, DpiCapability, EqualizerCapability,
     KeyRemapCapability, KeyboardLayoutCapability, KeyboardLayoutSlot, LcdCapability, LcdStateSlot,
@@ -32,7 +32,7 @@ pub static HALOD_CONFIG_DIR_LOCK: Mutex<()> = Mutex::new(());
 #[allow(clippy::await_holding_lock)]
 pub async fn with_tmp_config<F, Fut>(f: F)
 where
-    F: FnOnce(Arc<crate::state::AppState>) -> Fut,
+    F: FnOnce(Arc<crate::application::state::AppState>) -> Fut,
     Fut: std::future::Future<Output = ()>,
 {
     let _guard = HALOD_CONFIG_DIR_LOCK
@@ -40,7 +40,7 @@ where
         .unwrap_or_else(|e| e.into_inner());
     let tmp = tempfile::tempdir().unwrap();
     unsafe { std::env::set_var("HALOD_CONFIG_DIR", tmp.path()) };
-    f(Arc::new(crate::state::AppState::new(
+    f(Arc::new(crate::application::state::AppState::new(
         crate::config::Config::default(),
     )))
     .await;
@@ -584,6 +584,7 @@ impl ChoiceCapability for MockDevice {
             .expect("MockDevice: ChoiceStateCache not present — call .with_choice()")
     }
     async fn set_choice(&self, key: &str, selected: usize) -> Result<()> {
+        self.choice_cache().record(key, selected);
         *self
             .choice_last_set
             .as_ref()
@@ -602,6 +603,7 @@ impl RangeCapability for MockDevice {
             .expect("MockDevice: RangeStateCache not present — call .with_range()")
     }
     async fn set_range(&self, key: &str, value: i32) -> Result<()> {
+        self.range_cache().record(key, value);
         *self
             .range_last_set
             .as_ref()
@@ -786,8 +788,8 @@ impl EqualizerCapability for MockDevice {
 #[cfg(test)]
 mod capability_tests {
     use super::*;
-    use crate::drivers::EqualizerCapability as EqCap;
-    use crate::drivers::LcdCapability as LcdCap;
+    use crate::domain::device::EqualizerCapability as EqCap;
+    use crate::domain::device::LcdCapability as LcdCap;
 
     #[tokio::test]
     async fn equalizer_save_restore_round_trip() {

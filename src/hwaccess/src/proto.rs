@@ -28,6 +28,11 @@ pub const PIPE_NAME: &str = r"\\.\pipe\halod-broker";
 /// (register) and the daemon (start) agree on one string.
 pub const BROKER_SERVICE_NAME: &str = "HalodBroker";
 
+/// How long an unowned broker remains alive after its last client disconnects.
+/// Shared with the client so a replacement daemon can wait out a broker that
+/// still carries the previous daemon's process-local bootstrap token.
+pub const BROKER_IDLE_GRACE_MS: u64 = 30_000;
+
 /// Lifetime of one connection-bound authorization. Clients renew before it
 /// expires; the bootstrap secret itself exists only for one broker process.
 pub const CAPABILITY_TTL_MS: u64 = 60_000;
@@ -83,10 +88,6 @@ pub enum Request {
     Renew {
         capability: String,
     },
-    /// Enumerate chipset SMBus controllers.
-    Enumerate,
-    /// Enumerate GPU SMBus/i2c controllers.
-    EnumerateGpu,
     /// Open the register bus described by `info`; replies [`Response::Opened`].
     OpenBus {
         info: BusInfo,
@@ -166,7 +167,6 @@ pub enum Response {
         capability: String,
         expires_in_ms: u64,
     },
-    Buses(Vec<BusInfo>),
     Opened(u32),
     Dword(u32),
     Byte(u8),
@@ -275,8 +275,6 @@ mod tests {
                 },
             }),
             ".*".prop_map(|capability| Request::Renew { capability }),
-            Just(Request::Enumerate),
-            Just(Request::EnumerateGpu),
             arb_bus_info().prop_map(|info| Request::OpenBus { info }),
             (any::<u32>(), any::<u8>()).prop_map(|(bus, addr)| Request::ReadByte { bus, addr }),
             (any::<u32>(), any::<u8>(), any::<u8>())
@@ -345,7 +343,6 @@ mod tests {
                 capability,
                 expires_in_ms: CAPABILITY_TTL_MS,
             }),
-            prop::collection::vec(arb_bus_info(), 0..4).prop_map(Response::Buses),
             any::<u32>().prop_map(Response::Opened),
             any::<u32>().prop_map(Response::Dword),
             any::<u8>().prop_map(Response::Byte),

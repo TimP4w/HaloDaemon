@@ -5,14 +5,15 @@
 
 use std::hash::{Hash, Hasher};
 
-use egui::{epaint::Vertex, Align2, Color32, Mesh, Pos2, Sense, Shape, Stroke, Vec2};
-use halod_shared::types::{AppState, DiscoveryDetail, DiscoveryPhase, WireDevice};
+use crate::domain::topic_store::TopicStore;
+use egui::{epaint::Vertex, Align2, Color32, Mesh, Pos2, Rect, Sense, Shape, Stroke, Vec2};
+use halod_shared::types::{DiscoveryDetail, DiscoveryPhase, WireDevice};
 
 use crate::domain::models::device as model;
 use crate::ui::theme::{self, a};
 
 /// Returns true when the overlay should be dismissed
-pub fn show(ui: &mut egui::Ui, state: &AppState, connected: bool, time: f64) -> bool {
+pub fn show(ui: &mut egui::Ui, state: &TopicStore, connected: bool, time: f64) -> bool {
     let mut dismissed = false;
     let ctx = ui.ctx().clone();
     // Border on top of the radar screen (same as main app).
@@ -108,12 +109,10 @@ pub fn show(ui: &mut egui::Ui, state: &AppState, connected: bool, time: f64) -> 
                 draw_blip(&p, center, radius, d, i, time);
             }
 
-            // Title + subtitle. When the daemon is down there is nothing to scan,
-            // so prompt the user to start it instead.
+            // Title + subtitle. While the daemon starts there is nothing to scan,
+            // so show the shared indeterminate progress treatment instead.
             let title_y = center.y + radius + gap + 10.0;
-            let (title, sub) = if !connected {
-                (String::new(), t!("misc.radar_daemon_down_sub").to_string())
-            } else if complete {
+            let (title, sub) = if complete {
                 let title = if found == 1 {
                     t!("misc.radar_one_device_ready").to_string()
                 } else {
@@ -134,16 +133,28 @@ pub fn show(ui: &mut egui::Ui, state: &AppState, connected: bool, time: f64) -> 
                     theme::semibold(19.0),
                     theme::TEXT,
                 );
+                p.text(
+                    Pos2::new(center.x, title_y + 24.0),
+                    Align2::CENTER_CENTER,
+                    sub,
+                    theme::body(12.5),
+                    theme::TEXT_MUT,
+                );
             } else {
-                draw_power_icon(&p, Pos2::new(center.x, title_y), 9.0);
+                p.text(
+                    Pos2::new(center.x, title_y),
+                    Align2::CENTER_CENTER,
+                    t!("misc.radar_daemon_down_sub").to_string(),
+                    theme::bold(18.0),
+                    theme::TEXT,
+                );
+                let bar_rect = Rect::from_center_size(
+                    Pos2::new(center.x, title_y + 30.0),
+                    Vec2::new(320.0, 7.0),
+                );
+                let mut bar_ui = ui.new_child(egui::UiBuilder::new().max_rect(bar_rect));
+                crate::ui::components::progress_bar(&mut bar_ui, 320.0, 7.0, None);
             }
-            p.text(
-                Pos2::new(center.x, title_y + 24.0),
-                Align2::CENTER_CENTER,
-                sub,
-                theme::body(12.5),
-                theme::TEXT_MUT,
-            );
             if connected && state.discovery.checking_updates {
                 p.text(
                     Pos2::new(center.x, title_y + 44.0),
@@ -159,17 +170,6 @@ pub fn show(ui: &mut egui::Ui, state: &AppState, connected: bool, time: f64) -> 
             }
         });
     dismissed
-}
-
-fn draw_power_icon(p: &egui::Painter, center: Pos2, radius: f32) {
-    p.circle_stroke(center, radius, Stroke::new(2.0, theme::OFFLINE_TEXT));
-    p.line_segment(
-        [
-            Pos2::new(center.x, center.y - radius - 3.0),
-            Pos2::new(center.x, center.y + 1.0),
-        ],
-        Stroke::new(2.4, theme::OFFLINE_TEXT),
-    );
 }
 
 pub(crate) fn draw_radar(p: &egui::Painter, center: Pos2, radius: f32, time: f64) {

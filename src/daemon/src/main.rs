@@ -1,43 +1,34 @@
 // SPDX-License-Identifier: GPL-3.0-or-later
+mod application;
 mod config;
 mod constants;
-mod cooling;
-mod drivers;
+mod domain;
 mod embedded_plugins {
     include!(concat!(env!("OUT_DIR"), "/embedded_plugin_bundle.rs"));
 }
-mod input;
-mod ipc;
-mod lcd;
-mod lifecycle;
-mod lighting;
+mod infrastructure;
 mod logger;
-mod platform;
-mod plugin;
-mod profiles;
-mod registry;
-mod run_loop;
-mod secrets;
-mod services;
-mod state;
-mod task_supervisor;
 #[cfg(test)]
 mod test_support;
 mod util;
 
 use anyhow::Result;
 use std::sync::Arc;
-use tokio::sync::watch;
 
-use crate::drivers::transports::hid;
-use crate::state::EngineRunConfig;
+use crate::application::run_loop::{EngineConfigReceiver, EngineConfigTopic};
+use crate::application::state;
+use crate::application::{ipc, lifecycle, task_supervisor};
+use crate::domain::{cooling, device, input, lcd, lighting, plugin, profiles};
+#[cfg(unix)]
+use crate::infrastructure::platform;
+use crate::infrastructure::secrets;
 
 /// How this process was invoked, decided purely from argv.
 ///
 /// The daemon is always a plain user process now — Windows service registration
 /// and the elevated register-bus broker live in `halod-broker.exe`, and the GUI
 /// launches this daemon directly. `--headless` opts out of idle-shutdown (see
-/// [`crate::lifecycle`]); the development-only `--dev-plugin-repo <DIR>` flag
+/// [`crate::application::lifecycle`]); the development-only `--dev-plugin-repo <DIR>` flag
 /// loads a directly supplied working tree as an extra plugin source alongside
 /// the official, local, and configured repos, winning any id collisions.
 ///
@@ -235,9 +226,11 @@ async fn run_daemon(
     let initial_level: log::LevelFilter =
         cfg.gui.log_level.parse().unwrap_or(log::LevelFilter::Info);
 
-    let app = Arc::new(state::AppState::new(cfg).with_secret_store(secrets::open_secret_store()));
-    let save_worker = crate::state::start_config_save_worker(app.clone());
-    let persist_worker = crate::state::start_persist_worker(app.clone());
+    let app = Arc::new(
+        application::state::AppState::new(cfg).with_secret_store(secrets::open_secret_store()),
+    );
+    let save_worker = crate::application::state::start_config_save_worker(app.clone());
+    let persist_worker = crate::application::state::start_persist_worker(app.clone());
 
     logger::init(crate::config::config_dir().join("halod.log"), initial_level);
 
@@ -249,21 +242,20 @@ async fn run_daemon(
     log::info!("Daemon is running. Press Ctrl+C to shut down.");
 
     #[cfg(unix)]
-    platform::elevation::warn_if_elevated();
+    platform::elevation::refuse_if_elevated()?;
 
     // Must run before device discovery opens any HID handles: a second daemon
     // has to exit *before* it can fight the first over the hardware.
     ipc::ensure_single_instance()?;
 
     let ipc_handle = ipc::serve(app.clone());
-    let broadcast_handle = ipc::broadcast_loop(app.clone());
     let mut supervisor = task_supervisor::TaskSupervisor::new(Arc::clone(&app));
 
     // Reclaim sinks leaked by a previous daemon; safe once single-instance owns.
-    services::audio::sink::cleanup_orphaned_sinks().await;
+    infrastructure::audio::sink::cleanup_orphaned_sinks().await;
 
     log::info!("Discovering devices...");
-    crate::registry::initialize_app_state(
+    crate::domain::registry::initialize_app_state(
         app.clone(),
         #[cfg(feature = "dev-plugin-repo")]
         dev_plugin_repo,
@@ -273,11 +265,12 @@ async fn run_daemon(
 
     // Prime the requirement cache so the first UI poll doesn't trigger a probe
     // per plugin; refreshed thereafter only at reconcile (no continuous polling).
-    crate::plugin::usecases::plugins::refresh_requirements(&app).await?;
+    crate::application::usecases::plugin::plugins::refresh_requirements(&app).await?;
 
     // Compute passive HID/USB/SMBus recommendations once at startup. The same
     // snapshot is refreshed when repository manifests change.
-    crate::plugin::usecases::plugins::refresh_recommendations(&app).await;
+    crate::application::usecases::plugin::plugins::refresh_recommendations(&app).await;
+    crate::application::usecases::registry::runtime::bootstrap(&app).await;
 
     // Started only once startup is done — the grace clock must not elapse
     // before a client has had any chance to connect.
@@ -299,9 +292,11 @@ async fn run_daemon(
         "Device hotplug monitoring stopped unexpectedly.",
         move || {
             let app = Arc::clone(&hotplug_app);
-            Box::pin(
-                async move { task_supervisor::TaskHandle(tokio::spawn(hid::hotplug_monitor(app))) },
-            )
+            Box::pin(async move {
+                task_supervisor::TaskHandle(tokio::spawn(
+                    application::observers::hid::hotplug_monitor(app),
+                ))
+            })
         },
         || {},
     );
@@ -317,7 +312,7 @@ async fn run_daemon(
             let app = Arc::clone(&usb_hotplug_app);
             Box::pin(async move {
                 task_supervisor::TaskHandle(tokio::spawn(
-                    crate::drivers::transports::usb::usb_hotplug_monitor(app),
+                    crate::application::observers::usb_hotplug::run(app),
                 ))
             })
         },
@@ -335,7 +330,7 @@ async fn run_daemon(
             let app = Arc::clone(&integration_app);
             Box::pin(async move {
                 task_supervisor::TaskHandle(tokio::spawn(
-                    plugin::integration_monitor::integration_monitor(app),
+                    plugin::observers::integration_monitor::integration_monitor(app),
                 ))
             })
         },
@@ -349,7 +344,35 @@ async fn run_daemon(
         move || {
             let app = Arc::clone(&sensor_app);
             Box::pin(async move {
-                task_supervisor::TaskHandle(tokio::spawn(registry::state::sensor_data_producer(
+                task_supervisor::TaskHandle(tokio::spawn(
+                    crate::application::usecases::device::telemetry::run(app),
+                ))
+            })
+        },
+        || {},
+    );
+
+    let plugin_data_app = Arc::clone(&app);
+    supervisor.register(
+        "Plugin data status producer",
+        "Plugin data status projection stopped unexpectedly.",
+        move || {
+            let app = Arc::clone(&plugin_data_app);
+            Box::pin(async move {
+                task_supervisor::TaskHandle(tokio::spawn(plugin::observers::data_status::run(app)))
+            })
+        },
+        || {},
+    );
+
+    let battery_app = Arc::clone(&app);
+    supervisor.register(
+        "Low battery watcher",
+        "Low battery monitoring stopped unexpectedly.",
+        move || {
+            let app = Arc::clone(&battery_app);
+            Box::pin(async move {
+                task_supervisor::TaskHandle(tokio::spawn(device::policies::low_battery::watcher(
                     app,
                 )))
             })
@@ -357,67 +380,52 @@ async fn run_daemon(
         || {},
     );
 
-    let (cooling_cfg, rgb_cfg, lcd_cfg) = {
-        let cfg = app.config.read().await;
-        (cfg.cooling.clone(), cfg.rgb.clone(), cfg.lcd.clone())
-    };
-
-    let (fan_curve_cfg_tx, fan_curve_cfg_rx) =
-        watch::channel(EngineRunConfig::fan_curve(&cooling_cfg));
-    let (failsafe_duty_tx, failsafe_duty_rx) = watch::channel(cooling_cfg.fan_failsafe_duty);
-    let (rgb_cfg_tx, rgb_cfg_rx) = watch::channel(EngineRunConfig::canvas(&rgb_cfg));
-    let (lcd_cfg_tx, lcd_cfg_rx) = watch::channel(EngineRunConfig::lcd(&lcd_cfg));
-
-    let fan_curve = cooling::fan_curve::FanCurveEngine::new(app.clone());
-    let rgb = lighting::rgb_engine::RgbEngine::new(app.clone()).await;
+    let fan_curve = cooling::engine::fan_curve::FanCurveEngine::new(app.clone());
+    let rgb = lighting::engine::RgbEngine::new(app.clone()).await;
     let lcd = lcd::engine::LcdEngine::new(app.clone());
     let video = lcd::engine::video::VideoEngine::new(app.clone(), lcd.frame_sender());
 
-    let focus_watcher = profiles::focus_watcher::FocusWatcherEngine::new(app.clone());
+    let focus_watcher = profiles::observers::active_window::FocusWatcherEngine::new(app.clone());
 
-    app.lighting.set_engine(rgb.clone(), rgb_cfg_tx.clone());
-    app.cooling
-        .set_engine(fan_curve_cfg_tx.clone(), failsafe_duty_tx.clone());
-    app.lcd.set_engine(lcd.clone(), video, lcd_cfg_tx.clone());
+    app.lighting.set_engine(rgb.clone());
+    app.cooling.set_engine();
+    app.lcd.set_engine(lcd.clone(), video);
     // Receivers are subscribed lazily; SendError just means no live receivers yet,
     // but watch still stores the value so future subscribers see `true`.
     let _ = app.engines_ready.send(true);
 
-    drop((fan_curve_cfg_rx, failsafe_duty_rx, rgb_cfg_rx, lcd_cfg_rx));
     let fan_engine = Arc::clone(&fan_curve);
-    let fan_cfg = fan_curve_cfg_tx.clone();
-    let fan_failsafe = failsafe_duty_tx.clone();
+    let fan_bus = app.data_bus.clone();
     supervisor.register(
         "FanCurve engine",
         "FanCurve engine exited unexpectedly; fan control will no longer respond to sensors.",
         move || {
             let engine = Arc::clone(&fan_engine);
-            let cfg = fan_cfg.subscribe();
-            let failsafe = fan_failsafe.subscribe();
-            Box::pin(async move { task_supervisor::TaskHandle(engine.start(cfg, failsafe)) })
+            let cfg = EngineConfigReceiver::new(fan_bus.clone(), EngineConfigTopic::Cooling);
+            Box::pin(async move { task_supervisor::TaskHandle(engine.start(cfg)) })
         },
         || {},
     );
-    let rgb_engine = Arc::clone(&rgb);
-    let rgb_config = rgb_cfg_tx.clone();
+    let lighting_engine = Arc::clone(&rgb);
+    let rgb_bus = app.data_bus.clone();
     supervisor.register(
         "RGB engine",
         "RGB engine exited unexpectedly; RGB animations will stop.",
         move || {
-            let engine = Arc::clone(&rgb_engine);
-            let cfg = rgb_config.subscribe();
+            let engine = Arc::clone(&lighting_engine);
+            let cfg = EngineConfigReceiver::new(rgb_bus.clone(), EngineConfigTopic::Lighting);
             Box::pin(async move { task_supervisor::TaskHandle(engine.start(cfg).await) })
         },
         || {},
     );
     let lcd_engine = Arc::clone(&lcd);
-    let lcd_config = lcd_cfg_tx.clone();
+    let lcd_bus = app.data_bus.clone();
     supervisor.register(
         "LCD engine",
         "LCD engine exited unexpectedly; device LCDs will stop updating.",
         move || {
             let engine = Arc::clone(&lcd_engine);
-            let cfg = lcd_config.subscribe();
+            let cfg = EngineConfigReceiver::new(lcd_bus.clone(), EngineConfigTopic::Lcd);
             Box::pin(async move { task_supervisor::TaskHandle(engine.start(cfg).await) })
         },
         || {},
@@ -431,8 +439,9 @@ async fn run_daemon(
             let engine = Arc::clone(&focus_engine);
             let app = Arc::clone(&focus_app);
             Box::pin(async move {
-                let (tx, rx) =
-                    tokio::sync::mpsc::channel::<profiles::focus_watcher::ControlMsg>(32);
+                let (tx, rx) = tokio::sync::mpsc::channel::<
+                    profiles::observers::active_window::ControlMsg,
+                >(32);
                 app.focus.set_ctrl_tx(tx).await;
                 task_supervisor::TaskHandle(engine.start(rx).await)
             })
@@ -441,12 +450,14 @@ async fn run_daemon(
     );
 
     // Action executor may fail to init on headless Linux.
-    match input::action_executor::ActionExecutor::new() {
+    match input::engine::action_executor::ActionExecutor::new() {
         Ok(executor) => {
             let executor = Arc::new(executor);
             app.input.set_executor(Arc::clone(&executor));
-            let remap_engine =
-                Arc::new(input::key_remap::KeyRemapEngine::new(executor, app.clone()));
+            let remap_engine = Arc::new(input::engine::key_remap::KeyRemapEngine::new(
+                executor,
+                app.clone(),
+            ));
             let remap_start = Arc::clone(&remap_engine);
             let remap_app = Arc::clone(&app);
             supervisor.register(
@@ -460,7 +471,7 @@ async fn run_daemon(
             );
         }
         Err(e) => {
-            platform::notify::send(
+            application::notifications::send(
                 &app,
                 halod_shared::types::NotificationCode::KeyRemapUnavailable {
                     detail: e.to_string(),
@@ -497,7 +508,6 @@ async fn run_daemon(
             log::info!("Shutdown requested via IPC");
         }
         r = ipc_handle => { if let Err(e) = r { log::error!("IPC: {e}"); } }
-        r = broadcast_handle => { if let Err(e) = r { log::error!("Broadcast: {e}"); } }
     }
 
     // Stop every supervised task before closing devices so no engine writes mid-close.
@@ -509,7 +519,7 @@ async fn run_daemon(
     // Persistence owns its shutdown transition and performs one final flush of
     // the newest version before it exits. The device-state worker has no disk
     // queue of its own and can be cancelled after engines stop producing work.
-    app.persistence.shutdown_tx.send_replace(true);
+    app.config.persistence().shutdown_tx.send_replace(true);
     if tokio::time::timeout(std::time::Duration::from_secs(5), save_worker)
         .await
         .is_err()

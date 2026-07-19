@@ -6,10 +6,10 @@
 use crate::ui::components as widgets;
 use std::collections::{HashMap, VecDeque};
 
+use crate::domain::topic_store::TopicStore;
 use egui::{Align2, Color32, Pos2, Rect, Sense, Stroke, Vec2};
 use halod_shared::types::{
-    AppState, DeviceCapability, FanCurveStatus, Sensor, SensorType, WireDevice, WireFanCurve,
-    WirePresetCurve,
+    DeviceCapability, FanCurveStatus, Sensor, SensorType, WireDevice, WireFanCurve, WirePresetCurve,
 };
 
 use crate::domain::models::device as model;
@@ -70,7 +70,7 @@ fn curve_preset_command(
 #[allow(clippy::too_many_arguments)]
 pub fn show(
     ui: &mut egui::Ui,
-    state: &AppState,
+    state: &TopicStore,
     cmd: &CommandTx,
     history: &HashMap<String, VecDeque<f32>>,
     time: f64,
@@ -115,7 +115,7 @@ pub fn show(
 
 fn cooler_grid(
     ui: &mut egui::Ui,
-    state: &AppState,
+    state: &TopicStore,
     cmd: &CommandTx,
     coolers: &[(&WireDevice, Option<&halod_shared::types::CoolingChannel>)],
     time: f64,
@@ -147,7 +147,7 @@ fn cooler_card(
     ui: &mut egui::Ui,
     dev: &WireDevice,
     channel: Option<&halod_shared::types::CoolingChannel>,
-    state: &AppState,
+    state: &TopicStore,
     cmd: &CommandTx,
     sensors: &[(String, Sensor)],
     time: f64,
@@ -478,7 +478,7 @@ fn rpm_for(dev: &WireDevice) -> u32 {
 
 /// Temperature sensors across all devices, paired with their device name.
 /// Shared by the global cooling page and the per-device cooling tab.
-pub fn temp_sensors(state: &AppState) -> Vec<(String, Sensor)> {
+pub fn temp_sensors(state: &TopicStore) -> Vec<(String, Sensor)> {
     state
         .devices
         .iter()

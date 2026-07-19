@@ -1,0 +1,1186 @@
+// SPDX-License-Identifier: GPL-3.0-or-later
+//! Managing repository-provided plugins: enable/disable and configuration.
+
+use crate::domain::events::ChangeSink as _;
+
+use std::path::Path;
+use std::sync::Arc;
+
+use anyhow::{bail, Context, Result};
+use base64::Engine as _;
+use serde_json::json;
+
+use crate::application::ipc::ClientHandle;
+use crate::application::state::AppState;
+
+/// Disable a plugin immediately. Enabling is only allowed through
+/// [`confirm_enable`], which verifies the authority snapshot shown to the user.
+pub async fn set_enabled(id: String, enabled: bool, app: Arc<AppState>) -> Result<()> {
+    if enabled {
+        bail!("enabling a plugin requires ConfirmPluginEnable");
+    }
+    {
+        let mut cfg = app.config.write().await;
+        cfg.plugins.enabled.retain(|x| x != &id);
+    }
+    app.request_config_save();
+    let device_ids = {
+        let devices = app.device_registry.read().await;
+        devices
+            .iter()
+            .filter(|device| {
+                device.owning_plugin_id().as_deref() == Some(id.as_str())
+                    || device.integration_id().as_deref() == Some(id.as_str())
+            })
+            .map(|device| device.id().to_owned())
+            .collect::<Vec<_>>()
+    };
+    app.registry.clear_operational_errors(&id, &device_ids);
+    app.data_bus.invalidate_owner(&id);
+    reconcile_plugins(&app, std::slice::from_ref(&id)).await;
+    Ok(())
+}
+
+/// Split `values` into the plaintext `cfg.plugins.config` map and the secret
+/// store (for manifest-declared `secure` fields), then re-publish the
+/// plaintext config to the plugin registry and persist. Shared by
+/// [`set_config`] and [`super::integrations::set_integration_config`]. An
+/// absent (or empty) secure value leaves the
+/// previously stored secret untouched, so the GUI never has to round-trip a
+/// secret to keep it.
+pub(crate) async fn persist_config_values(
+    id: &str,
+    values: &std::collections::HashMap<String, String>,
+    app: &Arc<AppState>,
+) -> Result<()> {
+    let values = app.registry.normalize_config_values(id, values);
+    app.registry.validate_config_values(id, &values)?;
+    let secure_keys: std::collections::HashSet<String> = app
+        .registry
+        .secure_config_keys_for(id)
+        .into_iter()
+        .collect();
+    let secrets = values
+        .iter()
+        .filter(|(key, value)| secure_keys.contains(*key) && !value.is_empty())
+        .map(|(key, value)| (key.clone(), value.clone()))
+        .collect::<Vec<_>>();
+    if !secrets.is_empty() {
+        let store = Arc::clone(&app.secret_store);
+        let plugin_id = id.to_owned();
+        tokio::task::spawn_blocking(move || -> Result<()> {
+            for (key, value) in secrets {
+                store
+                    .set(&plugin_id, &key, &value)
+                    .with_context(|| format!("storing secret '{key}' for plugin '{plugin_id}'"))?;
+            }
+            Ok(())
+        })
+        .await
+        .context("secret-store task failed")??;
+    }
+    let mut cfg = app.config.write().await;
+    let plaintext = cfg.plugins.config.entry(id.to_owned()).or_default();
+    for (key, value) in &values {
+        if !secure_keys.contains(key) {
+            plaintext.insert(key.clone(), value.clone());
+        }
+    }
+    if plaintext.is_empty() {
+        cfg.plugins.config.remove(id);
+    }
+    app.registry.replace_policy(&cfg.plugins);
+    Ok(())
+}
+
+/// Fetch a plugin's display-only asset and send it to the client as base64. Not staged — a pure read.
+pub async fn get_asset(
+    plugin_id: String,
+    name: String,
+    client: ClientHandle,
+    app: Arc<AppState>,
+) -> Result<()> {
+    let bytes = app.registry.read_asset(&plugin_id, &name)?;
+    let data_b64 = base64::engine::general_purpose::STANDARD.encode(&bytes);
+    client.send_json(&json!({
+        "type": "plugin_asset",
+        "plugin_id": plugin_id,
+        "name": name,
+        "data_b64": data_b64,
+    }));
+    Ok(())
+}
+
+pub async fn get_lcd_widget_icon(
+    catalog_id: String,
+    client: ClientHandle,
+    app: Arc<AppState>,
+) -> Result<()> {
+    let bytes = app.registry.read_widget_icon(&catalog_id)?;
+    client.send_json(&json!({
+        "type": "lcd_widget_icon",
+        "catalog_id": catalog_id,
+        "data_b64": base64::engine::general_purpose::STANDARD.encode(bytes),
+    }));
+    Ok(())
+}
+
+pub async fn get_lcd_preset(
+    catalog_id: String,
+    client: ClientHandle,
+    app: Arc<AppState>,
+) -> Result<()> {
+    let def = app.registry.read_lcd_preset(&catalog_id)?;
+    client.send_json(&json!({
+        "type": "lcd_plugin_preset",
+        "catalog_id": catalog_id,
+        "def": def,
+    }));
+    Ok(())
+}
+
+/// Enumerate the host's serial ports for a `serial_port` config-field dropdown.
+pub async fn list_serial_ports(client: ClientHandle) -> Result<()> {
+    let ports = crate::infrastructure::drivers::transports::serial::list_ports();
+    client.send_json(&json!({
+        "type": "serial_ports",
+        "ports": ports,
+    }));
+    Ok(())
+}
+
+/// Return current Linux udev-rule drift without modifying system files.
+pub async fn get_udev_rules_status(client: ClientHandle, app: Arc<AppState>) -> Result<()> {
+    client.send_json(&json!({
+        "type": "udev_rules_status",
+        "data": app.registry.udev_rules_status(),
+    }));
+    Ok(())
+}
+
+/// Replace a plugin's user-editable config values and reconcile its devices.
+pub async fn set_config(
+    id: String,
+    values: std::collections::HashMap<String, String>,
+    app: Arc<AppState>,
+) -> Result<()> {
+    persist_config_values(&id, &values, &app).await?;
+    app.request_config_save();
+    reconcile_plugins(&app, &[id]).await;
+    Ok(())
+}
+
+/// Purge every id-keyed piece of plugin state — secret, disabled flag, plaintext
+/// config, granted permissions, installed content hash, and integration
+/// disable — returning whether config changed. Shared by [`delete`] and
+/// `repos::remove_repo`, so a reinstall of identical content can't inherit an
+/// old grant or acknowledgement.
+pub(crate) async fn purge_plugin_state(id: &str, app: &Arc<AppState>) -> bool {
+    let keys = app.registry.secure_config_keys_for(id);
+    let store = Arc::clone(&app.secret_store);
+    let plugin_id = id.to_owned();
+    if let Err(error) = tokio::task::spawn_blocking(move || {
+        for key in keys {
+            if let Err(error) = store.delete(&plugin_id, &key) {
+                log::warn!("deleting secret '{key}' for plugin '{plugin_id}': {error:#}");
+            }
+        }
+    })
+    .await
+    {
+        log::warn!("secret-store cleanup task failed for plugin '{id}': {error}");
+    }
+
+    let mut cfg = app.config.write().await;
+    let before = cfg.plugins.enabled.len();
+    cfg.plugins.enabled.retain(|x| x != id);
+    let enabled_changed = cfg.plugins.enabled.len() != before;
+    let config_changed = cfg.plugins.config.remove(id).is_some();
+    let authority_changed = cfg.plugins.accepted_authorities.remove(id).is_some();
+    let hash_changed = cfg.plugins.installed_hashes.remove(id).is_some();
+    let integ_before = cfg.plugins.integrations_enabled.len();
+    cfg.plugins.integrations_enabled.retain(|x| x != id);
+    let integ_changed = cfg.plugins.integrations_enabled.len() != integ_before;
+
+    let changed =
+        enabled_changed || config_changed || authority_changed || hash_changed || integ_changed;
+    if changed {
+        app.registry.replace_policy(&cfg.plugins);
+    }
+    changed
+}
+
+/// Re-read plugins while preserving the process-local development source, then
+/// re-apply the enabled and accepted-authority policy. Shared with `repos.rs`.
+pub(crate) async fn reload_registry(app: &Arc<AppState>) {
+    let cfg = app.config.read().await;
+    #[cfg(feature = "dev-plugin-repo")]
+    let development_repo = app.development_plugin_repo.read().await.clone();
+    #[cfg(not(feature = "dev-plugin-repo"))]
+    let development_repo: Option<&std::path::Path> = None;
+    app.registry.load_all_with_priority_repo(
+        &crate::config::plugins_dir(),
+        #[cfg(feature = "dev-plugin-repo")]
+        development_repo.as_deref(),
+        #[cfg(not(feature = "dev-plugin-repo"))]
+        development_repo,
+        &crate::domain::plugin::repo_plugin_sources(&cfg.plugins.repos),
+    );
+    app.registry.replace_policy(&cfg.plugins);
+    drop(cfg);
+    // Manifests just changed, so their derived requirements may have too.
+    if let Err(error) = refresh_requirements(app).await {
+        log::warn!("refreshing plugin requirements after registry reload failed: {error:#}");
+    }
+    refresh_recommendations(app).await;
+}
+
+/// Run host requirement probes away from Tokio's worker threads. A kernel
+/// module probe may wait up to its process timeout, so even this synchronous
+/// cache refresh must be treated as blocking work by async callers.
+pub(crate) async fn refresh_requirements(app: &Arc<AppState>) -> Result<()> {
+    let app = Arc::clone(app);
+    tokio::task::spawn_blocking(move || app.registry.refresh_requirements())
+        .await
+        .context("plugin requirement probe task failed")
+}
+
+/// Refresh the passive hardware snapshot used by plugin recommendations. HID
+/// and USB enumeration are blocking; SMBus enumeration only lists controllers
+/// and does not probe device addresses.
+pub(crate) async fn refresh_recommendations(app: &Arc<AppState>) {
+    let hid_usb = tokio::task::spawn_blocking(|| {
+        (
+            crate::application::usecases::registry::debug::enumerate_hid(),
+            crate::domain::plugin::recommend::enumerate_usb(),
+        )
+    });
+    let (_, gpu_smbus) =
+        crate::infrastructure::drivers::transports::smbus::SmBusTransport::enumerate_for_debug()
+            .await;
+    let (hid, usb) = match hid_usb.await {
+        Ok(snapshot) => snapshot,
+        Err(error) => {
+            log::warn!("HID/USB recommendation scan task failed: {error}");
+            Default::default()
+        }
+    };
+    app.registry.refresh_recommendations(&hid, &usb, &gpu_smbus);
+}
+
+/// Apply a repo-driven registry change immediately.
+///
+/// Repository installs and updates are explicit user actions, so reconcile
+/// their affected devices before returning success.
+pub(crate) async fn apply_repo_plugins(app: Arc<AppState>, plugin_ids: Vec<String>) -> Result<()> {
+    // A repository update has changed files on disk. Rebuild the registry
+    // before reconciliation so workers use the newly accepted code rather
+    // than stale manifest/source snapshots.
+    reload_registry(&app).await;
+    // An explicit update is allowed to replace code, but not to silently widen
+    // a plugin's authority. Compare the new inert manifest against the exact
+    // snapshot accepted through the enable modal and disable only affected
+    // plugins. A package without an accepted snapshot is inert until the user
+    // explicitly enables it.
+    let expanded: Vec<String> = {
+        let mut cfg = app.config.write().await;
+        let mut expanded = Vec::new();
+        for id in &plugin_ids {
+            let Some(accepted) = cfg.plugins.accepted_authorities.get(id) else {
+                continue;
+            };
+            let Some(current) = app.registry.authority_for(id) else {
+                continue;
+            };
+            if !current.is_subset_of(accepted) {
+                if cfg.plugins.enabled.contains(id) {
+                    cfg.plugins.enabled.retain(|enabled| enabled != id);
+                }
+                expanded.push(id.clone());
+            }
+        }
+        if !expanded.is_empty() {
+            app.registry.replace_policy(&cfg.plugins);
+        }
+        expanded
+    };
+    if !expanded.is_empty() {
+        app.request_config_save();
+        log::warn!(
+            "plugin update expanded authority; disabled pending fresh consent: {}",
+            expanded.join(", ")
+        );
+    }
+    if plugin_ids.is_empty() {
+        app.record_change(crate::domain::events::Change::PluginTopology)
+            .await;
+    } else {
+        reconcile_plugins(&app, &plugin_ids).await;
+    }
+    Ok(())
+}
+
+/// Enable a plugin only when the caller confirmed the exact authority that is
+/// currently declared by its inert manifest.  The runtime still receives the
+/// permission projection, while the complete snapshot is retained for later
+/// repository-update authority comparisons.
+pub async fn confirm_enable(
+    id: String,
+    authority: halod_shared::types::PluginAuthority,
+    app: Arc<AppState>,
+) -> Result<()> {
+    confirm_enable_batch(
+        vec![halod_shared::commands::PluginEnableConfirmation { id, authority }],
+        app,
+    )
+    .await
+}
+
+/// Validate a set of consent snapshots against one registry generation, commit
+/// every valid entry together, then reconcile the successful plugins once.
+/// Invalid entries are collected rather than short-circuiting the batch.
+pub async fn confirm_enable_batch(
+    confirmations: Vec<halod_shared::commands::PluginEnableConfirmation>,
+    app: Arc<AppState>,
+) -> Result<()> {
+    refresh_requirements(&app).await?;
+    let mut approved = Vec::new();
+    let mut failures = Vec::new();
+    let mut seen = std::collections::HashSet::new();
+
+    for confirmation in confirmations {
+        let id = confirmation.id;
+        if !seen.insert(id.clone()) {
+            failures.push(format!(
+                "plugin '{id}' appears more than once in enable batch"
+            ));
+            continue;
+        }
+        let Some(current) = app.registry.authority_for(&id) else {
+            failures.push(format!("unknown plugin '{id}'"));
+            continue;
+        };
+        if confirmation.authority.normalized() != current {
+            failures.push(format!(
+                "plugin '{id}' authority changed; reopen the enable confirmation"
+            ));
+            continue;
+        }
+        if !app.registry.supports_current_platform(&id) {
+            failures.push(format!("plugin '{id}' is not supported on this platform"));
+            continue;
+        }
+        let missing = app.registry.missing_blocking_requirements(&id);
+        if !missing.is_empty() {
+            failures.push(format!(
+                "plugin '{id}' has {} unmet blocking requirement(s)",
+                missing.len()
+            ));
+            continue;
+        }
+        approved.push((id, current));
+    }
+
+    let approved_ids: Vec<String> = approved.iter().map(|(id, _)| id.clone()).collect();
+    if !approved.is_empty() {
+        {
+            let mut cfg = app.config.write().await;
+            for (id, authority) in approved {
+                if !cfg.plugins.enabled.contains(&id) {
+                    cfg.plugins.enabled.push(id.clone());
+                }
+                cfg.plugins.accepted_authorities.insert(id, authority);
+            }
+            app.registry.replace_policy(&cfg.plugins);
+        }
+        app.request_config_save();
+        reconcile_plugins(&app, &approved_ids).await;
+    }
+
+    if !failures.is_empty() {
+        bail!(
+            "failed to enable {} plugin(s): {}",
+            failures.len(),
+            failures.join("; ")
+        );
+    }
+
+    Ok(())
+}
+
+/// Close and unregister every currently-registered device owned by one of
+/// `plugins` (plus its `_ctrl_` children); leaves every other device untouched.
+async fn teardown_owned_devices(app: &Arc<AppState>, plugins: &[String]) {
+    let owned_ids: Vec<String> = {
+        let devices = app.device_registry.read().await;
+        devices
+            .iter()
+            .filter(|d| {
+                d.owning_plugin_id()
+                    .is_some_and(|pid| plugins.contains(&pid))
+            })
+            .map(|d| d.id().to_owned())
+            .collect()
+    };
+    // Untrack the FULL torn-down set (parent + children): a plugin controller and
+    // its children share one HID key, and `untrack_devices` only prunes a key
+    // once every device it tracks is torn down. Passing only the owning parents
+    // would leave the key tracked, so the HID rescan skips it and the device
+    // never comes back on re-enable.
+    let mut torn_down: std::collections::HashSet<String> = std::collections::HashSet::new();
+    for id in &owned_ids {
+        let removed =
+            crate::application::usecases::registry::registration::unregister_device_and_children(
+                app, id,
+            )
+            .await;
+        torn_down.extend(removed);
+    }
+    app.hid.untrack_devices(&torn_down).await;
+}
+
+/// Scoped teardown + reprobe for `plugins`: only devices owned by one of
+/// these plugin ids are closed and re-discovered; every other device is
+/// left untouched.
+pub(crate) async fn reconcile_plugins(app: &Arc<AppState>, plugins: &[String]) {
+    use crate::domain::registry::observers::discovery::PendingRediscovery;
+    // Refresh the requirement cache before rediscovery so a satisfied↔missing
+    // transition gates activation this cycle (recovery reactivates, loss tears down).
+    if let Err(error) = refresh_requirements(app).await {
+        log::warn!("refreshing plugin requirements before rediscovery failed: {error:#}");
+        return;
+    }
+    app.merge_rediscovery(PendingRediscovery::PluginSet(
+        plugins.iter().cloned().collect(),
+    ))
+    .await;
+    drain_rediscovery(app).await;
+}
+
+pub(crate) async fn reconcile_full(app: &Arc<AppState>) {
+    if let Err(error) = refresh_requirements(app).await {
+        log::warn!("refreshing plugin requirements before full rediscovery failed: {error:#}");
+        return;
+    }
+    app.merge_rediscovery(crate::domain::registry::observers::discovery::PendingRediscovery::Full)
+        .await;
+    drain_rediscovery(app).await;
+}
+
+async fn drain_rediscovery(app: &Arc<AppState>) {
+    use crate::domain::registry::observers::discovery::{DiscoveryScope, PendingRediscovery};
+    let _runner = app.rediscovery_runner.lock().await;
+    loop {
+        match app.take_rediscovery().await {
+            PendingRediscovery::Clean => return,
+            PendingRediscovery::Full => {
+                reload_registry(app).await;
+                app.set_discovery_scope(DiscoveryScope::Full).await;
+                crate::domain::registry::observers::discovery::discover_devices(Arc::clone(app))
+                    .await;
+                app.set_discovery_scope(DiscoveryScope::Clean).await;
+            }
+            PendingRediscovery::PluginSet(plugin_ids) => {
+                reconcile_plugin_set(app, &plugin_ids.into_iter().collect::<Vec<_>>()).await;
+            }
+        }
+    }
+}
+
+async fn reconcile_plugin_set(app: &Arc<AppState>, plugins: &[String]) {
+    use crate::domain::registry::observers::discovery::{DiscoveryFilter, DiscoveryScope};
+
+    // Keep both sides of a manifest change in scope. Deleted/disabled plugins
+    // need their old specs so a built-in host device can reclaim the hardware, while
+    // newly imported or updated plugins need their new specs to claim it.
+    let mut specs = app.registry.device_specs_for(plugins);
+
+    // 1. Refresh manifests + disabled/granted/config so match_handle reflects
+    //    the new state, then add the post-change specs.
+    reload_registry(app).await;
+    specs.extend(app.registry.device_specs_for(plugins));
+
+    // 2. Teardown: close and unregister every device owned by a changed plugin.
+    teardown_owned_devices(app, plugins).await;
+
+    // 3. Scope re-probing to only these plugins' hardware.
+    app.set_discovery_scope(DiscoveryScope::PluginSet {
+        plugin_ids: plugins.iter().cloned().collect(),
+        filter: Arc::new(DiscoveryFilter { specs }),
+    })
+    .await;
+
+    // 4. Scoped re-probe.
+    crate::domain::registry::observers::discovery::discover_devices(Arc::clone(app)).await;
+
+    // 5. Clear the scope, then seed known-device records and restore any
+    //    chain layout for the newly registered devices. Each new device's own
+    //    profile state was already applied by `register_device` during the
+    //    scoped probe, so we deliberately skip the global `load_active_profile`
+    //    here — it would clear every device's LCD slot and re-load every
+    //    device's state, disturbing the untouched devices this path exists to
+    //    leave alone (mirroring the integration scoped path).
+    app.set_discovery_scope(DiscoveryScope::Clean).await;
+    crate::domain::registry::seed_known_devices(Arc::clone(app)).await;
+    crate::application::usecases::registry::chain::restore_saved_chains(Arc::clone(app)).await;
+    app.record_change(crate::domain::events::Change::PluginTopology)
+        .await;
+}
+
+/// Sanitize a file name or repo URL into a safe plugin id / directory name (lower-cased `[a-z0-9-]`, path-traversal-proof).
+pub(crate) fn sanitize_slug(filename: &str) -> String {
+    let stem = Path::new(filename)
+        .file_stem()
+        .and_then(|s| s.to_str())
+        .unwrap_or("");
+    let mut slug = String::new();
+    for c in stem.chars() {
+        if c.is_ascii_alphanumeric() {
+            slug.push(c.to_ascii_lowercase());
+        } else if !slug.ends_with('-') {
+            slug.push('-');
+        }
+    }
+    let slug = slug.trim_matches('-');
+    if slug.is_empty() {
+        "plugin".to_owned()
+    } else {
+        slug.to_owned()
+    }
+}
+
+#[cfg(test)]
+mod tests {
+    use super::*;
+    use std::sync::atomic::Ordering;
+
+    #[cfg(feature = "dev-plugin-repo")]
+    #[tokio::test]
+    async fn reload_registry_keeps_the_development_repository_as_the_priority_source() {
+        crate::test_support::with_tmp_config(|app| async move {
+            let development_repo = tempfile::tempdir().unwrap();
+            let package = development_repo.path().join("devplug");
+            std::fs::create_dir_all(&package).unwrap();
+            std::fs::write(
+                package.join("plugin.yaml"),
+                "id: devplug\nname: Development Plugin\npermissions: [hid]\ncapabilities: [lighting]\ndevices:\n  - vendor: Example\n    model: Device\n    type: led_strip\n    match:\n      hid: { vid: 0x1234, pid: 0x5678 }\n",
+            )
+            .unwrap();
+            std::fs::write(package.join("main.lua"), "return {}\n").unwrap();
+            *app.development_plugin_repo.write().await =
+                Some(development_repo.path().to_path_buf());
+
+            reload_registry(&app).await;
+
+            let plugin = app
+                .registry
+                .list(app.secret_store.as_ref())
+                .into_iter()
+                .find(|plugin| plugin.id == "devplug")
+                .expect("development package must remain loaded after a registry reload");
+            assert_eq!(
+                plugin.provenance,
+                halod_shared::types::PluginProvenance::LocalDevelopment
+            );
+            assert!(plugin.path.starts_with(development_repo.path().to_string_lossy().as_ref()));
+        })
+        .await;
+    }
+
+    #[test]
+    fn sanitize_slugs_a_file_name() {
+        assert_eq!(sanitize_slug("My Driver.lua"), "my-driver");
+        assert_eq!(sanitize_slug("wled_udp"), "wled-udp");
+        assert_eq!(sanitize_slug("a  b--c.lua"), "a-b-c");
+    }
+
+    #[test]
+    fn sanitize_strips_path_traversal_and_handles_empty() {
+        // A path separator can never survive into the written directory name.
+        assert!(!sanitize_slug("../../etc/passwd").contains('/'));
+        assert_eq!(sanitize_slug("///"), "plugin");
+        assert_eq!(sanitize_slug(""), "plugin");
+    }
+
+    #[tokio::test]
+    async fn set_enabled_reconciles_without_touching_unrelated_devices() {
+        crate::test_support::with_tmp_config(|app| async move {
+            app.device_registry.write().await.push(std::sync::Arc::new(
+                crate::test_support::MockDevice::new("stays-open"),
+            ));
+
+            set_enabled("some_plugin".into(), false, app.clone())
+                .await
+                .unwrap();
+
+            assert_eq!(
+                app.device_registry.read().await.len(),
+                1,
+                "scoped reconciliation must leave unrelated devices alone"
+            );
+            assert!(!app
+                .config
+                .read()
+                .await
+                .plugins
+                .enabled
+                .contains(&"some_plugin".to_string()));
+        })
+        .await;
+    }
+
+    #[tokio::test]
+    async fn scoped_teardown_prunes_hid_tracking_so_reprobe_can_readd() {
+        // Regression: the scoped teardown must drop the torn-down device's HID
+        // key, or the HID rescan skips the still-tracked key and the device never
+        // comes back on re-enable/config-change (the full path clears all HID
+        // tracking; the scoped path must clear just these keys).
+        use crate::domain::registry::HidTrackingEntry;
+        use crate::test_support::MockDevice;
+        use std::sync::Arc;
+
+        crate::test_support::with_tmp_config(|app| async move {
+            let owned: Arc<dyn crate::domain::device::Device> =
+                Arc::new(MockDevice::new("P-dev").with_owning_plugin_id("P"));
+            let other: Arc<dyn crate::domain::device::Device> =
+                Arc::new(MockDevice::new("Q-dev").with_owning_plugin_id("Q"));
+            app.device_registry.write().await.push(owned.clone());
+            app.device_registry.write().await.push(other.clone());
+            app.hid
+                .track("1234:5678:P".into(), HidTrackingEntry::Primary(vec![owned]))
+                .await;
+            app.hid
+                .track("9abc:def0:Q".into(), HidTrackingEntry::Primary(vec![other]))
+                .await;
+
+            teardown_owned_devices(&app, &["P".to_string()]).await;
+
+            let keys = app.hid.keys().await;
+            assert!(
+                !keys.contains("1234:5678:P"),
+                "torn-down plugin's HID key must be untracked so a re-probe re-adds it"
+            );
+            assert!(
+                keys.contains("9abc:def0:Q"),
+                "an untouched plugin's HID key must survive the scoped teardown"
+            );
+            assert!(app.find_device_by_id("P-dev").await.is_none());
+            assert!(app.find_device_by_id("Q-dev").await.is_some());
+        })
+        .await;
+    }
+
+    #[tokio::test]
+    async fn scoped_teardown_untracks_a_key_shared_by_a_parent_and_its_children() {
+        // Regression: a plugin controller and its children (e.g. NZXT Control Hub
+        // + fan cores) share one HID key. Only the parent carries the owning
+        // plugin id, but `untrack_devices` prunes a key only once EVERY device it
+        // tracks is torn down — so teardown must feed it the whole subtree, not
+        // just the owning parents, or the key survives and the re-probe skips the
+        // device.
+        use crate::domain::registry::HidTrackingEntry;
+        use crate::test_support::MockDevice;
+        use std::sync::Arc;
+
+        crate::test_support::with_tmp_config(|app| async move {
+            let parent: Arc<dyn crate::domain::device::Device> =
+                Arc::new(MockDevice::new("nzxt-abc").with_owning_plugin_id("nzxt"));
+            // Chain-accessory child: shares the parent key, no owning id of its own.
+            let child: Arc<dyn crate::domain::device::Device> =
+                Arc::new(MockDevice::new("nzxt-abc_acc_0_1"));
+            app.device_registry.write().await.push(parent.clone());
+            app.device_registry.write().await.push(child.clone());
+            app.hid
+                .track(
+                    "1e71:2022:S".into(),
+                    HidTrackingEntry::Primary(vec![parent, child]),
+                )
+                .await;
+
+            teardown_owned_devices(&app, &["nzxt".to_string()]).await;
+
+            assert!(
+                app.hid.keys().await.is_empty(),
+                "the shared key must be untracked once the whole subtree is torn down"
+            );
+            assert!(app.find_device_by_id("nzxt-abc").await.is_none());
+            assert!(app.find_device_by_id("nzxt-abc_acc_0_1").await.is_none());
+        })
+        .await;
+    }
+
+    #[tokio::test]
+    async fn teardown_owned_devices_removes_only_the_owning_plugins_subtree() {
+        use crate::test_support::MockDevice;
+        crate::test_support::with_tmp_config(|app| async move {
+            let root = Arc::new(MockDevice::new("p1-abc").with_owning_plugin_id("p1"));
+            // A child registered alongside the plugin root (the `_ctrl_` scheme
+            // `unregister_device_and_children` prunes) — no owner id of its own.
+            let child = Arc::new(MockDevice::new("p1-abc_ctrl_0"));
+            let other_plugin = Arc::new(MockDevice::new("p2-xyz").with_owning_plugin_id("p2"));
+            let native = Arc::new(MockDevice::new("native-dev"));
+            {
+                let mut devices = app.device_registry.write().await;
+                devices.push(root.clone());
+                devices.push(child.clone());
+                devices.push(other_plugin.clone());
+                devices.push(native.clone());
+            }
+
+            teardown_owned_devices(&app, &["p1".to_string()]).await;
+
+            let remaining: Vec<String> = app
+                .device_registry
+                .read()
+                .await
+                .iter()
+                .map(|d| d.id().to_owned())
+                .collect();
+            assert_eq!(remaining, vec!["p2-xyz", "native-dev"]);
+
+            assert!(root.closed.load(Ordering::SeqCst));
+            assert!(child.closed.load(Ordering::SeqCst));
+            assert!(!other_plugin.closed.load(Ordering::SeqCst));
+            assert!(!native.closed.load(Ordering::SeqCst));
+        })
+        .await;
+    }
+
+    #[tokio::test]
+    async fn teardown_owned_devices_is_a_noop_when_nothing_is_owned() {
+        use crate::test_support::MockDevice;
+        crate::test_support::with_tmp_config(|app| async move {
+            let native = Arc::new(MockDevice::new("native-dev"));
+            app.device_registry.write().await.push(native.clone());
+
+            teardown_owned_devices(&app, &["p1".to_string()]).await;
+
+            assert_eq!(app.device_registry.read().await.len(), 1);
+            assert!(!native.closed.load(Ordering::SeqCst));
+        })
+        .await;
+    }
+
+    const CONFIG_TEST_PLUGIN: &str = "return {}";
+
+    /// Every declaration lives in YAML; the Lua entry contains callbacks only.
+    const CONFIG_TEST_PLUGIN_YAML: &str =
+        "id: cfgtest\npermissions: [network, hid, secure_storage]\ncapabilities: [lighting]\ndevices:\n  - vendor: x\n    model: y\n    type: led_strip\n    match:\n      hid: { vid: 1, pid: 2 }\nconfig:\n  fields:\n    - key: host\n      label: Host\n    - key: token\n      label: Token\n      secure: true\n";
+
+    fn write_config_test_plugin(root: &std::path::Path) {
+        let dir = root.join("cfgtest");
+        std::fs::create_dir_all(&dir).unwrap();
+        std::fs::write(dir.join("plugin.yaml"), CONFIG_TEST_PLUGIN_YAML).unwrap();
+        std::fs::write(dir.join("main.lua"), CONFIG_TEST_PLUGIN).unwrap();
+    }
+
+    const CONFIG_TEST_REPO_SLUG: &str = "cfgtest-repo";
+
+    fn config_test_repo_record() -> crate::config::PluginRepoRecord {
+        crate::config::PluginRepoRecord {
+            url: "test://cfgtest".to_owned(),
+            slug: CONFIG_TEST_REPO_SLUG.to_owned(),
+            repository_id: None,
+            trusted_key: None,
+            source_kind: crate::config::PluginRepoSourceKind::Git,
+            branch: None,
+            locked_sha: "test".to_owned(),
+            active_revision: Some("test".to_owned()),
+            active_source: crate::config::PluginRevisionSource::Managed,
+            previous_verified_sha: None,
+            last_sync: None,
+        }
+    }
+
+    /// Loads `CONFIG_TEST_PLUGIN` into `app`'s plugin registry for the duration
+    /// of `f`, then restores the registry to just the built-ins.
+    /// Requires `with_tmp_config`.
+    ///
+    /// The plugin is installed as an unsigned repo source rather than standalone
+    /// under `plugins_dir()`: production loads plugins only from configured
+    /// repos, and the registry reload that `set_config`/enable run internally
+    /// re-scans just those repos — a standalone plugin would silently vanish.
+    async fn with_config_test_plugin<F, Fut>(app: &Arc<AppState>, f: F)
+    where
+        F: FnOnce() -> Fut,
+        Fut: std::future::Future<Output = ()>,
+    {
+        let record = config_test_repo_record();
+        write_config_test_plugin(&crate::domain::plugin::repo::active_revision_dir(&record));
+        app.config.write().await.plugins.repos.push(record);
+        reload_registry(app).await;
+        f().await;
+        app.config
+            .write()
+            .await
+            .plugins
+            .repos
+            .retain(|r| r.slug != CONFIG_TEST_REPO_SLUG);
+        reload_registry(app).await;
+    }
+
+    #[tokio::test]
+    async fn enable_batch_commits_valid_plugins_when_another_entry_fails() {
+        crate::test_support::with_tmp_config(|app| async move {
+            with_config_test_plugin(&app, || async {
+                let authority = app.registry.authority_for("cfgtest").unwrap();
+                let result = confirm_enable_batch(
+                    vec![
+                        halod_shared::commands::PluginEnableConfirmation {
+                            id: "missing".into(),
+                            authority: Default::default(),
+                        },
+                        halod_shared::commands::PluginEnableConfirmation {
+                            id: "cfgtest".into(),
+                            authority: authority.clone(),
+                        },
+                    ],
+                    app.clone(),
+                )
+                .await;
+
+                assert!(result.is_err(), "the failed entry is still reported");
+                let cfg = app.config.read().await;
+                assert!(cfg.plugins.enabled.contains(&"cfgtest".to_owned()));
+                assert_eq!(
+                    cfg.plugins.accepted_authorities.get("cfgtest"),
+                    Some(&authority)
+                );
+            })
+            .await;
+        })
+        .await;
+    }
+
+    #[tokio::test]
+    async fn repo_update_disables_plugin_when_authority_widens() {
+        crate::test_support::with_tmp_config(|app| async move {
+            with_config_test_plugin(&app, || async {
+                {
+                    let mut cfg = app.config.write().await;
+                    cfg.plugins.enabled.push("cfgtest".into());
+                    cfg.plugins
+                        .accepted_authorities
+                        .insert("cfgtest".into(), Default::default());
+                    app.registry.replace_policy(&cfg.plugins);
+                }
+
+                apply_repo_plugins(app.clone(), vec!["cfgtest".into()])
+                    .await
+                    .unwrap();
+
+                let cfg = app.config.read().await;
+                assert!(!cfg.plugins.enabled.contains(&"cfgtest".to_owned()));
+                assert_eq!(
+                    cfg.plugins.accepted_authorities.get("cfgtest"),
+                    Some(&halod_shared::types::PluginAuthority::default()),
+                    "the accepted snapshot must remain for the consent diff"
+                );
+            })
+            .await;
+        })
+        .await;
+    }
+
+    #[tokio::test]
+    async fn enable_batch_reports_duplicate_plugin_ids() {
+        crate::test_support::with_tmp_config(|app| async move {
+            with_config_test_plugin(&app, || async {
+                let authority = app.registry.authority_for("cfgtest").unwrap();
+                let result = confirm_enable_batch(
+                    vec![
+                        halod_shared::commands::PluginEnableConfirmation {
+                            id: "cfgtest".into(),
+                            authority: authority.clone(),
+                        },
+                        halod_shared::commands::PluginEnableConfirmation {
+                            id: "cfgtest".into(),
+                            authority,
+                        },
+                    ],
+                    app.clone(),
+                )
+                .await;
+
+                let error = result.expect_err("the duplicate entry must be reported");
+                assert!(error.to_string().contains("appears more than once"));
+                assert!(
+                    app.config
+                        .read()
+                        .await
+                        .plugins
+                        .enabled
+                        .contains(&"cfgtest".to_owned()),
+                    "the first valid entry is still committed"
+                );
+            })
+            .await;
+        })
+        .await;
+    }
+
+    #[tokio::test]
+    async fn enable_rejects_platform_unsupported_plugin() {
+        crate::test_support::with_tmp_config(|app| async move {
+            let dir = crate::config::plugins_dir();
+            std::fs::create_dir_all(dir.join("winonly")).unwrap();
+            // Declares a platform we are not running on, so it can never activate.
+            let foreign = if std::env::consts::OS == "windows" {
+                "linux"
+            } else {
+                "windows"
+            };
+            std::fs::write(
+                dir.join("winonly").join("plugin.yaml"),
+                format!("id: winonly\nplatforms: [{foreign}]\npermissions: [hid]\ncapabilities: [lighting]\ndevices:\n  - vendor: x\n    model: y\n    type: led_strip\n    match:\n      hid: {{ vid: 1, pid: 2 }}\n"),
+            )
+            .unwrap();
+            std::fs::write(dir.join("winonly").join("main.lua"), CONFIG_TEST_PLUGIN).unwrap();
+            app.registry.load_all(&dir);
+
+            let authority = app.registry.authority_for("winonly").unwrap();
+            let result = confirm_enable("winonly".into(), authority, app.clone()).await;
+
+            let error = result.expect_err("enable must be rejected on an unsupported platform");
+            assert!(error.to_string().contains("not supported on this platform"));
+            assert!(
+                !app.config
+                    .read()
+                    .await
+                    .plugins
+                    .enabled
+                    .contains(&"winonly".to_owned()),
+                "an unsupported plugin must never be persisted as enabled"
+            );
+
+            app.registry.load_all(std::path::Path::new("/nonexistent"));
+        })
+        .await;
+    }
+
+    fn test_client() -> (
+        ClientHandle,
+        tokio::sync::mpsc::Receiver<std::sync::Arc<Vec<u8>>>,
+    ) {
+        let (tx, rx) = tokio::sync::mpsc::channel::<std::sync::Arc<Vec<u8>>>(16);
+        let client = ClientHandle {
+            id: 0,
+            tx,
+            subs: std::sync::Arc::default(),
+        };
+        (client, rx)
+    }
+
+    #[tokio::test]
+    async fn get_asset_replies_with_base64_bytes() {
+        let app = Arc::new(AppState::new(crate::config::Config::default()));
+        let dir = tempfile::tempdir().unwrap();
+        let plugin_dir = dir.path().join("assetplug");
+        std::fs::create_dir_all(plugin_dir.join("assets")).unwrap();
+        std::fs::write(
+            plugin_dir.join("plugin.yaml"),
+            "id: assetplug\npermissions: [hid]\ncapabilities: [lighting]\ndevices:\n  - vendor: x\n    model: y\n    type: led_strip\n    match:\n      hid: { vid: 1, pid: 2 }\n\
+             logo: logo.png\n",
+        )
+        .unwrap();
+        std::fs::write(plugin_dir.join("main.lua"), "return {}").unwrap();
+        let png = {
+            let img = image::RgbaImage::from_pixel(16, 16, image::Rgba([1, 2, 3, 255]));
+            let mut b = std::io::Cursor::new(Vec::new());
+            image::DynamicImage::ImageRgba8(img)
+                .write_to(&mut b, image::ImageFormat::Png)
+                .unwrap();
+            b.into_inner()
+        };
+        std::fs::write(plugin_dir.join("assets/logo.png"), &png).unwrap();
+        app.registry.load_all(dir.path());
+
+        let (client, mut rx) = test_client();
+        get_asset("assetplug".into(), "logo.png".into(), client, app.clone())
+            .await
+            .unwrap();
+
+        let frame = rx.try_recv().expect("a frame was queued");
+        let v: serde_json::Value = serde_json::from_slice(&frame[5..]).unwrap();
+        assert_eq!(v["type"], "plugin_asset");
+        assert_eq!(v["plugin_id"], "assetplug");
+        assert_eq!(v["name"], "logo.png");
+        let decoded = base64::engine::general_purpose::STANDARD
+            .decode(v["data_b64"].as_str().unwrap())
+            .unwrap();
+        assert_eq!(decoded, png);
+
+        app.registry.load_all(std::path::Path::new("/nonexistent"));
+    }
+
+    #[tokio::test]
+    async fn get_asset_errors_for_unknown_plugin() {
+        let app = Arc::new(AppState::new(crate::config::Config::default()));
+        let (client, _rx) = test_client();
+        let err = get_asset("does-not-exist".into(), "logo.png".into(), client, app)
+            .await
+            .unwrap_err();
+        assert!(err.to_string().contains("unknown plugin"));
+    }
+
+    #[tokio::test]
+    async fn set_config_splits_secure_values_into_the_secret_store() {
+        crate::test_support::with_tmp_config(|app| async move {
+            with_config_test_plugin(&app, || async {
+                let mut values = std::collections::HashMap::new();
+                values.insert("host".to_string(), "127.0.0.1".to_string());
+                values.insert("token".to_string(), "s3cr3t".to_string());
+                set_config("cfgtest".into(), values, app.clone())
+                    .await
+                    .unwrap();
+
+                let cfg = app.config.read().await;
+                assert_eq!(
+                    cfg.plugins
+                        .config
+                        .get("cfgtest")
+                        .and_then(|m| m.get("host")),
+                    Some(&"127.0.0.1".to_string())
+                );
+                assert!(
+                    !cfg.plugins
+                        .config
+                        .get("cfgtest")
+                        .is_some_and(|m| m.contains_key("token")),
+                    "a secure value must never land in the plaintext config map"
+                );
+                drop(cfg);
+                assert_eq!(
+                    app.secret_store.get("cfgtest", "token").unwrap(),
+                    Some("s3cr3t".to_string())
+                );
+            })
+            .await;
+        })
+        .await;
+    }
+
+    #[tokio::test]
+    async fn set_config_with_blank_secure_value_keeps_the_existing_secret() {
+        crate::test_support::with_tmp_config(|app| async move {
+            with_config_test_plugin(&app, || async {
+                let mut first = std::collections::HashMap::new();
+                first.insert("token".to_string(), "s3cr3t".to_string());
+                set_config("cfgtest".into(), first, app.clone())
+                    .await
+                    .unwrap();
+
+                // Re-saving with an empty secure value must not clear it.
+                let mut second = std::collections::HashMap::new();
+                second.insert("token".to_string(), "".to_string());
+                set_config("cfgtest".into(), second, app.clone())
+                    .await
+                    .unwrap();
+
+                assert_eq!(
+                    app.secret_store.get("cfgtest", "token").unwrap(),
+                    Some("s3cr3t".to_string())
+                );
+            })
+            .await;
+        })
+        .await;
+    }
+
+    #[tokio::test]
+    async fn set_config_validates_every_field_kind_at_ingress() {
+        crate::test_support::with_tmp_config(|app| async move {
+            let dir = crate::config::plugins_dir();
+            let pdir = dir.join("numcfg");
+            std::fs::create_dir_all(&pdir).unwrap();
+            std::fs::write(
+                pdir.join("plugin.yaml"),
+                "id: numcfg\npermissions: [hid]\ncapabilities: [lighting]\ndevices:\n  - vendor: x\n    model: y\n    type: led_strip\n    match:\n      hid: { vid: 1, pid: 2 }\nconfig:\n  fields:\n    - { key: hz, label: Hz, kind: number, default: 50, min: 1, max: 100 }\n    - { key: enabled, label: Enabled, kind: boolean, default: true }\n    - { key: mode, label: Mode, kind: enum, default: auto, options: [auto, manual] }\n    - { key: host, label: Host, kind: host, default: localhost }\n    - { key: port, label: Port, kind: port, default: 8080 }\n    - { key: endpoint, label: Endpoint, kind: url, default: 'https://example.com' }\n    - { key: timeout, label: Timeout, kind: duration_ms, default: 1000, min: 10, max: 5000 }\n",
+            )
+            .unwrap();
+            std::fs::write(
+                pdir.join("main.lua"),
+                "return {}",
+            )
+            .unwrap();
+            app.registry.load_all(&dir);
+
+            let resolved = app.registry.resolved_config_for(
+                app.secret_store.as_ref(),
+                "numcfg",
+                &[],
+            );
+            assert_eq!(
+                resolved.get("enabled"),
+                Some(&crate::domain::plugin::ResolvedConfigValue::Boolean(true))
+            );
+            assert_eq!(
+                resolved.get("hz"),
+                Some(&crate::domain::plugin::ResolvedConfigValue::Number(50.0))
+            );
+            assert_eq!(
+                resolved.get("port"),
+                Some(&crate::domain::plugin::ResolvedConfigValue::Integer(8080))
+            );
+            assert_eq!(
+                resolved.get("timeout"),
+                Some(&crate::domain::plugin::ResolvedConfigValue::Integer(1000))
+            );
+            assert_eq!(
+                resolved.get("mode"),
+                Some(&crate::domain::plugin::ResolvedConfigValue::String("auto".into()))
+            );
+
+            let one = |k: &str, v: &str| {
+                let mut m = std::collections::HashMap::new();
+                m.insert(k.to_string(), v.to_string());
+                m
+            };
+            assert!(set_config("numcfg".into(), one("nope", "1"), app.clone())
+                .await
+                .is_err());
+            assert!(set_config("numcfg".into(), one("hz", "999"), app.clone())
+                .await
+                .is_err());
+            assert!(set_config("numcfg".into(), one("hz", "abc"), app.clone())
+                .await
+                .is_err());
+            for (key, invalid) in [
+                ("enabled", "yes"),
+                ("mode", "invalid"),
+                ("host", "bad host"),
+                ("port", "0"),
+                ("port", "65536"),
+                ("endpoint", "/relative"),
+                ("endpoint", "ftp://example.com"),
+                ("timeout", "-1"),
+                ("timeout", "1.5"),
+            ] {
+                assert!(
+                    app.registry
+                        .validate_config_values("numcfg", &one(key, invalid))
+                        .is_err(),
+                    "{key} accepted invalid value {invalid}"
+                );
+            }
+            for (key, valid) in [
+                ("enabled", "false"),
+                ("mode", "manual"),
+                ("host", "127.0.0.1"),
+                ("port", "443"),
+                ("endpoint", "https://example.com/api"),
+                ("timeout", "2500"),
+            ] {
+                app.registry
+                    .validate_config_values("numcfg", &one(key, valid))
+                    .unwrap();
+            }
+            set_config("numcfg".into(), one("hz", "50"), app.clone())
+                .await
+                .unwrap();
+
+            app.registry.load_all(std::path::Path::new("/nonexistent"));
+        })
+        .await;
+    }
+}

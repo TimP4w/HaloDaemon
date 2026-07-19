@@ -11,9 +11,10 @@ mod viewport;
 
 use std::collections::{HashMap, HashSet};
 
+use crate::domain::topic_store::TopicStore;
 use base64::{engine::general_purpose::STANDARD as B64, Engine as _};
 use egui::{Pos2, Rect, Vec2};
-use halod_shared::types::{AppState, CanvasFrame, EffectParamValue, PlacedZone, RgbColor};
+use halod_shared::types::{CanvasFrame, EffectParamValue, PlacedZone, RgbColor};
 
 pub(crate) use chrome::chrome;
 pub(crate) use modals::fps_modal;
@@ -351,7 +352,7 @@ pub fn ingest_frame(ctx: &egui::Context, ui: &mut CanvasUi, frame: &CanvasFrame)
 #[allow(clippy::too_many_arguments)] // top-level canvas view dependencies are explicit borrows
 pub(crate) fn body(
     ui: &mut egui::Ui,
-    state: &AppState,
+    state: &TopicStore,
     cmd: &crate::runtime::ipc::CommandTx,
     canvas_ui: &mut CanvasUi,
     canvas_frame: Option<&CanvasFrame>,
@@ -441,7 +442,7 @@ fn canvas_stage_rect(area: Rect, aspect: f32) -> Rect {
 }
 
 // Remove drag overrides once the daemon confirms them.
-fn prune_drag_zones(canvas_ui: &mut CanvasUi, state: &AppState) {
+fn prune_drag_zones(canvas_ui: &mut CanvasUi, state: &TopicStore) {
     if canvas_ui.drag.is_some() {
         return;
     }

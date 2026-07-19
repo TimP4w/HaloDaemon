@@ -20,8 +20,8 @@ mod platform {
         std::thread::spawn(move || {
             for attempt in 1..=3 {
                 match send(&title, &message) {
-                    Ok(id) => {
-                        log::debug!("showed native notification {id}");
+                    Ok(backend) => {
+                        log::debug!("showed native notification through {backend}");
                         return;
                     }
                     Err(error) if attempt < 3 => {
@@ -38,7 +38,7 @@ mod platform {
         });
     }
 
-    fn send(title: &str, message: &str) -> zbus::Result<u32> {
+    fn send(title: &str, message: &str) -> zbus::Result<&'static str> {
         let connection = zbus::blocking::Connection::session()?;
         let proxy = zbus::blocking::Proxy::new(
             &connection,
@@ -59,7 +59,7 @@ mod platform {
             Value::Str(Str::from(halod_shared::app::APP_ID)),
         );
         hints.insert("resident", Value::Bool(true));
-        proxy.call(
+        let _: u32 = proxy.call(
             "Notify",
             &(
                 halod_shared::app::APP_DISPLAY_NAME,
@@ -71,7 +71,8 @@ mod platform {
                 hints,
                 0_i32,
             ),
-        )
+        )?;
+        Ok("freedesktop service")
     }
 }
 

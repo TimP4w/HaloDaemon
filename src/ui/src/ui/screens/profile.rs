@@ -5,9 +5,10 @@
 use crate::ui::components as widgets;
 use std::collections::{HashMap, HashSet};
 
+use crate::domain::topic_store::TopicStore;
 use egui::{Align2, Color32, Id, Order, Pos2, Rect, Sense, Stroke, Vec2};
 use halod_shared::capability;
-use halod_shared::types::{AppState, Notification, RunningApp, DEFAULT_PROFILE_NAME};
+use halod_shared::types::{Notification, RunningApp, DEFAULT_PROFILE_NAME};
 
 use crate::domain::state::Page;
 use crate::runtime::ipc::CommandTx;
@@ -274,7 +275,9 @@ pub fn get_icon(
     if icon_name.is_empty() {
         return None;
     }
-    let mut map = cache.lock().unwrap();
+    let mut map = cache
+        .lock()
+        .unwrap_or_else(std::sync::PoisonError::into_inner);
     if let Some(state) = map.get(icon_name) {
         return match state {
             IconState::Ready(tex) => Some(tex.clone()),
@@ -340,7 +343,7 @@ fn draw_process_icon(
 /// Returns the rect it occupies (needed for dropdown positioning).
 pub fn title_button(
     ui: &mut egui::Ui,
-    state: &AppState,
+    state: &TopicStore,
     st: &mut ProfileUi,
     right_x: f32,
     cy: f32,
@@ -423,7 +426,7 @@ pub fn title_button(
 /// Must be called every frame while open; handles close-on-outside-click.
 pub fn title_dropdown(
     ctx: &egui::Context,
-    state: &AppState,
+    state: &TopicStore,
     cmd: &CommandTx,
     st: &mut ProfileUi,
     page: &mut Page,
@@ -671,7 +674,7 @@ pub fn title_dropdown(
 
 /// A trimmed name is usable only if non-empty and not already taken
 /// (case-insensitive), so create/rename never silently clobbers a profile.
-fn name_available(state: &AppState, trimmed: &str) -> bool {
+fn name_available(state: &TopicStore, trimmed: &str) -> bool {
     !trimmed.is_empty()
         && !state
             .profiles
@@ -680,7 +683,7 @@ fn name_available(state: &AppState, trimmed: &str) -> bool {
             .any(|p| p.eq_ignore_ascii_case(trimmed))
 }
 
-pub fn add_modal(ctx: &egui::Context, state: &AppState, cmd: &CommandTx, st: &mut ProfileUi) {
+pub fn add_modal(ctx: &egui::Context, state: &TopicStore, cmd: &CommandTx, st: &mut ProfileUi) {
     if !st.add_modal_open {
         return;
     }
@@ -796,7 +799,7 @@ fn seed_if_profile_changed(st: &mut ProfileUi, profile: &str) {
 /// Full profile settings page. `profile` is the name from `Page::Profile(name)`.
 pub fn show(
     ui: &mut egui::Ui,
-    state: &AppState,
+    state: &TopicStore,
     cmd: &CommandTx,
     st: &mut ProfileUi,
     profile: &str,
@@ -972,7 +975,7 @@ fn merge_process_names(existing: &[String], selected: &[String]) -> Vec<String> 
 
 fn auto_activate_card(
     ui: &mut egui::Ui,
-    state: &AppState,
+    state: &TopicStore,
     cmd: &CommandTx,
     st: &mut ProfileUi,
     profile: &str,
@@ -1166,7 +1169,7 @@ fn process_chip(
 
 fn overrides_section(
     ui: &mut egui::Ui,
-    state: &AppState,
+    state: &TopicStore,
     cmd: &CommandTx,
     is_active: bool,
     is_default: bool,
@@ -1290,7 +1293,7 @@ fn overrides_section(
 
 pub fn process_picker(
     ctx: &egui::Context,
-    state: &AppState,
+    state: &TopicStore,
     cmd: &CommandTx,
     st: &mut ProfileUi,
     profile: &str,
@@ -1530,7 +1533,7 @@ pub fn process_picker(
 #[cfg(test)]
 mod tests {
     use super::*;
-    use halod_shared::types::{AppRule, AppState};
+    use halod_shared::types::AppRule;
 
     #[test]
     fn capability_label_translates_known_keys_and_title_cases_unknown() {
@@ -1543,8 +1546,8 @@ mod tests {
         assert_eq!(capability_label("brightness"), "Brightness");
     }
 
-    fn state_with_profiles(profiles: &[&str], active: &str, rules: Vec<AppRule>) -> AppState {
-        AppState {
+    fn state_with_profiles(profiles: &[&str], active: &str, rules: Vec<AppRule>) -> TopicStore {
+        TopicStore {
             profiles: halod_shared::types::ProfileState {
                 active: active.to_string(),
                 available: profiles.iter().map(|s| s.to_string()).collect(),

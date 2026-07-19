@@ -14,7 +14,7 @@ use halod_shared::types::{
     MediaAction, MouseBtn, ScrollAxis,
 };
 
-use super::{editing, macro_editor, DeviceUi, TabCtx};
+use super::{macro_editor, DeviceUi, TabCtx};
 use crate::ui::theme::{self, a};
 
 pub fn show(ui: &mut egui::Ui, ctx: &TabCtx, st: &mut DeviceUi) {
@@ -31,17 +31,6 @@ pub fn show(ui: &mut egui::Ui, ctx: &TabCtx, st: &mut DeviceUi) {
     };
     let id = ctx.dev.id.clone();
 
-    if remap.requires_host_mode && !remap.host_mode_active {
-        widgets::card(ui, |ui| {
-            ui.label(
-                egui::RichText::new(t!("device.keys_host_mode_required"))
-                    .font(theme::body_md())
-                    .color(theme::STAT_AMBER),
-            );
-        });
-        ui.add_space(theme::SPACE_7);
-    }
-
     // Default to first button
     if st.keys.keys_sel_cid.is_none() && !remap.buttons.is_empty() {
         st.keys.keys_sel_cid = Some(remap.buttons[0].cid);
@@ -51,14 +40,11 @@ pub fn show(ui: &mut egui::Ui, ctx: &TabCtx, st: &mut DeviceUi) {
     // button before the buffers it relies on get re-seeded.
     macro_editor::sync_selection(ctx, st, &id);
 
-    // Re-seed the action buffers from daemon state when outside the edit window.
-    if !editing(st, ctx.time) {
-        if let Some(cid) = st.keys.keys_sel_cid {
-            let mapping = remap.mappings.iter().find(|m| m.cid == cid);
-            st.keys.keys_action = Some(mapping.map(|m| m.base.clone()).unwrap_or_default());
-            st.keys.keys_shifted_action =
-                Some(mapping.map(|m| m.shifted.clone()).unwrap_or_default());
-        }
+    if let Some(cid) = st.keys.keys_sel_cid {
+        let mapping = remap.mappings.iter().find(|m| m.cid == cid);
+        let base = mapping.map(|m| m.base.clone()).unwrap_or_default();
+        let shifted = mapping.map(|m| m.shifted.clone()).unwrap_or_default();
+        sync_mapping_editor(&mut st.keys, cid, base, shifted);
     }
 
     // The list below stays the primary control; the picture is a shortcut.
@@ -82,6 +68,40 @@ pub fn show(ui: &mut egui::Ui, ctx: &TabCtx, st: &mut DeviceUi) {
         action_card(right, ctx, st, &remap, &id);
         params_card(right, ctx, st, &id);
     });
+}
+
+/// Three-way synchronization between the last bus projection, the current bus
+/// projection, and the editor buffers. A layer follows external changes only
+/// while it is still equal to the projection it was seeded from.
+fn sync_mapping_editor(
+    keys: &mut super::KeysTab,
+    cid: u16,
+    base: ButtonAction,
+    shifted: ButtonAction,
+) {
+    match keys.observed_mapping.take() {
+        Some((observed_cid, old_base, old_shifted)) if observed_cid == cid => {
+            if keys
+                .keys_action
+                .as_ref()
+                .is_none_or(|local| *local == old_base)
+            {
+                keys.keys_action = Some(base.clone());
+            }
+            if keys
+                .keys_shifted_action
+                .as_ref()
+                .is_none_or(|local| *local == old_shifted)
+            {
+                keys.keys_shifted_action = Some(shifted.clone());
+            }
+        }
+        _ => {
+            keys.keys_action = Some(base.clone());
+            keys.keys_shifted_action = Some(shifted.clone());
+        }
+    }
+    keys.observed_mapping = Some((cid, base, shifted));
 }
 
 // ── Keyboard overview (clickable key picture) ────────────────────────────────
@@ -523,13 +543,15 @@ fn action_section(ui: &mut egui::Ui, ctx: &TabCtx, st: &mut DeviceUi, id: &str, 
                 let (base, shifted) = layer.pair(st, new_action.clone());
                 layer.set(st, new_action);
                 st.last_edit = ctx.time;
-                crate::runtime::ipc::send(
-                    ctx.cmd,
-                    DaemonCommand::SetButtonMapping {
-                        id: id.to_string(),
-                        mapping: ButtonMapping { cid, base, shifted },
-                    },
-                );
+                if mapping_is_complete(&base, &shifted) {
+                    crate::runtime::ipc::send(
+                        ctx.cmd,
+                        DaemonCommand::SetButtonMapping {
+                            id: id.to_string(),
+                            mapping: ButtonMapping { cid, base, shifted },
+                        },
+                    );
+                }
             }
         }
     });
@@ -658,11 +680,21 @@ fn params_editor(
     let apply = |st: &mut DeviceUi, a: ButtonAction| {
         layer.set(st, a.clone());
         st.last_edit = ctx.time;
-        crate::runtime::ipc::send(ctx.cmd, make_cmd(a));
+        let cmd = make_cmd(a);
+        if let DaemonCommand::SetButtonMapping { mapping, .. } = &cmd {
+            if mapping_is_complete(&mapping.base, &mapping.shifted) {
+                crate::runtime::ipc::send(ctx.cmd, cmd);
+            }
+        }
     };
     let queue = |st: &mut DeviceUi, field: &str, a: ButtonAction| {
         layer.set(st, a.clone());
-        st.queue(&format!("btn:{field}:{cid}:{tag}"), make_cmd(a), ctx.time);
+        let cmd = make_cmd(a);
+        if let DaemonCommand::SetButtonMapping { mapping, .. } = &cmd {
+            if mapping_is_complete(&mapping.base, &mapping.shifted) {
+                st.queue(&format!("btn:{field}:{cid}:{tag}"), cmd, ctx.time);
+            }
+        }
     };
 
     match action {
@@ -1032,6 +1064,18 @@ fn adapt_to_category(proto: ButtonAction, current: &ButtonAction) -> ButtonActio
     }
 }
 
+pub(super) fn mapping_is_complete(base: &ButtonAction, shifted: &ButtonAction) -> bool {
+    fn complete(action: &ButtonAction) -> bool {
+        match action {
+            ButtonAction::Macro { steps } => !steps.is_empty(),
+            ButtonAction::OpenApp { path } => !path.is_empty(),
+            ButtonAction::Command { cmd, .. } => !cmd.is_empty(),
+            _ => true,
+        }
+    }
+    complete(base) && complete(shifted)
+}
+
 /// Width of the key-label chip: grows to fit the label with side padding,
 /// but never below the base width so short labels keep a uniform pill.
 fn chip_width(label_w: f32) -> f32 {
@@ -1349,6 +1393,60 @@ mod tests {
             adapt_to_category(proto, &current),
             ButtonAction::Macro { steps }
         );
+    }
+
+    #[test]
+    fn mapping_sync_preserves_incomplete_local_macro_draft() {
+        let mut keys = crate::ui::screens::device::KeysTab::default();
+        sync_mapping_editor(&mut keys, 7, ButtonAction::Native, ButtonAction::Native);
+        keys.keys_action = Some(ButtonAction::Macro { steps: vec![] });
+
+        sync_mapping_editor(&mut keys, 7, ButtonAction::Native, ButtonAction::Native);
+
+        assert_eq!(
+            keys.keys_action,
+            Some(ButtonAction::Macro { steps: vec![] })
+        );
+    }
+
+    #[test]
+    fn mapping_sync_applies_external_change_to_clean_layer() {
+        let mut keys = crate::ui::screens::device::KeysTab::default();
+        sync_mapping_editor(&mut keys, 7, ButtonAction::Native, ButtonAction::Native);
+
+        sync_mapping_editor(&mut keys, 7, ButtonAction::Disable, ButtonAction::Native);
+
+        assert_eq!(keys.keys_action, Some(ButtonAction::Disable));
+    }
+
+    #[test]
+    fn incomplete_parameterized_actions_are_editor_drafts() {
+        assert!(!mapping_is_complete(
+            &ButtonAction::Macro { steps: vec![] },
+            &ButtonAction::Native
+        ));
+        assert!(!mapping_is_complete(
+            &ButtonAction::OpenApp {
+                path: String::new()
+            },
+            &ButtonAction::Native
+        ));
+        assert!(!mapping_is_complete(
+            &ButtonAction::Command {
+                cmd: String::new(),
+                args: vec![]
+            },
+            &ButtonAction::Native
+        ));
+        assert!(mapping_is_complete(
+            &ButtonAction::Macro {
+                steps: vec![halod_shared::types::MacroStep {
+                    kind: halod_shared::types::MacroAtom::KeyDown { key: 30 },
+                    delay_after_ms: 0,
+                }]
+            },
+            &ButtonAction::Native
+        ));
     }
 
     #[test]

@@ -114,7 +114,14 @@ pub fn serve_forever() -> Result<()> {
             continue;
         }
 
-        let handle = create_instance(PIPE_NAME, &sec)?;
+        let handle = match create_instance(PIPE_NAME, &sec) {
+            Ok(handle) => handle,
+            Err(e) => {
+                log::warn!("[broker] create pipe instance failed, retrying: {e}");
+                std::thread::sleep(Duration::from_millis(500));
+                continue;
+            }
+        };
         let mut stream = PipeStream::new(handle);
         if let Err(e) = wait_for_client(handle) {
             log::warn!("[broker] wait_for_client failed: {e}");
@@ -522,10 +529,9 @@ fn dispatch(conn: &mut Conn, scope: &CapabilityScope, req: Request) -> Response 
             )?;
             Ok(Response::Unit)
         }),
-        Request::Enumerate
-        | Request::EnumerateGpu
-        | Request::Authenticate { .. }
-        | Request::Renew { .. } => Response::Error("operation not available in this state".into()),
+        Request::Authenticate { .. } | Request::Renew { .. } => {
+            Response::Error("operation not available in this state".into())
+        }
     }
 }
 
@@ -551,19 +557,31 @@ fn require_one_word(function: &std::ffi::CStr, output: &[u64]) -> Result<u64> {
     Ok(*value)
 }
 
+fn with_register_io(
+    conn: &Conn,
+    handle: u32,
+    want: RegisterIoKind,
+    f: impl FnOnce(&PawnioModule) -> Result<Response>,
+) -> Response {
+    match conn.register_io.get(&handle) {
+        Some(entry) if !handle_kind_allows(entry.kind(), want) => Response::Error(format!(
+            "register-I/O handle {handle} is {:?}, not {:?}",
+            entry.kind(),
+            want
+        )),
+        Some(RegisterIoHandle::AmdSmn(module) | RegisterIoHandle::LpcIo(module)) => {
+            ok_or_err(f(module))
+        }
+        None => Response::Error(format!("unknown register-I/O handle {handle}")),
+    }
+}
+
 fn with_amd_smn(
     conn: &Conn,
     handle: u32,
     f: impl FnOnce(&PawnioModule) -> Result<Response>,
 ) -> Response {
-    match conn.register_io.get(&handle) {
-        Some(entry) if !handle_kind_allows(entry.kind(), RegisterIoKind::AmdSmn) => {
-            Response::Error(format!("register-I/O handle {handle} is LPC, not AMD SMN"))
-        }
-        Some(RegisterIoHandle::AmdSmn(module)) => ok_or_err(f(module)),
-        Some(RegisterIoHandle::LpcIo(_)) => unreachable!("kind checked above"),
-        None => Response::Error(format!("unknown register-I/O handle {handle}")),
-    }
+    with_register_io(conn, handle, RegisterIoKind::AmdSmn, f)
 }
 
 fn with_lpc_io(
@@ -571,14 +589,7 @@ fn with_lpc_io(
     handle: u32,
     f: impl FnOnce(&PawnioModule) -> Result<Response>,
 ) -> Response {
-    match conn.register_io.get(&handle) {
-        Some(entry) if !handle_kind_allows(entry.kind(), RegisterIoKind::LpcIo) => {
-            Response::Error(format!("register-I/O handle {handle} is AMD SMN, not LPC"))
-        }
-        Some(RegisterIoHandle::LpcIo(module)) => ok_or_err(f(module)),
-        Some(RegisterIoHandle::AmdSmn(_)) => unreachable!("kind checked above"),
-        None => Response::Error(format!("unknown register-I/O handle {handle}")),
-    }
+    with_register_io(conn, handle, RegisterIoKind::LpcIo, f)
 }
 
 fn with_bus(

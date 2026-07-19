@@ -2,11 +2,12 @@
 //! Settings page — matches the GTK GUI's settings content while using the
 //! Prism design visual layout (cards with toggles, value chips, buttons).
 
+use crate::domain::topic_store::TopicStore;
 use crate::ui::components as widgets;
 use egui::{Align, Align2, Color32, Pos2, Rect, Sense, Stroke, Vec2};
 use halod_shared::commands::EngineKind;
 use halod_shared::debug_info::{DebugInfo, DependencyStatus};
-use halod_shared::types::{AppState, DiscoveryPhase};
+use halod_shared::types::DiscoveryPhase;
 
 use crate::runtime::ipc::CommandTx;
 use crate::ui::screens::depcheck::{fix_text, impact_text, title_text};
@@ -41,7 +42,7 @@ enum Modal {
 
 pub fn show(
     ui: &mut egui::Ui,
-    state: &AppState,
+    state: &TopicStore,
     cmd: &CommandTx,
     connected: bool,
     debug: Option<&DebugInfo>,
@@ -85,7 +86,7 @@ pub fn show(
 #[allow(clippy::too_many_arguments)]
 fn page_body(
     ui: &mut egui::Ui,
-    state: &AppState,
+    state: &TopicStore,
     cmd: &CommandTx,
     connected: bool,
     debug: Option<&DebugInfo>,
@@ -315,7 +316,7 @@ fn start_on_boot_row(ui: &mut egui::Ui, st: &mut SettingsUi) {
 /// sends the current snapshot with only its own field overridden (`Some`).
 fn send_ui_config(
     cmd: &CommandTx,
-    state: &AppState,
+    state: &TopicStore,
     close_to_tray: Option<bool>,
     suppress_dependency_warning: Option<bool>,
     hide_window_controls: Option<bool>,
@@ -334,7 +335,7 @@ fn send_ui_config(
     );
 }
 
-fn close_to_tray_row(ui: &mut egui::Ui, state: &AppState, cmd: &CommandTx) {
+fn close_to_tray_row(ui: &mut egui::Ui, state: &TopicStore, cmd: &CommandTx) {
     let rect = row_rect(ui);
     row_label(
         ui,
@@ -348,7 +349,7 @@ fn close_to_tray_row(ui: &mut egui::Ui, state: &AppState, cmd: &CommandTx) {
     }
 }
 
-fn low_battery_notifications_row(ui: &mut egui::Ui, state: &AppState, cmd: &CommandTx) {
+fn low_battery_notifications_row(ui: &mut egui::Ui, state: &TopicStore, cmd: &CommandTx) {
     let rect = row_rect(ui);
     row_label(
         ui,
@@ -362,7 +363,7 @@ fn low_battery_notifications_row(ui: &mut egui::Ui, state: &AppState, cmd: &Comm
     }
 }
 
-fn plugin_downloads_row(ui: &mut egui::Ui, state: &AppState, cmd: &CommandTx) {
+fn plugin_downloads_row(ui: &mut egui::Ui, state: &TopicStore, cmd: &CommandTx) {
     let rect = row_rect(ui);
     row_label(
         ui,
@@ -379,7 +380,7 @@ fn plugin_downloads_row(ui: &mut egui::Ui, state: &AppState, cmd: &CommandTx) {
     }
 }
 
-fn window_controls_row(ui: &mut egui::Ui, state: &AppState, cmd: &CommandTx) {
+fn window_controls_row(ui: &mut egui::Ui, state: &TopicStore, cmd: &CommandTx) {
     let rect = row_rect(ui);
     row_label(
         ui,
@@ -393,7 +394,7 @@ fn window_controls_row(ui: &mut egui::Ui, state: &AppState, cmd: &CommandTx) {
     }
 }
 
-fn dependency_warning_row(ui: &mut egui::Ui, state: &AppState, cmd: &CommandTx) {
+fn dependency_warning_row(ui: &mut egui::Ui, state: &TopicStore, cmd: &CommandTx) {
     let rect = row_rect(ui);
     row_label(
         ui,
@@ -439,7 +440,7 @@ fn replay_tutorials_row(ui: &mut egui::Ui, cmd: &CommandTx) {
 
 // ── ENGINES rows ──────────────────────────────────────────────────────────────
 
-fn lcd_engine_row(ui: &mut egui::Ui, state: &AppState, cmd: &CommandTx) {
+fn lcd_engine_row(ui: &mut egui::Ui, state: &TopicStore, cmd: &CommandTx) {
     let rect = row_rect(ui);
     row_label(ui, rect, "LCD", &t!("settings.lcd_engine_sub"));
 
@@ -526,11 +527,11 @@ fn daemon_status_row(ui: &mut egui::Ui, connected: bool) {
     );
 }
 
-fn is_scanning(state: &AppState) -> bool {
+fn is_scanning(state: &TopicStore) -> bool {
     matches!(state.discovery.phase, DiscoveryPhase::Discovering)
 }
 
-fn rediscover_row(ui: &mut egui::Ui, state: &AppState, cmd: &CommandTx) {
+fn rediscover_row(ui: &mut egui::Ui, state: &TopicStore, cmd: &CommandTx) {
     let rect = row_rect(ui);
     row_label(
         ui,
@@ -718,7 +719,7 @@ pub fn apply_locale(code: &str) {
     }
 }
 
-fn language_row(ui: &mut egui::Ui, state: &AppState, cmd: &CommandTx) {
+fn language_row(ui: &mut egui::Ui, state: &TopicStore, cmd: &CommandTx) {
     let rect = row_rect(ui);
     row_label(ui, rect, &t!("settings.language"), "");
 
@@ -760,7 +761,7 @@ fn language_row(ui: &mut egui::Ui, state: &AppState, cmd: &CommandTx) {
 
 const LOG_LEVELS: &[&str] = &["error", "warn", "info", "debug"];
 
-fn log_level_row(ui: &mut egui::Ui, state: &AppState, cmd: &CommandTx) {
+fn log_level_row(ui: &mut egui::Ui, state: &TopicStore, cmd: &CommandTx) {
     let rect = row_rect(ui);
     row_label(
         ui,
@@ -805,7 +806,7 @@ fn log_level_row(ui: &mut egui::Ui, state: &AppState, cmd: &CommandTx) {
 
 // ── ADVANCED rows ─────────────────────────────────────────────────────────────
 
-fn config_folder_row(ui: &mut egui::Ui, state: &AppState) {
+fn config_folder_row(ui: &mut egui::Ui, state: &TopicStore) {
     let rect = row_rect(ui);
     ui.painter().text(
         Pos2::new(rect.left(), rect.top() + 10.0),
@@ -1016,7 +1017,7 @@ fn section_header(ui: &mut egui::Ui, text: &str) {
 
 // ── Footer ────────────────────────────────────────────────────────────────────
 
-fn footer(ui: &mut egui::Ui, _state: &AppState) {
+fn footer(ui: &mut egui::Ui, _state: &TopicStore) {
     ui.label(
         egui::RichText::new(concat!(
             "HaloDaemon v",
@@ -1433,7 +1434,7 @@ mod tests {
 
     #[test]
     fn scanning_only_during_discovering_phase() {
-        let scanning = |phase| AppState {
+        let scanning = |phase| TopicStore {
             discovery: DiscoveryStatus {
                 phase,
                 ..Default::default()

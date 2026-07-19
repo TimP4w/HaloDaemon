@@ -3,9 +3,10 @@
 
 use std::collections::HashSet;
 
+use crate::domain::topic_store::TopicStore;
 use halod_shared::types::{
-    AppState, PluginDownloadConsent, PluginIssue, PluginIssueContext, PluginRepoLocation,
-    PluginSource, RepoSignatureStatus,
+    PluginDownloadConsent, PluginIssue, PluginIssueContext, PluginRepoLocation, PluginSource,
+    RepoSignatureStatus,
 };
 
 #[derive(Debug, Clone, PartialEq, Eq)]
@@ -19,7 +20,7 @@ pub struct RepositoryIntegrityAlert {
 }
 
 pub fn repository_integrity_alert(
-    state: &AppState,
+    state: &TopicStore,
     notified: &HashSet<String>,
 ) -> Option<RepositoryIntegrityAlert> {
     state.plugins.plugins.iter().find_map(|plugin| {
@@ -169,7 +170,7 @@ mod tests {
             signing_key_fingerprint: None,
             compatibility: Default::default(),
         };
-        let mut state = AppState::default();
+        let mut state = TopicStore::default();
         state.gui.plugin_downloads = PluginDownloadConsent::Allowed;
         state.plugins.plugins = vec![plugin];
         state.plugins.repos = vec![repo];

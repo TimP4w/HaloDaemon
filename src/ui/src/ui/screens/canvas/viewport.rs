@@ -4,8 +4,9 @@
 
 use std::collections::HashSet;
 
+use crate::domain::topic_store::TopicStore;
 use egui::{Align2, Color32, Pos2, Rect, Sense, Stroke, Vec2};
-use halod_shared::types::{AppState, DeviceCapability, PlacedZone, SamplingMode, ZoneTopology};
+use halod_shared::types::{DeviceCapability, PlacedZone, SamplingMode, ZoneTopology};
 
 use crate::runtime::ipc::CommandTx;
 use crate::ui::components as widgets;
@@ -25,7 +26,7 @@ use widgets::rotation_handle_pos;
 // ── Canvas view ───────────────────────────────────────────────────────────────
 pub(super) fn canvas_view(
     ui: &mut egui::Ui,
-    state: &AppState,
+    state: &TopicStore,
     canvas_ui: &mut CanvasUi,
     cmd: &CommandTx,
     time: f64,
@@ -369,7 +370,7 @@ fn mode_toggle(ui: &mut egui::Ui, canvas_rect: Rect, canvas_ui: &mut CanvasUi) {
 }
 
 // ── Zone drawing ──────────────────────────────────────────────────────────────
-fn draw_zones(p: &egui::Painter, state: &AppState, canvas_ui: &CanvasUi, canvas_rect: Rect) {
+fn draw_zones(p: &egui::Painter, state: &TopicStore, canvas_ui: &CanvasUi, canvas_rect: Rect) {
     let single_sel = if canvas_ui.selected.len() == 1 {
         canvas_ui.selected.iter().next().cloned()
     } else {
@@ -568,7 +569,7 @@ fn hit_test(
 /// badge, return that zone's key. The badge only paints for the sole selection.
 fn badge_hit(
     canvas_ui: &CanvasUi,
-    state: &AppState,
+    state: &TopicStore,
     norm: Pos2,
     canvas_rect: Rect,
 ) -> Option<(String, String)> {

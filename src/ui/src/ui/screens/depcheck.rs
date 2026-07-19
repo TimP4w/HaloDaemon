@@ -1,10 +1,10 @@
 // SPDX-License-Identifier: GPL-3.0-or-later
 //! Startup healthcheck dialog, driven by the daemon's reported dependencies.
 
+use crate::domain::topic_store::TopicStore;
 use crate::ui::components as widgets;
 use egui::RichText;
 use halod_shared::debug_info::{DebugInfo, DependencyStatus};
-use halod_shared::types::AppState;
 
 use crate::runtime::ipc::CommandTx;
 use crate::ui::theme;
@@ -87,7 +87,7 @@ pub fn should_show(gate: &DepCheckGate, info: Option<&DebugInfo>) -> bool {
 /// Whether the healthcheck dialog is currently showing — so other overlays
 /// (the tour) know to stay out of its way.
 pub fn visible(
-    state: &AppState,
+    state: &TopicStore,
     debug: Option<&DebugInfo>,
     connected: bool,
     within_grace: bool,
@@ -106,7 +106,7 @@ pub fn visible(
 
 pub fn show(
     ctx: &egui::Context,
-    state: &AppState,
+    state: &TopicStore,
     cmd: &CommandTx,
     debug: Option<&DebugInfo>,
     connected: bool,

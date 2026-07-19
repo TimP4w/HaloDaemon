@@ -248,6 +248,11 @@ enum Setting<'a> {
 fn setting_row(ui: &mut egui::Ui, id: &str, ctx: &TabCtx, st: &mut DeviceUi, s: Setting) {
     match s {
         Setting::Choice(c) => {
+            let edit_key = format!("choice:{}", c.key);
+            let selected = st
+                .guarded(&edit_key, c.selected as f32, ctx.time)
+                .round()
+                .max(0.0) as usize;
             match c.display {
                 ChoiceDisplay::Inline => {
                     ui.label(
@@ -258,7 +263,8 @@ fn setting_row(ui: &mut egui::Ui, id: &str, ctx: &TabCtx, st: &mut DeviceUi, s: 
                     ui.add_space(theme::SPACE_3);
                     widgets::pill_strip(ui, |ui| {
                         for (i, opt) in c.options.iter().enumerate() {
-                            if widgets::pill(ui, &opt.label, i == c.selected) && i != c.selected {
+                            if widgets::pill(ui, &opt.label, i == selected) && i != selected {
+                                st.set(&edit_key, i as f32, ctx.time);
                                 crate::runtime::ipc::send(
                                     ctx.cmd,
                                     halod_shared::commands::DaemonCommand::SetChoice {
@@ -285,10 +291,11 @@ fn setting_row(ui: &mut egui::Ui, id: &str, ctx: &TabCtx, st: &mut DeviceUi, s: 
                         .map(|(i, opt)| (i.to_string(), opt.label.clone()))
                         .collect();
                     if let Some(new_id) =
-                        widgets::combo_picker(ui, &c.key, &options, &c.selected.to_string(), None)
+                        widgets::combo_picker(ui, &c.key, &options, &selected.to_string(), None)
                     {
                         if let Ok(idx) = new_id.parse::<usize>() {
-                            if idx != c.selected {
+                            if idx != selected {
+                                st.set(&edit_key, idx as f32, ctx.time);
                                 crate::runtime::ipc::send(
                                     ctx.cmd,
                                     halod_shared::commands::DaemonCommand::SetChoice {
@@ -312,8 +319,9 @@ fn setting_row(ui: &mut egui::Ui, id: &str, ctx: &TabCtx, st: &mut DeviceUi, s: 
                             );
                         },
                         |ui| {
-                            let on = c.selected == 1;
+                            let on = selected == 1;
                             if widgets::toggle(ui, on) != on {
+                                st.set(&edit_key, usize::from(!on) as f32, ctx.time);
                                 crate::runtime::ipc::send(
                                     ctx.cmd,
                                     halod_shared::commands::DaemonCommand::SetChoice {
@@ -385,6 +393,8 @@ fn setting_row(ui: &mut egui::Ui, id: &str, ctx: &TabCtx, st: &mut DeviceUi, s: 
             ui.add_space(theme::SPACE_7);
         }
         Setting::Boolean(b) => {
+            let edit_key = format!("boolean:{}", b.key);
+            let on = st.guarded(&edit_key, if b.value { 1.0 } else { 0.0 }, ctx.time) >= 0.5;
             egui::Sides::new().show(
                 ui,
                 |ui| {
@@ -395,7 +405,6 @@ fn setting_row(ui: &mut egui::Ui, id: &str, ctx: &TabCtx, st: &mut DeviceUi, s: 
                     );
                 },
                 |ui| {
-                    let on = b.value;
                     if b.read_only {
                         // Paint a non-interactive toggle showing the current value.
                         let (rect, _resp) = ui
@@ -405,12 +414,13 @@ fn setting_row(ui: &mut egui::Ui, id: &str, ctx: &TabCtx, st: &mut DeviceUi, s: 
                     } else {
                         let new_val = widgets::toggle(ui, on);
                         if new_val != on {
+                            st.set(&edit_key, if new_val { 1.0 } else { 0.0 }, ctx.time);
                             crate::runtime::ipc::send(
                                 ctx.cmd,
                                 halod_shared::commands::DaemonCommand::SetBoolean {
                                     id: id.to_string(),
                                     key: b.key.clone(),
-                                    value: !on,
+                                    value: new_val,
                                 },
                             );
                         }

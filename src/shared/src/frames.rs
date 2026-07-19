@@ -8,13 +8,16 @@ pub fn payload_exceeds_max(payload_len: u32) -> bool {
 }
 
 /// Build a 5-byte frame header + payload.
-fn write_frame(frame_type: u8, payload: &[u8]) -> Vec<u8> {
-    let len = u32::try_from(payload.len()).expect("frame payload exceeds u32 max");
+fn write_frame(frame_type: u8, payload: &[u8]) -> Option<Vec<u8>> {
+    let len = u32::try_from(payload.len()).ok()?;
+    if payload_exceeds_max(len) {
+        return None;
+    }
     let mut buf = Vec::with_capacity(5 + payload.len());
     buf.push(frame_type);
     buf.extend_from_slice(&len.to_be_bytes());
     buf.extend_from_slice(payload);
-    buf
+    Some(buf)
 }
 
 pub fn encode_json_frame(msg: &serde_json::Value) -> Option<Vec<u8>> {
@@ -23,10 +26,10 @@ pub fn encode_json_frame(msg: &serde_json::Value) -> Option<Vec<u8>> {
     if payload_exceeds_max(len) {
         return None;
     }
-    Some(write_frame(FRAME_JSON, &payload))
+    write_frame(FRAME_JSON, &payload)
 }
 
-pub fn encode_binary_frame(payload: &[u8]) -> Vec<u8> {
+pub fn encode_binary_frame(payload: &[u8]) -> Option<Vec<u8>> {
     write_frame(FRAME_BINARY, payload)
 }
 
@@ -92,11 +95,17 @@ mod tests {
     #[test]
     fn encode_binary_frame_header_and_payload() {
         let data = b"hello binary";
-        let frame = encode_binary_frame(data);
+        let frame = encode_binary_frame(data).unwrap();
         assert_eq!(frame[0], FRAME_BINARY);
         let len = u32::from_be_bytes([frame[1], frame[2], frame[3], frame[4]]) as usize;
         assert_eq!(len, data.len());
         assert_eq!(&frame[5..], data);
+    }
+
+    #[test]
+    fn encode_binary_frame_rejects_oversized_payload() {
+        let payload = vec![0; MAX_PAYLOAD as usize + 1];
+        assert!(encode_binary_frame(&payload).is_none());
     }
 
     #[test]
@@ -207,7 +216,7 @@ mod prop_tests {
         /// length, and the declared length equals the actual payload length.
         #[test]
         fn binary_frame_header_round_trips(payload in prop::collection::vec(any::<u8>(), 0..1024)) {
-            let frame = encode_binary_frame(&payload);
+            let frame = encode_binary_frame(&payload).unwrap();
             let header: [u8; 5] = frame[..5].try_into().unwrap();
             let (frame_type, len) = decode_header(&header);
             prop_assert_eq!(frame_type, FRAME_BINARY);

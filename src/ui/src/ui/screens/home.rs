@@ -5,9 +5,10 @@
 use crate::ui::components as widgets;
 use std::collections::{HashMap, HashSet, VecDeque};
 
+use crate::domain::topic_store::TopicStore;
 use egui::{Align2, Color32, Pos2, Rect, Sense, Stroke, Vec2};
 use halod_shared::types::{
-    AppState, ConflictDeviceSource, DeviceCapability, DeviceType, VisibilityState, WireDevice,
+    ConflictDeviceSource, DeviceCapability, DeviceType, VisibilityState, WireDevice,
 };
 
 use crate::domain::models::device::{self as model, Metric};
@@ -20,7 +21,7 @@ const GAP: f32 = 16.0;
 #[allow(clippy::too_many_arguments)]
 pub fn show(
     ui: &mut egui::Ui,
-    state: &AppState,
+    state: &TopicStore,
     cmd: &CommandTx,
     show_hidden: &mut bool,
     variant: &mut Variant,
@@ -762,7 +763,7 @@ fn set_vis(ui: &mut egui::Ui, cmd: &CommandTx, id: &str, state: VisibilityState)
 
 fn header(
     ui: &mut egui::Ui,
-    state: &AppState,
+    state: &TopicStore,
     show_hidden: &mut bool,
     variant: &mut Variant,
     search: &mut String,
@@ -918,7 +919,7 @@ fn segmented(ui: &mut egui::Ui, variant: &mut Variant) {
 /// with a live sparkline drawn in the card background. Wraps into rows of four.
 fn sensors_row(
     ui: &mut egui::Ui,
-    state: &AppState,
+    state: &TopicStore,
     cmd: &CommandTx,
     show_hidden: bool,
     history: &HashMap<String, VecDeque<f32>>,
@@ -929,7 +930,7 @@ fn sensors_row(
 // Sensor cards with sparklines, shared by Home and Cooling pages.
 pub(crate) fn sensors_grid(
     ui: &mut egui::Ui,
-    state: &AppState,
+    state: &TopicStore,
     cmd: &CommandTx,
     show_hidden: bool,
     history: &HashMap<String, VecDeque<f32>>,
