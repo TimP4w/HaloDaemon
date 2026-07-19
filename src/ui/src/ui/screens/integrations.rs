@@ -1283,6 +1283,7 @@ mod tests {
             name: format!("{id} integration"),
             path: String::new(),
             plugin_type: PluginKind::Integration,
+            experimental: false,
             capabilities: vec![],
             platforms: vec![],
             platform_supported: true,

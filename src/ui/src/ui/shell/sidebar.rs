@@ -494,6 +494,7 @@ mod tests {
             name: id.into(),
             path: String::new(),
             plugin_type: Default::default(),
+            experimental: false,
             capabilities: vec![],
             platforms: vec![],
             platform_supported: true,

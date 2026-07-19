@@ -1353,6 +1353,9 @@ pub struct PluginInfo {
     pub path: String,
     #[serde(default)]
     pub plugin_type: PluginKind,
+    /// True when the package author marks this plugin as experimental.
+    #[serde(default)]
+    pub experimental: bool,
     /// Human-readable capability labels the plugin declares (e.g. "RGB", "Fan").
     #[serde(default)]
     pub capabilities: Vec<String>,
@@ -2746,6 +2749,7 @@ mod tests {
         }))
         .unwrap();
         assert_eq!(info.health, HealthState::default());
+        assert!(!info.experimental);
 
         let init_failed = PluginIssue {
             kind: PluginIssueKind::InitFailed,

@@ -110,6 +110,7 @@ plugins:
   type_device: Driver
   type_effect: Effetti
   type_integration: Integrazione
+  experimental: Sperimentale
   author: AUTORE
   capabilities: FUNZIONALITÀ
   targets: DISPOSITIVI SUPPORTATI

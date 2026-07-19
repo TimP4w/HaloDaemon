@@ -1799,13 +1799,26 @@ fn list_row(
         theme::semibold(12.5),
         theme::TEXT,
     );
+    let metadata_y = rect.top() + 27.0;
+    let mut metadata_x = text_x;
     if !p.version.is_empty() {
-        ui.painter().text(
-            Pos2::new(text_x, rect.top() + 27.0),
-            Align2::LEFT_TOP,
-            &p.version,
-            theme::value_xs(),
+        let version_galley =
+            ui.painter()
+                .layout_no_wrap(p.version.clone(), theme::value_xs(), theme::TEXT_FAINT);
+        metadata_x += version_galley.size().x + 7.0;
+        ui.painter().galley(
+            Pos2::new(text_x, metadata_y),
+            version_galley,
             theme::TEXT_FAINT,
+        );
+    }
+    if p.experimental {
+        ui.painter().text(
+            Pos2::new(metadata_x, metadata_y),
+            Align2::LEFT_TOP,
+            t!("plugins.experimental"),
+            theme::value_xs(),
+            theme::STAT_AMBER,
         );
     }
     if needs_action {
@@ -2088,9 +2101,12 @@ fn detail_body(
         }
     }
 
-    if !p.license.is_empty() || !matches!(p.source, PluginSource::Local) {
+    if p.experimental || !p.license.is_empty() || !matches!(p.source, PluginSource::Local) {
         ui.add_space(theme::SPACE_5);
         widgets::pill_strip(ui, |ui| {
+            if p.experimental {
+                let _ = widgets::chip_colored(ui, &t!("plugins.experimental"), theme::STAT_AMBER);
+            }
             if !p.license.is_empty() {
                 widgets::chip(ui, &format!("⚖ {}", p.license));
             }
@@ -3663,6 +3679,7 @@ mod tests {
             name: format!("{id} device"),
             path: format!("/home/u/.config/halod/plugins/{id}.lua"),
             plugin_type: halod_shared::types::PluginKind::Device,
+            experimental: false,
             capabilities: vec!["RGB".into()],
             platforms: vec![],
             platform_supported: true,

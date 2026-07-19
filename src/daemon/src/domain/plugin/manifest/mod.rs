@@ -1185,6 +1185,8 @@ pub struct PluginManifest {
     /// Per-effect thumbnails; directory plugins only, empty for a built-in.
     pub effect_thumbnails: Vec<EffectAssetRef>,
     pub plugin_type: PluginKind,
+    /// Marks packages that are still under active development or hardware validation.
+    pub experimental: bool,
     /// Opt in to runtime child devices returned by `enumerate_controllers`.
     pub dynamic_children: bool,
     /// Status polling cadence for hardware whose controls can change outside
@@ -1225,6 +1227,8 @@ pub struct PluginMeta {
     pub id: String,
     #[serde(rename = "type", default)]
     pub plugin_type: PluginKind,
+    #[serde(default)]
+    pub experimental: bool,
     #[serde(default)]
     pub name: Option<String>,
     #[serde(default)]
@@ -3227,6 +3231,7 @@ pub(super) fn build_manifest_from_dir(dir: &Path) -> Result<PluginManifest> {
         logo,
         effect_thumbnails: meta.effect_assets,
         plugin_type: meta.plugin_type,
+        experimental: meta.experimental,
         dynamic_children: meta.dynamic_children,
         poll_interval_ms: meta.poll_interval_ms.clamp(50, 60_000),
         effects: meta.effects,
@@ -3925,6 +3930,21 @@ mod tests {
         assert_eq!(m.devices.len(), 1);
         assert_eq!(m.devices[0].vendor, "Real");
         assert_eq!(m.identity.name.as_deref(), Some("Real Name"));
+    }
+
+    #[test]
+    fn directory_plugin_reads_experimental_marker() {
+        let tmp = tempfile::tempdir().unwrap();
+        let experimental = write_plugin_dir(
+            tmp.path(),
+            "experimental_plugin",
+            "experimental: true\n",
+            ENTRY_LUA,
+        );
+        let stable = write_plugin_dir(tmp.path(), "stable_plugin", "", ENTRY_LUA);
+
+        assert!(parse_manifest_from_dir(&experimental).unwrap().experimental);
+        assert!(!parse_manifest_from_dir(&stable).unwrap().experimental);
     }
 
     #[test]
