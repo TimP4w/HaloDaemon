@@ -47,29 +47,22 @@ mod platform {
             "org.freedesktop.Notifications",
         )?;
         let actions: Vec<&str> = Vec::new();
-        let mut hints = HashMap::new();
-        // Freedesktop urgency 2 is critical. A zero timeout requests a
-        // persistent native notification; the desktop may still apply policy.
-        hints.insert("urgency", Value::U8(2));
-        // Associate the notification with our installed desktop file. GNOME,
-        // Plasma, and other servers can use this for app permissions, grouping,
-        // and presentation instead of treating the sender as an unknown client.
+        let mut hints: HashMap<&str, Value<'_>> = HashMap::new();
         hints.insert(
             "desktop-entry",
             Value::Str(Str::from(halod_shared::app::APP_ID)),
         );
-        hints.insert("resident", Value::Bool(true));
         let _: u32 = proxy.call(
             "Notify",
             &(
                 halod_shared::app::APP_DISPLAY_NAME,
                 0_u32,
-                halod_shared::app::APP_NAME,
+                "",
                 title,
                 message,
                 actions,
                 hints,
-                0_i32,
+                10_000_i32,
             ),
         )?;
         Ok("freedesktop service")

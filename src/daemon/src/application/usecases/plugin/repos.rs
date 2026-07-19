@@ -829,15 +829,20 @@ async fn publish_repo_updates(app: &Arc<AppState>, statuses: Vec<RepoUpdateStatu
 pub async fn update_all_plugins(app: Arc<AppState>) -> Result<()> {
     let (statuses, _reached) = compute_plugin_updates(&app, None).await;
     let mut slugs = std::collections::HashSet::new();
+    let mut failures = Vec::new();
     for status in statuses.into_iter().filter(|s| s.update_available) {
         slugs.insert(status.slug);
     }
     for slug in slugs {
         if let Err(e) = update_repo(slug.clone(), app.clone()).await {
             log::warn!("updating plugin repository '{slug}': {e:#}");
+            failures.push(format!("updating plugin repository '{slug}': {e:#}"));
         }
     }
     broadcast_plugin_updates(&app, None).await;
+    if !failures.is_empty() {
+        anyhow::bail!(failures.join("\n"));
+    }
     Ok(())
 }
 
@@ -1069,7 +1074,7 @@ pub async fn update_repo(slug: String, app: Arc<AppState>) -> Result<()> {
                 r.previous_verified_sha = Some(r.locked_sha.clone());
             }
             r.locked_sha = remote_sha.clone();
-            r.active_revision = Some(remote_sha);
+            r.active_revision = Some(remote_sha.clone());
             r.active_source = crate::config::PluginRevisionSource::Managed;
             r.last_sync = Some(now_rfc3339());
         }
@@ -1077,6 +1082,18 @@ pub async fn update_repo(slug: String, app: Arc<AppState>) -> Result<()> {
             cfg.plugins
                 .installed_hashes
                 .insert(package.id.clone(), package.sha256.clone());
+        }
+    }
+    // `compute_repo_updates` is retained separately from config.  Clear the
+    // stale "behind" result as part of the same successful install so the UI
+    // cannot keep advertising the revision we just activated until the next
+    // explicit update check.
+    {
+        let mut statuses = app.plugin_repo_update_status.lock().await;
+        if let Some(status) = statuses.iter_mut().find(|status| status.slug == slug) {
+            status.locked_sha = remote_sha.clone();
+            status.remote_sha = remote_sha.clone();
+            status.behind = false;
         }
     }
     for plugin_id in &removed_plugin_ids {
@@ -1697,6 +1714,32 @@ mod tests {
     }
 
     #[tokio::test]
+    async fn update_repo_clears_retained_behind_status_for_local_source() {
+        crate::test_support::with_tmp_config(|app| async move {
+            let src = tempfile::tempdir().unwrap();
+            let slug = super::sanitize_slug(&file_url(src.path()));
+            init_source_repo(src.path(), &slug);
+            add_repo(file_url(src.path()), None, app.clone())
+                .await
+                .unwrap();
+
+            let source = git2::Repository::open(src.path()).unwrap();
+            std::fs::write(src.path().join("main.lua"), "return { extra = true }").unwrap();
+            let second_sha = commit_all(&source, "second");
+            publish_repo_updates(&app, compute_repo_updates(&app).await).await;
+            assert!(app.plugin_repo_update_status.lock().await[0].behind);
+
+            update_repo(slug, app.clone()).await.unwrap();
+
+            let statuses = app.plugin_repo_update_status.lock().await;
+            assert_eq!(statuses[0].locked_sha, second_sha);
+            assert_eq!(statuses[0].remote_sha, second_sha);
+            assert!(!statuses[0].behind);
+        })
+        .await;
+    }
+
+    #[tokio::test]
     async fn mutable_git_worktree_is_never_loaded_as_plugin_input() {
         crate::test_support::with_tmp_config(|app| async move {
             let src = tempfile::tempdir().unwrap();
@@ -1780,6 +1823,39 @@ mod tests {
                 Some(false),
                 "update_all_plugins must commit a plugins record clearing the flag"
             );
+        })
+        .await;
+    }
+
+    #[tokio::test]
+    async fn update_all_plugins_returns_repository_failures_to_the_client() {
+        crate::test_support::with_tmp_config(|app| async move {
+            let src = tempfile::tempdir().unwrap();
+            let slug = super::sanitize_slug(&file_url(src.path()));
+            let first_sha = init_source_repo(src.path(), &slug);
+            add_repo(file_url(src.path()), None, app.clone())
+                .await
+                .unwrap();
+
+            let source = git2::Repository::open(src.path()).unwrap();
+            std::fs::write(src.path().join("main.lua"), "return { extra = true }").unwrap();
+            commit_all(&source, "second");
+            update_repo(slug.clone(), app.clone()).await.unwrap();
+
+            // Force the local source branch behind the installed revision. The
+            // update remains advertised because its indexed package digest is
+            // different, but applying it must trip the rollback guard.
+            let head_name = source.head().unwrap().name().unwrap().to_owned();
+            source
+                .find_reference(&head_name)
+                .unwrap()
+                .set_target(git2::Oid::from_str(&first_sha).unwrap(), "test rollback")
+                .unwrap();
+
+            let error = update_all_plugins(app).await.unwrap_err();
+            let message = format!("{error:#}");
+            assert!(message.contains(&slug), "{message}");
+            assert!(message.contains("would roll back"), "{message}");
         })
         .await;
     }

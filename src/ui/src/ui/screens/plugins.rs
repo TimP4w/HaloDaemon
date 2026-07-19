@@ -120,6 +120,23 @@ const UDEV_RECHECK_SPINNER: f64 = 1.0;
 const UPDATE_TIMEOUT: f64 = 90.0;
 
 impl PluginsUi {
+    /// Stop optimistic update progress as soon as the daemon reports that the
+    /// command failed. The same notification is rendered by the root toast
+    /// layer, so the user sees the reason instead of a spinner lasting until
+    /// the failsafe timeout.
+    pub fn observe_notifications(&mut self, notifications: &[halod_shared::types::Notification]) {
+        if notifications.iter().any(|notification| {
+            matches!(
+                notification.code,
+                halod_shared::types::NotificationCode::Generic { .. }
+            )
+        }) {
+            self.updating.clear();
+            self.updating_all = None;
+            self.updating_repos.clear();
+        }
+    }
+
     pub fn release_textures(&mut self) {
         self.asset_textures.clear();
         self.requested_assets.clear();
@@ -3524,6 +3541,29 @@ mod tests {
 
         assert!(!updating.contains_key("repo-a"));
         assert!(updating.contains_key("repo-b"));
+    }
+
+    #[test]
+    fn command_error_notification_stops_update_progress_immediately() {
+        let mut screen = PluginsUi {
+            updating: HashMap::from([("plugin-a".to_owned(), 1.0)]),
+            updating_all: Some(1.0),
+            updating_repos: HashMap::from([("repo-a".to_owned(), 1.0)]),
+            ..Default::default()
+        };
+        let notification = halod_shared::types::Notification {
+            code: halod_shared::types::NotificationCode::Generic {
+                message: "repository update would roll back".to_owned(),
+            },
+            show_native: false,
+            timestamp_ms: 0,
+        };
+
+        screen.observe_notifications(&[notification]);
+
+        assert!(screen.updating.is_empty());
+        assert!(screen.updating_all.is_none());
+        assert!(screen.updating_repos.is_empty());
     }
 
     #[test]

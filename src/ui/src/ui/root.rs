@@ -198,6 +198,7 @@ impl App {
                 )
             });
         }
+        self.plugins_ui.observe_notifications(&incoming);
         crate::ui::screens::profile::observe_notifications(&mut self.profile_ui, &incoming);
         self.toasts.ingest(incoming, time);
 
