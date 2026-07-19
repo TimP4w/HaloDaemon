@@ -2,7 +2,7 @@
 #![cfg(test)]
 //! Shared mock device + builders for unit tests. Test-only.
 
-use crate::drivers::{
+use crate::infrastructure::drivers::{
     ActionCapability, BooleanCapability, CapabilityRef, ChoiceCapability, ChoiceStateCache,
     CoolingCapability, CoolingStateSlot, Device, DpiCapability, EqualizerCapability,
     KeyRemapCapability, KeyboardLayoutCapability, KeyboardLayoutSlot, LcdCapability, LcdStateSlot,
@@ -32,7 +32,7 @@ pub static HALOD_CONFIG_DIR_LOCK: Mutex<()> = Mutex::new(());
 #[allow(clippy::await_holding_lock)]
 pub async fn with_tmp_config<F, Fut>(f: F)
 where
-    F: FnOnce(Arc<crate::state::AppState>) -> Fut,
+    F: FnOnce(Arc<crate::application::state::AppState>) -> Fut,
     Fut: std::future::Future<Output = ()>,
 {
     let _guard = HALOD_CONFIG_DIR_LOCK
@@ -40,7 +40,7 @@ where
         .unwrap_or_else(|e| e.into_inner());
     let tmp = tempfile::tempdir().unwrap();
     unsafe { std::env::set_var("HALOD_CONFIG_DIR", tmp.path()) };
-    f(Arc::new(crate::state::AppState::new(
+    f(Arc::new(crate::application::state::AppState::new(
         crate::config::Config::default(),
     )))
     .await;
@@ -786,8 +786,8 @@ impl EqualizerCapability for MockDevice {
 #[cfg(test)]
 mod capability_tests {
     use super::*;
-    use crate::drivers::EqualizerCapability as EqCap;
-    use crate::drivers::LcdCapability as LcdCap;
+    use crate::infrastructure::drivers::EqualizerCapability as EqCap;
+    use crate::infrastructure::drivers::LcdCapability as LcdCap;
 
     #[tokio::test]
     async fn equalizer_save_restore_round_trip() {
