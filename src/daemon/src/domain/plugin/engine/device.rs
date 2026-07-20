@@ -2144,7 +2144,15 @@ impl Controller for LuaDevice {
         if self.plugin_type == PluginKind::Integration || self.dynamic_children {
             return self.discover_controllers().await;
         }
-        let mut children = self.discover_cooling_channel_devices().await;
+        let cooling_children = self.discover_cooling_channel_devices().await;
+        let mut source_channels: HashMap<String, CoolingChannel> = cooling_children
+            .iter()
+            .map(|child| (child.device.id().to_owned(), child.source_channel.clone()))
+            .collect();
+        let mut children: Vec<Arc<dyn Device>> = cooling_children
+            .into_iter()
+            .map(|child| child.device)
+            .collect();
         let accessories = self.discover_chain_accessories().await;
 
         // Cooling outputs are the canonical devices. When accessory discovery
@@ -2168,10 +2176,9 @@ impl Controller for LuaDevice {
 
             let child = if let Some(Some(index)) = matching_fan {
                 let cooling = children.remove(index);
-                let channel = cooling
-                    .as_cooling()
-                    .and_then(|capability| capability.cooling_channels().first().cloned())
-                    .expect("matched cooling leaf lost its channel");
+                let channel = source_channels
+                    .remove(cooling.id())
+                    .expect("matched cooling leaf lost its source channel");
                 let Some(parent) = self.self_ref.upgrade() else {
                     children.push(cooling);
                     children.push(accessory.device);
@@ -2264,6 +2271,11 @@ struct DiscoveredChainAccessory {
     device: Arc<dyn Device>,
 }
 
+struct DiscoveredCoolingChannel {
+    device: Arc<dyn Device>,
+    source_channel: CoolingChannel,
+}
+
 fn child_device_id(root: &str, controller: &DetectedController) -> String {
     controller
         .id
@@ -2273,7 +2285,7 @@ fn child_device_id(root: &str, controller: &DetectedController) -> String {
 }
 
 impl LuaDevice {
-    async fn discover_cooling_channel_devices(&self) -> Vec<Arc<dyn Device>> {
+    async fn discover_cooling_channel_devices(&self) -> Vec<DiscoveredCoolingChannel> {
         if !self.cooling_as_devices.load(Ordering::Acquire) {
             return Vec::new();
         }
@@ -2287,13 +2299,17 @@ impl LuaDevice {
             .flatten()
             .cloned()
             .map(|channel| {
-                Arc::new(CoolingChannelLeaf::new(
+                let device = Arc::new(CoolingChannelLeaf::new(
                     format!("{}_cooling_{}", self.id, channel.id),
                     self.id.clone(),
                     self.vendor.clone(),
-                    channel,
+                    channel.clone(),
                     hub.clone(),
-                )) as Arc<dyn Device>
+                )) as Arc<dyn Device>;
+                DiscoveredCoolingChannel {
+                    device,
+                    source_channel: channel,
+                }
             })
             .collect()
     }
@@ -3357,6 +3373,64 @@ mod tests {
             LightingCapability::descriptor(&dev).channels[0].leds[0].id,
             7
         );
+        dev.close().await;
+    }
+
+    #[tokio::test(flavor = "multi_thread", worker_threads = 2)]
+    async fn combined_chain_fan_routes_default_to_its_source_channel() {
+        let script = r#"
+            return {
+              initialize = function()
+                return {
+                  cooling = { as_devices = true, channels = {
+                    { id = "fan1", name = "Radiator fan", kind = "fan", controllable = true },
+                  } },
+                  division = { { id = "0", name = "Fan chain", max_leds = 40 } },
+                  accessories = {
+                    { id = 30, name = "F360 RGB Core", led_count = 24,
+                      topology = "rings", rings = 3, fan = true },
+                  },
+                }
+              end,
+              detect_accessories = function()
+                return { { channel = 0, accessory = 30 } }
+              end,
+              get_cooling_status = function(_, channel)
+                if channel ~= "fan1" then error("unknown cooling channel: " .. channel) end
+                return { id = channel, name = "Radiator fan", kind = "fan",
+                         controllable = true, duty = 50, rpm = 1000 }
+              end,
+              set_cooling_duty = function(_, channel)
+                if channel ~= "fan1" then error("unknown cooling channel: " .. channel) end
+              end,
+            }
+        "#;
+        let (_tmp, manifest) = test_manifest(
+            "combined_chain_fan",
+            &["cooling", "lighting", "lighting_division"],
+            script,
+        );
+        let dev = hid_device(
+            "combined_chain_fan-0",
+            &manifest,
+            Arc::new(MockTransport::empty()),
+        );
+        assert!(dev.initialize().await.unwrap());
+
+        let children = Controller::discover_children(&dev).await;
+        let fan = children
+            .iter()
+            .find(|child| child.id().contains("_acc_0_30"))
+            .unwrap_or_else(|| {
+                panic!(
+                    "combined fan accessory was not discovered: {:?}",
+                    children.iter().map(|child| child.id()).collect::<Vec<_>>()
+                )
+            });
+        let cooling = fan.as_cooling().expect("combined fan lost cooling");
+        assert_eq!(cooling.cooling_channels()[0].id, "default");
+        cooling.set_cooling_duty("default", 65).await.unwrap();
+
         dev.close().await;
     }
 
