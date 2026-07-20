@@ -125,6 +125,49 @@ struct CurveTarget {
     channel_id: String,
 }
 
+fn suppress_initial_no_sensor(
+    previous: &HashMap<String, FanCurveStatus>,
+    current: &mut HashMap<String, FanCurveStatus>,
+) {
+    for (key, status) in current {
+        if matches!(status, FanCurveStatus::NoSensor) && !previous.contains_key(key) {
+            *status = FanCurveStatus::Ok;
+        }
+    }
+}
+
+fn log_status_changes(
+    previous: &HashMap<String, FanCurveStatus>,
+    current: &HashMap<String, FanCurveStatus>,
+    curves: &HashMap<String, (CurveTarget, FanCurveRecord)>,
+) {
+    for (key, status) in current {
+        let old = previous.get(key);
+        if old == Some(status) {
+            continue;
+        }
+        let Some((target, record)) = curves.get(key) else {
+            continue;
+        };
+        let sensor = record.sensor_id.as_deref().unwrap_or("none");
+        if matches!(status, FanCurveStatus::Ok) {
+            if let Some(old) = old {
+                log::info!(
+                    "[FanCurve] Cooling recovered for {}:{} from {old:?} (sensor: {sensor})",
+                    target.device_id,
+                    target.channel_id
+                );
+            }
+        } else {
+            log::warn!(
+                "[FanCurve] Cooling warning for {}:{}: {status:?} (previous: {old:?}, sensor: {sensor})",
+                target.device_id,
+                target.channel_id
+            );
+        }
+    }
+}
+
 // Non-async lock helpers — MutexGuard must not cross .await.
 impl FanCurveEngine {
     fn lock_mutex<T>(mu: &std::sync::Mutex<T>) -> std::sync::MutexGuard<'_, T> {
@@ -289,9 +332,11 @@ impl FanCurveEngine {
 
         let changed = {
             let mut statuses = self.app_state.cooling.statuses.lock().await;
+            suppress_initial_no_sensor(&statuses, &mut new_statuses);
             if *statuses == new_statuses {
                 false
             } else {
+                log_status_changes(&statuses, &new_statuses, &curves);
                 *statuses = new_statuses;
                 true
             }
@@ -570,6 +615,26 @@ mod tests {
         assert!(should_log_missing_device(1), "first miss logs");
         assert!(!should_log_missing_device(2), "second miss is silent");
         assert!(!should_log_missing_device(100), "later misses stay silent");
+    }
+
+    #[test]
+    fn initial_no_sensor_is_suppressed_for_one_cycle() {
+        let previous = HashMap::new();
+        let mut current = HashMap::from([("pump".to_owned(), FanCurveStatus::NoSensor)]);
+
+        suppress_initial_no_sensor(&previous, &mut current);
+
+        assert_eq!(current["pump"], FanCurveStatus::Ok);
+    }
+
+    #[test]
+    fn persistent_no_sensor_is_reported() {
+        let previous = HashMap::from([("pump".to_owned(), FanCurveStatus::Ok)]);
+        let mut current = HashMap::from([("pump".to_owned(), FanCurveStatus::NoSensor)]);
+
+        suppress_initial_no_sensor(&previous, &mut current);
+
+        assert_eq!(current["pump"], FanCurveStatus::NoSensor);
     }
 
     #[test]
@@ -935,6 +1000,11 @@ mod tests {
         assert_eq!(fan.last_duty(), 75);
         assert_eq!(
             app.cooling.statuses.lock().await[&curve_key("fan_0", "default")],
+            FanCurveStatus::Ok
+        );
+        engine.tick(75).await;
+        assert_eq!(
+            app.cooling.statuses.lock().await[&curve_key("fan_0", "default")],
             FanCurveStatus::NoSensor
         );
     }
@@ -950,6 +1020,11 @@ mod tests {
         let engine = FanCurveEngine::new(app.clone());
         engine.tick(75).await;
         assert_eq!(fan.last_duty(), 75);
+        assert_eq!(
+            app.cooling.statuses.lock().await[&curve_key("fan_0", "default")],
+            FanCurveStatus::Ok
+        );
+        engine.tick(75).await;
         let statuses = app.cooling.statuses.lock().await;
         assert_eq!(
             statuses[&curve_key("fan_0", "default")],
@@ -1012,8 +1087,12 @@ mod tests {
         let engine = FanCurveEngine::new(app.clone());
         engine.tick(75).await;
 
-        // Seeded curve has sensor_id: None → NoSensor failsafe
         assert_eq!(fan.last_duty(), 75);
+        assert_eq!(
+            app.cooling.statuses.lock().await[&curve_key("fan_0", "default")],
+            FanCurveStatus::Ok
+        );
+        engine.tick(75).await;
         let statuses = app.cooling.statuses.lock().await;
         assert_eq!(
             statuses[&curve_key("fan_0", "default")],
