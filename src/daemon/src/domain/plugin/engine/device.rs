@@ -2016,6 +2016,10 @@ impl LightingCapability for LuaDevice {
         Ok(())
     }
 
+    fn write_group_key(&self) -> Option<usize> {
+        self.transport.as_ref().and_then(PluginIo::write_group_key)
+    }
+
     fn lighting_state(&self) -> &LightingStateSlot {
         &self.rgb_slot
     }

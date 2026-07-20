@@ -43,7 +43,9 @@ fn idle_interval_ms(idle_since: Option<Instant>, now: Instant, base_ms: u64) -> 
 type RgbDeviceMap = HashMap<String, Arc<dyn Device>>;
 type FrameTx = tokio::sync::broadcast::Sender<Arc<CanvasFrame>>;
 /// Per device: the transformed frames to write this tick, one entry per zone.
-type PendingWrites = HashMap<String, (Arc<dyn Device>, WriteGuard, Vec<(String, Vec<RgbColor>)>)>;
+type DeviceWrite = (Arc<dyn Device>, WriteGuard, Vec<(String, Vec<RgbColor>)>);
+type PendingWrites = HashMap<String, DeviceWrite>;
+type WriteGroups = HashMap<WriteSlotKey, Vec<(String, DeviceWrite)>>;
 type DirectDevice = (
     Arc<dyn Device>,
     String,
@@ -84,7 +86,7 @@ pub struct RgbEngine {
     /// One in-flight write task per device. A device whose previous write is
     /// still running has its frame dropped this tick rather than queued, so a
     /// slow (e.g. rate-limited) device never paces the rest of the canvas.
-    write_slots: std::sync::Mutex<HashMap<String, tokio::task::JoinHandle<()>>>,
+    write_slots: std::sync::Mutex<HashMap<WriteSlotKey, tokio::task::JoinHandle<()>>>,
     tick_cache: Mutex<Option<TickStateCache>>,
     wake: Notify,
 }
@@ -107,6 +109,12 @@ struct EffectSignature {
 enum WriteGuard {
     Engine,
     Direct(EffectSignature),
+}
+
+#[derive(Clone, Debug, Hash, PartialEq, Eq)]
+enum WriteSlotKey {
+    Device(String),
+    Shared(usize),
 }
 
 impl WriteGuard {
@@ -902,44 +910,56 @@ impl RgbEngine {
     fn dispatch_writes(&self, pending: PendingWrites) {
         let mut slots = self.write_slots.lock().expect("write slots poisoned");
         slots.retain(|_, handle| !handle.is_finished());
+        let mut groups: WriteGroups = HashMap::new();
         for (id, (dev, guard, channels)) in pending {
-            // Skip a device that went offline between state sync and dispatch.
-            if !dev.is_live() || dev.active_state() == VisibilityState::Disabled {
+            let group = dev
+                .as_lighting()
+                .and_then(|rgb| rgb.write_group_key())
+                .map_or_else(|| WriteSlotKey::Device(id.clone()), WriteSlotKey::Shared);
+            groups
+                .entry(group)
+                .or_default()
+                .push((id, (dev, guard, channels)));
+        }
+        for (group, mut writes) in groups {
+            if slots.get(&group).is_some_and(|h| !h.is_finished()) {
                 continue;
             }
-            if slots.get(&id).is_some_and(|h| !h.is_finished()) {
-                continue;
-            }
+            writes.sort_unstable_by(|left, right| left.0.cmp(&right.0));
             let handle = tokio::spawn(async move {
-                if dev.active_state() == VisibilityState::Disabled {
-                    return;
-                }
-                let Some(rgb) = dev.as_lighting() else { return };
-                if !guard.permits(rgb.current_state()) {
-                    return;
-                }
-                let encoded: Vec<_> = channels
-                    .into_iter()
-                    .filter_map(|(channel_id, colors)| {
-                        let channel = rgb
-                            .descriptor()
-                            .channels
-                            .iter()
-                            .find(|channel| channel.id == channel_id)?;
-                        Some((
-                            channel_id,
-                            colors
-                                .into_iter()
-                                .flat_map(|color| channel.color_order.encode(color))
-                                .collect(),
-                        ))
-                    })
-                    .collect();
-                if let Err(e) = rgb.write_frame_batch(&encoded).await {
-                    log::warn!("write_frame_batch failed for {}: {e}", dev.id());
+                for (_, (dev, guard, channels)) in writes {
+                    if !dev.is_live() || dev.active_state() == VisibilityState::Disabled {
+                        continue;
+                    }
+                    let Some(rgb) = dev.as_lighting() else {
+                        continue;
+                    };
+                    if !guard.permits(rgb.current_state()) {
+                        continue;
+                    }
+                    let encoded: Vec<_> = channels
+                        .into_iter()
+                        .filter_map(|(channel_id, colors)| {
+                            let channel = rgb
+                                .descriptor()
+                                .channels
+                                .iter()
+                                .find(|channel| channel.id == channel_id)?;
+                            Some((
+                                channel_id,
+                                colors
+                                    .into_iter()
+                                    .flat_map(|color| channel.color_order.encode(color))
+                                    .collect(),
+                            ))
+                        })
+                        .collect();
+                    if let Err(e) = rgb.write_frame_batch(&encoded).await {
+                        log::warn!("write_frame_batch failed for {}: {e}", dev.id());
+                    }
                 }
             });
-            slots.insert(id, handle);
+            slots.insert(group, handle);
         }
     }
 
@@ -995,6 +1015,7 @@ mod tests {
         fail_write: bool,
         write_count: AtomicUsize,
         batch_count: AtomicUsize,
+        write_group: AtomicUsize,
         last_frame: StdMutex<Vec<RgbColor>>,
         rgb: LightingStateSlot,
         rgb_state: StdMutex<Option<LightingState>>,
@@ -1031,6 +1052,7 @@ mod tests {
                 fail_write,
                 write_count: AtomicUsize::new(0),
                 batch_count: AtomicUsize::new(0),
+                write_group: AtomicUsize::new(0),
                 last_frame: StdMutex::new(Vec::new()),
                 rgb: LightingStateSlot::default(),
                 rgb_state: StdMutex::new(None),
@@ -1138,6 +1160,13 @@ mod tests {
                 self.write_frame(channel_id, colors).await?;
             }
             Ok(())
+        }
+
+        fn write_group_key(&self) -> Option<usize> {
+            match self.write_group.load(Ordering::SeqCst) {
+                0 => None,
+                key => Some(key),
+            }
         }
     }
 
@@ -1930,7 +1959,7 @@ mod tests {
             .write_slots
             .lock()
             .unwrap()
-            .insert("dev0".into(), handle);
+            .insert(WriteSlotKey::Device("dev0".into()), handle);
 
         let mut pending: PendingWrites = HashMap::new();
         pending.insert(
@@ -1948,6 +1977,42 @@ mod tests {
             0,
             "frame must be dropped, not queued, while the prior write is in flight"
         );
+        let _ = unblock.send(());
+    }
+
+    #[tokio::test]
+    async fn dispatch_drops_a_shared_bus_frame_for_every_device_together() {
+        let engine = RgbEngine::new(make_app()).await;
+        let first = MockRgbDevice::new_engine_mode("dev0", "ring", false);
+        let second = MockRgbDevice::new_engine_mode("dev1", "ring", false);
+        first.write_group.store(42, Ordering::SeqCst);
+        second.write_group.store(42, Ordering::SeqCst);
+        let (unblock, blocked) = tokio::sync::oneshot::channel::<()>();
+        let handle = tokio::spawn(async move {
+            let _ = blocked.await;
+        });
+        engine
+            .write_slots
+            .lock()
+            .unwrap()
+            .insert(WriteSlotKey::Shared(42), handle);
+
+        let mut pending: PendingWrites = HashMap::new();
+        for dev in [&first, &second] {
+            pending.insert(
+                dev.device_id.clone(),
+                (
+                    dev.clone() as Arc<dyn Device>,
+                    WriteGuard::Engine,
+                    vec![("ring".into(), solid_colors(3))],
+                ),
+            );
+        }
+        engine.dispatch_writes(pending);
+        tokio::task::yield_now().await;
+
+        assert_eq!(first.write_count.load(Ordering::SeqCst), 0);
+        assert_eq!(second.write_count.load(Ordering::SeqCst), 0);
         let _ = unblock.send(());
     }
 

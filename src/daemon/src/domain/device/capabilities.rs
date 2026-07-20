@@ -157,6 +157,10 @@ pub trait LightingCapability: Send + Sync {
         Ok(())
     }
 
+    fn write_group_key(&self) -> Option<usize> {
+        None
+    }
+
     /// Backing slot — required so all state sub-operations have defaults.
     fn lighting_state(&self) -> &LightingStateSlot;
 

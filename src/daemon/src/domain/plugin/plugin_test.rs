@@ -2145,8 +2145,6 @@ fn value_to_param(v: &Value) -> Option<EffectParamValue> {
     }
 }
 
-/// The `LightingState` shapes the harness builds: `static`, `per_led`, and
-/// `native_effect`. Extend here as packages need more shapes.
 fn table_to_rgb_state(state: &Table) -> Result<LightingState> {
     let mode: String = state
         .get("mode")
@@ -2179,11 +2177,11 @@ fn table_to_rgb_state(state: &Table) -> Result<LightingState> {
             }
             Ok(LightingState::PerLed { channels })
         }
-        "native_effect" => {
+        "native_effect" | "direct_effect" => {
             let id: String = state
                 .get("id")
                 .anyhow()
-                .context("native_effect state needs an id")?;
+                .with_context(|| format!("{mode} state needs an id"))?;
             let mut params = HashMap::new();
             if let Ok(params_t) = state.get::<Table>("params") {
                 for pair in params_t.pairs::<String, Value>() {
@@ -2193,8 +2191,13 @@ fn table_to_rgb_state(state: &Table) -> Result<LightingState> {
                     }
                 }
             }
-            Ok(LightingState::NativeEffect { id, params })
+            if mode == "native_effect" {
+                Ok(LightingState::NativeEffect { id, params })
+            } else {
+                Ok(LightingState::DirectEffect { id, params })
+            }
         }
+        "engine" => Ok(LightingState::Engine),
         other => anyhow::bail!("plugin-test harness does not support state.mode = '{other}' yet"),
     }
 }
@@ -2202,6 +2205,37 @@ fn table_to_rgb_state(state: &Table) -> Result<LightingState> {
 #[cfg(test)]
 mod tests {
     use super::*;
+
+    #[test]
+    fn table_to_rgb_state_supports_direct_effects() {
+        let lua = Lua::new();
+        let state = lua.create_table().unwrap();
+        state.set("mode", "direct_effect").unwrap();
+        state.set("id", "breathing").unwrap();
+        let params = lua.create_table().unwrap();
+        params.set("speed", 2.5).unwrap();
+        state.set("params", params).unwrap();
+
+        let parsed = table_to_rgb_state(&state).unwrap();
+        assert!(matches!(
+            parsed,
+            LightingState::DirectEffect { id, params }
+                if id == "breathing"
+                    && params.get("speed") == Some(&EffectParamValue::Float(2.5))
+        ));
+    }
+
+    #[test]
+    fn table_to_rgb_state_supports_engine_mode() {
+        let lua = Lua::new();
+        let state = lua.create_table().unwrap();
+        state.set("mode", "engine").unwrap();
+
+        assert!(matches!(
+            table_to_rgb_state(&state).unwrap(),
+            LightingState::Engine
+        ));
+    }
 
     #[tokio::test]
     async fn recording_stream_injects_write_failures_without_recording_data() {

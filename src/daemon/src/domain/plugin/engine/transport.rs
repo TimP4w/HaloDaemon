@@ -59,6 +59,13 @@ pub enum PluginIo {
 }
 
 impl PluginIo {
+    pub fn write_group_key(&self) -> Option<usize> {
+        match self {
+            Self::Register(bus) => Some(bus.write_group_key()),
+            _ => None,
+        }
+    }
+
     /// A deterministic transport failure that cannot be fixed by retrying the
     /// same plugin instance. The first such failure latches for its lifetime.
     pub fn unrecoverable_error(&self) -> Option<String> {
@@ -378,6 +385,10 @@ impl RegisterBus {
 
     pub fn rate_status(&self) -> WriteRateStatus {
         self.bus.rate_status().unwrap_or_default()
+    }
+
+    pub fn write_group_key(&self) -> usize {
+        Arc::as_ptr(&self.bus) as usize
     }
 
     fn unrecoverable_error(&self) -> Option<String> {
