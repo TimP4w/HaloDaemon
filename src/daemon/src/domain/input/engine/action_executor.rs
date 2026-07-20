@@ -210,10 +210,7 @@ fn press_with_rollback<K: Copy>(
 #[cfg(target_os = "linux")]
 mod platform {
     use anyhow::Result;
-    use evdev::{
-        uinput::VirtualDeviceBuilder, AttributeSet, EventType, InputEvent, Key as EvKey,
-        RelativeAxisType,
-    };
+    use evdev::{AttributeSet, EventType, InputEvent, KeyCode as EvKey, RelativeAxisCode};
     use halod_shared::types::{MacroAtom, MacroStep, MediaAction, ModKey, MouseBtn, ScrollAxis};
     use tokio::sync::Mutex;
 
@@ -228,7 +225,7 @@ mod platform {
             for code in 1u16..=767 {
                 kbd_keys.insert(EvKey::new(code));
             }
-            let kbd = VirtualDeviceBuilder::new()?
+            let kbd = evdev::uinput::VirtualDevice::builder()?
                 .name(crate::constants::VIRTUAL_KEYBOARD_NAME)
                 .with_keys(&kbd_keys)?
                 .build()?;
@@ -243,10 +240,10 @@ mod platform {
             ] {
                 btn_keys.insert(k);
             }
-            let mut axes = AttributeSet::<RelativeAxisType>::new();
-            axes.insert(RelativeAxisType::REL_WHEEL);
-            axes.insert(RelativeAxisType::REL_HWHEEL);
-            let ptr = VirtualDeviceBuilder::new()?
+            let mut axes = AttributeSet::<RelativeAxisCode>::new();
+            axes.insert(RelativeAxisCode::REL_WHEEL);
+            axes.insert(RelativeAxisCode::REL_HWHEEL);
+            let ptr = evdev::uinput::VirtualDevice::builder()?
                 .name(crate::constants::VIRTUAL_POINTER_NAME)
                 .with_keys(&btn_keys)?
                 .with_relative_axes(&axes)?
@@ -260,26 +257,25 @@ mod platform {
 
         pub async fn mouse_button(&self, btn: &MouseBtn, pressed: bool) {
             let val = i32::from(pressed);
-            if let Err(e) =
-                self.ptr
-                    .lock()
-                    .await
-                    .emit(&[InputEvent::new(EventType::KEY, mouse_btn(btn), val)])
-            {
+            if let Err(e) = self.ptr.lock().await.emit(&[InputEvent::new(
+                EventType::KEY.0,
+                mouse_btn(btn),
+                val,
+            )]) {
                 log::warn!("ActionExecutor: mouse button: {e}");
             }
         }
 
         pub async fn scroll(&self, axis: &ScrollAxis, clicks: i32) {
             let code = match axis {
-                ScrollAxis::Vertical => RelativeAxisType::REL_WHEEL.0,
-                ScrollAxis::Horizontal => RelativeAxisType::REL_HWHEEL.0,
+                ScrollAxis::Vertical => RelativeAxisCode::REL_WHEEL.0,
+                ScrollAxis::Horizontal => RelativeAxisCode::REL_HWHEEL.0,
             };
             if let Err(e) =
                 self.ptr
                     .lock()
                     .await
-                    .emit(&[InputEvent::new(EventType::RELATIVE, code, clicks)])
+                    .emit(&[InputEvent::new(EventType::RELATIVE.0, code, clicks)])
             {
                 log::warn!("ActionExecutor: scroll: {e}");
             }
@@ -307,25 +303,26 @@ mod platform {
                     |code| {
                         kbd_cell
                             .borrow_mut()
-                            .emit(&[InputEvent::new(EventType::KEY, code, 1)])
+                            .emit(&[InputEvent::new(EventType::KEY.0, code, 1)])
                             .is_ok()
                     },
                     |code| {
-                        let _ =
-                            kbd_cell
-                                .borrow_mut()
-                                .emit(&[InputEvent::new(EventType::KEY, code, 0)]);
+                        let _ = kbd_cell.borrow_mut().emit(&[InputEvent::new(
+                            EventType::KEY.0,
+                            code,
+                            0,
+                        )]);
                     },
                 );
                 if held.len() != codes.len() {
                     log::warn!("ActionExecutor: key chord press failed; rolled back");
                 }
             } else {
-                if let Err(e) = kbd.emit(&[InputEvent::new(EventType::KEY, k, 0)]) {
+                if let Err(e) = kbd.emit(&[InputEvent::new(EventType::KEY.0, k, 0)]) {
                     log::warn!("ActionExecutor: key chord release: {e}");
                 }
                 for m in modifiers.iter().rev() {
-                    if let Err(e) = kbd.emit(&[InputEvent::new(EventType::KEY, mod_key(m), 0)]) {
+                    if let Err(e) = kbd.emit(&[InputEvent::new(EventType::KEY.0, mod_key(m), 0)]) {
                         log::warn!("ActionExecutor: key chord release modifier: {e}");
                     }
                 }
@@ -335,17 +332,17 @@ mod platform {
         pub async fn media_key(&self, key: &MediaAction) {
             let code = media_key(key);
             let mut kbd = self.kbd.lock().await;
-            if let Err(e) = kbd.emit(&[InputEvent::new(EventType::KEY, code, 1)]) {
+            if let Err(e) = kbd.emit(&[InputEvent::new(EventType::KEY.0, code, 1)]) {
                 log::warn!("ActionExecutor: media_key press failed: {e}");
             }
-            if let Err(e) = kbd.emit(&[InputEvent::new(EventType::KEY, code, 0)]) {
+            if let Err(e) = kbd.emit(&[InputEvent::new(EventType::KEY.0, code, 0)]) {
                 log::warn!("ActionExecutor: media_key release failed: {e}");
             }
         }
     }
 
     fn emit(dev: &mut evdev::uinput::VirtualDevice, code: u16, val: i32) {
-        if let Err(e) = dev.emit(&[InputEvent::new(EventType::KEY, code, val)]) {
+        if let Err(e) = dev.emit(&[InputEvent::new(EventType::KEY.0, code, val)]) {
             log::warn!("ActionExecutor: macro emit: {e}");
         }
     }

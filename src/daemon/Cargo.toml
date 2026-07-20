@@ -91,7 +91,7 @@ proptest = "1.11.0"
 [target.'cfg(target_os = "linux")'.dependencies]
 netlink-sys = { version = "0.8.8", features = ["tokio_socket"] }
 libc = "0.2.186"
-ashpd = { version = "0.13.13", default-features = false, features = ["tokio"] }
+ashpd = { version = "0.13.13", default-features = false, features = ["tokio", "screencast"] }
 pipewire = "0.10.0"
 evdev = "0.13.2"
 wayland-client = "0.31.14"
