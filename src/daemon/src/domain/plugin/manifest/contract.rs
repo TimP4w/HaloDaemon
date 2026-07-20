@@ -219,7 +219,7 @@ pub const TABLES_V1: &[TableContract] = &[
     },
     TableContract {
         name: "InitTable",
-        fields: "ok?; model?; capabilities?; lighting={channels={{id; name; topology; led_count; color_order?; division?}, ...}; native_effects?}?; lcd?; accessories?; controls?; dpi?; cooling={channels={{id; name; kind='fan'|'pump'; controllable}, ...}; as_devices?}?; key_remap?; keyboard?; ranges?; choices?",
+        fields: "ok?; model?; capabilities?; lighting={channels={{id; name; topology; led_count; color_order?; division?}, ...}; native_effects?}?; lcd?; accessories?; controls?; dpi?; cooling={channels={{id; name; kind='fan'|'pump'; controllable; builtin?}, ...}; as_devices?}?; key_remap?; keyboard?; ranges?; choices?",
     },
     TableContract {
         name: "DetectedController",

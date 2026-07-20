@@ -286,6 +286,8 @@ pub struct InitCoolingChannel {
     pub kind: halod_shared::types::CoolingChannelKind,
     #[serde(default)]
     pub controllable: bool,
+    #[serde(default)]
+    pub builtin: bool,
 }
 
 /// Runtime key-remap descriptor. Button CIDs and host-mode policy are reported
