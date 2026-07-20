@@ -200,22 +200,6 @@ fn should_start_status_poll(
     needs_status_poll(caps) && !integration_root
 }
 
-fn is_redundant_cooling_fan(
-    device_type: DeviceType,
-    has_lighting: bool,
-    cooling_kind: Option<CoolingChannelKind>,
-    combined_fans: &mut usize,
-) -> bool {
-    let redundant = *combined_fans > 0
-        && device_type == DeviceType::Fan
-        && !has_lighting
-        && cooling_kind == Some(CoolingChannelKind::Fan);
-    if redundant {
-        *combined_fans -= 1;
-    }
-    redundant
-}
-
 #[derive(Clone, Copy, Default)]
 struct StatusPollCaps {
     sensor: bool,
@@ -1797,8 +1781,12 @@ impl Device for LuaDevice {
             *self.dpi_state.lock_recover() = dpi_state_from_runtime(&dpi);
         }
         if let Some(cooling) = outcome.cooling {
+            let project_channels = cooling.as_devices
+                || (self.plugin_type == PluginKind::Device
+                    && !self.dynamic_children
+                    && !cooling.channels.is_empty());
             self.cooling_as_devices
-                .store(cooling.as_devices, Ordering::Release);
+                .store(project_channels, Ordering::Release);
             let _ = self.cooling_channels.set(
                 cooling
                     .channels
@@ -2159,33 +2147,57 @@ impl Controller for LuaDevice {
         let mut children = self.discover_cooling_channel_devices().await;
         let accessories = self.discover_chain_accessories().await;
 
-        // A fan-capable chain accessory is the physical fan represented by a
-        // cooling-only channel leaf, not another device beside it. Coalesce one
-        // cooling-only fan per combined RGB+fan accessory while preserving
-        // pumps and any unmatched/non-RGB fan channels.
-        let mut combined_fans = accessories
-            .iter()
-            .filter(|child| {
-                child.wire_device_type() == DeviceType::Fan
-                    && child.as_lighting().is_some()
-                    && child.as_cooling().is_some()
-            })
-            .count();
-        children.retain(|child| {
-            let cooling_kind = child.as_cooling().and_then(|cooling| {
-                cooling
-                    .cooling_channels()
-                    .first()
-                    .map(|channel| channel.kind.clone())
+        // Cooling outputs are the canonical devices. When accessory discovery
+        // finds lighting for the same physical fan, attach that capability to
+        // the cooling leaf instead of replacing it with a lighting-owned child.
+        // Pairing remains positional because the plugin protocol reports the
+        // fan accessory separately from its declared cooling channel.
+        for accessory in accessories {
+            let combined_fan = accessory.device.wire_device_type() == DeviceType::Fan
+                && accessory.device.as_lighting().is_some()
+                && accessory.device.as_cooling().is_some();
+            let matching_fan = combined_fan.then(|| {
+                children.iter().position(|child| {
+                    child.as_lighting().is_none()
+                        && child
+                            .as_cooling()
+                            .and_then(|cooling| cooling.cooling_channels().first().cloned())
+                            .is_some_and(|channel| channel.kind == CoolingChannelKind::Fan)
+                })
             });
-            !is_redundant_cooling_fan(
-                child.wire_device_type(),
-                child.as_lighting().is_some(),
-                cooling_kind,
-                &mut combined_fans,
-            )
-        });
-        children.extend(accessories);
+
+            let child = if let Some(Some(index)) = matching_fan {
+                let cooling = children.remove(index);
+                let channel = cooling
+                    .as_cooling()
+                    .and_then(|capability| capability.cooling_channels().first().cloned())
+                    .expect("matched cooling leaf lost its channel");
+                let Some(parent) = self.self_ref.upgrade() else {
+                    children.push(cooling);
+                    children.push(accessory.device);
+                    continue;
+                };
+                let hub: Arc<dyn CoolingHub> = parent;
+                Arc::new(
+                    CoolingChannelLeaf::new(
+                        accessory.device.id().to_owned(),
+                        self.id.clone(),
+                        self.vendor.clone(),
+                        channel,
+                        hub,
+                    )
+                    .with_lighting(accessory.device),
+                ) as Arc<dyn Device>
+            } else {
+                accessory.device
+            };
+
+            if let Some(host) = self.chain_host.get() {
+                host.register_auto_link(&accessory.channel_id, child.clone())
+                    .await;
+            }
+            children.push(child);
+        }
         children
     }
 
@@ -2247,6 +2259,11 @@ struct ChildBuildCtx {
     identity_scope: crate::domain::registry::identity::IdentityScope,
 }
 
+struct DiscoveredChainAccessory {
+    channel_id: String,
+    device: Arc<dyn Device>,
+}
+
 fn child_device_id(root: &str, controller: &DetectedController) -> String {
     controller
         .id
@@ -2281,7 +2298,7 @@ impl LuaDevice {
             .collect()
     }
 
-    async fn discover_chain_accessories(&self) -> Vec<Arc<dyn Device>> {
+    async fn discover_chain_accessories(&self) -> Vec<DiscoveredChainAccessory> {
         let (Some(worker), Some(host)) = (&self.worker, self.chain_host.get()) else {
             return Vec::new();
         };
@@ -2334,8 +2351,10 @@ impl LuaDevice {
                 log::warn!("plugin '{}' child init failed: {e:#}", self.plugin_id);
                 continue;
             }
-            host.register_auto_link(&channel_str, leaf.clone()).await;
-            out.push(leaf);
+            out.push(DiscoveredChainAccessory {
+                channel_id: channel_str,
+                device: leaf,
+            });
         }
         out
     }
@@ -3176,34 +3195,6 @@ mod tests {
     }
 
     #[test]
-    fn combined_rgb_fans_consume_only_matching_cooling_only_fan_leaves() {
-        let mut combined_fans = 1;
-
-        assert!(!is_redundant_cooling_fan(
-            DeviceType::AIO,
-            false,
-            Some(CoolingChannelKind::Pump),
-            &mut combined_fans,
-        ));
-        assert!(is_redundant_cooling_fan(
-            DeviceType::Fan,
-            false,
-            Some(CoolingChannelKind::Fan),
-            &mut combined_fans,
-        ));
-        assert_eq!(combined_fans, 0);
-        assert!(
-            !is_redundant_cooling_fan(
-                DeviceType::Fan,
-                false,
-                Some(CoolingChannelKind::Fan),
-                &mut combined_fans,
-            ),
-            "an unmatched cooling-only fan must remain discoverable"
-        );
-    }
-
-    #[test]
     fn every_manifest_capability_maps_to_a_runtime_capability() {
         for name in crate::domain::plugin::manifest::SUPPORTED_CAPABILITIES {
             assert!(
@@ -3353,9 +3344,12 @@ mod tests {
         assert!(caps
             .iter()
             .any(|cap| matches!(cap, CapabilityRef::Lighting(_))));
-        assert!(caps
+        assert!(!caps
             .iter()
             .any(|cap| matches!(cap, CapabilityRef::Cooling(_))));
+        assert!(caps
+            .iter()
+            .any(|cap| matches!(cap, CapabilityRef::Controller(_))));
         assert!(!caps
             .iter()
             .any(|cap| matches!(cap, CapabilityRef::Sensor(_))));

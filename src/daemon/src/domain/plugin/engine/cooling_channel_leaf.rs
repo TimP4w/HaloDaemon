@@ -5,7 +5,7 @@ use std::sync::Arc;
 
 use anyhow::{ensure, Result};
 use async_trait::async_trait;
-use halod_shared::types::{CoolingChannel, DeviceType};
+use halod_shared::types::{CoolingChannel, CoolingChannelKind, DeviceType};
 
 use crate::domain::device::{
     CapabilityRef, CoolingCapability, CoolingHub, CoolingStateSlot, Device, VisibilitySlot,
@@ -17,8 +17,16 @@ pub struct CoolingChannelLeaf {
     vendor: String,
     channel: CoolingChannel,
     hub: Arc<dyn CoolingHub>,
+    lighting: Option<Arc<dyn Device>>,
     cooling: CoolingStateSlot,
     visibility: VisibilitySlot,
+}
+
+fn device_type_for_channel(kind: &CoolingChannelKind) -> DeviceType {
+    match kind {
+        CoolingChannelKind::Fan => DeviceType::Fan,
+        CoolingChannelKind::Pump => DeviceType::AIO,
+    }
 }
 
 impl CoolingChannelLeaf {
@@ -35,9 +43,15 @@ impl CoolingChannelLeaf {
             vendor,
             channel,
             hub,
+            lighting: None,
             cooling: CoolingStateSlot::default(),
             visibility: VisibilitySlot::default(),
         }
+    }
+
+    pub fn with_lighting(mut self, lighting: Arc<dyn Device>) -> Self {
+        self.lighting = Some(lighting);
+        self
     }
 
     fn projected(&self, mut channel: CoolingChannel) -> CoolingChannel {
@@ -53,23 +67,37 @@ impl Device for CoolingChannelLeaf {
         &self.id
     }
     fn name(&self) -> &str {
-        &self.channel.name
+        self.lighting
+            .as_ref()
+            .map(|lighting| lighting.name())
+            .unwrap_or(&self.channel.name)
     }
     fn vendor(&self) -> &str {
         &self.vendor
     }
     fn model(&self) -> &str {
-        &self.channel.name
+        self.lighting
+            .as_ref()
+            .map(|lighting| lighting.model())
+            .unwrap_or(&self.channel.name)
     }
     async fn initialize(&self) -> Result<bool> {
         Ok(true)
     }
     async fn close(&self) {}
     fn wire_device_type(&self) -> DeviceType {
-        DeviceType::Fan
+        device_type_for_channel(&self.channel.kind)
     }
     fn capabilities(&self) -> Vec<CapabilityRef<'_>> {
-        vec![CapabilityRef::Cooling(self)]
+        let mut capabilities = vec![CapabilityRef::Cooling(self)];
+        if let Some(lighting) = self
+            .lighting
+            .as_ref()
+            .and_then(|device| device.as_lighting())
+        {
+            capabilities.push(CapabilityRef::Lighting(lighting));
+        }
+        capabilities
     }
     fn visibility_slot(&self) -> Option<&VisibilitySlot> {
         Some(&self.visibility)
@@ -79,6 +107,68 @@ impl Device for CoolingChannelLeaf {
     }
     fn state_source_id(&self) -> Option<&str> {
         Some(&self.parent_id)
+    }
+}
+
+#[cfg(test)]
+mod tests {
+    use super::*;
+    use crate::test_support::MockDevice;
+
+    struct NoopCoolingHub;
+
+    #[async_trait]
+    impl CoolingHub for NoopCoolingHub {
+        async fn get_cooling_status(&self, _channel: &str) -> Result<CoolingChannel> {
+            anyhow::bail!("unused test hub")
+        }
+
+        async fn set_cooling_duty(&self, _channel: &str, _duty: u8) -> Result<()> {
+            anyhow::bail!("unused test hub")
+        }
+    }
+
+    #[test]
+    fn cooling_channel_kind_determines_child_device_type() {
+        assert_eq!(
+            device_type_for_channel(&CoolingChannelKind::Fan),
+            DeviceType::Fan
+        );
+        assert_eq!(
+            device_type_for_channel(&CoolingChannelKind::Pump),
+            DeviceType::AIO
+        );
+    }
+
+    #[test]
+    fn cooling_leaf_can_own_a_delegated_lighting_capability() {
+        let lighting: Arc<dyn Device> = Arc::new(
+            MockDevice::new("rgb_fan")
+                .with_name("F120 RGB")
+                .with_model("F120 RGB")
+                .with_rgb(),
+        );
+        let leaf = CoolingChannelLeaf::new(
+            "fan_leaf".into(),
+            "controller".into(),
+            "NZXT".into(),
+            CoolingChannel {
+                id: "fan1".into(),
+                name: "Radiator fan".into(),
+                kind: CoolingChannelKind::Fan,
+                controllable: true,
+                rpm: None,
+                duty: None,
+            },
+            Arc::new(NoopCoolingHub),
+        )
+        .with_lighting(lighting);
+
+        assert_eq!(leaf.name(), "F120 RGB");
+        assert_eq!(leaf.model(), "F120 RGB");
+        assert!(leaf.as_cooling().is_some());
+        assert!(leaf.as_lighting().is_some());
+        assert_eq!(leaf.capabilities().len(), 2);
     }
 }
 

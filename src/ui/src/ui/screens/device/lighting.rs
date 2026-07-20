@@ -617,7 +617,7 @@ fn right_panel(
 
                 if color_changed {
                     match mode {
-                        Mode::Solid => crate::runtime::ipc::send(ctx.cmd, solid_cmd(ctx, st)),
+                        Mode::Solid => queue_static_color(ctx, st),
                         Mode::Effect(id) => {
                             if let Some(eff) =
                                 rgb.descriptor.native_effects.iter().find(|e| &e.id == id)
@@ -643,6 +643,14 @@ fn right_panel(
             },
         );
     }
+}
+
+/// Coalesce static colour-picker changes so dragging does not write every
+/// intermediate colour to the device. The latest colour is applied after the
+/// shared device-tab quiet period.
+fn queue_static_color(ctx: &TabCtx, st: &mut DeviceUi) {
+    let cmd = solid_cmd(ctx, st);
+    st.queue("lighting:static-color", cmd, ctx.time);
 }
 
 #[derive(Clone, Copy)]
