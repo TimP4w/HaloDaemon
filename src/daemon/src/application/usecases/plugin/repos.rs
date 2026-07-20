@@ -412,7 +412,11 @@ fn archive_sha256(source: &std::path::Path) -> Result<String> {
         }
         hasher.update(&buffer[..read]);
     }
-    Ok(format!("{:x}", hasher.finalize()))
+    Ok(hasher
+        .finalize()
+        .iter()
+        .map(|byte| format!("{byte:02x}"))
+        .collect())
 }
 
 pub async fn import_local_repo(source_path: String, app: Arc<AppState>) -> Result<()> {

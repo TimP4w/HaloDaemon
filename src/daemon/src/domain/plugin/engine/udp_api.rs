@@ -86,7 +86,7 @@ mod tests {
     #[test]
     fn send_reaches_the_backend_and_receive_returns_the_datagram() {
         let (lua, backend) = lua_with_udp(vec![vec![9, 8, 7]]);
-        let got: mlua::String = lua
+        let got: mlua::LuaString = lua
             .load(
                 r#"halod.udp:send{ bytes = string.char(1, 2, 3) }
                    return halod.udp:receive{ timeout_ms = 10 }"#,

@@ -8,19 +8,18 @@
 //!
 //! [`net_guard`]: crate::domain::plugin::engine::backends::net_guard
 
+mod subject_cn;
+
 use std::collections::BTreeMap;
 use std::io::Read;
-use std::net::{IpAddr, SocketAddr};
+use std::net::IpAddr;
 use std::sync::atomic::{AtomicUsize, Ordering};
 use std::sync::Arc;
 use std::time::Duration;
 
 use anyhow::{bail, Context, Result};
 use base64::Engine as _;
-use rustls::client::danger::{HandshakeSignatureValid, ServerCertVerified, ServerCertVerifier};
-use rustls::client::WebPkiServerVerifier;
-use rustls::pki_types::{CertificateDer, ServerName, UnixTime};
-use rustls::{CertificateError, DigitallySignedStruct, Error as RustlsError, SignatureScheme};
+use ureq::RequestExt as _;
 
 use crate::domain::plugin::engine::backends::net_guard;
 use crate::domain::plugin::manifest::HttpConfig;
@@ -303,19 +302,30 @@ pub trait HttpBackend: Send + Sync {
 
 /// Resolves every hostname through the SSRF guard, returning the single vetted
 /// address so the connection can't be rebound off it between check and connect.
-struct NetGuardResolver {
+#[derive(Debug)]
+pub(super) struct NetGuardResolver {
     allow_private: bool,
     host_override: Option<(String, String)>,
 }
 
-impl ureq::Resolver for NetGuardResolver {
-    fn resolve(&self, netloc: &str) -> std::io::Result<Vec<SocketAddr>> {
-        let (host, port) = netloc.rsplit_once(':').ok_or_else(|| {
-            std::io::Error::new(std::io::ErrorKind::InvalidInput, "missing port in netloc")
-        })?;
-        let port: u16 = port
-            .parse()
-            .map_err(|_| std::io::Error::new(std::io::ErrorKind::InvalidInput, "invalid port"))?;
+impl ureq::unversioned::resolver::Resolver for NetGuardResolver {
+    fn resolve(
+        &self,
+        uri: &ureq::http::Uri,
+        _config: &ureq::config::Config,
+        _timeout: ureq::unversioned::transport::NextTimeout,
+    ) -> std::result::Result<ureq::unversioned::resolver::ResolvedSocketAddrs, ureq::Error> {
+        let authority = uri
+            .authority()
+            .ok_or_else(|| ureq::Error::BadUri("missing URI authority".into()))?;
+        let host = authority.host();
+        let port = authority.port_u16().unwrap_or_else(|| {
+            if uri.scheme_str() == Some("https") {
+                443
+            } else {
+                80
+            }
+        });
         let host = self
             .host_override
             .as_ref()
@@ -326,10 +336,11 @@ impl ureq::Resolver for NetGuardResolver {
             .strip_prefix('[')
             .and_then(|value| value.strip_suffix(']'))
             .unwrap_or(host);
-        let addr = net_guard::resolve_vetted_addr(host, port, self.allow_private).map_err(|e| {
-            std::io::Error::new(std::io::ErrorKind::PermissionDenied, e.to_string())
-        })?;
-        Ok(vec![addr])
+        let addr = net_guard::resolve_vetted_addr(host, port, self.allow_private)
+            .map_err(|e| ureq::Error::Io(std::io::Error::other(e.to_string())))?;
+        let mut resolved = self.empty();
+        resolved.push(addr);
+        Ok(resolved)
     }
 }
 
@@ -344,16 +355,18 @@ impl UreqBackend {
         // `default` = standard public-CA (webpki) verification, which ureq's tls
         // feature already enforces. Keep a defensive runtime rejection in case a
         // policy is constructed without going through manifest validation.
-        let mut builder = ureq::AgentBuilder::new()
-            .redirects(0)
-            .timeout(policy.max_timeout)
-            .resolver(NetGuardResolver {
-                allow_private: policy.allow_private(),
-                host_override: policy
-                    .tls_identity
-                    .clone()
-                    .zip(policy.tls_connect_host.clone()),
-            });
+        let resolver = NetGuardResolver::new(
+            policy.allow_private(),
+            policy
+                .tls_identity
+                .clone()
+                .zip(policy.tls_connect_host.clone()),
+        );
+        let mut builder = ureq::Agent::config_builder()
+            .max_redirects(0)
+            .http_status_as_error(false)
+            .timeout_global(Some(policy.max_timeout));
+        let mut subject_cn_ca = None;
         match policy.tls_profile() {
             "default" => {}
             "custom-ca" => {
@@ -361,175 +374,81 @@ impl UreqBackend {
                     .tls_ca_der_base64
                     .as_deref()
                     .context("custom TLS root CA is not configured")?;
-                builder = builder.tls_config(Arc::new(custom_ca_tls_config(
-                    ca,
-                    &policy.tls_certificate_identity,
-                )?));
+                if policy.tls_certificate_identity == "subject-cn" {
+                    subject_cn_ca = Some(ca);
+                } else {
+                    let der = base64::engine::general_purpose::STANDARD
+                        .decode(ca)
+                        .context("decoding custom TLS root CA")?;
+                    let certificate = ureq::tls::Certificate::from_der(&der).to_owned();
+                    let tls = ureq::tls::TlsConfig::builder()
+                        .provider(ureq::tls::TlsProvider::Rustls)
+                        .root_certs(ureq::tls::RootCerts::new_with_certs(&[certificate]))
+                        .build();
+                    builder = builder.tls_config(tls);
+                }
             }
             other => bail!("http tls profile '{other}' has no live client"),
         }
-        let agent = builder.build();
+        let config = builder.build();
+        let agent = if let Some(ca) = subject_cn_ca {
+            subject_cn::agent(config, resolver, ca)?
+        } else {
+            ureq::Agent::with_parts(
+                config,
+                ureq::unversioned::transport::DefaultConnector::default(),
+                resolver,
+            )
+        };
         Ok(Self { agent })
     }
 }
 
-#[derive(Debug)]
-struct SubjectCnCertVerifier {
-    webpki: Arc<WebPkiServerVerifier>,
-}
-
-impl ServerCertVerifier for SubjectCnCertVerifier {
-    fn verify_server_cert(
-        &self,
-        end_entity: &CertificateDer<'_>,
-        intermediates: &[CertificateDer<'_>],
-        server_name: &ServerName<'_>,
-        ocsp_response: &[u8],
-        now: UnixTime,
-    ) -> std::result::Result<ServerCertVerified, RustlsError> {
-        match self.webpki.verify_server_cert(
-            end_entity,
-            intermediates,
-            server_name,
-            ocsp_response,
-            now,
-        ) {
-            Ok(verified) => Ok(verified),
-            Err(error)
-                if is_certificate_name_error(&error)
-                    && subject_cn_matches(end_entity, server_name) =>
-            {
-                // WebPKI has already checked the configured CA chain, validity
-                // period and signatures. This mode replaces only its SAN
-                // identity representation with one exact Subject CN.
-                Ok(ServerCertVerified::assertion())
-            }
-            Err(error) => Err(error),
+impl NetGuardResolver {
+    pub(super) fn new(allow_private: bool, host_override: Option<(String, String)>) -> Self {
+        Self {
+            allow_private,
+            host_override,
         }
-    }
-
-    fn verify_tls12_signature(
-        &self,
-        message: &[u8],
-        cert: &CertificateDer<'_>,
-        dss: &DigitallySignedStruct,
-    ) -> std::result::Result<HandshakeSignatureValid, RustlsError> {
-        self.webpki.verify_tls12_signature(message, cert, dss)
-    }
-
-    fn verify_tls13_signature(
-        &self,
-        message: &[u8],
-        cert: &CertificateDer<'_>,
-        dss: &DigitallySignedStruct,
-    ) -> std::result::Result<HandshakeSignatureValid, RustlsError> {
-        self.webpki.verify_tls13_signature(message, cert, dss)
-    }
-
-    fn supported_verify_schemes(&self) -> Vec<SignatureScheme> {
-        self.webpki.supported_verify_schemes()
-    }
-}
-
-fn is_certificate_name_error(error: &RustlsError) -> bool {
-    matches!(
-        error,
-        RustlsError::InvalidCertificate(
-            CertificateError::NotValidForName | CertificateError::NotValidForNameContext { .. }
-        )
-    )
-}
-
-fn subject_cn_matches(cert_der: &CertificateDer<'_>, server_name: &ServerName<'_>) -> bool {
-    let ServerName::DnsName(expected) = server_name else {
-        return false;
-    };
-    let Ok((remaining, cert)) = x509_parser::parse_x509_certificate(cert_der.as_ref()) else {
-        return false;
-    };
-    if !remaining.is_empty() {
-        return false;
-    }
-    let mut common_names = cert.subject().iter_common_name();
-    let Some(common_name) = common_names.next() else {
-        return false;
-    };
-    common_names.next().is_none()
-        && common_name
-            .as_str()
-            .is_ok_and(|name| name.eq_ignore_ascii_case(expected.as_ref()))
-}
-
-fn custom_ca_tls_config(
-    root_der_base64: &str,
-    certificate_identity: &str,
-) -> Result<rustls::ClientConfig> {
-    let der = base64::engine::general_purpose::STANDARD
-        .decode(root_der_base64)
-        .context("decoding custom TLS root CA")?;
-    let mut roots = rustls::RootCertStore::empty();
-    roots
-        .add(rustls::pki_types::CertificateDer::from(der))
-        .context("loading custom TLS root CA")?;
-    let provider: Arc<rustls::crypto::CryptoProvider> =
-        rustls::crypto::ring::default_provider().into();
-    let builder = rustls::ClientConfig::builder_with_provider(Arc::clone(&provider))
-        .with_protocol_versions(&[&rustls::version::TLS12, &rustls::version::TLS13])?;
-    match certificate_identity {
-        "webpki" => Ok(builder.with_root_certificates(roots).with_no_client_auth()),
-        "subject-cn" => {
-            let webpki =
-                WebPkiServerVerifier::builder_with_provider(Arc::new(roots), provider).build()?;
-            Ok(builder
-                .dangerous()
-                .with_custom_certificate_verifier(Arc::new(SubjectCnCertVerifier { webpki }))
-                .with_no_client_auth())
-        }
-        other => bail!("custom TLS certificate identity '{other}' is not implemented"),
     }
 }
 
 impl HttpBackend for UreqBackend {
     fn request(&self, req: &HttpRequest, max_response_bytes: usize) -> Result<HttpResponse> {
         let url = format!("{}{}", req.origin, req.path);
-        let mut builder = self.agent.request(&req.method, &url).timeout(req.timeout);
+        let mut builder = ureq::http::Request::builder()
+            .method(req.method.as_str())
+            .uri(&url);
         for (name, value) in &req.headers {
-            builder = builder.set(name, value);
+            builder = builder.header(name, value);
         }
-        let result = if req.body.is_empty() {
-            builder.call()
-        } else {
-            builder.send_bytes(&req.body)
-        };
-        let response = match result {
-            Ok(response) => response,
-            // ureq surfaces a non-2xx status as an error; that is still a valid
-            // HTTP response the plugin should observe, not a transport failure.
-            Err(ureq::Error::Status(_, response)) => response,
-            Err(ureq::Error::Transport(t)) => {
-                return Err(anyhow::anyhow!("http request failed: {t}"));
-            }
-        };
+        let request = builder.body(req.body.as_slice())?;
+        let result = request
+            .with_agent(&self.agent)
+            .configure()
+            .timeout_global(Some(req.timeout))
+            .run();
+        let response = result.map_err(|error| anyhow::anyhow!("http request failed: {error}"))?;
         read_response(response, max_response_bytes)
     }
 }
 
-fn read_response(response: ureq::Response, max_response_bytes: usize) -> Result<HttpResponse> {
-    let status = response.status();
+fn read_response(
+    mut response: ureq::http::Response<ureq::Body>,
+    max_response_bytes: usize,
+) -> Result<HttpResponse> {
+    let status = response.status().as_u16();
     // Dedup + bound the header set before handing it to Lua.
     let mut headers: BTreeMap<String, String> = BTreeMap::new();
-    for name in response
-        .headers_names()
-        .into_iter()
-        .take(MAX_RESPONSE_HEADERS)
-    {
-        if let Some(value) = response.header(&name) {
-            headers.insert(name, value.to_owned());
+    for (name, value) in response.headers().iter().take(MAX_RESPONSE_HEADERS) {
+        if let Ok(value) = value.to_str() {
+            headers.insert(name.as_str().to_owned(), value.to_owned());
         }
     }
     let mut body = Vec::new();
     response
-        .into_reader()
+        .body_mut()
+        .as_reader()
         .take(max_response_bytes as u64 + 1)
         .read_to_end(&mut body)
         .context("reading http response body")?;
@@ -871,10 +790,16 @@ mod tests {
 
     #[test]
     fn response_body_limit_is_enforced() {
-        let exact = ureq::Response::new(200, "OK", "1234").unwrap();
+        let exact = ureq::http::Response::builder()
+            .status(200)
+            .body(ureq::Body::builder().data("1234"))
+            .unwrap();
         assert_eq!(read_response(exact, 4).unwrap().body, b"1234");
 
-        let oversized = ureq::Response::new(200, "OK", "12345").unwrap();
+        let oversized = ureq::http::Response::builder()
+            .status(200)
+            .body(ureq::Body::builder().data("12345"))
+            .unwrap();
         assert!(read_response(oversized, 4)
             .unwrap_err()
             .to_string()

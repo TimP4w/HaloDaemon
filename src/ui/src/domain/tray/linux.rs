@@ -6,6 +6,7 @@
 //! `request_repaint` are thread-safe) rather than routing through a channel.
 
 use halod_shared::app;
+use ksni::blocking::TrayMethods as _;
 use ksni::menu::{MenuItem, RadioGroup, RadioItem, StandardItem, SubMenu};
 
 use std::sync::atomic::AtomicBool;
@@ -21,14 +22,14 @@ const MAX_TRAY_BACKOFF: Duration = Duration::from_secs(30);
 pub struct PlatformTray {
     /// Handle to the currently-running ksni service, or `None` while a rebuild
     /// is pending. Swapped by the supervisor thread on every (re)start.
-    handle: Arc<Mutex<Option<ksni::Handle<HalodTray>>>>,
+    handle: Arc<Mutex<Option<ksni::blocking::Handle<HalodTray>>>>,
     /// Last model pushed from the UI, used to seed a freshly rebuilt tray so it
     /// comes up with current battery/profile state rather than empty.
     latest: Arc<Mutex<TrayModel>>,
 }
 
 fn push_to_handle(
-    handle: &Arc<Mutex<Option<ksni::Handle<HalodTray>>>>,
+    handle: &Arc<Mutex<Option<ksni::blocking::Handle<HalodTray>>>>,
     latest: &Arc<Mutex<TrayModel>>,
     model: TrayModel,
 ) {
@@ -49,7 +50,8 @@ impl PlatformTray {
         force_quit: Arc<AtomicBool>,
         hide_state: Arc<crate::domain::state::HideState>,
     ) -> Self {
-        let handle: Arc<Mutex<Option<ksni::Handle<HalodTray>>>> = Arc::new(Mutex::new(None));
+        let handle: Arc<Mutex<Option<ksni::blocking::Handle<HalodTray>>>> =
+            Arc::new(Mutex::new(None));
         let latest = Arc::new(Mutex::new(TrayModel::default()));
         let ctx = ctx.clone();
         {
@@ -59,17 +61,22 @@ impl PlatformTray {
                 let mut backoff = Duration::from_millis(500);
                 loop {
                     let seed = latest.lock().unwrap().clone();
-                    let service = ksni::TrayService::new(HalodTray::new(
+                    let tray = HalodTray::new(
                         ctx.clone(),
                         cmd.clone(),
                         force_quit.clone(),
                         hide_state.clone(),
                         seed,
-                    ));
-                    *handle.lock().unwrap() = Some(service.handle());
-                    match service.run() {
-                        Ok(()) => break,
-                        Err(e) => log::warn!("tray service exited, retrying: {e}"),
+                    );
+                    match tray.spawn() {
+                        Ok(service_handle) => {
+                            *handle.lock().unwrap() = Some(service_handle.clone());
+                            while !service_handle.is_closed() {
+                                std::thread::sleep(Duration::from_millis(100));
+                            }
+                            log::warn!("tray service exited, retrying");
+                        }
+                        Err(e) => log::warn!("tray service failed, retrying: {e}"),
                     }
                     *handle.lock().unwrap() = None;
                     std::thread::sleep(backoff);

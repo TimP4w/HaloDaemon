@@ -540,11 +540,11 @@ mod tests {
             .eval()
             .unwrap();
         assert_eq!(
-            out.get::<mlua::String>(1).unwrap().as_bytes(),
+            out.get::<mlua::LuaString>(1).unwrap().as_bytes(),
             &[0x00, 0xAA, 0xBB]
         );
         assert_eq!(
-            out.get::<mlua::String>(2).unwrap().as_bytes(),
+            out.get::<mlua::LuaString>(2).unwrap().as_bytes(),
             &[0x00, 0xCC]
         );
         let written = rt.block_on(async { transport.written.lock().await.clone() });

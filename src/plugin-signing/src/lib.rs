@@ -594,7 +594,7 @@ pub fn package_hash(package_dir: &Path) -> Result<String> {
         hasher.update((bytes.len() as u64).to_le_bytes());
         hasher.update(&bytes);
     }
-    Ok(format!("{:x}", hasher.finalize()))
+    Ok(hex_lower(hasher.finalize()))
 }
 
 /// Normalize CRLF pairs in text files so CRLF and LF hash identically.
@@ -789,7 +789,15 @@ fn decode_array<const N: usize>(value: &str, label: &str) -> Result<[u8; N]> {
 
 fn file_sha256(path: &Path) -> Result<String> {
     let bytes = fs::read(path).with_context(|| format!("reading {}", path.display()))?;
-    Ok(format!("{:x}", Sha256::digest(bytes)))
+    Ok(hex_lower(Sha256::digest(bytes)))
+}
+
+fn hex_lower(bytes: impl AsRef<[u8]>) -> String {
+    bytes
+        .as_ref()
+        .iter()
+        .map(|byte| format!("{byte:02x}"))
+        .collect()
 }
 
 fn atomic_write(path: &Path, bytes: &[u8]) -> Result<()> {

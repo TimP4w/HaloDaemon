@@ -545,7 +545,7 @@ fn attach_udp_methods(lua: &Lua, dev: &Table, recording: Option<Arc<RecordingUdp
     let inbound = recording.clone();
     dev.set(
         "queue_udp_datagram",
-        lua.create_function(move |_, (_self, data): (Table, mlua::String)| {
+        lua.create_function(move |_, (_self, data): (Table, mlua::LuaString)| {
             inbound
                 .inbound
                 .lock()
@@ -1353,8 +1353,8 @@ fn command_results_from_spec(spec: &Option<Table>) -> Result<Vec<CommandRunResul
         .sequence_values::<Table>()
         .map(|result| {
             let result = result.anyhow()?;
-            let stdout = result.get::<mlua::String>("stdout").anyhow()?;
-            let stderr = result.get::<mlua::String>("stderr").anyhow()?;
+            let stdout = result.get::<mlua::LuaString>("stdout").anyhow()?;
+            let stderr = result.get::<mlua::LuaString>("stderr").anyhow()?;
             Ok(CommandRunResult {
                 success: result.get::<bool>("success").anyhow()?,
                 exit_code: result.get::<i32>("exit_code").anyhow()?,

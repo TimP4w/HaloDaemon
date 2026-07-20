@@ -32,7 +32,11 @@ fn scan_mdns(services: &[String]) -> Result<Vec<Value>> {
             if let Ok(ServiceEvent::ServiceResolved(info)) =
                 receiver.recv_timeout(Duration::from_millis(150))
             {
-                let addresses = ordered_mdns_addresses(info.get_addresses().iter().copied());
+                let addresses = ordered_mdns_addresses(
+                    info.get_addresses()
+                        .iter()
+                        .map(|address| address.to_ip_addr()),
+                );
                 let txt: HashMap<String, String> = info
                     .get_properties()
                     .iter()

@@ -519,11 +519,11 @@ mod tests {
         assert!(!table.get::<bool>("success").unwrap());
         assert_eq!(table.get::<i32>("exit_code").unwrap(), 7);
         assert_eq!(
-            table.get::<mlua::String>("stdout").unwrap().as_bytes(),
+            table.get::<mlua::LuaString>("stdout").unwrap().as_bytes(),
             b"out"
         );
         assert_eq!(
-            table.get::<mlua::String>("stderr").unwrap().as_bytes(),
+            table.get::<mlua::LuaString>("stderr").unwrap().as_bytes(),
             b"err"
         );
         assert!(!table.get::<bool>("timed_out").unwrap());
