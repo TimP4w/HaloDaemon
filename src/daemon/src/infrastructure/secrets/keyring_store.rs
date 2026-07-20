@@ -2,8 +2,9 @@
 //! OS credential store backend: Windows Credential Manager (DPAPI) or Linux
 //! Secret Service (libsecret over D-Bus), via the `keyring` crate.
 
-use anyhow::{Context, Result};
 use std::sync::mpsc;
+
+use anyhow::{Context, Result};
 
 use super::SecretStore;
 
