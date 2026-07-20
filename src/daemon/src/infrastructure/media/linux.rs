@@ -615,7 +615,7 @@ mod tests {
     }
 
     fn array_value(items: &[&str]) -> OwnedValue {
-        let mut arr = Array::new(Signature::from_str_unchecked("s"));
+        let mut arr = Array::new(&Signature::Str);
         for item in items {
             arr.append(Value::Str(Str::from(item.to_string()))).unwrap();
         }

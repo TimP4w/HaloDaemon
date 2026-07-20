@@ -957,7 +957,7 @@ mod tests {
     #[cfg(target_os = "linux")]
     #[test]
     fn keycode_table_matches_evdev_constants() {
-        use evdev::Key as EvKey;
+        use evdev::KeyCode as EvKey;
         for (name, ev) in [
             ("A", EvKey::KEY_A),
             ("Z", EvKey::KEY_Z),
