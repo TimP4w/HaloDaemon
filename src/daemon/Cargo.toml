@@ -26,72 +26,80 @@ halod-shared = { path = "../shared" }
 halod-hwaccess = { path = "../hwaccess" }
 halod-plugin-signing = { path = "../plugin-signing" }
 
-tokio      = { workspace = true }
+tokio      = { workspace = true, features = [
+    "fs",
+    "io-util",
+    "macros",
+    "net",
+    "process",
+    "rt-multi-thread",
+    "signal",
+    "sync",
+    "time",
+] }
 serde      = { workspace = true }
 serde_json = { workspace = true }
-serde_yaml = "0.9"
-semver     = { workspace = true }
+serde_yaml = "0.9.34"
 anyhow     = { workspace = true }
 log        = { workspace = true }
 async-trait = { workspace = true }
-fnv        = "1"
-hidapi     = "2"
-inventory  = "0.3"
+fnv        = "1.0.7"
+hidapi     = "2.6.6"
+inventory  = "0.3.24"
 # Embedded Lua runtime for device plugins (statically vendored, no system Lua).
 # `serialize` bridges manifest tables straight into serde types.
-mlua       = { version = "0.10", features = ["lua54", "vendored", "serialize"] }
-rusb       = { version = "0.9" }
-serialport = "4"
-uuid       = { version = "1", features = ["v4"] }
-base64     = "0.22"
-image      = { version = "0.25", default-features = false, features = ["png", "jpeg", "gif"] }
-gif        = "0.14"
+mlua       = { version = "0.12.0", features = ["lua54", "vendored", "serialize"] }
+rusb       = { version = "0.9.4" }
+serialport = "4.9.0"
+uuid       = { version = "1.24.0", features = ["v4"] }
+base64     = "0.22.1"
+image      = { version = "0.25.10", default-features = false, features = ["png", "jpeg", "gif"] }
+gif        = "0.14.2"
 # Q565 — QOI-derived RGB565 codec. The NZXT Kraken type-0x08 LCD streaming path
 # expects frames in this format (verified against NZXT CAM USB captures).
 q565       = { git = "https://github.com/seritools/q565", rev = "aeb432dc7d73757b20cd45b71755e8573a978541" }
-imageproc  = { version = "0.25", default-features = false }
-ab_glyph   = "0.2"
-unicode-segmentation = "1.13"
-tiny-skia = "0.11"
-resvg      = { version = "0.44", default-features = false }
-chrono     = { version = "0.4", default-features = false, features = ["clock"] }
-rustfft    = "6"
+imageproc  = { version = "0.27.0", default-features = false }
+ab_glyph   = "0.2.32"
+unicode-segmentation = "1.13.3"
+tiny-skia = "0.12.0"
+resvg      = { version = "0.47.0", default-features = false }
+chrono     = { version = "0.4.45", default-features = false, features = ["clock"] }
+rustfft    = "6.4.1"
 chacha20poly1305 = "0.11.0"
-zeroize = { version = "1.9.0", features = ["zeroize_derive"] }
-keyring = "4.1.4"
+keyring = "4.1.5"
 # Fully vendored (libgit2/libssh2/openssl via `cc`), matching mlua's `vendored` Lua.
-git2 = { version = "0.19", default-features = false, features = ["ssh", "https", "vendored-libgit2", "vendored-openssl"] }
-futures-util = "0.3"
-url      = "2"
-flate2   = "1"
-tar      = "0.4"
-sha2     = "0.10"
-tempfile = "3"
-mdns-sd = "0.13"
-rand = "0.9"
-rustls = "0.23"
-x509-parser = "0.18"
+git2 = { version = "0.21.0", default-features = false, features = ["ssh", "https", "vendored-libgit2", "vendored-openssl"] }
+futures-util = "0.3.33"
+url      = "2.5.8"
+flate2   = "1.1.9"
+tar      = "0.4.46"
+sha2     = "0.11.0"
+tempfile = "3.27.0"
+mdns-sd = "0.20.2"
+rand = "0.10.2"
 # HTTP(S) client for the plugin http capability and the Linux MPRIS now-playing
 # album-art fetch (remote artUrl, not file:// paths).
-ureq = { version = "2", default-features = false, features = ["tls"] }
+ureq = { version = "3.3.0", default-features = false, features = ["rustls"] }
+rustls = { version = "0.23.42", default-features = false, features = ["ring", "std", "tls12"] }
+x509-parser = "0.18.1"
 
 [dev-dependencies]
-ed25519-dalek = "2"
-tokio    = { version = "1", features = ["test-util"] }
-proptest = "1"
+ed25519-dalek = "3.0.0"
+tokio    = { version = "1.53.1", features = ["test-util"] }
+proptest = "1.11.0"
 
 [target.'cfg(target_os = "linux")'.dependencies]
-netlink-sys = { version = "0.8", features = ["tokio_socket"] }
-libc = "0.2"
-ashpd = { version = "0.9", default-features = false, features = ["tokio"] }
-pipewire = "0.10"
-evdev = "0.12"
-wayland-client = "0.31"
-wayland-protocols-wlr = { version = "0.3", features = ["client"] }
-zbus = { version = "4", default-features = false, features = ["tokio"] }
+netlink-sys = { version = "0.8.8", features = ["tokio_socket"] }
+libc = "0.2.186"
+ashpd = { version = "0.13.13", default-features = false, features = ["tokio", "screencast"] }
+pipewire = "0.10.0"
+evdev = "0.13.2"
+wayland-client = "0.31.14"
+wayland-protocols-wlr = { version = "0.3.12", features = ["client"] }
+zbus = { version = "5.18.0", default-features = false, features = ["tokio"] }
 
 [target.'cfg(target_os = "windows")'.dependencies.enigo]
-version = "0.2"
+version = "0.6.1"
 default-features = false
 
 [target.'cfg(target_os = "windows")'.dependencies]
@@ -128,7 +136,7 @@ windows    = { version = "0.62.2", features = [
 ] }
 # SCM dispatcher + service install/uninstall/stop for the supervisor service.
 windows-service = "0.8.1"
-libloading = "0.8"
+libloading = "0.9.0"
 
 # ── Linux packaging ──────────────────────────────────────────────────────────
 # Both the .deb (cargo-deb) and .rpm (cargo-generate-rpm) ship BOTH binaries

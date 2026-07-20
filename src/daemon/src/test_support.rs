@@ -887,6 +887,22 @@ mod capability_tests {
     }
 
     #[tokio::test]
+    async fn lcd_restore_rejects_numeric_rotation_strings() {
+        let dev = MockDevice::new("lcd_dev").with_lcd();
+        dev.lcd
+            .as_ref()
+            .unwrap()
+            .set_rotation(halod_shared::types::ScreenRotation::R180);
+
+        LcdCap::restore_state(&dev, &serde_json::json!({ "rotation": "90" })).await;
+
+        assert_eq!(
+            dev.lcd.as_ref().unwrap().rotation(),
+            halod_shared::types::ScreenRotation::R180
+        );
+    }
+
+    #[tokio::test]
     async fn lcd_restore_video_mode_is_not_clobbered_by_the_null_sibling_fields() {
         let dev = MockDevice::new("lcd_dev").with_lcd();
         let slot = dev.lcd.as_ref().unwrap();

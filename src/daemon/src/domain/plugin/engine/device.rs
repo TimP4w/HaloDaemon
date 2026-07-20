@@ -577,6 +577,7 @@ pub struct LuaDevice {
     rgb_slot: LightingStateSlot,
     cooling_slot: CoolingStateSlot,
     cooling_channels: Arc<OnceLock<Vec<CoolingChannel>>>,
+    cooling_builtin_channels: OnceLock<HashSet<String>>,
     cooling_as_devices: AtomicBool,
 
     /// Last sensor telemetry sampled by the status poll.
@@ -1200,6 +1201,7 @@ impl LuaDevice {
             rgb_slot: LightingStateSlot::default(),
             cooling_slot: CoolingStateSlot::default(),
             cooling_channels: Arc::new(OnceLock::new()),
+            cooling_builtin_channels: OnceLock::new(),
             cooling_as_devices: AtomicBool::new(false),
             sensor_cache: Arc::new(Mutex::new(Vec::new())),
             poll_task: None,
@@ -1785,8 +1787,17 @@ impl Device for LuaDevice {
                 || (self.plugin_type == PluginKind::Device
                     && !self.dynamic_children
                     && !cooling.channels.is_empty());
-            self.cooling_as_devices
-                .store(project_channels, Ordering::Release);
+            let builtin_channels: HashSet<_> = cooling
+                .channels
+                .iter()
+                .filter(|channel| channel.builtin)
+                .map(|channel| channel.id.clone())
+                .collect();
+            self.cooling_as_devices.store(
+                project_channels && builtin_channels.len() < cooling.channels.len(),
+                Ordering::Release,
+            );
+            let _ = self.cooling_builtin_channels.set(builtin_channels);
             let _ = self.cooling_channels.set(
                 cooling
                     .channels
@@ -1940,7 +1951,13 @@ impl Device for LuaDevice {
         for cap in &active {
             match cap {
                 Cap::Lighting => caps.push(CapabilityRef::Lighting(self)),
-                Cap::Cooling if !self.cooling_as_devices.load(Ordering::Acquire) => {
+                Cap::Cooling
+                    if !self.cooling_as_devices.load(Ordering::Acquire)
+                        || self
+                            .cooling_builtin_channels
+                            .get()
+                            .is_some_and(|channels| !channels.is_empty()) =>
+                {
                     caps.push(CapabilityRef::Cooling(self));
                 }
                 Cap::Cooling => {}
@@ -2016,6 +2033,10 @@ impl LightingCapability for LuaDevice {
         Ok(())
     }
 
+    fn write_group_key(&self) -> Option<usize> {
+        self.transport.as_ref().and_then(PluginIo::write_group_key)
+    }
+
     fn lighting_state(&self) -> &LightingStateSlot {
         &self.rgb_slot
     }
@@ -2066,6 +2087,10 @@ fn apply_per_led_transforms(
 impl CoolingCapability for LuaDevice {
     fn cooling_channels(&self) -> Vec<CoolingChannel> {
         let mut channels = self.cooling_channels.get().cloned().unwrap_or_default();
+        if self.cooling_as_devices.load(Ordering::Acquire) {
+            let builtin = self.cooling_builtin_channels.get();
+            channels.retain(|channel| builtin.is_some_and(|ids| ids.contains(&channel.id)));
+        }
         let observed = self.cooling_cache.lock_recover();
         for channel in &mut channels {
             if let Some(current) = observed.get(&channel.id) {
@@ -2104,12 +2129,48 @@ impl CoolingCapability for LuaDevice {
         &self.cooling_slot
     }
 
+    fn curves(&self) -> HashMap<String, crate::domain::cooling::model::FanCurveRecord> {
+        let mut curves = self.cooling_slot.curves();
+        if self.cooling_as_devices.load(Ordering::Acquire) {
+            let builtin = self.cooling_builtin_channels.get();
+            curves.retain(|channel_id, _| builtin.is_some_and(|ids| ids.contains(channel_id)));
+        }
+        curves
+    }
+
+    fn save_state(&self) -> serde_json::Value {
+        let curves = self.curves();
+        if curves.is_empty() {
+            serde_json::Value::Null
+        } else {
+            serde_json::to_value(curves).unwrap_or(serde_json::Value::Null)
+        }
+    }
+
+    async fn restore_state(&self, value: &serde_json::Value) {
+        self.cooling_slot.load(value);
+        if self.cooling_as_devices.load(Ordering::Acquire) {
+            let builtin = self.cooling_builtin_channels.get();
+            for channel_id in self.cooling_slot.curves().keys() {
+                if !builtin.is_some_and(|ids| ids.contains(channel_id)) {
+                    self.cooling_slot.clear_curve(channel_id);
+                }
+            }
+        }
+    }
+
     fn cached_cooling_status(&self) -> Vec<CoolingChannel> {
-        self.cooling_cache
+        let mut channels: Vec<_> = self
+            .cooling_cache
             .lock_recover()
             .values()
             .cloned()
-            .collect()
+            .collect();
+        if self.cooling_as_devices.load(Ordering::Acquire) {
+            let builtin = self.cooling_builtin_channels.get();
+            channels.retain(|channel| builtin.is_some_and(|ids| ids.contains(&channel.id)));
+        }
+        channels
     }
 }
 
@@ -2144,7 +2205,15 @@ impl Controller for LuaDevice {
         if self.plugin_type == PluginKind::Integration || self.dynamic_children {
             return self.discover_controllers().await;
         }
-        let mut children = self.discover_cooling_channel_devices().await;
+        let cooling_children = self.discover_cooling_channel_devices().await;
+        let mut source_channels: HashMap<String, CoolingChannel> = cooling_children
+            .iter()
+            .map(|child| (child.device.id().to_owned(), child.source_channel.clone()))
+            .collect();
+        let mut children: Vec<Arc<dyn Device>> = cooling_children
+            .into_iter()
+            .map(|child| child.device)
+            .collect();
         let accessories = self.discover_chain_accessories().await;
 
         // Cooling outputs are the canonical devices. When accessory discovery
@@ -2168,10 +2237,9 @@ impl Controller for LuaDevice {
 
             let child = if let Some(Some(index)) = matching_fan {
                 let cooling = children.remove(index);
-                let channel = cooling
-                    .as_cooling()
-                    .and_then(|capability| capability.cooling_channels().first().cloned())
-                    .expect("matched cooling leaf lost its channel");
+                let channel = source_channels
+                    .remove(cooling.id())
+                    .expect("matched cooling leaf lost its source channel");
                 let Some(parent) = self.self_ref.upgrade() else {
                     children.push(cooling);
                     children.push(accessory.device);
@@ -2264,6 +2332,11 @@ struct DiscoveredChainAccessory {
     device: Arc<dyn Device>,
 }
 
+struct DiscoveredCoolingChannel {
+    device: Arc<dyn Device>,
+    source_channel: CoolingChannel,
+}
+
 fn child_device_id(root: &str, controller: &DetectedController) -> String {
     controller
         .id
@@ -2273,7 +2346,7 @@ fn child_device_id(root: &str, controller: &DetectedController) -> String {
 }
 
 impl LuaDevice {
-    async fn discover_cooling_channel_devices(&self) -> Vec<Arc<dyn Device>> {
+    async fn discover_cooling_channel_devices(&self) -> Vec<DiscoveredCoolingChannel> {
         if !self.cooling_as_devices.load(Ordering::Acquire) {
             return Vec::new();
         }
@@ -2285,15 +2358,25 @@ impl LuaDevice {
             .get()
             .into_iter()
             .flatten()
+            .filter(|channel| {
+                !self
+                    .cooling_builtin_channels
+                    .get()
+                    .is_some_and(|ids| ids.contains(&channel.id))
+            })
             .cloned()
             .map(|channel| {
-                Arc::new(CoolingChannelLeaf::new(
+                let device = Arc::new(CoolingChannelLeaf::new(
                     format!("{}_cooling_{}", self.id, channel.id),
                     self.id.clone(),
                     self.vendor.clone(),
-                    channel,
+                    channel.clone(),
                     hub.clone(),
-                )) as Arc<dyn Device>
+                )) as Arc<dyn Device>;
+                DiscoveredCoolingChannel {
+                    device,
+                    source_channel: channel,
+                }
             })
             .collect()
     }
@@ -3357,6 +3440,140 @@ mod tests {
             LightingCapability::descriptor(&dev).channels[0].leds[0].id,
             7
         );
+        dev.close().await;
+    }
+
+    #[tokio::test(flavor = "multi_thread", worker_threads = 2)]
+    async fn combined_chain_fan_routes_default_to_its_source_channel() {
+        let script = r#"
+            return {
+              initialize = function()
+                return {
+                  cooling = { as_devices = true, channels = {
+                    { id = "fan1", name = "Radiator fan", kind = "fan", controllable = true },
+                  } },
+                  division = { { id = "0", name = "Fan chain", max_leds = 40 } },
+                  accessories = {
+                    { id = 30, name = "F360 RGB Core", led_count = 24,
+                      topology = "rings", rings = 3, fan = true },
+                  },
+                }
+              end,
+              detect_accessories = function()
+                return { { channel = 0, accessory = 30 } }
+              end,
+              get_cooling_status = function(_, channel)
+                if channel ~= "fan1" then error("unknown cooling channel: " .. channel) end
+                return { id = channel, name = "Radiator fan", kind = "fan",
+                         controllable = true, duty = 50, rpm = 1000 }
+              end,
+              set_cooling_duty = function(_, channel)
+                if channel ~= "fan1" then error("unknown cooling channel: " .. channel) end
+              end,
+            }
+        "#;
+        let (_tmp, manifest) = test_manifest(
+            "combined_chain_fan",
+            &["cooling", "lighting", "lighting_division"],
+            script,
+        );
+        let dev = Arc::new_cyclic(|weak| {
+            let mut dev = hid_device(
+                "combined_chain_fan-0",
+                &manifest,
+                Arc::new(MockTransport::empty()),
+            );
+            dev.set_self_ref(weak.clone());
+            dev
+        });
+        let adapter: Arc<dyn crate::domain::device::chain::LightingDivisionAdapter> = dev.clone();
+        dev.install_chain_host(crate::domain::device::chain::LightingDivisionHost::new(
+            adapter,
+        ));
+        assert!(dev.initialize().await.unwrap());
+
+        let children = Controller::discover_children(dev.as_ref()).await;
+        let fan = children
+            .iter()
+            .find(|child| child.id().contains("_acc_0_30"))
+            .unwrap_or_else(|| {
+                panic!(
+                    "combined fan accessory was not discovered: {:?}",
+                    children.iter().map(|child| child.id()).collect::<Vec<_>>()
+                )
+            });
+        let cooling = fan.as_cooling().expect("combined fan lost cooling");
+        assert_eq!(cooling.cooling_channels()[0].id, "default");
+        cooling.set_cooling_duty("default", 65).await.unwrap();
+
+        dev.close().await;
+    }
+
+    #[tokio::test(flavor = "multi_thread", worker_threads = 2)]
+    async fn builtin_cooling_channel_stays_on_root_and_other_channels_become_devices() {
+        let script = r#"
+            return {
+              initialize = function()
+                return { cooling = { as_devices = true, channels = {
+                  { id = "pump", name = "Pump", kind = "pump",
+                    controllable = true, builtin = true },
+                  { id = "fan1", name = "Radiator fan", kind = "fan",
+                    controllable = true },
+                } } }
+              end,
+              get_cooling_status = function(_, channel)
+                if channel ~= "pump" and channel ~= "fan1" then
+                  error("unknown cooling channel: " .. channel)
+                end
+                return { id = channel, name = channel, kind = channel == "pump" and "pump" or "fan",
+                         controllable = true, duty = 50, rpm = 1000 }
+              end,
+              set_cooling_duty = function(_, channel)
+                if channel ~= "pump" and channel ~= "fan1" then
+                  error("unknown cooling channel: " .. channel)
+                end
+              end,
+            }
+        "#;
+        let (_tmp, manifest) = test_manifest("builtin_pump", &["cooling"], script);
+        let dev = Arc::new_cyclic(|weak| {
+            let mut dev = hid_device(
+                "builtin_pump-0",
+                &manifest,
+                Arc::new(MockTransport::empty()),
+            );
+            dev.set_self_ref(weak.clone());
+            dev
+        });
+        assert!(dev.initialize().await.unwrap());
+
+        let root_cooling = dev.as_cooling().expect("root lost builtin pump");
+        assert_eq!(
+            root_cooling
+                .cooling_channels()
+                .into_iter()
+                .map(|channel| channel.id)
+                .collect::<Vec<_>>(),
+            ["pump"]
+        );
+        root_cooling.set_cooling_duty("pump", 65).await.unwrap();
+        root_cooling
+            .restore_state(&serde_json::json!({
+                "pump": { "sensor_id": null, "points": [[30.0, 30.0], [80.0, 100.0]] },
+                "fan1": { "sensor_id": null, "points": [[30.0, 30.0], [80.0, 100.0]] }
+            }))
+            .await;
+        assert!(root_cooling.curve("pump").is_some());
+        assert!(root_cooling.curve("fan1").is_none());
+        assert_eq!(root_cooling.curves().len(), 1);
+
+        let children = Controller::discover_children(dev.as_ref()).await;
+        assert_eq!(children.len(), 1);
+        assert_eq!(children[0].wire_device_type(), DeviceType::Fan);
+        let fan = children[0].as_cooling().expect("fan child lost cooling");
+        assert_eq!(fan.cooling_channels()[0].id, "default");
+        fan.set_cooling_duty("default", 65).await.unwrap();
+
         dev.close().await;
     }
 

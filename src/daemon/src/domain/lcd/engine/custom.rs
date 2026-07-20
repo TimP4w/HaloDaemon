@@ -852,7 +852,7 @@ fn rotate_widget_image(source: &RgbaImage, theta: f32) -> RgbaImage {
         (rotated_w as f32 / 2.0, rotated_h as f32 / 2.0),
         theta,
         imageproc::geometric_transformations::Interpolation::Bilinear,
-        Rgba([0, 0, 0, 0]),
+        imageproc::geometric_transformations::Border::Constant(Rgba([0, 0, 0, 0])),
     )
 }
 

@@ -132,7 +132,7 @@ pub trait CoolingCapability: Send + Sync {
         self.cooling_state().save()
     }
     async fn restore_state(&self, v: &serde_json::Value) {
-        self.cooling_state().load_legacy(v);
+        self.cooling_state().load(v);
     }
 }
 
@@ -155,6 +155,10 @@ pub trait LightingCapability: Send + Sync {
             self.write_frame(channel_id, bytes).await?;
         }
         Ok(())
+    }
+
+    fn write_group_key(&self) -> Option<usize> {
+        None
     }
 
     /// Backing slot — required so all state sub-operations have defaults.
@@ -631,31 +635,21 @@ pub trait LcdCapability: Send + Sync {
                 failure = Some(format!("restoring brightness failed: {e}"));
             }
         }
-        if let Some(r) = v["rotation"].as_str() {
-            let degrees = match r.parse::<u32>() {
-                // Legacy numeric format (0/90/180/270).
-                Ok(0) => Some(0u32),
-                Ok(d @ (90 | 180 | 270)) => Some(d),
-                _ => {
-                    // New `ScreenRotation` enum format (serde snake_case).
-                    match serde_json::from_value::<halod_shared::types::ScreenRotation>(
-                        v["rotation"].clone(),
-                    ) {
-                        Ok(halod_shared::types::ScreenRotation::R90) => Some(90),
-                        Ok(halod_shared::types::ScreenRotation::R180) => Some(180),
-                        Ok(halod_shared::types::ScreenRotation::R270) => Some(270),
-                        Ok(halod_shared::types::ScreenRotation::R0) => Some(0),
-                        Err(_) => {
-                            log::warn!(
-                                "[lcd restore_state] rotation \"{r}\" unrecognised, skipping"
-                            );
-                            None
-                        }
-                    }
+        if let Some(value) = v.get("rotation").filter(|value| !value.is_null()) {
+            let rotation =
+                serde_json::from_value::<halod_shared::types::ScreenRotation>(value.clone());
+            let degrees = match rotation {
+                Ok(halod_shared::types::ScreenRotation::R0) => Some(0),
+                Ok(halod_shared::types::ScreenRotation::R90) => Some(90),
+                Ok(halod_shared::types::ScreenRotation::R180) => Some(180),
+                Ok(halod_shared::types::ScreenRotation::R270) => Some(270),
+                Err(error) => {
+                    log::warn!("[lcd restore_state] invalid rotation {value}: {error}");
+                    None
                 }
             };
-            if let Some(d) = degrees {
-                if let Err(e) = self.set_rotation(d).await {
+            if let Some(degrees) = degrees {
+                if let Err(e) = self.set_rotation(degrees).await {
                     log::warn!("[lcd restore_state] set_rotation failed: {e:#}");
                     failure.get_or_insert_with(|| format!("restoring rotation failed: {e}"));
                 }

@@ -9,13 +9,13 @@ license = "GPL-3.0-or-later"
 repository = "https://github.com/TimP4w/Halod"
 
 [workspace.dependencies]
-tokio      = { version = "1", features = ["full"] }
-serde      = { version = "1", features = ["derive"] }
-serde_json = { version = "1", features = ["float_roundtrip"] }
-semver     = "1"
-anyhow     = "1"
-log        = "0.4"
-async-trait = "0.1"
+tokio      = { version = "1.53.1" }
+serde      = { version = "1.0.229", features = ["derive"] }
+serde_json = { version = "1.0.151", features = ["float_roundtrip"] }
+semver     = "1.0.28"
+anyhow     = "1.0.104"
+log        = "0.4.33"
+async-trait = "0.1.91"
 
 [workspace.lints.clippy]
 # Opinionated style/formatting lints kept off so the gate stays focused on

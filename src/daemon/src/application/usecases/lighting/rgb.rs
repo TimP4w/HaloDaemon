@@ -65,10 +65,7 @@ pub async fn lighting_apply(id: String, state: LightingState, app: Arc<AppState>
             Some(LightingState::Engine | LightingState::DirectEffect { .. })
         );
 
-    lighting.apply(state.clone()).await?;
-    persist_device_state(&app, device.as_ref()).await;
-
-    if needs_engine {
+    if needs_engine && !app.config.read().await.rgb.canvas_enabled {
         settings::set_engine_config(
             halod_shared::commands::EngineKind::Canvas,
             Some(true),
@@ -78,7 +75,18 @@ pub async fn lighting_apply(id: String, state: LightingState, app: Arc<AppState>
             Arc::clone(&app),
         )
         .await?;
-    } else if leaving_engine {
+    }
+
+    if let Some(engine) = app.lighting.engine() {
+        engine.wake();
+    }
+    lighting.apply(state.clone()).await?;
+    if let Some(engine) = app.lighting.engine() {
+        engine.wake();
+    }
+    persist_device_state(&app, device.as_ref()).await;
+
+    if leaving_engine {
         tokio::time::sleep(std::time::Duration::from_millis(
             super::canvas::STOP_DRAIN_MS,
         ))

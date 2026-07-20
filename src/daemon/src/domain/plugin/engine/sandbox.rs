@@ -52,11 +52,13 @@ pub fn apply(
 ) -> mlua::Result<()> {
     let globals = lua.globals();
     strip_escape_hatches(lua)?;
-    let logger = lua.create_function(|_, (msg, level): (mlua::String, Option<mlua::String>)| {
-        let level = plugin_log_level(level.as_ref().map(|l| l.to_string_lossy()).as_deref());
-        log::log!(level, "[plugin] {}", msg.to_string_lossy());
-        Ok(())
-    })?;
+    let logger = lua.create_function(
+        |_, (msg, level): (mlua::LuaString, Option<mlua::LuaString>)| {
+            let level = plugin_log_level(level.as_ref().map(|l| l.to_string_lossy()).as_deref());
+            log::log!(level, "[plugin] {}", msg.to_string_lossy());
+            Ok(())
+        },
+    )?;
     globals.set("log", logger)?;
     bytebuf::register(lua)?;
     inject_platform(lua)?;
@@ -178,7 +180,8 @@ pub(super) fn install_instruction_budget_hook(lua: &Lua, budget: u64) -> Rc<Cell
             }
             Ok(VmState::Continue)
         },
-    );
+    )
+    .expect("installing Lua instruction budget hook");
     counter
 }
 

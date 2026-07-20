@@ -16,7 +16,7 @@ use base64::Engine as _;
 use halod_shared::types::{
     IntegrationAuthKind, IntegrationSetupMode, IntegrationSetupPhase, IntegrationSetupStatus,
 };
-use rand::RngCore;
+use rand::Rng;
 use serde_json::json;
 use sha2::{Digest, Sha256};
 use std::time::Duration;

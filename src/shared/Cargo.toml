@@ -9,12 +9,12 @@ repository.workspace = true
 workspace = true
 
 [dependencies]
-fontdb     = "0.22"
+fontdb     = "0.23.0"
 serde      = { workspace = true }
 serde_json = { workspace = true }
 
 [target.'cfg(unix)'.dependencies]
-libc = "0.2"
+libc = "0.2.186"
 
 [dev-dependencies]
-proptest = "1"
+proptest = "1.11.0"

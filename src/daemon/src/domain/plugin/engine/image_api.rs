@@ -93,7 +93,7 @@ mod tests {
     #[test]
     fn rgba_to_bgr888_from_lua_reorders() {
         let lua = lua();
-        let out: mlua::String = lua
+        let out: mlua::LuaString = lua
             .load(
                 r#"
                 local rgba = halod.buffer("\x0A\x14\x1E\xFF")
@@ -108,7 +108,7 @@ mod tests {
     #[test]
     fn rgba_to_q565_from_lua_produces_q565_file() {
         let lua = lua();
-        let out: mlua::String = lua
+        let out: mlua::LuaString = lua
             .load(
                 r#"
                 local rgba = halod.buffer(4 * 4 * 4)

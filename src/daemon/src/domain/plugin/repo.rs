@@ -324,11 +324,11 @@ fn tracked_branch_name(repo: &git2::Repository, branch: Option<&str>) -> Result<
         Ok(head) => head
             .shorthand()
             .map(str::to_owned)
-            .ok_or_else(|| anyhow!("HEAD has no shorthand name")),
+            .context("HEAD has no shorthand name"),
         Err(e) if e.code() == git2::ErrorCode::UnbornBranch => Ok(repo
             .find_reference("refs/remotes/origin/HEAD")
             .ok()
-            .and_then(|r| r.symbolic_target().map(str::to_owned))
+            .and_then(|r| r.symbolic_target().ok().flatten().map(str::to_owned))
             .and_then(|t| t.strip_prefix("refs/remotes/origin/").map(str::to_owned))
             .unwrap_or_else(|| "main".to_owned())),
         Err(e) => Err(e).context("reading HEAD"),
@@ -375,7 +375,7 @@ fn materialize_tree(repo: &git2::Repository, tree: &git2::Tree<'_>, dest: &Path)
     for entry in tree {
         let name = entry
             .name()
-            .ok_or_else(|| anyhow!("repository tree contains a non-UTF-8 filename"))?;
+            .context("repository tree contains a non-UTF-8 filename")?;
         let target = dest.join(name);
         match entry.kind() {
             Some(git2::ObjectType::Tree) => {

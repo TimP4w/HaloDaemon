@@ -54,10 +54,7 @@ impl CoolingEngineState {
             .into_iter()
             .map(|(device_id, channel_id, record)| {
                 let key = curve_key(&device_id, &channel_id);
-                let status = statuses
-                    .get(&key)
-                    .cloned()
-                    .unwrap_or(FanCurveStatus::NoSensor);
+                let status = statuses.get(&key).cloned().unwrap_or(FanCurveStatus::Ok);
                 record.serialize(device_id, channel_id, status)
             })
             .collect();
@@ -109,5 +106,22 @@ mod tests {
         assert_eq!(wire.fan_curves[0].device_id, "fan_dev");
         assert_eq!(wire.fan_curves[0].channel_id, "default");
         assert_eq!(wire.fan_curves[0].sensor_id.as_deref(), Some("cpu_temp"));
+    }
+
+    #[tokio::test]
+    async fn snapshot_does_not_warn_before_engine_evaluation() {
+        let state = CoolingEngineState::new();
+        let fan_curves = vec![(
+            "fan_dev".to_string(),
+            "default".to_string(),
+            FanCurveRecord {
+                sensor_id: None,
+                points: vec![(0.0, 50.0), (100.0, 50.0)],
+            },
+        )];
+
+        let wire = state.snapshot(fan_curves).await;
+
+        assert_eq!(wire.fan_curves[0].status, FanCurveStatus::Ok);
     }
 }

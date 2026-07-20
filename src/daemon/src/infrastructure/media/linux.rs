@@ -181,54 +181,25 @@ fn http_authority(url: &str) -> Option<(String, u16)> {
     Some((host, port))
 }
 
-/// Split a ureq `host:port` netloc, stripping IPv6 brackets from the host.
-fn split_netloc(netloc: &str) -> Option<(String, u16)> {
-    let (host, port) = netloc.rsplit_once(':')?;
-    let host = host.trim_start_matches('[').trim_end_matches(']');
-    Some((host.to_string(), port.parse().ok()?))
-}
-
-/// Resolve `host:port` and keep only addresses that pass the SSRF policy (same
-/// as the plugin TCP transport). Errors if nothing resolves or all are blocked.
-fn resolve_vetted(host: &str, port: u16) -> std::io::Result<Vec<std::net::SocketAddr>> {
-    use std::net::ToSocketAddrs;
-    let addrs: Vec<_> = (host, port)
-        .to_socket_addrs()?
-        .filter(|sa| !crate::domain::plugin::engine::backends::net_guard::is_blocked_ip(&sa.ip()))
-        .collect();
-    if addrs.is_empty() {
-        return Err(std::io::Error::new(
-            std::io::ErrorKind::PermissionDenied,
-            "host has no routable address",
-        ));
-    }
-    Ok(addrs)
-}
-
 /// Blocking http(s) GET with a 4 s timeout, address vetting, no redirects, and a
 /// 2 MB size cap (an over-cap body is rejected, not silently truncated).
 fn fetch_http_bytes(url: &str) -> Option<Vec<u8>> {
     use std::io::Read;
     const MAX_BYTES: u64 = 2 * 1024 * 1024;
     http_authority(url)?;
-    // A custom resolver vets the exact address ureq connects to, so the client
-    // can't re-resolve the host to a blocked address after our check (TOCTOU).
-    let resp = ureq::AgentBuilder::new()
-        .timeout(std::time::Duration::from_secs(4))
-        .redirects(0)
-        .resolver(|netloc: &str| match split_netloc(netloc) {
-            Some((host, port)) => resolve_vetted(&host, port),
-            None => Err(std::io::Error::new(
-                std::io::ErrorKind::InvalidInput,
-                "malformed netloc",
-            )),
-        })
-        .build()
-        .get(url)
-        .call()
-        .ok()?;
+    let config = ureq::Agent::config_builder()
+        .timeout_global(Some(Duration::from_secs(4)))
+        .max_redirects(0)
+        .build();
+    let agent = ureq::Agent::with_parts(
+        config,
+        ureq::unversioned::transport::DefaultConnector::default(),
+        crate::infrastructure::http::NetGuardResolver::new(false, None),
+    );
+    let mut resp = agent.get(url).call().ok()?;
     let mut buf = Vec::new();
-    resp.into_reader()
+    resp.body_mut()
+        .as_reader()
         .take(MAX_BYTES + 1)
         .read_to_end(&mut buf)
         .ok()?;
@@ -643,25 +614,8 @@ mod tests {
         assert_eq!(http_authority("ftp://example.com/a.png"), None);
     }
 
-    #[test]
-    fn resolver_returns_no_vetted_addrs_for_blocked_hosts() {
-        assert!(resolve_vetted("127.0.0.1", 80).is_err());
-        assert!(resolve_vetted("192.168.1.5", 443).is_err());
-        assert!(resolve_vetted("169.254.169.254", 80).is_err());
-        assert!(resolve_vetted("::1", 443).is_err());
-    }
-
-    #[test]
-    fn split_netloc_strips_ipv6_brackets() {
-        assert_eq!(split_netloc("[::1]:443"), Some(("::1".to_string(), 443)));
-        assert_eq!(
-            split_netloc("1.2.3.4:80"),
-            Some(("1.2.3.4".to_string(), 80))
-        );
-    }
-
     fn array_value(items: &[&str]) -> OwnedValue {
-        let mut arr = Array::new(Signature::from_str_unchecked("s"));
+        let mut arr = Array::new(&Signature::Str);
         for item in items {
             arr.append(Value::Str(Str::from(item.to_string()))).unwrap();
         }

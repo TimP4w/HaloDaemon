@@ -14,13 +14,13 @@ workspace = true
 anyhow = { workspace = true }
 serde = { workspace = true }
 semver = { workspace = true }
-serde_yaml = "0.9"
-sha2 = "0.10"
-base64 = "0.22"
+serde_yaml = "0.9.34"
+sha2 = "0.11.0"
+base64 = "0.22.1"
 ed25519-dalek = "3.0.0"
 getrandom = "0.4.3"
-tempfile = "3"
+tempfile = "3.27.0"
 zeroize = "1.9.0"
 
 [dev-dependencies]
-proptest = "1"
+proptest = "1.11.0"

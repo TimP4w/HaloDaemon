@@ -214,7 +214,7 @@ mod tests {
     #[test]
     fn build_and_read_back_le_and_be() {
         let lua = lua();
-        let out: mlua::String = lua
+        let out: mlua::LuaString = lua
             .load(
                 r#"
                 local b = halod.buffer(4)
@@ -236,7 +236,7 @@ mod tests {
     #[test]
     fn set_bytes_writes_a_string_in_one_call() {
         let lua = lua();
-        let out: mlua::String = lua
+        let out: mlua::LuaString = lua
             .load(
                 r#"
                 local b = halod.buffer(6)
@@ -254,7 +254,7 @@ mod tests {
     #[test]
     fn set_bytes_accepts_another_buffer_as_the_source() {
         let lua = lua();
-        let out: mlua::String = lua
+        let out: mlua::LuaString = lua
             .load(
                 r#"
                 local src = halod.buffer(string.char(9, 8, 7))
@@ -271,7 +271,7 @@ mod tests {
     #[test]
     fn set_bytes_out_of_range_errors_without_partial_write() {
         let lua = lua();
-        let out: mlua::String = lua
+        let out: mlua::LuaString = lua
             .load(
                 r#"
                 local b = halod.buffer(4)
@@ -292,7 +292,7 @@ mod tests {
     #[test]
     fn wrap_string_and_slice() {
         let lua = lua();
-        let out: mlua::String = lua
+        let out: mlua::LuaString = lua
             .load(
                 r#"
                 local b = halod.buffer("\x01\x02\x03\x04")

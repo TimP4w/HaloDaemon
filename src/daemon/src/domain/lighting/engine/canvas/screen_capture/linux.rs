@@ -219,8 +219,8 @@ pub fn start(
 /// Negotiated screencast: the proxy and session are returned so the caller can
 /// keep them alive and explicitly close the session when capture stops.
 type Portal = (
-    ashpd::desktop::screencast::Screencast<'static>,
-    ashpd::desktop::Session<'static, ashpd::desktop::screencast::Screencast<'static>>,
+    ashpd::desktop::screencast::Screencast,
+    ashpd::desktop::Session<ashpd::desktop::screencast::Screencast>,
     i32,
     u32,
     u32,
@@ -265,31 +265,34 @@ async fn run_portal(
 }
 
 async fn acquire_portal() -> Result<Portal, String> {
-    use ashpd::desktop::screencast::{CursorMode, Screencast, SourceType};
-    use ashpd::desktop::PersistMode;
+    use ashpd::desktop::screencast::{
+        CursorMode, OpenPipeWireRemoteOptions, Screencast, SelectSourcesOptions, SourceType,
+        StartCastOptions,
+    };
+    use ashpd::desktop::{CreateSessionOptions, PersistMode};
 
     let proxy = Screencast::new()
         .await
         .map_err(|e| format!("Screencast::new: {e}"))?;
     let session = proxy
-        .create_session()
+        .create_session(CreateSessionOptions::default())
         .await
         .map_err(|e| format!("create_session: {e}"))?;
 
     proxy
         .select_sources(
             &session,
-            CursorMode::Hidden,
-            SourceType::Monitor.into(),
-            false,
-            None,
-            PersistMode::DoNot,
+            SelectSourcesOptions::default()
+                .set_cursor_mode(CursorMode::Hidden)
+                .set_sources(Some(SourceType::Monitor.into()))
+                .set_multiple(false)
+                .set_persist_mode(PersistMode::DoNot),
         )
         .await
         .map_err(|e| format!("select_sources: {e}"))?;
 
     let response = proxy
-        .start(&session, &ashpd::WindowIdentifier::default())
+        .start(&session, None, StartCastOptions::default())
         .await
         .map_err(|e| format!("portal start: {e}"))?
         .response()
@@ -313,7 +316,7 @@ async fn acquire_portal() -> Result<Portal, String> {
     );
 
     let fd: OwnedFd = proxy
-        .open_pipe_wire_remote(&session)
+        .open_pipe_wire_remote(&session, OpenPipeWireRemoteOptions::default())
         .await
         .map_err(|e| format!("open_pipe_wire_remote: {e}"))?;
 

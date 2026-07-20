@@ -59,6 +59,13 @@ pub enum PluginIo {
 }
 
 impl PluginIo {
+    pub fn write_group_key(&self) -> Option<usize> {
+        match self {
+            Self::Register(bus) => Some(bus.write_group_key()),
+            _ => None,
+        }
+    }
+
     /// A deterministic transport failure that cannot be fixed by retrying the
     /// same plugin instance. The first such failure latches for its lifetime.
     pub fn unrecoverable_error(&self) -> Option<String> {
@@ -380,6 +387,10 @@ impl RegisterBus {
         self.bus.rate_status().unwrap_or_default()
     }
 
+    pub fn write_group_key(&self) -> usize {
+        Arc::as_ptr(&self.bus) as usize
+    }
+
     fn unrecoverable_error(&self) -> Option<String> {
         self.scope.unrecoverable_error()
     }
@@ -519,11 +530,11 @@ mod tests {
         assert!(!table.get::<bool>("success").unwrap());
         assert_eq!(table.get::<i32>("exit_code").unwrap(), 7);
         assert_eq!(
-            table.get::<mlua::String>("stdout").unwrap().as_bytes(),
+            table.get::<mlua::LuaString>("stdout").unwrap().as_bytes(),
             b"out"
         );
         assert_eq!(
-            table.get::<mlua::String>("stderr").unwrap().as_bytes(),
+            table.get::<mlua::LuaString>("stderr").unwrap().as_bytes(),
             b"err"
         );
         assert!(!table.get::<bool>("timed_out").unwrap());

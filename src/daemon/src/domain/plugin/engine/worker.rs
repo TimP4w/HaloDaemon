@@ -286,6 +286,8 @@ pub struct InitCoolingChannel {
     pub kind: halod_shared::types::CoolingChannelKind,
     #[serde(default)]
     pub controllable: bool,
+    #[serde(default)]
+    pub builtin: bool,
 }
 
 /// Runtime key-remap descriptor. Button CIDs and host-mode policy are reported
@@ -521,15 +523,8 @@ fn lua_err(context: &str, e: mlua::Error) -> anyhow::Error {
 /// collection cannot pace itself from those bytes. The callback result remains
 /// authoritative if collection also fails.
 fn finish_lcd_frame_callback(lua: &Lua, frame_bytes: usize, result: Result<()>) -> Result<()> {
-    // Account conservatively for the input, an optional rotated RGBA buffer and
-    // the encoded output, with headroom for codecs whose worst case exceeds one
-    // RGBA frame. `gc_step_kbytes` advances Lua's incremental collector as though
-    // these externally allocated bytes belonged to its own heap.
-    let external_kbytes = frame_bytes
-        .saturating_mul(4)
-        .div_ceil(1024)
-        .min(i32::MAX as usize) as i32;
-    if let Err(error) = lua.gc_step_kbytes(external_kbytes) {
+    let _ = frame_bytes;
+    if let Err(error) = lua.gc_step() {
         if result.is_ok() {
             return Err(lua_err("lcd_stream_frame garbage collection", error));
         }

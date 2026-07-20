@@ -265,7 +265,6 @@ fn default_tls_profile() -> String {
 fn default_certificate_identity() -> String {
     "webpki".to_owned()
 }
-
 #[derive(Debug, Clone, Default, Serialize, Deserialize)]
 #[serde(deny_unknown_fields)]
 pub struct IntegrationSetupConfig {
@@ -373,8 +372,7 @@ pub struct HttpTls {
     /// configured `host_key` address.
     #[serde(default)]
     pub verify_identity: Option<String>,
-    /// Leaf-certificate identity representation: standard `webpki` SAN
-    /// verification or one exact `subject-cn` value.
+    /// Leaf-certificate identity representation used with a custom CA.
     #[serde(default = "default_certificate_identity")]
     pub certificate_identity: String,
 }
@@ -3567,6 +3565,17 @@ mod tests {
             ENTRY_LUA,
         );
         assert!(parse_manifest_from_dir(&custom_with_identity).is_ok());
+
+        let custom_with_unknown_identity = write_plugin_dir(
+            tmp.path(),
+            "custom_with_unknown_identity",
+            "type: integration\npermissions: [network]\nconfig:\n  fields:\n    - { key: device_id, label: Device ID, type: string }\ntransports:\n  http:\n    origins: [https://api.example.com]\n    tls: { profile: custom-ca, ca_der_base64: Zm9v, verify_identity: device_id, certificate_identity: unchecked }\n",
+            ENTRY_LUA,
+        );
+        assert!(parse_manifest_from_dir(&custom_with_unknown_identity)
+            .unwrap_err()
+            .to_string()
+            .contains("certificate_identity"));
     }
 
     #[test]
