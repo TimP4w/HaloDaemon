@@ -2148,7 +2148,7 @@ impl CoolingCapability for LuaDevice {
     }
 
     async fn restore_state(&self, value: &serde_json::Value) {
-        self.cooling_slot.load_legacy(value);
+        self.cooling_slot.load(value);
         if self.cooling_as_devices.load(Ordering::Acquire) {
             let builtin = self.cooling_builtin_channels.get();
             for channel_id in self.cooling_slot.curves().keys() {

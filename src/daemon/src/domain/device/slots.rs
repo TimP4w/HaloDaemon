@@ -156,9 +156,7 @@ impl LightingStateSlot {
     }
 }
 
-/// Persisted curves keyed by device-local cooling channel. The custom loader
-/// deliberately accepts the previous single-record shape so upgrades preserve
-/// existing fan/pump curves as the `default` channel.
+/// Persisted curves keyed by device-local cooling channel.
 #[derive(Default)]
 pub struct CoolingStateSlot(Slot<HashMap<String, crate::domain::cooling::model::FanCurveRecord>>);
 
@@ -196,20 +194,37 @@ impl CoolingStateSlot {
         }
         serde_json::to_value(curves).unwrap_or(serde_json::Value::Null)
     }
-    pub fn load_legacy(&self, value: &serde_json::Value) {
-        if let Ok(curves) = serde_json::from_value::<
+    pub fn load(&self, value: &serde_json::Value) {
+        if let Ok(mut curves) = serde_json::from_value::<
             HashMap<String, crate::domain::cooling::model::FanCurveRecord>,
         >(value.clone())
         {
+            for curve in curves.values_mut() {
+                curve.sanitize();
+            }
             self.0.set(curves);
-            return;
         }
-        if let Ok(Some(curve)) = serde_json::from_value::<
-            Option<crate::domain::cooling::model::FanCurveRecord>,
-        >(value.clone())
-        {
-            self.set_curve("default".to_string(), curve);
-        }
+    }
+}
+
+#[cfg(test)]
+mod cooling_state_tests {
+    use super::*;
+
+    #[test]
+    fn load_accepts_only_channel_maps() {
+        let slot = CoolingStateSlot::default();
+        slot.load(&serde_json::json!({
+            "pump": { "sensor_id": null, "points": [[30.0, 20.0], [80.0, 100.0]] }
+        }));
+        assert!(slot.curve("pump").is_some());
+
+        slot.clear_curves();
+        slot.load(&serde_json::json!({
+            "sensor_id": null,
+            "points": [[30.0, 20.0], [80.0, 100.0]]
+        }));
+        assert!(slot.curves().is_empty());
     }
 }
 
