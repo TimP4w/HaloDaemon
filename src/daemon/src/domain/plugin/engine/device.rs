@@ -2129,6 +2129,36 @@ impl CoolingCapability for LuaDevice {
         &self.cooling_slot
     }
 
+    fn curves(&self) -> HashMap<String, crate::domain::cooling::model::FanCurveRecord> {
+        let mut curves = self.cooling_slot.curves();
+        if self.cooling_as_devices.load(Ordering::Acquire) {
+            let builtin = self.cooling_builtin_channels.get();
+            curves.retain(|channel_id, _| builtin.is_some_and(|ids| ids.contains(channel_id)));
+        }
+        curves
+    }
+
+    fn save_state(&self) -> serde_json::Value {
+        let curves = self.curves();
+        if curves.is_empty() {
+            serde_json::Value::Null
+        } else {
+            serde_json::to_value(curves).unwrap_or(serde_json::Value::Null)
+        }
+    }
+
+    async fn restore_state(&self, value: &serde_json::Value) {
+        self.cooling_slot.load_legacy(value);
+        if self.cooling_as_devices.load(Ordering::Acquire) {
+            let builtin = self.cooling_builtin_channels.get();
+            for channel_id in self.cooling_slot.curves().keys() {
+                if !builtin.is_some_and(|ids| ids.contains(channel_id)) {
+                    self.cooling_slot.clear_curve(channel_id);
+                }
+            }
+        }
+    }
+
     fn cached_cooling_status(&self) -> Vec<CoolingChannel> {
         let mut channels: Vec<_> = self
             .cooling_cache
@@ -3527,6 +3557,15 @@ mod tests {
             ["pump"]
         );
         root_cooling.set_cooling_duty("pump", 65).await.unwrap();
+        root_cooling
+            .restore_state(&serde_json::json!({
+                "pump": { "sensor_id": null, "points": [[30.0, 30.0], [80.0, 100.0]] },
+                "fan1": { "sensor_id": null, "points": [[30.0, 30.0], [80.0, 100.0]] }
+            }))
+            .await;
+        assert!(root_cooling.curve("pump").is_some());
+        assert!(root_cooling.curve("fan1").is_none());
+        assert_eq!(root_cooling.curves().len(), 1);
 
         let children = Controller::discover_children(dev.as_ref()).await;
         assert_eq!(children.len(), 1);
