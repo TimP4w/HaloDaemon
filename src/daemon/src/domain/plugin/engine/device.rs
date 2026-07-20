@@ -3410,14 +3410,22 @@ mod tests {
             &["cooling", "lighting", "lighting_division"],
             script,
         );
-        let dev = hid_device(
-            "combined_chain_fan-0",
-            &manifest,
-            Arc::new(MockTransport::empty()),
-        );
+        let dev = Arc::new_cyclic(|weak| {
+            let mut dev = hid_device(
+                "combined_chain_fan-0",
+                &manifest,
+                Arc::new(MockTransport::empty()),
+            );
+            dev.set_self_ref(weak.clone());
+            dev
+        });
+        let adapter: Arc<dyn crate::domain::device::chain::LightingDivisionAdapter> = dev.clone();
+        dev.install_chain_host(crate::domain::device::chain::LightingDivisionHost::new(
+            adapter,
+        ));
         assert!(dev.initialize().await.unwrap());
 
-        let children = Controller::discover_children(&dev).await;
+        let children = Controller::discover_children(dev.as_ref()).await;
         let fan = children
             .iter()
             .find(|child| child.id().contains("_acc_0_30"))

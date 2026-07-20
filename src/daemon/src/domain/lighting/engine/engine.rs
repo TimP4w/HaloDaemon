@@ -13,7 +13,7 @@ use halod_shared::types::{
 use halod_shared::zone_transform::ring_slice;
 use std::time::Duration;
 use tiny_skia::Pixmap;
-use tokio::sync::Mutex;
+use tokio::sync::{Mutex, Notify};
 
 use super::canvas::{self, FrameSource, Sampler};
 use super::color::linear_to_led;
@@ -86,6 +86,7 @@ pub struct RgbEngine {
     /// slow (e.g. rate-limited) device never paces the rest of the canvas.
     write_slots: std::sync::Mutex<HashMap<String, tokio::task::JoinHandle<()>>>,
     tick_cache: Mutex<Option<TickStateCache>>,
+    wake: Notify,
 }
 
 struct TickStateCache {
@@ -285,11 +286,17 @@ impl RgbEngine {
             preview_srgb_buf: Mutex::new(Vec::new()),
             write_slots: std::sync::Mutex::new(HashMap::new()),
             tick_cache: Mutex::new(None),
+            wake: Notify::new(),
         })
     }
 
     pub fn subscribe(&self) -> tokio::sync::broadcast::Receiver<Arc<CanvasFrame>> {
+        self.wake.notify_one();
         self.frame_tx.subscribe()
+    }
+
+    pub fn wake(&self) {
+        self.wake.notify_one();
     }
 
     /// Built-in host effects plus plugin-declared pixmap effects. The built-in
@@ -359,6 +366,10 @@ impl RgbEngine {
                         }
                         r = cfg_rx.changed() => {
                             if !r { return; }
+                            break;
+                        }
+                        _ = self.wake.notified() => {
+                            idle_since = None;
                             break;
                         }
                     }
@@ -1973,6 +1984,43 @@ mod tests {
             idle_interval_ms(Some(now - Duration::from_secs(60)), now, 50),
             IDLE_POLL_MS
         );
+    }
+
+    #[tokio::test(start_paused = true)]
+    async fn wake_applies_a_direct_effect_without_waiting_for_the_idle_poll() {
+        let app = make_app();
+        let dev = MockRgbDevice::new("dev0", "ring", 4, false);
+        app.device_registry
+            .write()
+            .await
+            .push(dev.clone() as Arc<dyn Device>);
+        let engine = RgbEngine::new(Arc::clone(&app)).await;
+        let cfg = crate::application::run_loop::EngineConfigReceiver::new(
+            Arc::clone(&app.data_bus),
+            crate::application::run_loop::EngineConfigTopic::Lighting,
+        );
+        let handle = Arc::clone(&engine).start(cfg).await;
+
+        tokio::task::yield_now().await;
+        tokio::time::advance(IDLE_GRACE + Duration::from_secs(1)).await;
+        tokio::task::yield_now().await;
+        *dev.rgb_state.lock().unwrap() = Some(LightingState::DirectEffect {
+            id: "breathing".into(),
+            params: HashMap::new(),
+        });
+
+        let wake_at = tokio::time::Instant::now();
+        engine.wake();
+        for _ in 0..10 {
+            tokio::task::yield_now().await;
+            if dev.write_count.load(Ordering::SeqCst) > 0 {
+                break;
+            }
+        }
+
+        assert!(dev.write_count.load(Ordering::SeqCst) > 0);
+        assert_eq!(tokio::time::Instant::now(), wake_at);
+        handle.abort();
     }
 
     #[tokio::test]
