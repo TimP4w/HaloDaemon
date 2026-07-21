@@ -913,6 +913,7 @@ impl AccessoryManifest {
                 leds,
                 color_order: Default::default(),
                 division: Default::default(),
+                visibility: Default::default(),
             }],
             native_effects: vec![],
         }

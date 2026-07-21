@@ -294,11 +294,18 @@ impl FanCurveEngine {
     async fn tick(&self, failsafe_duty: u8) {
         let curves: HashMap<String, (CurveTarget, FanCurveRecord)> = {
             let devices = self.app_state.get_active_devices().await;
+            let cfg = self.app_state.config.read().await;
             let mut map = HashMap::new();
             for device in devices {
                 if let Some(cooling) = device.as_cooling() {
                     for channel in cooling.cooling_channels() {
-                        if !channel.controllable {
+                        if !channel.controllable
+                            || !cfg.channel_enabled(
+                                device.id(),
+                                halod_shared::types::ChannelKind::Cooling,
+                                &channel.id,
+                            )
+                        {
                             continue;
                         }
                         let curve = cooling.curve(&channel.id).unwrap_or_else(|| {
@@ -838,6 +845,7 @@ mod tests {
                 controllable: true,
                 rpm: Some(*self.rpm.lock().unwrap()),
                 duty: Some(*self.duty.lock().unwrap()),
+                visibility: Default::default(),
             }
         }
     }
@@ -1172,6 +1180,58 @@ mod tests {
     }
 
     #[tokio::test]
+    async fn tick_skips_disabled_channel_and_does_not_seed_curve() {
+        let fan = MockFan::new("fan_0");
+        let app = make_app(fan.clone(), None);
+        {
+            let mut cfg = app.config.write().await;
+            cfg.channel_visibility
+                .entry("fan_0".into())
+                .or_default()
+                .insert(
+                    halod_shared::types::ChannelKind::Cooling.key("default"),
+                    halod_shared::types::VisibilityState::Disabled,
+                );
+        }
+        let initial_duty = fan.last_duty();
+
+        FanCurveEngine::new(app.clone()).tick(75).await;
+
+        assert!(fan.cooling.curve("default").is_none());
+        assert_eq!(fan.last_duty(), initial_duty);
+        assert!(app.cooling.statuses.lock().await.is_empty());
+    }
+
+    #[tokio::test]
+    async fn tick_drives_a_hidden_channel() {
+        let record = FanCurveRecord {
+            sensor_id: Some("sensor_0".to_string()),
+            points: vec![(0.0, 50.0), (100.0, 100.0)],
+        };
+        let fan = MockFan::new_with_curve("fan_0", record);
+        let app = make_app(fan.clone(), Some(MockSensor::new("sensor_0", 80.0)));
+        {
+            let mut cfg = app.config.write().await;
+            cfg.channel_visibility
+                .entry("fan_0".into())
+                .or_default()
+                .insert(
+                    halod_shared::types::ChannelKind::Cooling.key("default"),
+                    halod_shared::types::VisibilityState::Hidden,
+                );
+        }
+        crate::application::usecases::device::telemetry::observe(&app).await;
+
+        FanCurveEngine::new(app.clone()).tick(75).await;
+
+        assert_ne!(
+            fan.last_duty(),
+            0,
+            "Hidden only hides the channel in the UI; the curve keeps driving it"
+        );
+    }
+
+    #[tokio::test]
     async fn tick_skips_hidden_fan() {
         let record = FanCurveRecord {
             sensor_id: Some("sensor_0".to_string()),
@@ -1485,6 +1545,7 @@ mod tests {
                 controllable: true,
                 rpm: None,
                 duty: Some(*self.duty.lock().unwrap()),
+                visibility: Default::default(),
             }]
         }
         async fn get_cooling_status(&self, channel_id: &str) -> anyhow::Result<CoolingChannel> {

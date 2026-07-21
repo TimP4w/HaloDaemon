@@ -588,6 +588,17 @@ async fn dispatch(
             )
             .await
         }
+        DaemonCommand::SetChannelVisibility {
+            device_id,
+            kind,
+            channel_id,
+            state,
+        } => {
+            crate::application::usecases::device::visibility::set_channel_visibility(
+                device_id, kind, channel_id, state, app,
+            )
+            .await
+        }
         DaemonCommand::SetKeyboardLayout { id, selection } => {
             crate::application::usecases::device::keyboard_layout::set_keyboard_layout(
                 id, selection, app,

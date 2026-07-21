@@ -47,6 +47,7 @@ pub fn load() -> Result<Config> {
         gui: main.gui,
         device_layouts: devices.device_layouts,
         sensor_visibility: devices.sensor_visibility,
+        channel_visibility: devices.channel_visibility,
         device_transforms: devices.device_transforms,
         keyboard_layouts: devices.keyboard_layouts,
         app_rules: app_rules.app_rules,
@@ -71,6 +72,7 @@ pub fn save(cfg: &Config) -> Result<()> {
             known_devices: cfg.known_devices.clone(),
             device_layouts: cfg.device_layouts.clone(),
             sensor_visibility: cfg.sensor_visibility.clone(),
+            channel_visibility: cfg.channel_visibility.clone(),
             device_transforms: cfg.device_transforms.clone(),
             keyboard_layouts: cfg.keyboard_layouts.clone(),
         })?,
@@ -325,6 +327,8 @@ struct DevicesFile {
     #[serde(default, skip_serializing_if = "HashMap::is_empty")]
     sensor_visibility: HashMap<String, VisibilityState>,
     #[serde(default, skip_serializing_if = "HashMap::is_empty")]
+    channel_visibility: HashMap<String, HashMap<String, VisibilityState>>,
+    #[serde(default, skip_serializing_if = "HashMap::is_empty")]
     device_transforms: HashMap<String, HashMap<String, ZoneContentTransform>>,
     #[serde(default, skip_serializing_if = "HashMap::is_empty")]
     keyboard_layouts: HashMap<String, KeyboardLayoutSelection>,
@@ -455,6 +459,9 @@ pub struct Config {
     pub device_layouts: HashMap<String, DeviceLayout>,
     #[serde(default, skip_serializing_if = "HashMap::is_empty")]
     pub sensor_visibility: HashMap<String, VisibilityState>,
+    /// device_id → `ChannelKind::key(channel_id)` → state. Absent = Visible.
+    #[serde(default, skip_serializing_if = "HashMap::is_empty")]
+    pub channel_visibility: HashMap<String, HashMap<String, VisibilityState>>,
     #[serde(default, skip_serializing_if = "HashMap::is_empty")]
     pub device_transforms: HashMap<String, HashMap<String, ZoneContentTransform>>,
     /// device_id → keyboard layout selection. Absent = Auto/Auto (both axes
@@ -484,6 +491,7 @@ impl Default for Config {
             gui: GuiConfig::default(),
             device_layouts: HashMap::new(),
             sensor_visibility: HashMap::new(),
+            channel_visibility: HashMap::new(),
             device_transforms: HashMap::new(),
             keyboard_layouts: HashMap::new(),
             app_rules: Vec::new(),
@@ -492,9 +500,42 @@ impl Default for Config {
     }
 }
 
+impl Config {
+    /// Whether the engines may drive this channel. `Hidden` only affects the
+    /// UI; `Disabled` means hands off the hardware.
+    pub fn channel_enabled(
+        &self,
+        device_id: &str,
+        kind: halod_shared::types::ChannelKind,
+        channel_id: &str,
+    ) -> bool {
+        self.channel_visibility
+            .get(device_id)
+            .and_then(|channels| channels.get(&kind.key(channel_id)))
+            != Some(&VisibilityState::Disabled)
+    }
+}
+
 #[cfg(test)]
 mod tests {
     use super::*;
+
+    #[test]
+    fn only_a_disabled_channel_is_kept_from_the_engines() {
+        use halod_shared::types::ChannelKind;
+        let mut cfg = Config::default();
+        assert!(cfg.channel_enabled("dev", ChannelKind::Cooling, "fan1"));
+
+        let entry = cfg.channel_visibility.entry("dev".into()).or_default();
+        entry.insert(ChannelKind::Cooling.key("fan1"), VisibilityState::Disabled);
+        entry.insert(ChannelKind::Cooling.key("fan2"), VisibilityState::Hidden);
+        // Same id, different capability — the key must not collide.
+        entry.insert(ChannelKind::Lighting.key("fan1"), VisibilityState::Disabled);
+
+        assert!(!cfg.channel_enabled("dev", ChannelKind::Cooling, "fan1"));
+        assert!(cfg.channel_enabled("dev", ChannelKind::Cooling, "fan2"));
+        assert!(cfg.channel_enabled("other", ChannelKind::Cooling, "fan1"));
+    }
 
     #[test]
     fn gui_config_close_to_tray_defaults_to_true_when_field_absent() {

@@ -2050,6 +2050,26 @@ pub enum ZoneTopology {
     },
 }
 
+/// Which capability a channel id belongs to. Channel ids are device-local and
+/// only unique within one capability, so anything addressing a channel across
+/// capabilities has to carry this too.
+#[derive(Debug, Clone, Copy, PartialEq, Eq, Hash, Serialize, Deserialize)]
+#[serde(rename_all = "snake_case")]
+pub enum ChannelKind {
+    Lighting,
+    Cooling,
+}
+
+impl ChannelKind {
+    /// Stable key for persisting per-channel state in a single flat map.
+    pub fn key(&self, channel_id: &str) -> String {
+        match self {
+            Self::Lighting => format!("lighting:{channel_id}"),
+            Self::Cooling => format!("cooling:{channel_id}"),
+        }
+    }
+}
+
 #[derive(Debug, Clone, Serialize, Deserialize)]
 pub struct LightingChannel {
     pub id: String,
@@ -2060,6 +2080,10 @@ pub struct LightingChannel {
     pub color_order: ColorOrder,
     #[serde(default)]
     pub division: LightingDivision,
+    /// User preference, not a hardware property: `Hidden` drops the channel
+    /// from the UI, `Disabled` also stops the engines driving it.
+    #[serde(default)]
+    pub visibility: VisibilityState,
 }
 
 /// Widget type for one effect parameter
@@ -2445,6 +2469,10 @@ pub struct CoolingChannel {
     pub rpm: Option<u32>,
     #[serde(default, skip_serializing_if = "Option::is_none")]
     pub duty: Option<u8>,
+    /// User preference, not a hardware property: `Hidden` drops the channel
+    /// from the UI, `Disabled` also stops the fan curve driving it.
+    #[serde(default)]
+    pub visibility: VisibilityState,
 }
 
 #[derive(Debug, Clone, Serialize, Deserialize, Default)]
@@ -3167,6 +3195,7 @@ mod tests {
                     controllable: true,
                     rpm: Some(2600),
                     duty: Some(70),
+                    visibility: Default::default(),
                 },
                 CoolingChannel {
                     id: "fan1".into(),
@@ -3175,6 +3204,7 @@ mod tests {
                     controllable: true,
                     rpm: Some(1200),
                     duty: Some(45),
+                    visibility: Default::default(),
                 },
             ],
         });

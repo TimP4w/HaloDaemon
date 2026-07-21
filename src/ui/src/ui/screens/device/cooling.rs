@@ -5,7 +5,9 @@
 use crate::ui::components as widgets;
 use egui::{Align2, Pos2, Rect, Sense, Vec2};
 use halod_shared::commands::DaemonCommand;
-use halod_shared::types::{CoolingChannel, DeviceCapability, FanCurveStatus, Sensor};
+use halod_shared::types::{
+    ChannelKind, CoolingChannel, DeviceCapability, FanCurveStatus, Sensor, VisibilityState,
+};
 
 use super::{editing, DeviceUi, TabCtx};
 use crate::ui::screens::cooling::preset_display_name;
@@ -17,7 +19,9 @@ pub fn show(ui: &mut egui::Ui, ctx: &TabCtx, st: &mut DeviceUi) {
         crate::domain::tour::AnchorId::TabCooling,
         ui.max_rect(),
     );
-    let channels = cooling_channels(ctx.dev);
+    let all_channels = visible_cooling_channels(ctx.dev, true);
+    let has_hidden = all_channels.len() > cooling_channels(ctx.dev).len();
+    let channels = visible_cooling_channels(ctx.dev, st.cooling.show_hidden);
     let default_channel = channels
         .first()
         .map(|c| c.id.clone())
@@ -66,25 +70,68 @@ pub fn show(ui: &mut egui::Ui, ctx: &TabCtx, st: &mut DeviceUi) {
         .and_then(|sid| sensors.iter().find(|(_, s)| &s.id == sid))
         .map(|(_, s)| s.value as f32);
 
-    if channels.len() > 1 {
+    if channels.len() > 1 || has_hidden {
         let label = channels
             .iter()
             .find(|c| c.id == selected)
             .map(|c| c.name.as_str())
             .unwrap_or("Cooling");
-        egui::ComboBox::from_id_salt("cooling_channel")
-            .selected_text(label)
-            .show_ui(ui, |ui| {
-                for channel in &channels {
-                    if ui
-                        .selectable_label(selected == channel.id, &channel.name)
-                        .clicked()
-                    {
-                        st.cooling.channel_id = Some(channel.id.clone());
-                        st.cooling.curve_seeded = false;
+        ui.horizontal(|ui| {
+            egui::ComboBox::from_id_salt("cooling_channel")
+                .selected_text(label)
+                .show_ui(ui, |ui| {
+                    for channel in &channels {
+                        let hidden = channel.visibility != VisibilityState::Visible;
+                        let name = if hidden {
+                            format!("{} ({})", channel.name, t!("cooling.channel_off"))
+                        } else {
+                            channel.name.clone()
+                        };
+                        let resp = ui.selectable_label(selected == channel.id, name);
+                        if resp.clicked() {
+                            st.cooling.channel_id = Some(channel.id.clone());
+                            st.cooling.curve_seeded = false;
+                        }
+                        resp.context_menu(|ui| {
+                            ui.set_width(170.0);
+                            let (label, state) = if hidden {
+                                (t!("cooling.enable_channel"), VisibilityState::Visible)
+                            } else {
+                                (t!("cooling.disable_channel"), VisibilityState::Disabled)
+                            };
+                            if widgets::context_menu_item(ui, &label, theme::TEXT).clicked() {
+                                crate::runtime::ipc::send(
+                                    ctx.cmd,
+                                    DaemonCommand::SetChannelVisibility {
+                                        device_id: ctx.dev.id.clone(),
+                                        kind: ChannelKind::Cooling,
+                                        channel_id: channel.id.clone(),
+                                        state,
+                                    },
+                                );
+                                ui.close();
+                            }
+                        });
                     }
+                });
+            if has_hidden {
+                let label = if st.cooling.show_hidden {
+                    t!("cooling.hide_disabled")
+                } else {
+                    t!("cooling.show_disabled")
+                };
+                if widgets::button(
+                    ui,
+                    &label,
+                    widgets::ButtonKind::Ghost,
+                    egui::vec2(150.0, 28.0),
+                )
+                .clicked()
+                {
+                    st.cooling.show_hidden = !st.cooling.show_hidden;
                 }
-            });
+            }
+        });
         ui.add_space(theme::SPACE_6);
     }
     top_row(ui, ctx, st, &fan, &sensors, sensor_temp, &selected);
@@ -371,8 +418,23 @@ fn curve_preset_command(
 }
 
 fn cooling_channels(dev: &halod_shared::types::WireDevice) -> Vec<CoolingChannel> {
+    visible_cooling_channels(dev, false)
+}
+
+/// The device's cooling channels, minus the ones the user switched off.
+pub fn visible_cooling_channels(
+    dev: &halod_shared::types::WireDevice,
+    include_hidden: bool,
+) -> Vec<CoolingChannel> {
     dev.cooling()
-        .map(|cooling| cooling.channels.clone())
+        .map(|cooling| {
+            cooling
+                .channels
+                .iter()
+                .filter(|channel| include_hidden || channel.visibility == VisibilityState::Visible)
+                .cloned()
+                .collect()
+        })
         .unwrap_or_default()
 }
 

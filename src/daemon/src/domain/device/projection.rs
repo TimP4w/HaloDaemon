@@ -8,7 +8,9 @@ use crate::config::{Config, PlacedZone};
 use crate::domain::cooling::model::FanCurveRecord;
 use crate::domain::device::Device;
 use crate::domain::registry::identity::{detect_conflicts, ConflictEntry};
-use halod_shared::types::{DeviceCapability, EffectParamValue, VisibilityState, WireDevice};
+use halod_shared::types::{
+    ChannelKind, DeviceCapability, EffectParamValue, VisibilityState, WireDevice,
+};
 
 /// One pass over the device registry: wire-serialize each device, apply the
 /// config/HID overlay, and collect the per-domain engine inputs the cooling,
@@ -43,7 +45,9 @@ impl AppState {
             devices.push(d.serialize().await);
         }
 
-        // Collect per-device engine state from device_list (already owned — no extra locks).
+        // Collect per-device engine state from device_list (already owned — no
+        // extra locks). A disabled channel is dropped from the snapshot; the
+        // engines skip it on their own side.
         let mut fan_curves = Vec::new();
         for device in &device_list {
             if let Some(cooling) = device.as_cooling() {
@@ -51,6 +55,9 @@ impl AppState {
                     cooling
                         .curves()
                         .into_iter()
+                        .filter(|(channel_id, _)| {
+                            cfg.channel_enabled(device.id(), ChannelKind::Cooling, channel_id)
+                        })
                         .map(|(channel_id, curve)| (device.id().to_owned(), channel_id, curve)),
                 );
             }
@@ -60,6 +67,9 @@ impl AppState {
             .iter()
             .filter_map(|d| d.as_lighting())
             .flat_map(|s| s.placed_channels())
+            .filter(|zone| {
+                cfg.channel_enabled(&zone.device_id, ChannelKind::Lighting, &zone.channel_id)
+            })
             .collect();
 
         let lcd_templates: HashMap<String, String> = device_list
@@ -124,6 +134,15 @@ impl AppState {
                     sensor.visibility = state.clone();
                 }
             }
+            // Stamp, never drop: the UI greys a hidden channel so it can be
+            // switched back on.
+            let channel_visibility = cfg.channel_visibility.get(device.id());
+            let visibility_of = |kind: ChannelKind, id: &str| {
+                channel_visibility
+                    .and_then(|channels| channels.get(&kind.key(id)))
+                    .cloned()
+                    .unwrap_or_default()
+            };
             for cap in &mut wire.capabilities {
                 match cap {
                     DeviceCapability::Lcd(_) => {}
@@ -133,9 +152,13 @@ impl AppState {
                                 status.channel_transforms = t.clone();
                             }
                         }
+                        for channel in &mut status.descriptor.channels {
+                            channel.visibility = visibility_of(ChannelKind::Lighting, &channel.id);
+                        }
                     }
                     DeviceCapability::Cooling(status) => {
                         for channel in &mut status.channels {
+                            channel.visibility = visibility_of(ChannelKind::Cooling, &channel.id);
                             let prefix = format!("cooling_{}_{}", device.id(), channel.id);
                             if let Some(sensor) = sensors
                                 .iter()
@@ -321,6 +344,7 @@ mod tests {
             controllable: true,
             rpm: Some(900),
             duty: Some(28),
+            visibility: Default::default(),
         };
         let fresh = CoolingChannel {
             rpm: Some(2200),

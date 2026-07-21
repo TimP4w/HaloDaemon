@@ -312,6 +312,7 @@ mod tests {
             display_name: name.into(),
             max_leds,
             color_order: ColorOrder::Rgb,
+            cooling_channel: None,
         }
     }
 

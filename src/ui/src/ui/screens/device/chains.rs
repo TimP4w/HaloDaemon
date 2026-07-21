@@ -932,6 +932,7 @@ mod tests {
                                 locked: false,
                             }],
                         },
+                        visibility: Default::default(),
                     }],
                     native_effects: vec![],
                 },

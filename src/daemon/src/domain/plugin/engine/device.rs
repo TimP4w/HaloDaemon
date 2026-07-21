@@ -13,10 +13,10 @@ use async_trait::async_trait;
 use halod_shared::keyboard::{KeyId, KeyVariant, KeyboardLayoutStatus, VisualKey};
 use halod_shared::types::{
     Action, Battery, Boolean, ButtonAction, ButtonDescriptor, ButtonMapping, CategoryLayout,
-    Choice, ConnectionStatus, CoolingChannel, CoolingChannelKind, DeviceCapability, DeviceType,
-    DpiMode, DpiStatus, Equalizer, KeyRemapStatus, KeyboardFormFactor, KeyboardLayout,
-    LcdDescriptor, LightingChannel, LightingDescriptor, LightingState, NativeEffect, Permission,
-    PluginKind, Range, ScreenRotation, ScreenShape, Sensor, WriteRateStatus,
+    Choice, ConnectionStatus, CoolingChannel, DeviceCapability, DeviceType, DpiMode, DpiStatus,
+    Equalizer, KeyRemapStatus, KeyboardFormFactor, KeyboardLayout, LcdDescriptor, LightingChannel,
+    LightingDescriptor, LightingState, NativeEffect, Permission, PluginKind, Range, ScreenRotation,
+    ScreenShape, Sensor, WriteRateStatus,
 };
 use halod_shared::zone_transform::build_permutation;
 
@@ -33,7 +33,6 @@ use crate::domain::device::{
 };
 
 use super::chain_leaf::ChainLeaf;
-use super::cooling_channel_leaf::CoolingChannelLeaf;
 use super::manifest::{
     topology_from, AccessoryManifest, ActionDef, BooleanDef, ChoiceDef, DeviceSpec, PluginManifest,
     RangeDef,
@@ -577,8 +576,6 @@ pub struct LuaDevice {
     rgb_slot: LightingStateSlot,
     cooling_slot: CoolingStateSlot,
     cooling_channels: Arc<OnceLock<Vec<CoolingChannel>>>,
-    cooling_builtin_channels: OnceLock<HashSet<String>>,
-    cooling_as_devices: AtomicBool,
 
     /// Last sensor telemetry sampled by the status poll.
     sensor_cache: Arc<Mutex<Vec<Sensor>>>,
@@ -604,10 +601,8 @@ pub struct LuaDevice {
     chain_host: OnceLock<Arc<LightingDivisionHost>>,
     /// Weak back-reference so `discover_children` can hand children a `FanHub`.
     self_ref: Weak<LuaDevice>,
-    chain_channels: Vec<ChannelDescriptor>,
-    /// Channels reported dynamically by `initialize` (capacity known only at
-    /// runtime, e.g. ARGB headers read from a config table). Takes precedence
-    /// over `chain_channels` once set.
+    /// The `chainable` subset of the channels `initialize` reports (capacity is
+    /// known only at runtime, e.g. ARGB headers read from a config table).
     dynamic_chain_channels: OnceLock<Vec<ChannelDescriptor>>,
     accessories: Vec<AccessoryManifest>,
     dynamic_accessories: OnceLock<Vec<AccessoryManifest>>,
@@ -754,9 +749,6 @@ impl LuaDevice {
             PluginIo::Stream { transport, .. } => transport.event_receiver(),
             _ => None,
         };
-        // Canonical packages report physical channels from initialize. Do not
-        // seed the worker from the removed static RGB catalog section.
-        let channels = Vec::new();
         let audio_registry: super::audio_api::SinkRegistry =
             std::sync::Arc::new(std::sync::Mutex::new(Vec::new()));
         let http = super::worker::http_runtime_for(manifest, &granted, &config);
@@ -770,7 +762,6 @@ impl LuaDevice {
             granted,
             config,
             handle.clone(),
-            channels,
             audio_registry.clone(),
             data,
             http,
@@ -1201,8 +1192,6 @@ impl LuaDevice {
             rgb_slot: LightingStateSlot::default(),
             cooling_slot: CoolingStateSlot::default(),
             cooling_channels: Arc::new(OnceLock::new()),
-            cooling_builtin_channels: OnceLock::new(),
-            cooling_as_devices: AtomicBool::new(false),
             sensor_cache: Arc::new(Mutex::new(Vec::new())),
             poll_task: None,
             poll_paused: Arc::new(AtomicBool::new(false)),
@@ -1214,7 +1203,6 @@ impl LuaDevice {
             audio_guard: None,
             chain_host: OnceLock::new(),
             self_ref: Weak::new(),
-            chain_channels: Vec::new(),
             dynamic_chain_channels: OnceLock::new(),
             accessories: Vec::new(),
             dynamic_accessories: OnceLock::new(),
@@ -1492,6 +1480,7 @@ fn build_dynamic_descriptor(
                     topology,
                     color_order: Default::default(),
                     division: Default::default(),
+                    visibility: Default::default(),
                 }
             } else if matches!(topology, ZoneTopology::Keyboard { .. })
                 && keyboard_keys.is_some_and(|keys| !keys.is_empty())
@@ -1503,6 +1492,7 @@ fn build_dynamic_descriptor(
                     topology,
                     color_order: Default::default(),
                     division: Default::default(),
+                    visibility: Default::default(),
                 }
             } else if !z.led_ids.is_empty() {
                 let columns = if matches!(topology, ZoneTopology::Keyboard { .. }) {
@@ -1535,6 +1525,7 @@ fn build_dynamic_descriptor(
                     topology,
                     color_order: Default::default(),
                     division: Default::default(),
+                    visibility: Default::default(),
                 }
             } else if matches!(topology, ZoneTopology::Linear) {
                 linear_lighting_channel(&z.id, &z.name, led_count as usize)
@@ -1546,6 +1537,7 @@ fn build_dynamic_descriptor(
                     topology,
                     color_order: Default::default(),
                     division: Default::default(),
+                    visibility: Default::default(),
                 }
             }
         })
@@ -1586,6 +1578,10 @@ mod dynamic_rgb_descriptor_tests {
                 rings: 0,
                 keyboard_form_factor: None,
                 keyboard_layout: None,
+                chainable: false,
+                max_leds: 0,
+                color_order: Default::default(),
+                cooling_channel: None,
             }],
             Vec::new(),
             None,
@@ -1726,11 +1722,25 @@ impl Device for LuaDevice {
             let _ = self.keyboard_descriptor.set(keyboard);
         }
         if let Some(channels) = outcome.channels {
+            let (chainable, plain): (Vec<_>, Vec<_>) =
+                channels.into_iter().partition(|channel| channel.chainable);
+            let _ = self.dynamic_chain_channels.set(
+                chainable
+                    .into_iter()
+                    .map(|c| ChannelDescriptor {
+                        channel_id: c.id,
+                        display_name: c.name,
+                        max_leds: c.max_leds,
+                        color_order: c.color_order,
+                        cooling_channel: c.cooling_channel,
+                    })
+                    .collect(),
+            );
             let effects = outcome.native_effects.unwrap_or_default();
             let keyboard = self.keyboard_descriptor.get();
             let ansi_keys = keyboard.map(|descriptor| visual_keys(&descriptor.ansi));
             let _ = self.dynamic_rgb_descriptor.set(build_dynamic_descriptor(
-                channels.clone(),
+                plain.clone(),
                 effects.clone(),
                 ansi_keys.as_deref(),
             ));
@@ -1738,7 +1748,7 @@ impl Device for LuaDevice {
                 let iso_keys = visual_keys(iso);
                 let _ = self
                     .dynamic_rgb_iso_descriptor
-                    .set(build_dynamic_descriptor(channels, effects, Some(&iso_keys)));
+                    .set(build_dynamic_descriptor(plain, effects, Some(&iso_keys)));
             }
         }
         if let Some(lcd) = outcome.lcd {
@@ -1750,18 +1760,6 @@ impl Device for LuaDevice {
             self.lcd_needs_rgb_restore
                 .store(lcd.needs_rgb_restore, Ordering::Relaxed);
             let _ = self.lcd_descriptor.set(build_lcd_descriptor(&lcd));
-        }
-        if let Some(channels) = outcome.division {
-            let descriptors = channels
-                .into_iter()
-                .map(|c| ChannelDescriptor {
-                    channel_id: c.id,
-                    display_name: c.name,
-                    max_leds: c.max_leds,
-                    color_order: c.color_order,
-                })
-                .collect();
-            let _ = self.dynamic_chain_channels.set(descriptors);
         }
         if let Some(accessories) = outcome.accessories {
             let _ = self.dynamic_accessories.set(accessories);
@@ -1783,21 +1781,6 @@ impl Device for LuaDevice {
             *self.dpi_state.lock_recover() = dpi_state_from_runtime(&dpi);
         }
         if let Some(cooling) = outcome.cooling {
-            let project_channels = cooling.as_devices
-                || (self.plugin_type == PluginKind::Device
-                    && !self.dynamic_children
-                    && !cooling.channels.is_empty());
-            let builtin_channels: HashSet<_> = cooling
-                .channels
-                .iter()
-                .filter(|channel| channel.builtin)
-                .map(|channel| channel.id.clone())
-                .collect();
-            self.cooling_as_devices.store(
-                project_channels && builtin_channels.len() < cooling.channels.len(),
-                Ordering::Release,
-            );
-            let _ = self.cooling_builtin_channels.set(builtin_channels);
             let _ = self.cooling_channels.set(
                 cooling
                     .channels
@@ -1809,6 +1792,7 @@ impl Device for LuaDevice {
                         controllable: c.controllable,
                         rpm: None,
                         duty: None,
+                        visibility: Default::default(),
                     })
                     .collect(),
             );
@@ -1951,13 +1935,7 @@ impl Device for LuaDevice {
         for cap in &active {
             match cap {
                 Cap::Lighting => caps.push(CapabilityRef::Lighting(self)),
-                Cap::Cooling
-                    if !self.cooling_as_devices.load(Ordering::Acquire)
-                        || self
-                            .cooling_builtin_channels
-                            .get()
-                            .is_some_and(|channels| !channels.is_empty()) =>
-                {
+                Cap::Cooling if !self.cooling_channels().is_empty() => {
                     caps.push(CapabilityRef::Cooling(self));
                 }
                 Cap::Cooling => {}
@@ -1981,13 +1959,6 @@ impl Device for LuaDevice {
             }
         }
         if self.plugin_type == PluginKind::Integration || self.dynamic_children {
-            caps.push(CapabilityRef::Controller(self));
-        }
-        if self.cooling_as_devices.load(Ordering::Acquire)
-            && !caps
-                .iter()
-                .any(|cap| matches!(cap, CapabilityRef::Controller(_)))
-        {
             caps.push(CapabilityRef::Controller(self));
         }
         caps
@@ -2087,10 +2058,8 @@ fn apply_per_led_transforms(
 impl CoolingCapability for LuaDevice {
     fn cooling_channels(&self) -> Vec<CoolingChannel> {
         let mut channels = self.cooling_channels.get().cloned().unwrap_or_default();
-        if self.cooling_as_devices.load(Ordering::Acquire) {
-            let builtin = self.cooling_builtin_channels.get();
-            channels.retain(|channel| builtin.is_some_and(|ids| ids.contains(&channel.id)));
-        }
+        let claimed = self.claimed_cooling_channels();
+        channels.retain(|channel| !claimed.contains(&channel.id));
         let observed = self.cooling_cache.lock_recover();
         for channel in &mut channels {
             if let Some(current) = observed.get(&channel.id) {
@@ -2131,10 +2100,8 @@ impl CoolingCapability for LuaDevice {
 
     fn curves(&self) -> HashMap<String, crate::domain::cooling::model::FanCurveRecord> {
         let mut curves = self.cooling_slot.curves();
-        if self.cooling_as_devices.load(Ordering::Acquire) {
-            let builtin = self.cooling_builtin_channels.get();
-            curves.retain(|channel_id, _| builtin.is_some_and(|ids| ids.contains(channel_id)));
-        }
+        let claimed = self.claimed_cooling_channels();
+        curves.retain(|channel_id, _| !claimed.contains(channel_id));
         curves
     }
 
@@ -2149,13 +2116,8 @@ impl CoolingCapability for LuaDevice {
 
     async fn restore_state(&self, value: &serde_json::Value) {
         self.cooling_slot.load(value);
-        if self.cooling_as_devices.load(Ordering::Acquire) {
-            let builtin = self.cooling_builtin_channels.get();
-            for channel_id in self.cooling_slot.curves().keys() {
-                if !builtin.is_some_and(|ids| ids.contains(channel_id)) {
-                    self.cooling_slot.clear_curve(channel_id);
-                }
-            }
+        for channel_id in self.claimed_cooling_channels() {
+            self.cooling_slot.clear_curve(&channel_id);
         }
     }
 
@@ -2166,10 +2128,8 @@ impl CoolingCapability for LuaDevice {
             .values()
             .cloned()
             .collect();
-        if self.cooling_as_devices.load(Ordering::Acquire) {
-            let builtin = self.cooling_builtin_channels.get();
-            channels.retain(|channel| builtin.is_some_and(|ids| ids.contains(&channel.id)));
-        }
+        let claimed = self.claimed_cooling_channels();
+        channels.retain(|channel| !claimed.contains(&channel.id));
         channels
     }
 }
@@ -2205,66 +2165,13 @@ impl Controller for LuaDevice {
         if self.plugin_type == PluginKind::Integration || self.dynamic_children {
             return self.discover_controllers().await;
         }
-        let cooling_children = self.discover_cooling_channel_devices().await;
-        let mut source_channels: HashMap<String, CoolingChannel> = cooling_children
-            .iter()
-            .map(|child| (child.device.id().to_owned(), child.source_channel.clone()))
-            .collect();
-        let mut children: Vec<Arc<dyn Device>> = cooling_children
-            .into_iter()
-            .map(|child| child.device)
-            .collect();
-        let accessories = self.discover_chain_accessories().await;
-
-        // Cooling outputs are the canonical devices. When accessory discovery
-        // finds lighting for the same physical fan, attach that capability to
-        // the cooling leaf instead of replacing it with a lighting-owned child.
-        // Pairing remains positional because the plugin protocol reports the
-        // fan accessory separately from its declared cooling channel.
-        for accessory in accessories {
-            let combined_fan = accessory.device.wire_device_type() == DeviceType::Fan
-                && accessory.device.as_lighting().is_some()
-                && accessory.device.as_cooling().is_some();
-            let matching_fan = combined_fan.then(|| {
-                children.iter().position(|child| {
-                    child.as_lighting().is_none()
-                        && child
-                            .as_cooling()
-                            .and_then(|cooling| cooling.cooling_channels().first().cloned())
-                            .is_some_and(|channel| channel.kind == CoolingChannelKind::Fan)
-                })
-            });
-
-            let child = if let Some(Some(index)) = matching_fan {
-                let cooling = children.remove(index);
-                let channel = source_channels
-                    .remove(cooling.id())
-                    .expect("matched cooling leaf lost its source channel");
-                let Some(parent) = self.self_ref.upgrade() else {
-                    children.push(cooling);
-                    children.push(accessory.device);
-                    continue;
-                };
-                let hub: Arc<dyn CoolingHub> = parent;
-                Arc::new(
-                    CoolingChannelLeaf::new(
-                        accessory.device.id().to_owned(),
-                        self.id.clone(),
-                        self.vendor.clone(),
-                        channel,
-                        hub,
-                    )
-                    .with_lighting(accessory.device),
-                ) as Arc<dyn Device>
-            } else {
-                accessory.device
-            };
-
+        let mut children = Vec::new();
+        for accessory in self.discover_chain_accessories().await {
             if let Some(host) = self.chain_host.get() {
-                host.register_auto_link(&accessory.channel_id, child.clone())
+                host.register_auto_link(&accessory.channel_id, accessory.device.clone())
                     .await;
             }
-            children.push(child);
+            children.push(accessory.device);
         }
         children
     }
@@ -2332,11 +2239,6 @@ struct DiscoveredChainAccessory {
     device: Arc<dyn Device>,
 }
 
-struct DiscoveredCoolingChannel {
-    device: Arc<dyn Device>,
-    source_channel: CoolingChannel,
-}
-
 fn child_device_id(root: &str, controller: &DetectedController) -> String {
     controller
         .id
@@ -2346,38 +2248,19 @@ fn child_device_id(root: &str, controller: &DetectedController) -> String {
 }
 
 impl LuaDevice {
-    async fn discover_cooling_channel_devices(&self) -> Vec<DiscoveredCoolingChannel> {
-        if !self.cooling_as_devices.load(Ordering::Acquire) {
-            return Vec::new();
-        }
-        let Some(parent) = self.self_ref.upgrade() else {
-            return Vec::new();
+    /// Cooling channels a detected chain child has taken over. They belong to
+    /// that child alone: the parent must not expose them anywhere.
+    fn claimed_cooling_channels(&self) -> HashSet<String> {
+        let Some(host) = self.chain_host.get() else {
+            return HashSet::new();
         };
-        let hub: Arc<dyn CoolingHub> = parent;
-        self.cooling_channels
+        let detected = host.detected_channels();
+        self.dynamic_chain_channels
             .get()
             .into_iter()
             .flatten()
-            .filter(|channel| {
-                !self
-                    .cooling_builtin_channels
-                    .get()
-                    .is_some_and(|ids| ids.contains(&channel.id))
-            })
-            .cloned()
-            .map(|channel| {
-                let device = Arc::new(CoolingChannelLeaf::new(
-                    format!("{}_cooling_{}", self.id, channel.id),
-                    self.id.clone(),
-                    self.vendor.clone(),
-                    channel.clone(),
-                    hub.clone(),
-                )) as Arc<dyn Device>;
-                DiscoveredCoolingChannel {
-                    device,
-                    source_channel: channel,
-                }
-            })
+            .filter(|channel| detected.contains(&channel.channel_id))
+            .filter_map(|channel| channel.cooling_channel.clone())
             .collect()
     }
 
@@ -2403,6 +2286,11 @@ impl LuaDevice {
         let cooling_hub: Arc<dyn CoolingHub> = parent;
         let chain_hub: Arc<dyn LightingDivisionHub> = host.clone();
 
+        let chainable = self
+            .dynamic_chain_channels
+            .get()
+            .cloned()
+            .unwrap_or_default();
         let mut out = Vec::new();
         for d in detected {
             let Some(accessory) = self
@@ -2420,12 +2308,16 @@ impl LuaDevice {
                 continue;
             };
             let channel_str = d.channel.to_string();
+            let owned_cooling = chainable
+                .iter()
+                .find(|channel| channel.channel_id == channel_str)
+                .and_then(|channel| channel.cooling_channel.clone());
             let leaf: Arc<dyn Device> = Arc::new(ChainLeaf::new(
                 format!("{}_acc_{}_{}", self.id, channel_str, d.accessory),
                 self.id.clone(),
                 self.vendor.clone(),
                 channel_str.clone(),
-                d.channel,
+                owned_cooling,
                 accessory,
                 chain_hub.clone(),
                 cooling_hub.clone(),
@@ -3103,13 +2995,12 @@ impl LightingDivisionAdapter for LuaDevice {
         self.id.clone()
     }
     fn channels(&self) -> Vec<ChannelDescriptor> {
-        // Runtime-reported channels (from `initialize`) win over the static
-        // manifest ones. `LightingDivisionHost` reads this live, so channels discovered
-        // during init appear even though the host was built before it.
+        // `LightingDivisionHost` reads this live, so channels reported by
+        // `initialize` appear even though the host was built before it ran.
         self.dynamic_chain_channels
             .get()
             .cloned()
-            .unwrap_or_else(|| self.chain_channels.clone())
+            .unwrap_or_default()
     }
     async fn write_divided_frame(&self, channel_id: &str, bytes: &[u8]) -> Result<()> {
         self.worker()?.write_lighting_frame(channel_id, bytes).await
@@ -3381,6 +3272,10 @@ mod tests {
                 rings: 0,
                 keyboard_form_factor: None,
                 keyboard_layout: None,
+                chainable: false,
+                max_leds: 0,
+                color_order: Default::default(),
+                cooling_channel: None,
             }],
             Vec::new(),
             None,
@@ -3427,15 +3322,17 @@ mod tests {
         assert!(caps
             .iter()
             .any(|cap| matches!(cap, CapabilityRef::Lighting(_))));
-        assert!(!caps
+        // Cooling channels stay on the device that declares them.
+        assert!(caps
             .iter()
             .any(|cap| matches!(cap, CapabilityRef::Cooling(_))));
-        assert!(caps
+        assert!(!caps
             .iter()
             .any(|cap| matches!(cap, CapabilityRef::Controller(_))));
         assert!(!caps
             .iter()
             .any(|cap| matches!(cap, CapabilityRef::Sensor(_))));
+        assert!(Controller::discover_children(&dev).await.is_empty());
         assert_eq!(
             LightingCapability::descriptor(&dev).channels[0].leds[0].id,
             7
@@ -3443,43 +3340,64 @@ mod tests {
         dev.close().await;
     }
 
-    #[tokio::test(flavor = "multi_thread", worker_threads = 2)]
-    async fn combined_chain_fan_routes_default_to_its_source_channel() {
-        let script = r#"
-            return {
+    /// A chainable channel that declares `cooling_channel` and a plugin whose
+    /// `detect_accessories` reply is driven by `attached`.
+    fn owned_cooling_script(attached: bool) -> String {
+        format!(
+            r#"
+            return {{
               initialize = function()
-                return {
-                  cooling = { as_devices = true, channels = {
-                    { id = "fan1", name = "Radiator fan", kind = "fan", controllable = true },
-                  } },
-                  division = { { id = "0", name = "Fan chain", max_leds = 40 } },
-                  accessories = {
-                    { id = 30, name = "F360 RGB Core", led_count = 24,
-                      topology = "rings", rings = 3, fan = true },
-                  },
-                }
+                return {{
+                  channels = {{
+                    {{ id = "ring", name = "Pump Ring", topology = "ring", led_count = 24 }},
+                    {{ id = "0", name = "Fan chain", chainable = true, max_leds = 40,
+                       cooling_channel = "fan1" }},
+                  }},
+                  cooling = {{ channels = {{
+                    {{ id = "pump", name = "Pump", kind = "pump", controllable = true }},
+                    {{ id = "fan1", name = "Radiator fan", kind = "fan", controllable = true }},
+                  }} }},
+                  accessories = {{
+                    {{ id = 30, name = "F360 RGB Core", led_count = 24,
+                       topology = "rings", rings = 3, fan = true }},
+                  }},
+                }}
               end,
               detect_accessories = function()
-                return { { channel = 0, accessory = 30 } }
+                return {}
               end,
               get_cooling_status = function(_, channel)
-                if channel ~= "fan1" then error("unknown cooling channel: " .. channel) end
-                return { id = channel, name = "Radiator fan", kind = "fan",
-                         controllable = true, duty = 50, rpm = 1000 }
+                if channel ~= "pump" and channel ~= "fan1" then
+                  error("unknown cooling channel: " .. channel)
+                end
+                return {{ id = channel, name = channel, kind = "fan",
+                         controllable = true, duty = 50, rpm = 1000 }}
               end,
               set_cooling_duty = function(_, channel)
-                if channel ~= "fan1" then error("unknown cooling channel: " .. channel) end
+                if channel ~= "pump" and channel ~= "fan1" then
+                  error("unknown cooling channel: " .. channel)
+                end
               end,
+            }}
+        "#,
+            if attached {
+                "{ { channel = 0, accessory = 30 } }"
+            } else {
+                "{}"
             }
-        "#;
-        let (_tmp, manifest) = test_manifest(
-            "combined_chain_fan",
-            &["cooling", "lighting", "lighting_division"],
-            script,
-        );
+        )
+    }
+
+    async fn owned_cooling_device(
+        name: &str,
+        attached: bool,
+    ) -> (tempfile::TempDir, Arc<LuaDevice>) {
+        let script = owned_cooling_script(attached);
+        let (tmp, manifest) =
+            test_manifest(name, &["cooling", "lighting", "lighting_division"], &script);
         let dev = Arc::new_cyclic(|weak| {
             let mut dev = hid_device(
-                "combined_chain_fan-0",
+                &format!("{name}-0"),
                 &manifest,
                 Arc::new(MockTransport::empty()),
             );
@@ -3491,88 +3409,138 @@ mod tests {
             adapter,
         ));
         assert!(dev.initialize().await.unwrap());
-
-        let children = Controller::discover_children(dev.as_ref()).await;
-        let fan = children
-            .iter()
-            .find(|child| child.id().contains("_acc_0_30"))
-            .unwrap_or_else(|| {
-                panic!(
-                    "combined fan accessory was not discovered: {:?}",
-                    children.iter().map(|child| child.id()).collect::<Vec<_>>()
-                )
-            });
-        let cooling = fan.as_cooling().expect("combined fan lost cooling");
-        assert_eq!(cooling.cooling_channels()[0].id, "default");
-        cooling.set_cooling_duty("default", 65).await.unwrap();
-
-        dev.close().await;
+        (tmp, dev)
     }
 
     #[tokio::test(flavor = "multi_thread", worker_threads = 2)]
-    async fn builtin_cooling_channel_stays_on_root_and_other_channels_become_devices() {
-        let script = r#"
-            return {
-              initialize = function()
-                return { cooling = { as_devices = true, channels = {
-                  { id = "pump", name = "Pump", kind = "pump",
-                    controllable = true, builtin = true },
-                  { id = "fan1", name = "Radiator fan", kind = "fan",
-                    controllable = true },
-                } } }
-              end,
-              get_cooling_status = function(_, channel)
-                if channel ~= "pump" and channel ~= "fan1" then
-                  error("unknown cooling channel: " .. channel)
-                end
-                return { id = channel, name = channel, kind = channel == "pump" and "pump" or "fan",
-                         controllable = true, duty = 50, rpm = 1000 }
-              end,
-              set_cooling_duty = function(_, channel)
-                if channel ~= "pump" and channel ~= "fan1" then
-                  error("unknown cooling channel: " .. channel)
-                end
-              end,
-            }
-        "#;
-        let (_tmp, manifest) = test_manifest("builtin_pump", &["cooling"], script);
-        let dev = Arc::new_cyclic(|weak| {
-            let mut dev = hid_device(
-                "builtin_pump-0",
-                &manifest,
-                Arc::new(MockTransport::empty()),
-            );
-            dev.set_self_ref(weak.clone());
-            dev
-        });
-        assert!(dev.initialize().await.unwrap());
+    async fn detected_chain_child_takes_sole_ownership_of_its_declared_cooling_channel() {
+        let (_tmp, dev) = owned_cooling_device("owned_cooling_attached", true).await;
+        let children = Controller::discover_children(dev.as_ref()).await;
 
-        let root_cooling = dev.as_cooling().expect("root lost builtin pump");
+        let fan = children
+            .iter()
+            .find(|child| child.id().contains("_acc_0_30"))
+            .expect("fan accessory was not discovered");
+        // The child drives the parent's "fan1" through its own single channel;
+        // the Lua script rejects any other source channel.
+        let cooling = fan.as_cooling().expect("fan child lost cooling");
+        assert_eq!(cooling.cooling_channels().len(), 1);
+        cooling.set_cooling_duty("fan", 65).await.unwrap();
+
+        // The parent keeps the pump and gives up the radiator fan entirely.
+        let root = dev.as_cooling().expect("root lost its pump");
         assert_eq!(
-            root_cooling
-                .cooling_channels()
+            root.cooling_channels()
                 .into_iter()
                 .map(|channel| channel.id)
                 .collect::<Vec<_>>(),
             ["pump"]
         );
-        root_cooling.set_cooling_duty("pump", 65).await.unwrap();
-        root_cooling
-            .restore_state(&serde_json::json!({
-                "pump": { "sensor_id": null, "points": [[30.0, 30.0], [80.0, 100.0]] },
-                "fan1": { "sensor_id": null, "points": [[30.0, 30.0], [80.0, 100.0]] }
-            }))
-            .await;
-        assert!(root_cooling.curve("pump").is_some());
-        assert!(root_cooling.curve("fan1").is_none());
-        assert_eq!(root_cooling.curves().len(), 1);
+        assert!(root.cached_cooling_status().iter().all(|c| c.id != "fan1"));
 
+        root.restore_state(&serde_json::json!({
+            "pump": { "sensor_id": null, "points": [[30.0, 30.0], [80.0, 100.0]] },
+            "fan1": { "sensor_id": null, "points": [[30.0, 30.0], [80.0, 100.0]] }
+        }))
+        .await;
+        assert!(root.curve("pump").is_some());
+        assert!(root.curve("fan1").is_none());
+
+        dev.close().await;
+    }
+
+    #[tokio::test(flavor = "multi_thread", worker_threads = 2)]
+    async fn unclaimed_cooling_channel_stays_an_ordinary_parent_channel() {
+        let (_tmp, dev) = owned_cooling_device("owned_cooling_detached", false).await;
         let children = Controller::discover_children(dev.as_ref()).await;
-        assert_eq!(children.len(), 1);
-        assert_eq!(children[0].wire_device_type(), DeviceType::Fan);
-        let fan = children[0].as_cooling().expect("fan child lost cooling");
-        assert_eq!(fan.cooling_channels()[0].id, "default");
-        fan.set_cooling_duty("default", 65).await.unwrap();
+        assert!(children.is_empty(), "nothing is attached to the chain");
+
+        let root = dev.as_cooling().expect("root lost its cooling");
+        assert_eq!(
+            root.cooling_channels()
+                .into_iter()
+                .map(|channel| channel.id)
+                .collect::<Vec<_>>(),
+            ["pump", "fan1"]
+        );
+        root.set_cooling_duty("fan1", 65).await.unwrap();
+
+        dev.close().await;
+    }
+
+    /// The `nuvoton_lpcio` / `hwmon` shape: a `dynamic_children` root whose
+    /// manifest advertises cooling, but where only the enumerated `Fan N`
+    /// children own a PWM channel. The root must not present itself as a fan.
+    #[tokio::test(flavor = "multi_thread", worker_threads = 2)]
+    async fn a_dynamic_children_root_without_channels_is_not_a_cooling_device() {
+        let script = r#"
+            return {
+              initialize = function(dev)
+                if dev.match.key then
+                  return { ok = true, capabilities = { "cooling" },
+                    cooling = { channels = {
+                      { id = "fan", name = "Fan 1", kind = "fan", controllable = true },
+                    } } }
+                end
+                return { ok = true }
+              end,
+              enumerate_controllers = function(dev)
+                if dev.match.key then return {} end
+                return { { index = 0, key = "0", id = "superio_fan1", name = "Fan 1" } }
+              end,
+              get_cooling_status = function(_, channel)
+                return { id = channel, name = "Fan 1", kind = "fan",
+                         controllable = true, duty = 40, rpm = 900 }
+              end,
+              set_cooling_duty = function() end,
+            }
+        "#;
+        let (_tmp, mut manifest) = test_manifest("superio_root", &["sensors", "cooling"], script);
+        manifest.dynamic_children = true;
+        let dev = hid_device(
+            "superio_root-0",
+            &manifest,
+            Arc::new(MockTransport::empty()),
+        );
+        assert!(dev.initialize().await.unwrap());
+
+        let caps = dev.capabilities();
+        assert!(
+            !caps
+                .iter()
+                .any(|cap| matches!(cap, CapabilityRef::Cooling(_))),
+            "the controller declares no channel of its own"
+        );
+        assert!(caps
+            .iter()
+            .any(|cap| matches!(cap, CapabilityRef::Controller(_))));
+        dev.close().await;
+    }
+
+    #[tokio::test(flavor = "multi_thread", worker_threads = 2)]
+    async fn chainable_channels_are_divisible_and_leave_the_plain_descriptor() {
+        let (_tmp, dev) = owned_cooling_device("chainable_descriptor", true).await;
+        let _ = Controller::discover_children(dev.as_ref()).await;
+
+        // The plain lighting descriptor holds only the non-chainable channel.
+        assert_eq!(
+            LightingCapability::descriptor(dev.as_ref())
+                .channels
+                .iter()
+                .map(|channel| channel.id.clone())
+                .collect::<Vec<_>>(),
+            ["ring"]
+        );
+
+        // The chain host mints the chainable one, and only it is divisible.
+        let host = dev.chain_host().expect("chainable device lost its host");
+        let chain = host.lighting_channels();
+        assert_eq!(chain.len(), 1);
+        assert_eq!(chain[0].id, "0");
+        assert!(matches!(
+            chain[0].division,
+            halod_shared::types::LightingDivision::Divisible { max_leds: 40, .. }
+        ));
 
         dev.close().await;
     }

@@ -80,7 +80,7 @@ pub fn show(
         .auto_shrink([false, false])
         .show(ui, |ui| {
             widgets::page_frame(ui, |ui| {
-                let coolers: Vec<(&WireDevice, Option<&halod_shared::types::CoolingChannel>)> =
+                let mut coolers: Vec<(&WireDevice, Option<&halod_shared::types::CoolingChannel>)> =
                     state
                         .devices
                         .iter()
@@ -89,11 +89,24 @@ pub fn show(
                             Some(cooling) => cooling
                                 .channels
                                 .iter()
+                                .filter(|channel| {
+                                    channel.visibility
+                                        == halod_shared::types::VisibilityState::Visible
+                                })
                                 .map(|channel| (device, Some(channel)))
                                 .collect::<Vec<_>>(),
                             None => Vec::new(),
                         })
                         .collect();
+                coolers.sort_by_key(|(device, channel)| {
+                    let channel_id = channel.map(|c| c.id.as_str()).unwrap_or("default");
+                    let has_sensor = state.cooling.fan_curves.iter().any(|c| {
+                        c.device_id == device.id
+                            && c.channel_id == channel_id
+                            && c.sensor_id.is_some()
+                    });
+                    is_idle(channel.and_then(|c| c.rpm), has_sensor)
+                });
 
                 widgets::page_header(
                     ui,
@@ -184,6 +197,10 @@ fn cooler_card(
             }
         })
         .unwrap_or_else(|| dev.name.clone());
+
+    if is_idle(channel.and_then(|c| c.rpm), sensor_id.is_some()) {
+        ui.multiply_opacity(IDLE_OPACITY);
+    }
 
     widgets::card(ui, |ui| {
         // ── Header: rotating fan + name/type + RPM ────────────────────────────
@@ -464,6 +481,15 @@ fn fan_icon(p: &egui::Painter, center: Pos2, r: f32, time: f64, rpm: u32, color:
 
 // ── Helpers ───────────────────────────────────────────────────────────────────
 
+const IDLE_OPACITY: f32 = 0.45;
+
+/// A channel with nothing attached — reports 0 RPM and drives no curve sensor —
+/// is dimmed and sorted last. A channel that reports no RPM at all (pumps,
+/// tach-less headers) says nothing about what is plugged in, so it stays put.
+fn is_idle(rpm: Option<u32>, has_sensor: bool) -> bool {
+    rpm == Some(0) && !has_sensor
+}
+
 fn rpm_for(dev: &WireDevice) -> u32 {
     dev.capabilities
         .iter()
@@ -576,6 +602,34 @@ mod tests {
             assert!(w[1][0] > w[0][0]);
             assert!(w[1][1] >= w[0][1]);
         }
+    }
+
+    #[test]
+    fn only_stopped_and_sensorless_coolers_are_dimmed() {
+        assert!(is_idle(Some(0), false));
+        assert!(!is_idle(Some(900), false));
+        assert!(!is_idle(Some(0), true));
+        assert!(
+            !is_idle(None, false),
+            "no tach reading is not proof of idle"
+        );
+    }
+
+    #[test]
+    fn idle_sort_key_sinks_idle_coolers_and_keeps_the_rest_in_order() {
+        let mut coolers = [
+            ("a", Some(0), false),
+            ("b", Some(900), false),
+            ("c", Some(0), true),
+            ("d", None, false),
+            ("e", Some(0), false),
+        ];
+        coolers.sort_by_key(|&(_, rpm, has_sensor)| is_idle(rpm, has_sensor));
+        assert_eq!(
+            coolers.map(|c| c.0),
+            ["b", "c", "d", "a", "e"],
+            "idle cards go last, everything else keeps its order"
+        );
     }
 
     #[test]

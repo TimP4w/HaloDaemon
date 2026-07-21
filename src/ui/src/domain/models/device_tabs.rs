@@ -50,12 +50,14 @@ pub fn tabs_for(dev: &WireDevice) -> Vec<Tab> {
     if has(dev, |c| matches!(c, DeviceCapability::Children(_))) {
         push(TabKind::Devices);
     }
-    if has(dev, |c| matches!(c, DeviceCapability::Lighting(_))) {
+    // A device whose every channel is chainable has nothing to paint directly:
+    // its content is composed from chain links in the Chains tab.
+    if !super::device::plain_channels(dev).is_empty() {
         push(TabKind::Lighting);
     }
     if has(
         dev,
-        |c| matches!(c, DeviceCapability::Lighting(r) if r.descriptor.channels.iter().any(|channel| matches!(channel.division, halod_shared::types::LightingDivision::Divisible { .. }))),
+        |c| matches!(c, DeviceCapability::Lighting(r) if r.descriptor.channels.iter().any(super::device::is_chainable)),
     ) {
         push(TabKind::Chains);
     }
@@ -133,6 +135,7 @@ mod tests {
                 max_leds: 300,
                 segments: vec![],
             },
+            visibility: Default::default(),
         }
     }
 
@@ -145,14 +148,30 @@ mod tests {
     }
 
     fn rgb_cap() -> DeviceCapability {
+        lighting_cap(vec![plain_channel()])
+    }
+
+    fn lighting_cap(channels: Vec<halod_shared::types::LightingChannel>) -> DeviceCapability {
         DeviceCapability::Lighting(LightingStatus {
             descriptor: LightingDescriptor {
-                channels: vec![],
+                channels,
                 native_effects: vec![],
             },
             state: None,
             channel_transforms: Default::default(),
         })
+    }
+
+    fn plain_channel() -> halod_shared::types::LightingChannel {
+        halod_shared::types::LightingChannel {
+            id: "ring".into(),
+            name: "Ring".into(),
+            topology: halod_shared::types::ZoneTopology::Linear,
+            leds: vec![],
+            color_order: Default::default(),
+            division: halod_shared::types::LightingDivision::Indivisible,
+            visibility: Default::default(),
+        }
     }
 
     fn kinds(d: &WireDevice) -> Vec<TabKind> {
@@ -283,15 +302,10 @@ mod tests {
         let rgb_no_chains = rgb_cap();
         assert!(!kinds(&dev(DeviceType::Hub, vec![rgb_no_chains])).contains(&TabKind::Chains));
 
-        let rgb_with_chains = DeviceCapability::Lighting(LightingStatus {
-            descriptor: LightingDescriptor {
-                channels: vec![division_channel()],
-                native_effects: vec![],
-            },
-            state: None,
-            channel_transforms: Default::default(),
-        });
-        let d = dev(DeviceType::Hub, vec![rgb_with_chains]);
+        let d = dev(
+            DeviceType::Hub,
+            vec![lighting_cap(vec![plain_channel(), division_channel()])],
+        );
         let tabs = kinds(&d);
         assert!(
             tabs.contains(&TabKind::Chains),
@@ -301,5 +315,16 @@ mod tests {
         let li = tabs.iter().position(|&k| k == TabKind::Lighting).unwrap();
         let ci = tabs.iter().position(|&k| k == TabKind::Chains).unwrap();
         assert!(ci > li, "Chains should be after Lighting");
+    }
+
+    #[test]
+    fn a_purely_chainable_device_gets_chains_but_no_empty_lighting_tab() {
+        let d = dev(
+            DeviceType::Hub,
+            vec![lighting_cap(vec![division_channel()])],
+        );
+        let tabs = kinds(&d);
+        assert!(tabs.contains(&TabKind::Chains));
+        assert!(!tabs.contains(&TabKind::Lighting), "{tabs:?}");
     }
 }

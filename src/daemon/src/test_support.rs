@@ -474,6 +474,7 @@ impl CoolingCapability for MockDevice {
             controllable: true,
             rpm: self.fan_rpm,
             duty: Some(0),
+            visibility: Default::default(),
         }]
     }
     async fn get_cooling_status(&self, channel_id: &str) -> Result<CoolingChannel> {
@@ -505,6 +506,7 @@ impl LightingCapability for MockDevice {
                 leds: vec![],
                 color_order: Default::default(),
                 division: Default::default(),
+                visibility: Default::default(),
             };
             LightingDescriptor {
                 channels: vec![

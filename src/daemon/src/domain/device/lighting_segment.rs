@@ -105,6 +105,9 @@ fn topology_to_positions(topology: &ZoneTopology, count: u32) -> Vec<LedPosition
     }
 }
 
+/// The single lighting channel every user-added segment exposes.
+pub const SEGMENT_CHANNEL_ID: &str = "strip";
+
 /// Shared state for the unified `LightingSegmentDevice`. The authoritative display name
 /// lives in the parent's `LightingDivisionHost` state, read via `LightingDivisionHub::link_name`;
 /// `fallback_name` is only used when the host has lost the slot.
@@ -159,12 +162,13 @@ impl LightingSegmentDevice {
         let core = LightingSegmentCore::new(id, channel_id, name, topology, led_count);
         let rgb_descriptor = LightingDescriptor {
             channels: vec![LightingChannel {
-                id: "strip".to_string(),
+                id: SEGMENT_CHANNEL_ID.to_string(),
                 name: "Strip".to_string(),
                 topology: core.topology.clone(),
                 leds: core.leds.clone(),
                 color_order: Default::default(),
                 division: Default::default(),
+                visibility: Default::default(),
             }],
             native_effects: vec![],
         };
@@ -185,7 +189,7 @@ impl LightingSegmentDevice {
                     .await?;
             }
             LightingState::PerLed { channels } => {
-                if let Some(led_map) = channels.get("strip") {
+                if let Some(led_map) = channels.get(SEGMENT_CHANNEL_ID) {
                     let zone = &self.rgb_descriptor.channels[0];
                     let colors = transformed_zone_frame(zone, &self.core.rgb, led_map);
                     self.hub
@@ -268,7 +272,7 @@ impl LightingCapability for LightingSegmentDevice {
     }
 
     async fn write_frame(&self, channel_id: &str, bytes: &[u8]) -> Result<()> {
-        if channel_id != "strip" {
+        if channel_id != SEGMENT_CHANNEL_ID {
             anyhow::bail!("unknown zone: {channel_id}");
         }
         anyhow::ensure!(

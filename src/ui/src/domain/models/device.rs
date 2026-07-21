@@ -52,6 +52,42 @@ pub fn conflict_presentation(
     })
 }
 
+/// The channels the lighting widget may drive directly. Chainable channels are
+/// composed from their links in the Chains tab and have no LEDs of their own.
+pub fn plain_channels(dev: &WireDevice) -> Vec<&halod_shared::types::LightingChannel> {
+    dev.lighting()
+        .map(|lighting| {
+            lighting
+                .descriptor
+                .channels
+                .iter()
+                .filter(|channel| {
+                    !is_chainable(channel) && channel.visibility == VisibilityState::Visible
+                })
+                .collect()
+        })
+        .unwrap_or_default()
+}
+
+pub fn is_chainable(channel: &halod_shared::types::LightingChannel) -> bool {
+    matches!(
+        channel.division,
+        halod_shared::types::LightingDivision::Divisible { .. }
+    )
+}
+
+/// Keep a zone selection pointing at a channel that still exists, returning
+/// `None` when the device has no directly drivable channel at all.
+pub fn resolve_zone(
+    channels: &[&halod_shared::types::LightingChannel],
+    selected: &str,
+) -> Option<String> {
+    if channels.iter().any(|channel| channel.id == selected) {
+        return Some(selected.to_owned());
+    }
+    channels.first().map(|channel| channel.id.clone())
+}
+
 /// Find the parent hub whose RGB chain lists `device_id` and return its
 /// write-rate status. Chain accessories share their parent's transport, so
 /// their own `write_rate` is always `None`.
@@ -418,6 +454,7 @@ mod tests {
                         controllable: true,
                         rpm: Some(1000),
                         duty: Some(50),
+                        visibility: Default::default(),
                     }],
                 }),
                 DeviceCapability::Sensors(vec![Sensor {
@@ -436,6 +473,7 @@ mod tests {
                         controllable: true,
                         rpm: Some(1200),
                         duty: Some(60),
+                        visibility: Default::default(),
                     }],
                 }),
             ],
@@ -621,6 +659,90 @@ mod tests {
         assert_eq!(m[0].value, "Wireless");
     }
 
+    fn lighting_device(channels: Vec<halod_shared::types::LightingChannel>) -> WireDevice {
+        use halod_shared::types::{LightingDescriptor, LightingStatus};
+        WireDevice {
+            capabilities: vec![DeviceCapability::Lighting(LightingStatus {
+                descriptor: LightingDescriptor {
+                    channels,
+                    native_effects: vec![],
+                },
+                state: None,
+                channel_transforms: Default::default(),
+            })],
+            ..Default::default()
+        }
+    }
+
+    fn channel(id: &str, chainable: bool) -> halod_shared::types::LightingChannel {
+        use halod_shared::types::{LightingChannel, LightingDivision, ZoneTopology};
+        LightingChannel {
+            id: id.into(),
+            name: id.into(),
+            topology: ZoneTopology::Linear,
+            leds: vec![],
+            color_order: Default::default(),
+            division: if chainable {
+                LightingDivision::Divisible {
+                    max_leds: 40,
+                    segments: vec![],
+                }
+            } else {
+                LightingDivision::Indivisible
+            },
+            visibility: Default::default(),
+        }
+    }
+
+    #[test]
+    fn the_lighting_widget_only_sees_directly_drivable_channels() {
+        let dev = lighting_device(vec![
+            channel("ring", false),
+            channel("0", true),
+            channel("logo", false),
+        ]);
+        assert_eq!(
+            plain_channels(&dev)
+                .iter()
+                .map(|c| c.id.as_str())
+                .collect::<Vec<_>>(),
+            ["ring", "logo"]
+        );
+    }
+
+    #[test]
+    fn a_channel_the_user_switched_off_leaves_the_lighting_widget() {
+        let mut off = channel("logo", false);
+        off.visibility = VisibilityState::Disabled;
+        let mut hidden = channel("side", false);
+        hidden.visibility = VisibilityState::Hidden;
+        let dev = lighting_device(vec![channel("ring", false), off, hidden]);
+        assert_eq!(
+            plain_channels(&dev)
+                .iter()
+                .map(|c| c.id.as_str())
+                .collect::<Vec<_>>(),
+            ["ring"]
+        );
+    }
+
+    #[test]
+    fn a_device_whose_channels_are_all_chainable_has_nothing_to_paint() {
+        let dev = lighting_device(vec![channel("0", true), channel("1", true)]);
+        assert!(plain_channels(&dev).is_empty());
+        assert!(resolve_zone(&plain_channels(&dev), "0").is_none());
+    }
+
+    #[test]
+    fn a_zone_selection_that_no_longer_exists_falls_back_to_the_first() {
+        let dev = lighting_device(vec![channel("ring", false), channel("logo", false)]);
+        let channels = plain_channels(&dev);
+        assert_eq!(resolve_zone(&channels, "logo").as_deref(), Some("logo"));
+        // A chainable channel is never a valid selection, even by exact id.
+        assert_eq!(resolve_zone(&channels, "0").as_deref(), Some("ring"));
+        assert_eq!(resolve_zone(&channels, "").as_deref(), Some("ring"));
+    }
+
     fn hub_with_child(
         hub_id: &str,
         child_id: &str,
@@ -652,6 +774,7 @@ mod tests {
                                 locked: false,
                             }],
                         },
+                        visibility: Default::default(),
                     }],
                     native_effects: vec![],
                 },

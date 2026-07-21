@@ -28,3 +28,8 @@ cooling:
   status_write_error: Failed to set the fan speed. Check the daemon logs.
   status_fan_stalled: "The fan is not spinning (0 RPM). Check its connections or replace it."
   status_no_device: The fan is not connected. Its curve will resume when it becomes available again.
+  channel_off: off
+  enable_channel: Enable channel
+  disable_channel: Disable channel
+  show_disabled: Show disabled
+  hide_disabled: Hide disabled

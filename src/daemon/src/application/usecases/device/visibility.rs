@@ -8,7 +8,7 @@ use std::sync::Arc;
 use crate::application::state::AppState;
 use crate::domain::profiles::device_state::persist_device_state;
 use crate::domain::registry::model::ensure_record;
-use halod_shared::types::VisibilityState;
+use halod_shared::types::{ChannelKind, VisibilityState};
 
 pub async fn set_device_visibility(
     device_id: String,
@@ -80,6 +80,65 @@ pub async fn set_device_visibility(
             .retain(|d| d.id() != device_id);
         crate::application::usecases::plugin::plugins::reconcile_full(&app).await;
         return Ok(());
+    }
+
+    app.record_change(crate::domain::events::Change::Device(device_id))
+        .await;
+    Ok(())
+}
+
+pub async fn set_channel_visibility(
+    device_id: String,
+    kind: ChannelKind,
+    channel_id: String,
+    state: VisibilityState,
+    app: Arc<AppState>,
+) -> Result<()> {
+    let device = {
+        let devices = app.device_registry.read().await;
+        devices
+            .iter()
+            .find(|d| d.id() == device_id)
+            .cloned()
+            .ok_or_else(|| anyhow!("device not found: {device_id}"))?
+    };
+    let exists = match kind {
+        ChannelKind::Lighting => device.as_lighting().is_some_and(|lighting| {
+            lighting
+                .descriptor()
+                .channels
+                .iter()
+                .any(|channel| channel.id == channel_id)
+        }),
+        ChannelKind::Cooling => device.as_cooling().is_some_and(|cooling| {
+            cooling
+                .cooling_channels()
+                .iter()
+                .any(|channel| channel.id == channel_id)
+        }),
+    };
+    if !exists {
+        anyhow::bail!("channel '{channel_id}' not found on device '{device_id}'");
+    }
+
+    {
+        let mut cfg = app.config.write().await;
+        let key = kind.key(&channel_id);
+        if state == VisibilityState::Visible {
+            if let Some(channels) = cfg.channel_visibility.get_mut(&device_id) {
+                channels.remove(&key);
+                if channels.is_empty() {
+                    cfg.channel_visibility.remove(&device_id);
+                }
+            }
+        } else {
+            cfg.channel_visibility
+                .entry(device_id.clone())
+                .or_default()
+                .insert(key, state);
+        }
+        drop(cfg);
+        app.request_config_save();
     }
 
     app.record_change(crate::domain::events::Change::Device(device_id))

@@ -161,6 +161,7 @@ mod tests {
             ],
             color_order: Default::default(),
             division: Default::default(),
+            visibility: Default::default(),
         };
 
         let sampler = Sampler::new(3.0);
@@ -228,6 +229,7 @@ mod tests {
             }],
             color_order: Default::default(),
             division: Default::default(),
+            visibility: Default::default(),
         }
     }
 

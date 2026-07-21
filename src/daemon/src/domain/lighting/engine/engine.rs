@@ -1046,6 +1046,7 @@ mod tests {
                         leds,
                         color_order: Default::default(),
                         division: Default::default(),
+                        visibility: Default::default(),
                     }],
                     native_effects: vec![],
                 },
@@ -1299,6 +1300,7 @@ mod tests {
             ],
             color_order: Default::default(),
             division: Default::default(),
+            visibility: Default::default(),
         };
         let colors = direct_zone_colors(fx.as_ref(), &zone, 0.0);
         assert!(colors.iter().all(|c| *c == RgbColor { r: 0, g: 0, b: 0 }));
@@ -1325,6 +1327,7 @@ mod tests {
             ],
             color_order: Default::default(),
             division: Default::default(),
+            visibility: Default::default(),
         };
         let colors = direct_zone_colors(fx.as_ref(), &zone, 1.0);
         assert_eq!(colors[0], colors[1], "breathing is position-independent");
@@ -1365,6 +1368,7 @@ mod tests {
             ],
             color_order: Default::default(),
             division: Default::default(),
+            visibility: Default::default(),
         };
         let colors = direct_zone_colors(fx.as_ref(), &zone, 0.0);
         assert_ne!(
@@ -1384,6 +1388,7 @@ mod tests {
                 .collect(),
             color_order: Default::default(),
             division: Default::default(),
+            visibility: Default::default(),
         };
         let params = |ring_scope: &str| {
             let mut m = HashMap::new();
