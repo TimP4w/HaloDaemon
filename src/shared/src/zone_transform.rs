@@ -237,6 +237,7 @@ mod tests {
                 .collect(),
             color_order: Default::default(),
             division: Default::default(),
+            visibility: Default::default(),
         }
     }
 
@@ -270,6 +271,7 @@ mod tests {
             ],
             color_order: Default::default(),
             division: Default::default(),
+            visibility: Default::default(),
         }
     }
 
@@ -479,6 +481,7 @@ mod tests {
             ],
             color_order: Default::default(),
             division: Default::default(),
+            visibility: Default::default(),
         };
         let t = ZoneContentTransform {
             flip_h: true,
@@ -538,6 +541,7 @@ mod prop_tests {
                 .collect(),
             color_order: Default::default(),
             division: Default::default(),
+            visibility: Default::default(),
         }
     }
 
@@ -664,6 +668,7 @@ mod prop_tests {
                     .collect(),
                 color_order: Default::default(),
                 division: Default::default(),
+                visibility: Default::default(),
             };
             let perm = build_permutation(&zone, &t);
             prop_assert_eq!(perm.len(), n);

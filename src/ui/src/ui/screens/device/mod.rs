@@ -98,6 +98,8 @@ pub struct CoolingTab {
     pub curve_sensor: Option<String>,
     /// Selected device-local channel for multi-output coolers.
     pub channel_id: Option<String>,
+    /// Reveal channels the user switched off, so they can be switched back on.
+    pub show_hidden: bool,
 }
 
 /// Per-tab edit state for the Performance tab.

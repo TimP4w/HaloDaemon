@@ -12,7 +12,7 @@
 //!
 //! See `docs/chainable-argb.md` for the end-to-end walkthrough.
 
-use std::collections::HashMap;
+use std::collections::{HashMap, HashSet};
 use std::sync::{Arc, Mutex};
 use std::time::Duration;
 
@@ -31,6 +31,9 @@ use super::{ChainLinkSpec, Device};
 #[derive(Debug, Clone)]
 pub struct ChainLinkRuntime {
     pub child_id: String,
+    /// The child's own lighting channel id, which differs by leaf kind
+    /// (`"strip"` for a user-added segment, `"ring"` for a detected accessory).
+    pub lighting_channel_id: String,
     pub name: String,
     pub topology: ZoneTopology,
     pub led_count: u32,
@@ -42,6 +45,7 @@ pub struct ChainLinkRuntime {
 impl ChainLinkRuntime {
     pub fn new(
         child_id: String,
+        lighting_channel_id: String,
         name: String,
         topology: ZoneTopology,
         led_count: u32,
@@ -49,6 +53,7 @@ impl ChainLinkRuntime {
     ) -> Self {
         Self {
             child_id,
+            lighting_channel_id,
             name,
             topology,
             led_count,
@@ -60,7 +65,7 @@ impl ChainLinkRuntime {
     pub fn info(&self) -> LightingSegmentInfo {
         LightingSegmentInfo {
             device_id: self.child_id.clone(),
-            channel_id: "lighting".to_string(),
+            channel_id: self.lighting_channel_id.clone(),
             name: self.name.clone(),
             topology: self.topology.clone(),
             led_count: self.led_count,
@@ -161,6 +166,9 @@ pub struct ChannelDescriptor {
     pub display_name: String,
     pub max_leds: u32,
     pub color_order: ColorOrder,
+    /// Cooling channel a detected child on this output takes ownership of.
+    /// While that child exists the parent must not expose the channel itself.
+    pub cooling_channel: Option<String>,
 }
 
 /// Vendor-specific surface a parent must implement. Tiny on purpose — the
@@ -247,6 +255,7 @@ impl LightingDivisionHost {
                         max_leds: d.max_leds,
                         segments: chain.links.iter().map(ChainLinkRuntime::info).collect(),
                     },
+                    visibility: Default::default(),
                 }
             })
             .collect()
@@ -270,6 +279,17 @@ impl LightingDivisionHost {
             .collect()
     }
 
+    /// Chain channels that currently hold a hardware-detected link. A parent
+    /// uses this to tell which of its cooling channels a child has taken over.
+    pub fn detected_channels(&self) -> HashSet<String> {
+        let state = self.state.lock().unwrap_or_else(|e| e.into_inner());
+        state
+            .iter()
+            .filter(|(_, chain)| chain.links.iter().any(|link| link.locked))
+            .map(|(channel_id, _)| channel_id.clone())
+            .collect()
+    }
+
     /// Register a hardware-detected first link (locked). Called from the
     /// parent's `discover_children` after `child.initialize()` succeeds. The
     /// host tracks the child Arc itself so the parent's `serialize()` reads
@@ -284,6 +304,7 @@ impl LightingDivisionHost {
         };
         let link = ChainLinkRuntime::new(
             child.id().to_owned(),
+            zone.id.clone(),
             child.name().to_string(),
             zone.topology.clone(),
             u32::try_from(zone.leds.len()).unwrap_or_else(|_| {
@@ -422,6 +443,7 @@ impl LightingDivisionHost {
             }
             chain.append(ChainLinkRuntime::new(
                 child_id.to_string(),
+                super::lighting_segment::SEGMENT_CHANNEL_ID.to_string(),
                 name,
                 topology,
                 led_count,
@@ -678,6 +700,7 @@ mod tests {
     fn link(id: &str, count: u32, locked: bool) -> ChainLinkRuntime {
         ChainLinkRuntime::new(
             id.to_string(),
+            "strip".to_string(),
             id.to_string(),
             ZoneTopology::Linear,
             count,
@@ -853,6 +876,7 @@ mod tests {
                 display_name: "Channel A".to_string(),
                 max_leds: 120,
                 color_order: ColorOrder::Rgb,
+                cooling_channel: None,
             }],
             last_written: Mutex::new(Vec::new()),
         });
@@ -950,6 +974,7 @@ mod tests {
             chain.discovery_active = true;
             chain.links.push(ChainLinkRuntime::new(
                 "x".into(),
+                "strip".into(),
                 "x".into(),
                 ZoneTopology::Linear,
                 4,
@@ -1000,6 +1025,7 @@ mod tests {
                             .collect(),
                         color_order: Default::default(),
                         division: Default::default(),
+                        visibility: Default::default(),
                     }],
                     native_effects: vec![],
                 },

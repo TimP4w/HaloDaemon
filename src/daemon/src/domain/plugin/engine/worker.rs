@@ -22,8 +22,8 @@ use super::lua_worker::LuaWorker;
 use halod_shared::keyboard::{KeyId, StandardLayout};
 use halod_shared::types::{
     Battery, Boolean, ButtonDescriptor, ButtonMapping, ConnectionStatus, DeviceType, Equalizer,
-    KeyboardFormFactor, KeyboardLayout, LedPosition, LightingChannel, LightingState, NativeEffect,
-    OnboardProfiles, PairingStatus, Permission, Sensor,
+    KeyboardFormFactor, KeyboardLayout, LedPosition, LightingState, NativeEffect, OnboardProfiles,
+    PairingStatus, Permission, Sensor,
 };
 
 use super::bytebuf::ByteBuf;
@@ -158,6 +158,8 @@ pub struct InitLightingChannel {
     pub name: String,
     #[serde(default = "default_zone_topology")]
     pub topology: String,
+    /// Absent for a `chainable` channel, whose length comes from its links.
+    #[serde(default)]
     pub led_count: u32,
     /// Optional firmware LED ids, in display order. When absent, ids are
     /// synthesized from 0..led_count as before.
@@ -173,6 +175,19 @@ pub struct InitLightingChannel {
     pub keyboard_form_factor: Option<KeyboardFormFactor>,
     #[serde(default)]
     pub keyboard_layout: Option<KeyboardLayout>,
+    /// The channel is a chain output (e.g. an ARGB header) whose content is
+    /// composed from child devices rather than a fixed LED layout.
+    #[serde(default)]
+    pub chainable: bool,
+    /// Chain capacity; required when `chainable`.
+    #[serde(default)]
+    pub max_leds: u32,
+    #[serde(default)]
+    pub color_order: halod_shared::types::ColorOrder,
+    /// The cooling channel a chain child on this output takes ownership of.
+    /// While a child holds it, the parent stops exposing that channel.
+    #[serde(default)]
+    pub cooling_channel: Option<String>,
 }
 
 fn default_zone_topology() -> String {
@@ -214,18 +229,6 @@ pub struct InitLcd {
 
 fn default_lcd_brightness() -> u8 {
     80
-}
-
-/// One chainable output channel a plugin's `initialize` reports for dynamic chain
-/// discovery (e.g. an ARGB header whose count/capacity is only known after reading
-/// the device's config table). Mirrors the static `manifest::ChannelManifest`.
-#[derive(Debug, Clone, Deserialize)]
-pub struct InitChainChannel {
-    pub id: String,
-    pub name: String,
-    pub max_leds: u32,
-    #[serde(default)]
-    pub color_order: halod_shared::types::ColorOrder,
 }
 
 /// Runtime control descriptors. They replace the removed static manifest
@@ -272,10 +275,6 @@ pub struct InitDpi {
 pub struct InitCooling {
     #[serde(default)]
     pub channels: Vec<InitCoolingChannel>,
-    /// Keep channels on the controller internally, but expose each one as a
-    /// separate connected device instead of a parent cooling capability.
-    #[serde(default)]
-    pub as_devices: bool,
 }
 
 #[derive(Debug, Clone, Deserialize)]
@@ -286,8 +285,6 @@ pub struct InitCoolingChannel {
     pub kind: halod_shared::types::CoolingChannelKind,
     #[serde(default)]
     pub controllable: bool,
-    #[serde(default)]
-    pub builtin: bool,
 }
 
 /// Runtime key-remap descriptor. Button CIDs and host-mode policy are reported
@@ -369,10 +366,6 @@ pub struct InitOutcome {
     /// supported effects may differ by firmware and controller revision.
     pub native_effects: Option<Vec<NativeEffect>>,
     pub lcd: Option<InitLcd>,
-    /// Chainable channels discovered at runtime (e.g. ARGB headers whose capacity
-    /// is read from the device's config table), for a plugin that declares a
-    /// `chain` capability but reports its channels dynamically rather than statically.
-    pub division: Option<Vec<InitChainChannel>>,
     pub accessories: Option<Vec<AccessoryManifest>>,
     pub controls: Option<InitControls>,
     pub dpi: Option<InitDpi>,
@@ -401,8 +394,6 @@ struct InitTable {
     native_effects: Option<Vec<NativeEffect>>,
     #[serde(default)]
     lcd: Option<InitLcd>,
-    #[serde(default)]
-    division: Option<Vec<InitChainChannel>>,
     #[serde(default)]
     accessories: Option<Vec<AccessoryManifest>>,
     #[serde(default)]
@@ -607,7 +598,6 @@ impl PluginHandle {
         granted: Vec<Permission>,
         config: crate::domain::plugin::ResolvedConfig,
         handle: Handle,
-        channels: Vec<LightingChannel>,
         audio_registry: super::audio_api::SinkRegistry,
     ) -> Self {
         Self::spawn_with_data(
@@ -618,7 +608,6 @@ impl PluginHandle {
             granted,
             config,
             handle,
-            channels,
             audio_registry,
             Default::default(),
             None,
@@ -635,7 +624,6 @@ impl PluginHandle {
         granted: Vec<Permission>,
         config: crate::domain::plugin::ResolvedConfig,
         handle: Handle,
-        channels: Vec<LightingChannel>,
         audio_registry: super::audio_api::SinkRegistry,
         data: super::data_api::DataRuntime,
         http: Option<crate::infrastructure::http::HttpRuntime>,
@@ -657,7 +645,6 @@ impl PluginHandle {
                     &granted,
                     &config,
                     handle,
-                    &channels,
                     audio_registry,
                     data,
                     http,
@@ -800,7 +787,9 @@ impl PluginHandle {
                     if let Some(channels) = &t.channels {
                         check_zone_count(channels.len())?;
                         for z in channels {
-                            let count = if !z.leds.is_empty() {
+                            let count = if z.chainable {
+                                z.max_leds
+                            } else if !z.leds.is_empty() {
                                 u32::try_from(z.leds.len()).unwrap_or(u32::MAX)
                             } else if !z.led_ids.is_empty() {
                                 u32::try_from(z.led_ids.len()).unwrap_or(u32::MAX)
@@ -808,16 +797,11 @@ impl PluginHandle {
                                 z.led_count
                             };
                             check_led_count(&z.id, count)?;
+                            validate_chainable(z, t.cooling.as_ref())?;
                         }
                     }
                     if let Some(lcd) = &t.lcd {
                         check_lcd_dims(lcd.width, lcd.height)?;
-                    }
-                    if let Some(chain) = &t.division {
-                        check_zone_count(chain.len())?;
-                        for c in chain {
-                            check_led_count(&c.id, c.max_leds)?;
-                        }
                     }
                     if let Some(accessories) = &t.accessories {
                         validate_accessories(accessories)?;
@@ -853,7 +837,6 @@ impl PluginHandle {
                         channels: t.channels,
                         native_effects: t.native_effects,
                         lcd: t.lcd,
-                        division: t.division,
                         accessories: t.accessories,
                         controls: t.controls,
                         dpi: t.dpi,
@@ -1291,6 +1274,34 @@ impl PluginHandle {
     }
 }
 
+/// A chain output needs a capacity, and a cooling channel it hands to its child
+/// must be one the device actually declares — otherwise the parent would drop a
+/// channel that no child ever picks up.
+fn validate_chainable(channel: &InitLightingChannel, cooling: Option<&InitCooling>) -> Result<()> {
+    if !channel.chainable {
+        if channel.cooling_channel.is_some() {
+            bail!(
+                "channel '{}' declares a cooling_channel but is not chainable",
+                channel.id
+            );
+        }
+        return Ok(());
+    }
+    if channel.max_leds == 0 {
+        bail!("chainable channel '{}' declares no max_leds", channel.id);
+    }
+    if let Some(owned) = &channel.cooling_channel {
+        let declared = cooling.is_some_and(|c| c.channels.iter().any(|ch| ch.id == *owned));
+        if !declared {
+            bail!(
+                "channel '{}' claims undeclared cooling channel '{owned}'",
+                channel.id
+            );
+        }
+    }
+    Ok(())
+}
+
 fn validate_runtime_controls(controls: &InitControls) -> Result<()> {
     let mut keys = std::collections::HashSet::new();
     for key in controls
@@ -1421,7 +1432,6 @@ fn build_ctx(
     granted: &[Permission],
     config: &crate::domain::plugin::ResolvedConfig,
     handle: Handle,
-    channels: &[LightingChannel],
     audio_registry: super::audio_api::SinkRegistry,
     data: super::data_api::DataRuntime,
     http: Option<crate::infrastructure::http::HttpRuntime>,
@@ -1484,14 +1494,6 @@ fn build_ctx(
         dev.set("audio", audio_ud)
             .map_err(|e| lua_err("dev.audio", e))?;
     }
-    if !channels.is_empty() {
-        let zones_v = lua
-            .to_value(channels)
-            .map_err(|e| lua_err("dev.channels", e))?;
-        dev.set("channels", zones_v)
-            .map_err(|e| lua_err("dev.channels", e))?;
-    }
-
     Ok(WorkerCtx {
         lua,
         transport,
@@ -1654,6 +1656,66 @@ mod tests {
     use crate::infrastructure::drivers::transports::{HidTransport, Transport, TransportEvent};
     use halod_shared::types::RgbColor;
 
+    fn channel(id: &str) -> InitLightingChannel {
+        InitLightingChannel {
+            id: id.into(),
+            name: id.into(),
+            topology: default_zone_topology(),
+            led_count: 0,
+            led_ids: Vec::new(),
+            leds: Vec::new(),
+            rings: 0,
+            keyboard_form_factor: None,
+            keyboard_layout: None,
+            chainable: false,
+            max_leds: 0,
+            color_order: Default::default(),
+            cooling_channel: None,
+        }
+    }
+
+    fn cooling(ids: &[&str]) -> InitCooling {
+        InitCooling {
+            channels: ids
+                .iter()
+                .map(|id| InitCoolingChannel {
+                    id: (*id).into(),
+                    name: (*id).into(),
+                    kind: Default::default(),
+                    controllable: true,
+                })
+                .collect(),
+        }
+    }
+
+    #[test]
+    fn a_chain_output_needs_a_capacity() {
+        let mut ch = channel("0");
+        ch.chainable = true;
+        assert!(validate_chainable(&ch, None).is_err());
+        ch.max_leds = 40;
+        assert!(validate_chainable(&ch, None).is_ok());
+    }
+
+    #[test]
+    fn a_channel_may_only_claim_a_cooling_channel_the_device_declares() {
+        let mut ch = channel("0");
+        ch.chainable = true;
+        ch.max_leds = 40;
+        ch.cooling_channel = Some("fan1".into());
+
+        assert!(validate_chainable(&ch, None).is_err());
+        assert!(validate_chainable(&ch, Some(&cooling(&["pump"]))).is_err());
+        assert!(validate_chainable(&ch, Some(&cooling(&["pump", "fan1"]))).is_ok());
+    }
+
+    #[test]
+    fn only_a_chain_output_may_hand_over_a_cooling_channel() {
+        let mut ch = channel("ring");
+        ch.cooling_channel = Some("fan1".into());
+        assert!(validate_chainable(&ch, Some(&cooling(&["fan1"]))).is_err());
+    }
+
     struct GcDropProbe(std::sync::Arc<std::sync::atomic::AtomicBool>);
 
     impl mlua::UserData for GcDropProbe {}
@@ -1783,7 +1845,6 @@ mod tests {
             granted,
             HashMap::new(),
             Handle::current(),
-            Vec::new(),
             std::sync::Arc::new(std::sync::Mutex::new(Vec::new())),
         )
     }
@@ -1801,7 +1862,6 @@ mod tests {
             vec![],
             HashMap::new(),
             Handle::current(),
-            Vec::new(),
             std::sync::Arc::new(std::sync::Mutex::new(Vec::new())),
         )
     }
@@ -1892,7 +1952,6 @@ mod tests {
             vec![],
             HashMap::new(),
             Handle::current(),
-            Vec::new(),
             std::sync::Arc::new(std::sync::Mutex::new(Vec::new())),
         );
         let child = root.child(DevMatch {
@@ -1935,7 +1994,6 @@ mod tests {
             vec![],
             HashMap::new(),
             Handle::current(),
-            Vec::new(),
             std::sync::Arc::new(std::sync::Mutex::new(Vec::new())),
         );
         assert!(root.on_transport_events().await.unwrap().is_empty());
@@ -1958,7 +2016,6 @@ mod tests {
             vec![],
             HashMap::new(),
             Handle::current(),
-            Vec::new(),
             std::sync::Arc::new(std::sync::Mutex::new(Vec::new())),
         );
         assert_eq!(h.initialize().await.unwrap().model.as_deref(), Some("7"));

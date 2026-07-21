@@ -426,6 +426,7 @@ mod tests {
                     controllable: true,
                     rpm: None,
                     duty: Some(0),
+                    visibility: Default::default(),
                 }]
             }
             async fn get_cooling_status(&self, channel_id: &str) -> anyhow::Result<CoolingChannel> {
@@ -541,6 +542,7 @@ mod tests {
                     controllable: true,
                     rpm: None,
                     duty: Some(50),
+                    visibility: Default::default(),
                 }]
             }
             async fn get_cooling_status(&self, channel_id: &str) -> anyhow::Result<CoolingChannel> {

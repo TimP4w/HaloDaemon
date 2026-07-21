@@ -29,9 +29,9 @@ pub struct ChainLeaf {
     vendor: String,
     /// Chain channel this leaf sits on (string id used with the `LightingDivisionHub`).
     channel_id: String,
-    /// Numeric parent cooling channel.
-    fan_channel: u8,
-    has_fan: bool,
+    /// Parent cooling channel this leaf owns, as declared by the chainable
+    /// channel. `None` leaves the leaf lighting-only.
+    fan_channel: Option<String>,
     rgb_descriptor: LightingDescriptor,
     rgb: LightingStateSlot,
     cooling: CoolingStateSlot,
@@ -46,7 +46,7 @@ impl ChainLeaf {
         parent_id: String,
         vendor: String,
         channel_id: String,
-        fan_channel: u8,
+        fan_channel: Option<String>,
         accessory: &AccessoryManifest,
         chain_hub: Arc<dyn LightingDivisionHub>,
         cooling_hub: Arc<dyn CoolingHub>,
@@ -57,8 +57,9 @@ impl ChainLeaf {
             name: accessory.name.clone(),
             vendor,
             channel_id,
-            fan_channel,
-            has_fan: accessory.fan,
+            // Both sides must agree: the hardware reports a fan and the plugin
+            // declares which cooling channel this output hands over.
+            fan_channel: fan_channel.filter(|_| accessory.fan),
             rgb_descriptor: accessory.rgb_descriptor(),
             rgb: LightingStateSlot::default(),
             cooling: CoolingStateSlot::default(),
@@ -66,6 +67,15 @@ impl ChainLeaf {
             chain_hub,
             cooling_hub,
         }
+    }
+
+    /// Resolve this leaf's single cooling channel back to the parent channel it
+    /// was handed.
+    fn source_channel(&self, channel_id: &str) -> Result<&str> {
+        anyhow::ensure!(channel_id == "fan", "unknown cooling channel: {channel_id}");
+        self.fan_channel
+            .as_deref()
+            .ok_or_else(|| anyhow::anyhow!("{} owns no cooling channel", self.id))
     }
 
     async fn apply_state(&self, state: LightingState) -> Result<()> {
@@ -120,7 +130,7 @@ impl Device for ChainLeaf {
     async fn close(&self) {}
 
     fn wire_device_type(&self) -> DeviceType {
-        if self.has_fan {
+        if self.fan_channel.is_some() {
             DeviceType::Fan
         } else {
             DeviceType::LedStrip
@@ -129,7 +139,7 @@ impl Device for ChainLeaf {
 
     fn capabilities(&self) -> Vec<CapabilityRef<'_>> {
         let mut caps = vec![CapabilityRef::Lighting(self)];
-        if self.has_fan {
+        if self.fan_channel.is_some() {
             caps.push(CapabilityRef::Cooling(self));
         }
         caps
@@ -184,20 +194,23 @@ impl LightingCapability for ChainLeaf {
 #[async_trait]
 impl CoolingCapability for ChainLeaf {
     fn cooling_channels(&self) -> Vec<CoolingChannel> {
-        vec![CoolingChannel {
-            id: "fan".to_string(),
-            name: self.name.clone(),
-            kind: CoolingChannelKind::Fan,
-            controllable: true,
-            rpm: None,
-            duty: None,
-        }]
+        self.fan_channel
+            .iter()
+            .map(|_| CoolingChannel {
+                id: "fan".to_string(),
+                name: self.name.clone(),
+                kind: CoolingChannelKind::Fan,
+                controllable: true,
+                rpm: None,
+                duty: None,
+                visibility: Default::default(),
+            })
+            .collect()
     }
     async fn get_cooling_status(&self, channel_id: &str) -> Result<CoolingChannel> {
-        anyhow::ensure!(channel_id == "fan", "unknown cooling channel: {channel_id}");
         let status = self
             .cooling_hub
-            .get_cooling_status(&self.fan_channel.to_string())
+            .get_cooling_status(self.source_channel(channel_id)?)
             .await?;
         Ok(CoolingChannel {
             id: "fan".to_string(),
@@ -206,12 +219,12 @@ impl CoolingCapability for ChainLeaf {
             controllable: status.controllable,
             rpm: status.rpm,
             duty: status.duty,
+            visibility: Default::default(),
         })
     }
     async fn set_cooling_duty(&self, channel_id: &str, duty: u8) -> Result<()> {
-        anyhow::ensure!(channel_id == "fan", "unknown cooling channel: {channel_id}");
         self.cooling_hub
-            .set_cooling_duty(&self.fan_channel.to_string(), duty)
+            .set_cooling_duty(self.source_channel(channel_id)?, duty)
             .await
     }
     fn cooling_state(&self) -> &CoolingStateSlot {
@@ -219,8 +232,9 @@ impl CoolingCapability for ChainLeaf {
     }
 
     fn cached_cooling_status(&self) -> Vec<CoolingChannel> {
-        self.cooling_hub
-            .cached_cooling_status(&self.fan_channel.to_string())
+        self.fan_channel
+            .as_deref()
+            .and_then(|source| self.cooling_hub.cached_cooling_status(source))
             .map(|status| CoolingChannel {
                 id: "fan".to_string(),
                 name: self.name.clone(),
@@ -228,6 +242,7 @@ impl CoolingCapability for ChainLeaf {
                 controllable: status.controllable,
                 rpm: status.rpm,
                 duty: status.duty,
+                visibility: Default::default(),
             })
             .into_iter()
             .collect()

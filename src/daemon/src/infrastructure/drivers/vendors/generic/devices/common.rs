@@ -45,6 +45,7 @@ pub fn linear_lighting_channel(id: &str, name: &str, led_count: usize) -> Lighti
         leds,
         color_order: Default::default(),
         division: LightingDivision::Indivisible,
+        visibility: Default::default(),
     }
 }
 

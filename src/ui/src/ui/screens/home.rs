@@ -1601,6 +1601,7 @@ mod tests {
                             max_leds: 120,
                             segments: links,
                         },
+                        visibility: Default::default(),
                     }],
                     native_effects: vec![],
                 },

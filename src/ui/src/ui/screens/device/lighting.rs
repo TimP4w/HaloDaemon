@@ -106,24 +106,17 @@ pub fn show(ui: &mut egui::Ui, ctx: &TabCtx, st: &mut DeviceUi) {
     }) else {
         return;
     };
-    if rgb.descriptor.channels.is_empty() {
+    let channels = crate::domain::models::device::plain_channels(ctx.dev);
+    let Some(zone) = crate::domain::models::device::resolve_zone(&channels, &st.lighting.zone)
+    else {
         widgets::empty_state(
             ui,
             &t!("lighting.no_zones_title"),
             Some(t!("lighting.no_zones_subtitle").as_ref()),
         );
         return;
-    }
-
-    if st.lighting.zone.is_empty()
-        || !rgb
-            .descriptor
-            .channels
-            .iter()
-            .any(|z| z.id == st.lighting.zone)
-    {
-        st.lighting.zone = rgb.descriptor.channels[0].id.clone();
-    }
+    };
+    st.lighting.zone = zone;
     if st.lighting.paint_color.is_none() {
         st.lighting.paint_color = Some(current_color(rgb).unwrap_or(DEFAULT_PAINT_COLOR));
     }
@@ -207,6 +200,10 @@ fn leave_canvas_modal(ui: &mut egui::Ui, ctx: &TabCtx, st: &mut DeviceUi) {
 }
 
 fn preview(ui: &mut egui::Ui, ctx: &TabCtx, st: &mut DeviceUi, rgb: &LightingStatus, mode: &Mode) {
+    let channels = crate::domain::models::device::plain_channels(ctx.dev);
+    if channels.is_empty() {
+        return;
+    }
     widgets::card_titled(
         ui,
         &t!("lighting.lighting_preview"),
@@ -232,7 +229,7 @@ fn preview(ui: &mut egui::Ui, ctx: &TabCtx, st: &mut DeviceUi, rgb: &LightingSta
                 if matches!(mode, Mode::Solid | Mode::Direct(_)) {
                     let _ = widgets::pill(ui, &t!("lighting.all_zones"), true);
                 } else {
-                    for z in &rgb.descriptor.channels {
+                    for z in &channels {
                         if widgets::pill(ui, &z.name, z.id == st.lighting.zone) {
                             st.lighting.zone = z.id.clone();
                         }
@@ -247,12 +244,11 @@ fn preview(ui: &mut egui::Ui, ctx: &TabCtx, st: &mut DeviceUi, rgb: &LightingSta
                 ui.add_space(theme::SPACE_6);
             }
 
-            let zone = rgb
-                .descriptor
-                .channels
+            let zone = channels
                 .iter()
                 .find(|z| z.id == st.lighting.zone)
-                .unwrap_or(&rgb.descriptor.channels[0]);
+                .copied()
+                .unwrap_or(channels[0]);
             let painting = matches!(mode, Mode::Paint);
             let live = ctx.led_colors.get(&(ctx.dev.id.clone(), zone.id.clone()));
             let fill = fill_for(
@@ -1408,6 +1404,7 @@ mod tests {
                 .collect(),
             color_order: Default::default(),
             division: Default::default(),
+            visibility: Default::default(),
         }
     }
 

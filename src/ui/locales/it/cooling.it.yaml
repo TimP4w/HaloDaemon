@@ -28,3 +28,8 @@ cooling:
   status_write_error: Impossibile impostare la velocità della ventola. Controlla i log del daemon.
   status_fan_stalled: "La ventola non gira (0 RPM). Controlla i collegamenti o sostituiscila."
   status_no_device: La ventola non è connessa. La curva verrà riapplicata quando sarà di nuovo disponibile.
+  channel_off: disattivato
+  enable_channel: Abilita canale
+  disable_channel: Disabilita canale
+  show_disabled: Mostra disattivati
+  hide_disabled: Nascondi disattivati

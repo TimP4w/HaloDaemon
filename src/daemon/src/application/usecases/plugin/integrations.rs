@@ -61,7 +61,6 @@ async fn setup_worker(
             granted,
             config,
             tokio::runtime::Handle::current(),
-            vec![],
             Default::default(),
             Default::default(),
             http,

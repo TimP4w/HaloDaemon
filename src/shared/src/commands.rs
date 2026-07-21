@@ -8,8 +8,8 @@
 use std::collections::HashMap;
 
 use crate::types::{
-    ButtonMapping, EffectDef, EffectParamValue, IntegrationSetupMode, LightingState, MacroStep,
-    PluginAuthority, SamplingMode, VisibilityState, ZoneTopology,
+    ButtonMapping, ChannelKind, EffectDef, EffectParamValue, IntegrationSetupMode, LightingState,
+    MacroStep, PluginAuthority, SamplingMode, VisibilityState, ZoneTopology,
 };
 use crate::zone_transform::ZoneContentTransform;
 use serde::{Deserialize, Serialize};
@@ -272,6 +272,14 @@ pub enum DaemonCommand {
     },
     SetSensorVisibility {
         sensor_id: String,
+        state: VisibilityState,
+    },
+    /// Hide or disable one of a device's lighting or cooling channels. Channel
+    /// ids are only unique per capability, hence `kind`.
+    SetChannelVisibility {
+        device_id: String,
+        kind: ChannelKind,
+        channel_id: String,
         state: VisibilityState,
     },
     SetDeviceName {
@@ -1218,6 +1226,26 @@ mod tests {
             cmd,
             DaemonCommand::SetDeviceVisibility {
                 state: VisibilityState::Hidden,
+                ..
+            }
+        ));
+    }
+
+    #[test]
+    fn set_channel_visibility_parses_ui_payload() {
+        let cmd: DaemonCommand = serde_json::from_value(json!({
+            "type": "set_channel_visibility",
+            "device_id": "d",
+            "kind": "cooling",
+            "channel_id": "fan1",
+            "state": "disabled",
+        }))
+        .expect("UI payload must deserialise");
+        assert!(matches!(
+            cmd,
+            DaemonCommand::SetChannelVisibility {
+                kind: ChannelKind::Cooling,
+                state: VisibilityState::Disabled,
                 ..
             }
         ));

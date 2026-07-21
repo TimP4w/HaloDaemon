@@ -1033,7 +1033,6 @@ fn open_integration(
         manifest.permissions.clone(),
         resolved_config,
         handle.clone(),
-        Vec::new(),
         Arc::new(Mutex::new(Vec::new())),
         super::engine::data_api::DataRuntime::new(
             data_bus,

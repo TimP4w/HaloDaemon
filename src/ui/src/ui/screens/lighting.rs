@@ -879,19 +879,10 @@ fn card_click(on_checkbox: bool, selected: bool, has_zones: bool) -> CardClick {
 
 /// The `(zone id, zone name)` pairs a device exposes via its `Rgb` capability.
 fn rgb_zone_pairs(dev: &WireDevice) -> Vec<(String, String)> {
-    dev.capabilities
-        .iter()
-        .find_map(|c| match c {
-            DeviceCapability::Lighting(r) => Some(
-                r.descriptor
-                    .channels
-                    .iter()
-                    .map(|z| (z.id.clone(), z.name.clone()))
-                    .collect(),
-            ),
-            _ => None,
-        })
-        .unwrap_or_default()
+    model::plain_channels(dev)
+        .into_iter()
+        .map(|z| (z.id.clone(), z.name.clone()))
+        .collect()
 }
 
 /// Allocated width of a zone pill for `label` (matches [`widgets::pill`]).
@@ -1350,12 +1341,10 @@ fn rgb_devices(state: &TopicStore) -> impl Iterator<Item = &WireDevice> {
         .filter(|d| model::listable(d) && !model::is_hidden(d) && has_rgb_zones(d))
 }
 
-/// A device is an RGB target only if it exposes real channels. Chain hosts get a
-/// zone-less `Rgb` carrier synthesized by the daemon and must not appear here.
+/// A device is an RGB target only if it exposes directly drivable channels.
+/// Chainable channels are painted through their links, not the host.
 fn has_rgb_zones(d: &WireDevice) -> bool {
-    d.capabilities
-        .iter()
-        .any(|c| matches!(c, DeviceCapability::Lighting(r) if !r.descriptor.channels.is_empty()))
+    !model::plain_channels(d).is_empty()
 }
 
 // ── Tests ─────────────────────────────────────────────────────────────────────
@@ -1863,6 +1852,7 @@ mod tests {
             leds: vec![],
             color_order: Default::default(),
             division: Default::default(),
+            visibility: Default::default(),
         }
     }
 

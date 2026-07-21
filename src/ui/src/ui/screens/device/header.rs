@@ -372,6 +372,7 @@ mod tests {
                 .collect(),
             color_order: Default::default(),
             division: Default::default(),
+            visibility: Default::default(),
         };
         let cap = DeviceCapability::Lighting(LightingStatus {
             descriptor: LightingDescriptor {

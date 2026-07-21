@@ -253,6 +253,7 @@ mod tests {
                 display_name: "Channel".into(),
                 max_leds: 120,
                 color_order: Default::default(),
+                cooling_channel: None,
             }]
         }
         async fn write_divided_frame(&self, _channel_id: &str, _composed: &[u8]) -> Result<()> {
