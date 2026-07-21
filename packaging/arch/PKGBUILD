@@ -1,8 +1,8 @@
 # Maintainer: Timucin Besken <beskent@gmail.com>
 pkgname=halod
-pkgver=0.9.0
+pkgver=0.10.0
 pkgrel=1
-plugin_commit=7c4aaa06c34983e97f49e960b9a663b323509c90
+plugin_commit=eba5024e43de09dc88a041e2115174730ec441b3
 pkgdesc="Peripheral control daemon (fan curves, RGB, LCD, audio EQ, DPI)"
 arch=('x86_64')
 url="https://github.com/TimP4w/HaloDaemon"
