@@ -124,16 +124,11 @@ impl AppState {
 
             wire.capabilities
                 .retain(|capability| !matches!(capability, DeviceCapability::Sensors(_)));
-            let mut sensors = if wire.active_state == VisibilityState::Disabled {
+            let sensors = if wire.active_state == VisibilityState::Disabled {
                 Vec::new()
             } else {
                 self.data_bus.sensors_for_device(device.id())
             };
-            for sensor in &mut sensors {
-                if let Some(state) = cfg.sensor_visibility.get(&sensor.id) {
-                    sensor.visibility = state.clone();
-                }
-            }
             // Stamp, never drop: the UI greys a hidden channel so it can be
             // switched back on.
             let channel_visibility = cfg.channel_visibility.get(device.id());
@@ -306,7 +301,7 @@ mod tests {
 
     #[tokio::test]
     async fn retained_rpm_observation_overlays_cooling_channel() {
-        use halod_shared::types::{Sensor, SensorType, SensorUnit, VisibilityState};
+        use halod_shared::types::{Sensor, SensorType, SensorUnit};
 
         let app = Arc::new(AppState::new(Config::default()));
         let dev: Arc<dyn Device> = Arc::new(MockDevice::new("fan").with_fan_rpm(900));
@@ -319,7 +314,6 @@ mod tests {
                 value: 1777.0,
                 unit: SensorUnit::Rpm,
                 sensor_type: SensorType::FanSpeed,
-                visibility: VisibilityState::Visible,
             },
         )]);
 
@@ -379,56 +373,6 @@ mod tests {
     }
 
     #[tokio::test]
-    async fn serialize_applies_saved_visibility_to_fan_sensors() {
-        let mut cfg = Config::default();
-        cfg.sensor_visibility.insert(
-            "cooling_test_device_default_duty".to_string(),
-            halod_shared::types::VisibilityState::Hidden,
-        );
-        let app = Arc::new(AppState::new(cfg));
-        let dev: Arc<dyn Device> = Arc::new(MockDevice::new("test_device").with_fan());
-        app.device_registry.write().await.push(dev);
-        crate::application::usecases::device::telemetry::observe(&app).await;
-        let cfg = app.config.read().await.clone();
-        let snap = app.snapshot_devices(&cfg).await;
-        let sensors = snap.devices[0].sensors().expect("fan sensors present");
-        let duty = sensors
-            .iter()
-            .find(|s| s.id == "cooling_test_device_default_duty")
-            .unwrap();
-        assert_eq!(
-            duty.visibility,
-            halod_shared::types::VisibilityState::Hidden
-        );
-    }
-
-    #[tokio::test]
-    async fn serialize_applies_saved_visibility_to_device_native_sensors() {
-        // Device SensorCapability sensors report
-        // Visible from get_sensors; the config overlay must hide them at snapshot.
-        use halod_shared::types::{Sensor, SensorType, SensorUnit, VisibilityState};
-        let mut cfg = Config::default();
-        cfg.sensor_visibility
-            .insert("ccd1".to_string(), VisibilityState::Hidden);
-        let app = Arc::new(AppState::new(cfg));
-        let dev: Arc<dyn Device> = Arc::new(MockDevice::new("cpu").with_sensor(vec![Sensor {
-            id: "ccd1".into(),
-            name: "CCD1 (Tdie)".into(),
-            value: 50.0,
-            unit: SensorUnit::Celsius,
-            sensor_type: SensorType::Temperature,
-            visibility: VisibilityState::Visible,
-        }]));
-        app.device_registry.write().await.push(dev);
-        crate::application::usecases::device::telemetry::observe(&app).await;
-        let cfg = app.config.read().await.clone();
-        let snap = app.snapshot_devices(&cfg).await;
-        let sensors = snap.devices[0].sensors().expect("sensors present");
-        let ccd1 = sensors.iter().find(|s| s.id == "ccd1").unwrap();
-        assert_eq!(ccd1.visibility, VisibilityState::Hidden);
-    }
-
-    #[tokio::test]
     async fn serialize_strips_sensors_from_disabled_device() {
         use crate::domain::registry::model::DeviceRecord;
         let mut cfg = Config::default();
@@ -451,7 +395,6 @@ mod tests {
                     value: 33.0,
                     unit: halod_shared::types::SensorUnit::Celsius,
                     sensor_type: halod_shared::types::SensorType::Temperature,
-                    visibility: halod_shared::types::VisibilityState::Visible,
                 }]),
         );
         app.device_registry.write().await.push(dev);

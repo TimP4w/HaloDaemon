@@ -96,6 +96,20 @@ pub async fn set_language(lang: String, app: Arc<AppState>) -> Result<()> {
     Ok(())
 }
 
+pub async fn set_home_widgets(
+    widgets: Vec<halod_shared::types::HomeWidget>,
+    app: Arc<AppState>,
+) -> Result<()> {
+    halod_shared::types::validate_home_widgets(&widgets)?;
+    {
+        let mut cfg = app.config.write().await;
+        cfg.gui.home_widgets = widgets;
+    }
+    app.request_config_save();
+    app.record_change(crate::domain::events::Change::Gui).await;
+    Ok(())
+}
+
 pub async fn set_ui_config(
     close_to_tray: bool,
     suppress_dependency_warning: bool,
@@ -282,6 +296,47 @@ mod tests {
                 revision_before + 1,
                 "changing language must commit a bus transaction"
             );
+        })
+        .await;
+    }
+
+    fn chart_widget(id: &str) -> halod_shared::types::HomeWidget {
+        halod_shared::types::HomeWidget {
+            id: id.into(),
+            kind: halod_shared::types::HomeWidgetKind::Chart {
+                sensor_id: "cpu".into(),
+            },
+            color: 0,
+            label: String::new(),
+        }
+    }
+
+    #[tokio::test]
+    async fn set_home_widgets_persists_the_row() {
+        with_tmp_config(|app| async move {
+            let revision_before = app.data_bus.state_snapshot(&[]).revision;
+            let widgets = vec![chart_widget("a"), chart_widget("b")];
+            set_home_widgets(widgets.clone(), app.clone())
+                .await
+                .unwrap();
+            assert_eq!(app.config.read().await.gui.home_widgets, widgets);
+            assert_eq!(
+                app.data_bus.state_snapshot(&[]).revision,
+                revision_before + 1,
+                "changing the widget row must commit a bus transaction"
+            );
+        })
+        .await;
+    }
+
+    #[tokio::test]
+    async fn set_home_widgets_rejects_an_invalid_row() {
+        with_tmp_config(|app| async move {
+            let err = set_home_widgets(vec![chart_widget("a"), chart_widget("a")], app.clone())
+                .await
+                .unwrap_err();
+            assert!(err.to_string().contains("duplicate"), "{err}");
+            assert!(app.config.read().await.gui.home_widgets.is_empty());
         })
         .await;
     }

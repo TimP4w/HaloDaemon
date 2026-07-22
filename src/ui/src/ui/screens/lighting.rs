@@ -320,10 +320,9 @@ fn effect_extras(
 }
 
 /// Every sensor across all devices as `(id, display name)` pairs, for the
-/// `ParamKind::Sensor` picker. Hidden sensors stay selectable — visibility
-/// only governs the home dashboard.
+/// `ParamKind::Sensor` picker.
 pub(crate) fn sensor_options(state: &TopicStore) -> Vec<(String, String)> {
-    crate::domain::models::sensors::sensors(state, true)
+    crate::domain::models::sensors::sensors(state)
         .into_iter()
         .map(|s| {
             let label = format!("{} ({:.0}{})", s.label, s.value, s.unit);
@@ -1618,7 +1617,6 @@ mod tests {
                         value: 47.6,
                         unit: halod_shared::types::SensorUnit::Celsius,
                         sensor_type: halod_shared::types::SensorType::Temperature,
-                        visibility: halod_shared::types::VisibilityState::Visible,
                     },
                 ])],
                 ..Default::default()

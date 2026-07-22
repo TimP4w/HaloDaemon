@@ -99,7 +99,7 @@ When the sensor is unset or its reading is unavailable, both effects fade to bla
 
 ### Fan sensors
 
-Any device with a `FanCapability` gets two synthesized `Sensor` readings: `fan_<id>_duty` (%) and `fan_<id>_rpm` (RPM, omitted when the fan doesn't report one), so fan speed/duty can drive `sensor_gradient` (or any other sensor-consuming effect) exactly like a temperature sensor. These aren't backed by `SensorCapability`; `crate::drivers::fan_sensors()` synthesizes them for both the engine's sensor snapshot and the wire `Sensors` capability list, with visibility overlaid from the same `sensor_visibility` config as every other sensor.
+Any device with a `FanCapability` gets two synthesized `Sensor` readings: `fan_<id>_duty` (%) and `fan_<id>_rpm` (RPM, omitted when the fan doesn't report one), so fan speed/duty can drive `sensor_gradient` (or any other sensor-consuming effect) exactly like a temperature sensor. These aren't backed by `SensorCapability`; `crate::drivers::fan_sensors()` synthesizes them for both the engine's sensor snapshot and the wire `Sensors` capability list.
 
 ---
 

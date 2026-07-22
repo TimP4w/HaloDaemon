@@ -2,7 +2,7 @@
 //! Sensor list derived from the daemon's `TopicStore`, for the home dashboard.
 
 use crate::domain::topic_store::TopicStore;
-use halod_shared::types::{DeviceCapability, VisibilityState};
+use halod_shared::types::DeviceCapability;
 
 use super::device::unit;
 
@@ -12,13 +12,11 @@ pub struct SensorView {
     pub label: String,
     pub value: f64,
     pub unit: &'static str,
-    pub hidden: bool,
 }
 
-/// Sensors across all devices, in device order. Hidden sensors are included only
-/// when `include_hidden` is set. Sensors without their own name (e.g. an hwmon
-/// channel with a blank `_label`) fall back to the device name.
-pub fn sensors(state: &TopicStore, include_hidden: bool) -> Vec<SensorView> {
+/// Sensors across all devices, in device order. Sensors without their own name
+/// (e.g. an hwmon channel with a blank `_label`) fall back to the device name.
+pub fn sensors(state: &TopicStore) -> Vec<SensorView> {
     let mut out = Vec::new();
     for d in &state.devices {
         for cap in &d.capabilities {
@@ -26,9 +24,6 @@ pub fn sensors(state: &TopicStore, include_hidden: bool) -> Vec<SensorView> {
                 continue;
             };
             for s in ss {
-                if !include_hidden && s.visibility != VisibilityState::Visible {
-                    continue;
-                }
                 let label = if s.name.trim().is_empty() {
                     d.name.clone()
                 } else {
@@ -39,28 +34,11 @@ pub fn sensors(state: &TopicStore, include_hidden: bool) -> Vec<SensorView> {
                     label,
                     value: s.value,
                     unit: unit(&s.unit),
-                    hidden: s.visibility != VisibilityState::Visible,
                 });
             }
         }
     }
     out
-}
-
-/// Number of hidden sensors across all devices. Used to decide whether the
-/// home "show hidden" toggle should be offered even when no device is hidden.
-pub fn hidden_count(state: &TopicStore) -> usize {
-    state
-        .devices
-        .iter()
-        .flat_map(|d| &d.capabilities)
-        .filter_map(|cap| match cap {
-            DeviceCapability::Sensors(ss) => Some(ss),
-            _ => None,
-        })
-        .flatten()
-        .filter(|s| s.visibility != VisibilityState::Visible)
-        .count()
 }
 
 #[cfg(test)]
@@ -77,73 +55,30 @@ mod tests {
         }
     }
 
-    fn sensor(id: &str, ty: SensorType, vis: VisibilityState) -> Sensor {
+    fn sensor(id: &str, ty: SensorType) -> Sensor {
         Sensor {
             id: id.into(),
             name: id.into(),
             value: 50.0,
             unit: SensorUnit::Celsius,
             sensor_type: ty,
-            visibility: vis,
         }
     }
 
     #[test]
-    fn sensors_filters_hidden() {
+    fn sensors_includes_every_type_in_device_order() {
         let d = dev(
             DeviceType::Sensor,
             vec![DeviceCapability::Sensors(vec![
-                sensor("vis", SensorType::Temperature, VisibilityState::Visible),
-                sensor("hid", SensorType::Temperature, VisibilityState::Hidden),
+                sensor("load", SensorType::Load),
+                sensor("temp", SensorType::Temperature),
             ])],
         );
         let state = TopicStore {
             devices: vec![d],
             ..Default::default()
         };
-        let visible: Vec<_> = sensors(&state, false).into_iter().map(|s| s.id).collect();
-        assert_eq!(visible, vec!["vis".to_string()]);
-        let all: Vec<_> = sensors(&state, true).into_iter().map(|s| s.id).collect();
-        assert_eq!(all, vec!["vis".to_string(), "hid".to_string()]);
-        // The hidden flag is set independently of the include filter.
-        let hidden_flags: Vec<_> = sensors(&state, true)
-            .into_iter()
-            .map(|s| s.hidden)
-            .collect();
-        assert_eq!(hidden_flags, vec![false, true]);
-    }
-
-    #[test]
-    fn hidden_count_counts_non_visible_sensors() {
-        let d = dev(
-            DeviceType::Sensor,
-            vec![DeviceCapability::Sensors(vec![
-                sensor("vis", SensorType::Temperature, VisibilityState::Visible),
-                sensor("hid", SensorType::Temperature, VisibilityState::Hidden),
-                sensor("hid2", SensorType::Load, VisibilityState::Hidden),
-            ])],
-        );
-        let state = TopicStore {
-            devices: vec![d],
-            ..Default::default()
-        };
-        assert_eq!(hidden_count(&state), 2);
-    }
-
-    #[test]
-    fn sensors_includes_non_temperature_types() {
-        let d = dev(
-            DeviceType::Sensor,
-            vec![DeviceCapability::Sensors(vec![
-                sensor("load", SensorType::Load, VisibilityState::Visible),
-                sensor("temp", SensorType::Temperature, VisibilityState::Visible),
-            ])],
-        );
-        let state = TopicStore {
-            devices: vec![d],
-            ..Default::default()
-        };
-        let ids: Vec<_> = sensors(&state, false).into_iter().map(|s| s.id).collect();
+        let ids: Vec<_> = sensors(&state).into_iter().map(|s| s.id).collect();
         assert_eq!(ids, vec!["load".to_string(), "temp".to_string()]);
     }
 
@@ -152,12 +87,8 @@ mod tests {
         let mut d = dev(
             DeviceType::Sensor,
             vec![DeviceCapability::Sensors(vec![Sensor {
-                id: "s".into(),
                 name: "   ".into(),
-                value: 50.0,
-                unit: SensorUnit::Celsius,
-                sensor_type: SensorType::Temperature,
-                visibility: VisibilityState::Visible,
+                ..sensor("s", SensorType::Temperature)
             }])],
         );
         d.name = "My Device".into();
@@ -165,15 +96,15 @@ mod tests {
             devices: vec![d],
             ..Default::default()
         };
-        let s = sensors(&state, false);
+        let s = sensors(&state);
         assert_eq!(s[0].label, "My Device");
     }
 
     #[test]
     fn unit_maps_all_variants() {
         let cases = [
-            (SensorUnit::Celsius, "°C"),
-            (SensorUnit::Fahrenheit, "°F"),
+            (SensorUnit::Celsius, "\u{b0}C"),
+            (SensorUnit::Fahrenheit, "\u{b0}F"),
             (SensorUnit::Percent, "%"),
             (SensorUnit::Megahertz, "MHz"),
             (SensorUnit::Hours, "h"),
@@ -183,19 +114,15 @@ mod tests {
             let d = dev(
                 DeviceType::Hub,
                 vec![DeviceCapability::Sensors(vec![Sensor {
-                    id: "s".into(),
-                    name: "s".into(),
-                    value: 1.0,
                     unit: unit_variant,
-                    sensor_type: SensorType::Temperature,
-                    visibility: VisibilityState::Visible,
+                    ..sensor("s", SensorType::Temperature)
                 }])],
             );
             let state = TopicStore {
                 devices: vec![d],
                 ..Default::default()
             };
-            let sv = sensors(&state, false);
+            let sv = sensors(&state);
             assert_eq!(sv[0].unit, expected, "unit() for {expected}");
         }
     }

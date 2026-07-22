@@ -1676,7 +1676,6 @@ mod tests {
                 value: 80.0,
                 unit: halod_shared::types::SensorUnit::Celsius,
                 sensor_type: halod_shared::types::SensorType::Temperature,
-                visibility: halod_shared::types::VisibilityState::Visible,
             },
         ]);
         app.device_registry

@@ -13,7 +13,7 @@ use halod_shared::bus::{
     matches_prefixes, BusEvent, BusEventPayload, BusEventReplay, BusRecord, BusRecordStatus,
     BusSnapshot, BusTransaction, BusValue, EVENT_RING_CAPACITY,
 };
-use halod_shared::types::{Sensor, SensorType, SensorUnit, VisibilityState};
+use halod_shared::types::{Sensor, SensorType, SensorUnit};
 
 pub const MAX_PLUGIN_RECORD_BYTES: usize = 32 * 1024;
 const MAX_GLOBAL_BYTES: usize = 8 * 1024 * 1024;
@@ -516,10 +516,6 @@ impl DataBus {
                 "sensor_type".into(),
                 DataValue::String(sensor_type_name(&sensor.sensor_type).into()),
             );
-            value.insert(
-                "visibility".into(),
-                DataValue::String(visibility_name(&sensor.visibility).into()),
-            );
             let next = DataValue::Map(value);
             if self.read(&key).value.as_ref() != Some(&next) {
                 changed_devices.insert(device_id.clone());
@@ -555,12 +551,6 @@ impl DataBus {
             .collect()
     }
 
-    pub fn sensor_owner(&self, sensor_id: &str) -> Option<String> {
-        self.sensor_entries()
-            .into_iter()
-            .find_map(|(owner, sensor)| (sensor.id == sensor_id).then_some(owner))
-    }
-
     fn sensor_entries(&self) -> Vec<(String, Sensor)> {
         let catalog = self.read("host.sensors.catalog");
         if catalog.status != SnapshotStatus::Fresh {
@@ -590,7 +580,6 @@ impl DataBus {
                     value: data_number(&value, "value")?,
                     unit: parse_sensor_unit(data_string(&value, "unit")?)?,
                     sensor_type: parse_sensor_type(data_string(&value, "sensor_type")?)?,
-                    visibility: parse_visibility(data_string(&value, "visibility")?)?,
                 };
                 Some((device_id, sensor))
             })
@@ -1126,23 +1115,6 @@ fn sensor_type_name(value: &SensorType) -> &'static str {
     }
 }
 
-fn parse_visibility(value: &str) -> Option<VisibilityState> {
-    match value {
-        "visible" => Some(VisibilityState::Visible),
-        "hidden" => Some(VisibilityState::Hidden),
-        "disabled" => Some(VisibilityState::Disabled),
-        _ => None,
-    }
-}
-
-fn visibility_name(value: &VisibilityState) -> &'static str {
-    match value {
-        VisibilityState::Visible => "visible",
-        VisibilityState::Hidden => "hidden",
-        VisibilityState::Disabled => "disabled",
-    }
-}
-
 pub fn host_policy(stale_after: Duration) -> DataPolicy {
     DataPolicy {
         stale_after,
@@ -1296,7 +1268,6 @@ mod tests {
             value: 42.0,
             unit: SensorUnit::Celsius,
             sensor_type: SensorType::Temperature,
-            visibility: VisibilityState::Visible,
         };
         let key = sensor_key(&sensor.id);
         bus.replace_host_sensors(vec![("device".into(), sensor)]);

@@ -11,8 +11,9 @@ pub use debounce::Debouncer;
 pub use hide_state::HideState;
 
 /// Home device-list layout: grid of cards or a compact list.
-#[derive(Clone, Copy, PartialEq)]
+#[derive(Clone, Copy, PartialEq, Default)]
 pub enum Variant {
+    #[default]
     Grid,
     List,
 }

@@ -115,8 +115,8 @@ pub fn show(
                     Some(crate::domain::tour::AnchorId::CoolingCurve),
                 );
 
-                if !crate::domain::models::sensors::sensors(state, false).is_empty() {
-                    crate::ui::screens::home::sensors_grid(ui, state, cmd, false, history, 3);
+                if !crate::domain::models::sensors::sensors(state).is_empty() {
+                    crate::ui::screens::home::sensors_grid(ui, state, history, 3);
                     ui.add_space(22.0);
                 }
                 cooler_grid(ui, state, cmd, &coolers, time, page);

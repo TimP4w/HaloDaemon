@@ -463,7 +463,6 @@ mod tests {
                     value: 40.0,
                     unit: SensorUnit::Celsius,
                     sensor_type: SensorType::Temperature,
-                    visibility: VisibilityState::Visible,
                 }]),
                 DeviceCapability::Cooling(CoolingStatus {
                     channels: vec![CoolingChannel {
@@ -608,7 +607,6 @@ mod tests {
                 value: 42.4,
                 unit: SensorUnit::Celsius,
                 sensor_type: SensorType::Temperature,
-                visibility: VisibilityState::Visible,
             }])],
         );
         let m = metrics(&d);

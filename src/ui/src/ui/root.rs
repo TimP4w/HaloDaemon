@@ -236,7 +236,7 @@ impl App {
 
         if time - self.last_sample >= 1.0 {
             self.last_sample = time;
-            let sensors = domain::models::sensors::sensors(&state, true);
+            let sensors = domain::models::sensors::sensors(&state);
             let sensor_ids = sensors
                 .iter()
                 .map(|s| s.id.as_str())
@@ -426,14 +426,10 @@ impl App {
                             ui,
                             &state,
                             &self.cmd,
-                            &mut self.show_hidden,
-                            &mut self.variant,
-                            &mut self.search,
-                            &mut self.rename,
-                            &mut self.confirm_remove,
-                            &mut self.conflict_resolve,
+                            &mut self.home_ui,
                             &self.sensor_history,
                             &mut self.page,
+                            time,
                             !tour_active && !onboarding_active,
                         );
                     }

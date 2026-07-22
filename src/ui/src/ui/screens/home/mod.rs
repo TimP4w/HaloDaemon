@@ -1,6 +1,10 @@
 // SPDX-License-Identifier: GPL-3.0-or-later
-//! The Home screen main panel: greeting + summary, live sensor sparklines, and
-//! the device grid/list. All data comes from the live daemon state.
+//! The Home screen main panel: greeting + summary, the configurable widget row,
+//! and the device grid/list. All data comes from the live daemon state.
+
+mod widget_config;
+pub mod widget_row;
+mod widget_view;
 
 use crate::ui::components as widgets;
 use std::collections::{HashMap, HashSet, VecDeque};
@@ -18,21 +22,33 @@ use crate::ui::theme::{self, a};
 
 const GAP: f32 = 16.0;
 
-#[allow(clippy::too_many_arguments)]
+/// Everything the Home screen owns across frames.
+#[derive(Default)]
+pub struct HomeUi {
+    pub show_hidden: bool,
+    pub variant: Variant,
+    /// Device-list filter text (matches name or vendor).
+    pub search: String,
+    pub rename: Option<Rename>,
+    /// Pending confirmation to unlink a chained device.
+    pub confirm_remove: Option<ConfirmRemove>,
+    /// Open duplicate-device resolve dialog: every conflict group with the
+    /// owner the user has picked to keep. `None` when the dialog is closed.
+    pub conflict_resolve: Option<Vec<ConflictGroup>>,
+    pub widgets: widget_row::EditState,
+}
+
 pub fn show(
     ui: &mut egui::Ui,
     state: &TopicStore,
     cmd: &CommandTx,
-    show_hidden: &mut bool,
-    variant: &mut Variant,
-    search: &mut String,
-    rename: &mut Option<Rename>,
-    confirm_remove: &mut Option<ConfirmRemove>,
-    conflict_resolve: &mut Option<Vec<ConflictGroup>>,
+    home: &mut HomeUi,
     history: &HashMap<String, VecDeque<f32>>,
     page: &mut crate::domain::state::Page,
+    time: f64,
     allow_modals: bool,
 ) {
+    let sensors = crate::domain::models::sensors::sensors(state);
     egui::ScrollArea::vertical()
         .auto_shrink([false, false])
         .show(ui, |ui| {
@@ -44,19 +60,28 @@ pub fn show(
                     bottom: 30,
                 })
                 .show(ui, |ui| {
-                    header(ui, state, show_hidden, variant, search);
+                    header(ui, state, home);
                     let conflicts = conflict_group_count(&state.devices);
                     if conflicts > 0 {
                         ui.add_space(theme::SPACE_9);
                         if attention_banner(ui, conflicts) {
-                            *conflict_resolve = Some(conflict_groups(&state.devices));
+                            home.conflict_resolve = Some(conflict_groups(&state.devices));
                         }
                     }
-                    let has_sensors =
-                        !crate::domain::models::sensors::sensors(state, *show_hidden).is_empty();
-                    ui.add_space(if has_sensors { 24.0 } else { 14.0 });
-                    sensors_row(ui, state, cmd, *show_hidden, history);
-                    if has_sensors {
+                    let has_row = home.widgets.customizing() || !state.gui.home_widgets.is_empty();
+                    ui.add_space(if has_row { 24.0 } else { 14.0 });
+                    widget_row::show(
+                        ui,
+                        &mut home.widgets,
+                        widget_row::RowCtx {
+                            state,
+                            cmd,
+                            history,
+                            sensors: &sensors,
+                            time,
+                        },
+                    );
+                    if has_row {
                         ui.add_space(26.0);
                     }
 
@@ -65,23 +90,23 @@ pub fn show(
                         .iter()
                         .filter(|d| {
                             model::listable(d)
-                                && (*show_hidden || !model::is_hidden(d))
-                                && model::matches_query(d, search)
+                                && (home.show_hidden || !model::is_hidden(d))
+                                && model::matches_query(d, &home.search)
                         })
                         .collect();
 
                     if devices.is_empty() {
-                        empty(ui, !search.trim().is_empty());
+                        empty(ui, !home.search.trim().is_empty());
                     } else {
-                        match variant {
+                        match home.variant {
                             Variant::Grid => grid(
                                 ui,
                                 &devices,
                                 &state.devices,
                                 cmd,
-                                rename,
-                                confirm_remove,
-                                conflict_resolve,
+                                &mut home.rename,
+                                &mut home.confirm_remove,
+                                &mut home.conflict_resolve,
                                 page,
                             ),
                             Variant::List => list(
@@ -89,9 +114,9 @@ pub fn show(
                                 &devices,
                                 &state.devices,
                                 cmd,
-                                rename,
-                                confirm_remove,
-                                conflict_resolve,
+                                &mut home.rename,
+                                &mut home.confirm_remove,
+                                &mut home.conflict_resolve,
                                 page,
                             ),
                         }
@@ -100,8 +125,8 @@ pub fn show(
         });
 
     if allow_modals {
-        remove_confirm_modal(ui.ctx(), cmd, confirm_remove);
-        conflict_modal(ui.ctx(), cmd, conflict_resolve);
+        remove_confirm_modal(ui.ctx(), cmd, &mut home.confirm_remove);
+        conflict_modal(ui.ctx(), cmd, &mut home.conflict_resolve);
     }
 }
 
@@ -577,7 +602,12 @@ fn tag_pill(p: &egui::Painter, left_center: Pos2, text: &str, color: Color32) {
     p.text(rect.center(), Align2::CENTER_CENTER, text, font, color);
 }
 
-fn ellipsize(painter: &egui::Painter, text: &str, font: &egui::FontId, max_width: f32) -> String {
+pub(super) fn ellipsize(
+    painter: &egui::Painter,
+    text: &str,
+    font: &egui::FontId,
+    max_width: f32,
+) -> String {
     widgets::truncate_to_width(text, max_width, |s| {
         painter
             .layout_no_wrap(s.to_owned(), font.clone(), theme::TEXT)
@@ -761,13 +791,7 @@ fn set_vis(ui: &mut egui::Ui, cmd: &CommandTx, id: &str, state: VisibilityState)
     ui.close();
 }
 
-fn header(
-    ui: &mut egui::Ui,
-    state: &TopicStore,
-    show_hidden: &mut bool,
-    variant: &mut Variant,
-    search: &mut String,
-) {
+fn header(ui: &mut egui::Ui, state: &TopicStore, home: &mut HomeUi) {
     let total = state.devices.iter().filter(|d| model::listable(d)).count();
     let online = state
         .devices
@@ -779,8 +803,7 @@ fn header(
         .devices
         .iter()
         .filter(|d| model::listable(d) && model::is_hidden(d))
-        .count()
-        + crate::domain::models::sensors::hidden_count(state);
+        .count();
 
     ui.horizontal(|ui| {
         ui.vertical(|ui| {
@@ -802,26 +825,36 @@ fn header(
         });
 
         ui.with_layout(egui::Layout::right_to_left(egui::Align::Center), |ui| {
-            segmented(ui, variant);
+            segmented(ui, &mut home.variant);
             ui.add_space(theme::SPACE_5);
             if hidden > 0 {
-                let label = if *show_hidden {
+                let label = if home.show_hidden {
                     t!("home.hide_hidden")
                 } else {
                     t!("home.show_hidden")
                 };
-                let clicked = widgets::pill(ui, &label, *show_hidden);
+                let clicked = widgets::pill(ui, &label, home.show_hidden);
                 crate::domain::tour::anchor(
                     ui.ctx(),
                     crate::domain::tour::AnchorId::HomeShowHidden,
                     ui.min_rect(),
                 );
                 if clicked {
-                    *show_hidden = !*show_hidden;
+                    home.show_hidden = !home.show_hidden;
                 }
                 ui.add_space(theme::SPACE_5);
             }
-            search_box(ui, search);
+            let customizing = home.widgets.customizing();
+            let label = if customizing {
+                t!("home.customize_done")
+            } else {
+                t!("home.customize")
+            };
+            if widgets::pill(ui, &label, customizing) {
+                home.widgets.toggle(state);
+            }
+            ui.add_space(theme::SPACE_5);
+            search_box(ui, &mut home.search);
         });
     });
 }
@@ -915,28 +948,14 @@ fn segmented(ui: &mut egui::Ui, variant: &mut Variant) {
     }
 }
 
-/// All visible sensors (plus hidden ones when `show_hidden`), each
-/// with a live sparkline drawn in the card background. Wraps into rows of four.
-fn sensors_row(
-    ui: &mut egui::Ui,
-    state: &TopicStore,
-    cmd: &CommandTx,
-    show_hidden: bool,
-    history: &HashMap<String, VecDeque<f32>>,
-) {
-    sensors_grid(ui, state, cmd, show_hidden, history, 4);
-}
-
-// Sensor cards with sparklines, shared by Home and Cooling pages.
+// Sensor cards with sparklines, drawn on the Cooling page.
 pub(crate) fn sensors_grid(
     ui: &mut egui::Ui,
     state: &TopicStore,
-    cmd: &CommandTx,
-    show_hidden: bool,
     history: &HashMap<String, VecDeque<f32>>,
     cols: usize,
 ) {
-    let sensors = crate::domain::models::sensors::sensors(state, show_hidden);
+    let sensors = crate::domain::models::sensors::sensors(state);
     if sensors.is_empty() {
         return;
     }
@@ -949,7 +968,7 @@ pub(crate) fn sensors_grid(
             ui.spacing_mut().item_spacing.x = GAP;
             for (col, s) in chunk.iter().enumerate() {
                 let color = theme::sensor_hue(row * cols + col);
-                sensor_card(ui, s, color, w, cmd, history);
+                sensor_card(ui, s, color, w, history);
             }
         });
     }
@@ -960,17 +979,12 @@ fn sensor_card(
     s: &crate::domain::models::sensors::SensorView,
     color: Color32,
     w: f32,
-    cmd: &CommandTx,
     history: &HashMap<String, VecDeque<f32>>,
 ) {
-    let (rect, resp) = ui.allocate_exact_size(Vec2::new(w, 82.0), Sense::click());
-    let hovered = resp.hovered() && !s.hidden;
-    let t = ui
-        .ctx()
-        .animate_bool_with_time(egui::Id::new(("sensor_h", &s.id)), hovered, 0.15);
-    if hovered {
-        ui.ctx().set_cursor_icon(egui::CursorIcon::PointingHand);
-    }
+    let (rect, resp) = ui.allocate_exact_size(Vec2::new(w, 82.0), Sense::hover());
+    let t =
+        ui.ctx()
+            .animate_bool_with_time(egui::Id::new(("sensor_h", &s.id)), resp.hovered(), 0.15);
     let p = ui.painter();
     if t > 0.0 {
         theme::gentle_glow_ellipse(p, rect.center(), w * 0.68, 68.0, color, 0.10 * t);
@@ -984,15 +998,10 @@ fn sensor_card(
     }
     // The sparkline fill bleeds into the rounded corners; mask them back.
     theme::round_corners(p, rect, 12.0, theme::MAIN_BG);
-    let border_color = if s.hidden {
-        theme::BORDER
-    } else {
-        theme::lerp_color(theme::BORDER, a(color, 0.5), t)
-    };
     p.rect_stroke(
         rect,
         theme::RADIUS_LG,
-        Stroke::new(1.0, border_color),
+        Stroke::new(1.0, theme::lerp_color(theme::BORDER, a(color, 0.5), t)),
         egui::StrokeKind::Middle,
     );
 
@@ -1033,35 +1042,6 @@ fn sensor_card(
             theme::TEXT_FAINT,
         );
     }
-    // Greyed when hidden; right-click to toggle visibility.
-    if s.hidden {
-        p.rect_filled(rect, theme::RADIUS_LG, a(theme::MAIN_BG, 0.45));
-        theme::round_corners(p, rect, 12.0, theme::MAIN_BG);
-        p.rect_stroke(
-            rect,
-            theme::RADIUS_LG,
-            Stroke::new(1.0, theme::BORDER),
-            egui::StrokeKind::Middle,
-        );
-    }
-    resp.context_menu(|ui| {
-        ui.set_width(150.0);
-        let (label, state) = if s.hidden {
-            (t!("home.show_sensor"), VisibilityState::Visible)
-        } else {
-            (t!("home.hide_sensor"), VisibilityState::Hidden)
-        };
-        if widgets::context_menu_item(ui, &label, theme::TEXT).clicked() {
-            crate::runtime::ipc::send(
-                cmd,
-                halod_shared::commands::DaemonCommand::SetSensorVisibility {
-                    sensor_id: s.id.clone(),
-                    state,
-                },
-            );
-            ui.close();
-        }
-    });
 }
 
 /// Signed change across the history window, suffixed with the sensor's unit —

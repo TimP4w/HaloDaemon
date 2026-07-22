@@ -898,7 +898,6 @@ mod tests {
                 value: self.temp,
                 unit: SensorUnit::Celsius,
                 sensor_type: halod_shared::types::SensorType::Temperature,
-                visibility: Default::default(),
             }])
         }
     }

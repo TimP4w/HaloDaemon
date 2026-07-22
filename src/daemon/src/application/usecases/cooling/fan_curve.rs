@@ -147,7 +147,6 @@ mod tests {
             value: 40.0,
             unit: halod_shared::types::SensorUnit::Celsius,
             sensor_type: kind,
-            visibility: Default::default(),
         }
     }
 

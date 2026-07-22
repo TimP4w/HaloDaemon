@@ -228,6 +228,11 @@ pub enum DaemonCommand {
     SetLanguage {
         lang: String,
     },
+    /// Replace the Home dashboard's widget row. Adds, removals and reorders
+    /// are all whole-list mutations, so one command covers them.
+    SetHomeWidgets {
+        widgets: Vec<crate::types::HomeWidget>,
+    },
     SetUiConfig {
         close_to_tray: bool,
         suppress_dependency_warning: bool,
@@ -268,10 +273,6 @@ pub enum DaemonCommand {
     },
     SetDeviceVisibility {
         device_id: String,
-        state: VisibilityState,
-    },
-    SetSensorVisibility {
-        sensor_id: String,
         state: VisibilityState,
     },
     /// Hide or disable one of a device's lighting or cooling channels. Channel
@@ -654,6 +655,32 @@ mod tests {
     fn set_language_wire_format() {
         let v = roundtrip(&DaemonCommand::SetLanguage { lang: "it".into() });
         assert_eq!(v, json!({"type": "set_language", "lang": "it"}));
+    }
+
+    #[test]
+    fn set_home_widgets_wire_format() {
+        let v = roundtrip(&DaemonCommand::SetHomeWidgets {
+            widgets: vec![crate::types::HomeWidget {
+                id: "w1".into(),
+                kind: crate::types::HomeWidgetKind::Chart {
+                    sensor_id: "cpu".into(),
+                },
+                color: 2,
+                label: "CPU".into(),
+            }],
+        });
+        assert_eq!(
+            v,
+            json!({
+                "type": "set_home_widgets",
+                "widgets": [{
+                    "id": "w1",
+                    "kind": {"type": "chart", "sensor_id": "cpu"},
+                    "color": 2,
+                    "label": "CPU",
+                }],
+            })
+        );
     }
 
     #[test]
@@ -1245,21 +1272,6 @@ mod tests {
             cmd,
             DaemonCommand::SetChannelVisibility {
                 kind: ChannelKind::Cooling,
-                state: VisibilityState::Disabled,
-                ..
-            }
-        ));
-    }
-
-    #[test]
-    fn set_sensor_visibility_parses_ui_payload() {
-        let cmd: DaemonCommand = serde_json::from_value(
-            json!({"type": "set_sensor_visibility", "sensor_id": "s", "state": "disabled"}),
-        )
-        .expect("UI payload must deserialise");
-        assert!(matches!(
-            cmd,
-            DaemonCommand::SetSensorVisibility {
                 state: VisibilityState::Disabled,
                 ..
             }

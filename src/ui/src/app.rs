@@ -9,11 +9,7 @@ use std::collections::{HashMap, VecDeque};
 use std::sync::atomic::{AtomicBool, Ordering};
 use std::sync::Arc;
 
-use crate::domain::{
-    self,
-    state::{Page, Rename, Variant},
-    topic_store::TopicStore,
-};
+use crate::domain::{self, state::Page, topic_store::TopicStore};
 use crate::runtime::ipc::{self, CommandTx, FrameSinks, UiRx};
 use crate::ui;
 
@@ -45,16 +41,7 @@ pub struct App {
     pub(crate) onboarding_completed: bool,
     /// First-run onboarding wizard state (step, selections, scan timer).
     pub(crate) onboarding_ui: ui::screens::onboarding::OnboardingUi,
-    pub(crate) show_hidden: bool,
-    pub(crate) variant: Variant,
-    /// Home device-list filter text (matches name or vendor).
-    pub(crate) search: String,
-    pub(crate) rename: Option<Rename>,
-    /// Pending confirmation to unlink a chained device from the Home view.
-    pub(crate) confirm_remove: Option<ui::screens::home::ConfirmRemove>,
-    /// Open duplicate-device resolve dialog: every conflict group with the
-    /// owner the user has picked to keep. `None` when the dialog is closed.
-    pub(crate) conflict_resolve: Option<Vec<ui::screens::home::ConflictGroup>>,
+    pub(crate) home_ui: ui::screens::home::HomeUi,
     pub(crate) sensor_history: HashMap<String, VecDeque<f32>>,
     /// Rolling write-rate throughput (bytes/sec) per device id.
     pub(crate) write_rate_history: HashMap<String, VecDeque<f32>>,
@@ -153,12 +140,7 @@ impl App {
             recommendation_toasted: std::collections::HashSet::new(),
             onboarding_completed: false,
             onboarding_ui: ui::screens::onboarding::OnboardingUi::default(),
-            show_hidden: false,
-            variant: Variant::Grid,
-            search: String::new(),
-            rename: None,
-            confirm_remove: None,
-            conflict_resolve: None,
+            home_ui: ui::screens::home::HomeUi::default(),
             sensor_history: HashMap::new(),
             write_rate_history: HashMap::new(),
             last_sample: 0.0,

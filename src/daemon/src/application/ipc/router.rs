@@ -510,6 +510,9 @@ async fn dispatch(
         DaemonCommand::SetLanguage { lang } => {
             crate::application::usecases::registry::settings::set_language(lang, app).await
         }
+        DaemonCommand::SetHomeWidgets { widgets } => {
+            crate::application::usecases::registry::settings::set_home_widgets(widgets, app).await
+        }
         DaemonCommand::SetUiConfig {
             close_to_tray,
             suppress_dependency_warning,
@@ -579,12 +582,6 @@ async fn dispatch(
         DaemonCommand::SetDeviceVisibility { device_id, state } => {
             crate::application::usecases::device::visibility::set_device_visibility(
                 device_id, state, app,
-            )
-            .await
-        }
-        DaemonCommand::SetSensorVisibility { sensor_id, state } => {
-            crate::application::usecases::device::visibility::set_sensor_visibility(
-                sensor_id, state, app,
             )
             .await
         }

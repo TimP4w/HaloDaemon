@@ -18,8 +18,6 @@ home:
   search_devices: Search devices
   grid: Grid
   list: List
-  show_sensor: Show sensor
-  hide_sensor: Hide sensor
   offline: Offline
   conflict_confirmed: Duplicate device
   conflict_possible: Possible duplicate
@@ -50,3 +48,25 @@ home:
   no_matching_sub: None of your connected devices match this search
   no_devices: No devices connected
   no_devices_sub: Plug in a peripheral or check that halod is running
+  customize: Customize
+  customize_done: Done
+  widget_add: Add widget
+  widget_add_title: Add a widget
+  widget_edit_title: Edit widget
+  widget_add_subtitle: Choose what this tile shows on your dashboard
+  widget_type: Type
+  widget_chart: Chart
+  widget_chart_desc: Sparkline trend over time
+  widget_gauge: Gauge
+  widget_gauge_desc: Radial dial across a range you choose
+  widget_battery: Battery
+  widget_battery_desc: Charge levels for up to three batteries
+  widget_sensor: Sensor
+  widget_batteries: "Batteries (up to %{max})"
+  widget_no_batteries: No devices report a battery
+  widget_label: Label
+  widget_color: Color
+  widget_range: Range
+  widget_min: Minimum
+  widget_max: Maximum
+  widget_unavailable: Source unavailable

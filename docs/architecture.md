@@ -259,7 +259,7 @@ directly.
   `~/.config/halod/` (Linux) or `%APPDATA%\halod\` (Windows); see
   [daemon/src/config/mod.rs](../src/daemon/src/config/mod.rs): `config.yaml`
   (global settings + active profile), `devices.yaml` (known devices, chain
-  layouts, zone transforms, sensor visibility), `app_rules.yaml`, one
+  layouts, zone transforms), `app_rules.yaml`, one
   `profiles/<name>.yaml` per profile, and `lcd/<name>.yaml` for saved custom
   LCD templates. Each file is saved via tmp-file + rename, fsync'd on Unix (a
   fully durable cross-platform atomic-replace is still being unified); the

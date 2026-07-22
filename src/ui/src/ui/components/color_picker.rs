@@ -102,6 +102,29 @@ fn color_swatch_row_inner(ui: &mut egui::Ui, current: RgbColor) -> Option<RgbCol
     out
 }
 
+/// A swatch row over a fixed palette, selected by index rather than by value —
+/// for settings persisted as a palette slot (e.g. Home widget accents).
+pub fn palette_swatch_row(
+    ui: &mut egui::Ui,
+    id_salt: impl Hash + std::fmt::Debug,
+    palette: &[Color32],
+    current: u8,
+) -> Option<u8> {
+    ui.push_id(id_salt, |ui| {
+        let mut picked = None;
+        ui.horizontal_wrapped(|ui| {
+            ui.spacing_mut().item_spacing = Vec2::new(9.0, 9.0);
+            for (i, &color) in palette.iter().enumerate() {
+                if mini_swatch(ui, 22.0, color, usize::from(current) == i) {
+                    picked = Some(i as u8);
+                }
+            }
+        });
+        picked
+    })
+    .inner
+}
+
 fn mini_swatch(ui: &mut egui::Ui, d: f32, color: Color32, selected: bool) -> bool {
     let (rect, resp) = ui.allocate_exact_size(Vec2::splat(d), Sense::click());
     let center = rect.center();

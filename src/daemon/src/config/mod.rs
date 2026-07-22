@@ -20,7 +20,7 @@ use halod_shared::keyboard::KeyboardLayoutSelection;
 // The single in-memory `Config` is split across several files by concern, each
 // independently atomic (tmp+rename) and independently defaultable:
 //   config.yaml          - active_profile + cooling/rgb/lcd/gui config
-//   devices.yaml          - known_devices, device_layouts, device_transforms, sensor_visibility
+//   devices.yaml          - known_devices, device_layouts, device_transforms
 //   app_rules.yaml        - app_rules
 //   profiles/<slug>.yaml  - one Profile per file, named for a human to read
 
@@ -46,7 +46,6 @@ pub fn load() -> Result<Config> {
         lcd: main.lcd,
         gui: main.gui,
         device_layouts: devices.device_layouts,
-        sensor_visibility: devices.sensor_visibility,
         channel_visibility: devices.channel_visibility,
         device_transforms: devices.device_transforms,
         keyboard_layouts: devices.keyboard_layouts,
@@ -71,7 +70,6 @@ pub fn save(cfg: &Config) -> Result<()> {
         &serde_yaml::to_string(&DevicesFile {
             known_devices: cfg.known_devices.clone(),
             device_layouts: cfg.device_layouts.clone(),
-            sensor_visibility: cfg.sensor_visibility.clone(),
             channel_visibility: cfg.channel_visibility.clone(),
             device_transforms: cfg.device_transforms.clone(),
             keyboard_layouts: cfg.keyboard_layouts.clone(),
@@ -325,8 +323,6 @@ struct DevicesFile {
     #[serde(default, skip_serializing_if = "HashMap::is_empty")]
     device_layouts: HashMap<String, DeviceLayout>,
     #[serde(default, skip_serializing_if = "HashMap::is_empty")]
-    sensor_visibility: HashMap<String, VisibilityState>,
-    #[serde(default, skip_serializing_if = "HashMap::is_empty")]
     channel_visibility: HashMap<String, HashMap<String, VisibilityState>>,
     #[serde(default, skip_serializing_if = "HashMap::is_empty")]
     device_transforms: HashMap<String, HashMap<String, ZoneContentTransform>>,
@@ -457,8 +453,6 @@ pub struct Config {
     pub gui: GuiConfig,
     #[serde(default, skip_serializing_if = "HashMap::is_empty")]
     pub device_layouts: HashMap<String, DeviceLayout>,
-    #[serde(default, skip_serializing_if = "HashMap::is_empty")]
-    pub sensor_visibility: HashMap<String, VisibilityState>,
     /// device_id → `ChannelKind::key(channel_id)` → state. Absent = Visible.
     #[serde(default, skip_serializing_if = "HashMap::is_empty")]
     pub channel_visibility: HashMap<String, HashMap<String, VisibilityState>>,
@@ -490,7 +484,6 @@ impl Default for Config {
             lcd: LcdConfig::default(),
             gui: GuiConfig::default(),
             device_layouts: HashMap::new(),
-            sensor_visibility: HashMap::new(),
             channel_visibility: HashMap::new(),
             device_transforms: HashMap::new(),
             keyboard_layouts: HashMap::new(),
@@ -611,8 +604,6 @@ mod tests {
                 channels: HashMap::new(),
             },
         );
-        cfg.sensor_visibility
-            .insert("sensor1".into(), Default::default());
         cfg.keyboard_layouts.insert(
             "kbd1".into(),
             KeyboardLayoutSelection {
@@ -688,7 +679,6 @@ mod tests {
         );
         assert_eq!(reloaded.known_devices["dev1"].name, "Dev One");
         assert!(reloaded.device_layouts.contains_key("hub1"));
-        assert!(reloaded.sensor_visibility.contains_key("sensor1"));
         assert_eq!(
             reloaded.keyboard_layouts["kbd1"].language,
             Some(halod_shared::types::KeyboardLayout::CH)

@@ -100,7 +100,6 @@ fn sensor(id: &str, name: &str, value: f64, unit: SensorUnit, sensor_type: Senso
         value,
         unit,
         sensor_type,
-        visibility: Default::default(),
     }
 }
 

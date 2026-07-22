@@ -235,7 +235,6 @@ mod tests {
                     value: 45.5,
                     unit: halod_shared::types::SensorUnit::Celsius,
                     sensor_type: halod_shared::types::SensorType::Temperature,
-                    visibility: halod_shared::types::VisibilityState::Visible,
                 },
             ]),
         );
@@ -247,7 +246,6 @@ mod tests {
                     value: 62.0,
                     unit: halod_shared::types::SensorUnit::Celsius,
                     sensor_type: halod_shared::types::SensorType::Temperature,
-                    visibility: halod_shared::types::VisibilityState::Visible,
                 },
             ]),
         );
@@ -289,7 +287,6 @@ mod tests {
                     value: 45.5,
                     unit: halod_shared::types::SensorUnit::Celsius,
                     sensor_type: halod_shared::types::SensorType::Temperature,
-                    visibility: halod_shared::types::VisibilityState::Visible,
                 }]),
         );
         app.device_registry
@@ -315,7 +312,6 @@ mod tests {
                     value: 45.5,
                     unit: halod_shared::types::SensorUnit::Celsius,
                     sensor_type: halod_shared::types::SensorType::Temperature,
-                    visibility: halod_shared::types::VisibilityState::Visible,
                 },
             ]),
         );

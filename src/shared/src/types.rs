@@ -549,6 +549,110 @@ pub enum PluginDownloadConsent {
 /// Persisted first-run onboarding completion key shared by daemon and GUI.
 pub const ONBOARDING_TOUR_KEY: &str = "onboarding";
 
+/// Upper bound on the Home dashboard's configurable widget row.
+pub const MAX_HOME_WIDGETS: usize = 12;
+/// Batteries a single battery widget may list.
+pub const MAX_BATTERY_WIDGET_ENTRIES: usize = 3;
+
+/// Separator joining a device id and a battery key into the stable identifier
+/// a battery widget stores.
+pub const BATTERY_REF_SEPARATOR: char = '/';
+
+/// What a Home dashboard widget renders, and the source it reads.
+#[derive(Debug, Clone, PartialEq, Serialize, Deserialize)]
+#[serde(tag = "type", rename_all = "snake_case")]
+pub enum HomeWidgetKind {
+    Chart {
+        sensor_id: String,
+    },
+    Gauge {
+        sensor_id: String,
+        min: f64,
+        max: f64,
+    },
+    /// Battery references, each `"{device_id}/{battery_key}"`.
+    Battery {
+        batteries: Vec<String>,
+    },
+}
+
+/// One tile in the Home dashboard's configurable widget row.
+#[derive(Debug, Clone, PartialEq, Serialize, Deserialize)]
+pub struct HomeWidget {
+    pub id: String,
+    pub kind: HomeWidgetKind,
+    /// Index into the GUI's widget accent palette.
+    pub color: u8,
+    /// Overrides the source's own name when non-empty.
+    #[serde(default)]
+    pub label: String,
+}
+
+/// Join a device id and battery key into a [`HomeWidgetKind::Battery`] entry.
+pub fn battery_ref(device_id: &str, key: &str) -> String {
+    format!("{device_id}{BATTERY_REF_SEPARATOR}{key}")
+}
+
+/// Why a widget row was rejected. The GUI keeps the user from building one,
+/// the daemon refuses to persist one that slips through anyway.
+#[derive(Debug, Clone, Copy, PartialEq, Eq)]
+pub enum HomeWidgetsError {
+    TooMany,
+    DuplicateId,
+    EmptyId,
+    TooManyBatteries,
+    EmptyRange,
+}
+
+impl std::fmt::Display for HomeWidgetsError {
+    fn fmt(&self, f: &mut std::fmt::Formatter<'_>) -> std::fmt::Result {
+        let text = match self {
+            Self::TooMany => "too many home widgets",
+            Self::DuplicateId => "duplicate home widget id",
+            Self::EmptyId => "home widget id must not be empty",
+            Self::TooManyBatteries => "too many batteries in one widget",
+            Self::EmptyRange => "gauge range must have min below max",
+        };
+        f.write_str(text)
+    }
+}
+
+impl std::error::Error for HomeWidgetsError {}
+
+/// Reject a widget row the daemon must not persist.
+pub fn validate_home_widgets(widgets: &[HomeWidget]) -> Result<(), HomeWidgetsError> {
+    if widgets.len() > MAX_HOME_WIDGETS {
+        return Err(HomeWidgetsError::TooMany);
+    }
+    let mut seen = std::collections::HashSet::new();
+    for w in widgets {
+        if w.id.trim().is_empty() {
+            return Err(HomeWidgetsError::EmptyId);
+        }
+        if !seen.insert(&w.id) {
+            return Err(HomeWidgetsError::DuplicateId);
+        }
+        match &w.kind {
+            HomeWidgetKind::Gauge { min, max, .. } if min >= max => {
+                return Err(HomeWidgetsError::EmptyRange)
+            }
+            HomeWidgetKind::Battery { batteries }
+                if batteries.len() > MAX_BATTERY_WIDGET_ENTRIES =>
+            {
+                return Err(HomeWidgetsError::TooManyBatteries)
+            }
+            _ => {}
+        }
+    }
+    Ok(())
+}
+
+/// Split a battery reference back into `(device_id, battery_key)`. Splits from
+/// the right so a device id containing the separator survives the round trip.
+pub fn split_battery_ref(reference: &str) -> Option<(&str, &str)> {
+    reference.rsplit_once(BATTERY_REF_SEPARATOR)
+}
+
 /// GUI-facing preferences and daemon log level, published on the GUI bus topic and
 /// persisted on the daemon under `config.yaml`'s `gui` key.
 #[derive(Debug, Clone, Serialize, Deserialize)]
@@ -568,6 +672,8 @@ pub struct GuiConfig {
     pub seen_tours: BTreeSet<String>,
     pub log_level: String,
     pub plugin_downloads: PluginDownloadConsent,
+    /// The Home dashboard's widget row, in display order.
+    pub home_widgets: Vec<HomeWidget>,
 }
 
 impl Default for GuiConfig {
@@ -581,6 +687,7 @@ impl Default for GuiConfig {
             seen_tours: BTreeSet::new(),
             log_level: DEFAULT_LOG_LEVEL.to_string(),
             plugin_downloads: PluginDownloadConsent::Allowed,
+            home_widgets: Vec::new(),
         }
     }
 }
@@ -2442,8 +2549,6 @@ pub struct Sensor {
     pub unit: SensorUnit,
     #[serde(default)]
     pub sensor_type: SensorType,
-    #[serde(default)]
-    pub visibility: VisibilityState,
 }
 
 /// One independently addressable cooling output. A device may expose a pump
@@ -2696,6 +2801,7 @@ impl WireDevice {
 #[cfg(test)]
 mod app_rule_tests {
     use super::*;
+    use serde_json::json;
 
     #[test]
     fn app_rule_serde_round_trip() {
@@ -2732,6 +2838,137 @@ mod app_rule_tests {
     fn gui_config_seen_tours_defaults_empty_for_old_configs() {
         let cfg: GuiConfig = serde_json::from_str("{}").unwrap();
         assert!(cfg.seen_tours.is_empty());
+    }
+
+    fn widget(id: &str, kind: HomeWidgetKind) -> HomeWidget {
+        HomeWidget {
+            id: id.into(),
+            kind,
+            color: 0,
+            label: String::new(),
+        }
+    }
+
+    #[test]
+    fn gui_config_home_widgets_round_trip() {
+        let cfg = GuiConfig {
+            home_widgets: vec![
+                widget(
+                    "a",
+                    HomeWidgetKind::Chart {
+                        sensor_id: "cpu".into(),
+                    },
+                ),
+                widget(
+                    "b",
+                    HomeWidgetKind::Gauge {
+                        sensor_id: "gpu".into(),
+                        min: 0.0,
+                        max: 100.0,
+                    },
+                ),
+                widget(
+                    "c",
+                    HomeWidgetKind::Battery {
+                        batteries: vec![battery_ref("mouse", "main")],
+                    },
+                ),
+            ],
+            ..GuiConfig::default()
+        };
+        let json = serde_json::to_string(&cfg).unwrap();
+        let back: GuiConfig = serde_json::from_str(&json).unwrap();
+        assert_eq!(back.home_widgets, cfg.home_widgets);
+    }
+
+    #[test]
+    fn gui_config_home_widgets_default_empty_for_old_configs() {
+        let cfg: GuiConfig = serde_json::from_str("{}").unwrap();
+        assert!(cfg.home_widgets.is_empty());
+    }
+
+    #[test]
+    fn home_widget_kind_wire_format() {
+        assert_eq!(
+            serde_json::to_value(HomeWidgetKind::Gauge {
+                sensor_id: "cpu".into(),
+                min: 20.0,
+                max: 90.0,
+            })
+            .unwrap(),
+            json!({"type": "gauge", "sensor_id": "cpu", "min": 20.0, "max": 90.0})
+        );
+    }
+
+    #[test]
+    fn battery_ref_round_trips_device_ids_containing_the_separator() {
+        let reference = battery_ref("hid/1234:5678", "left");
+        assert_eq!(
+            split_battery_ref(&reference),
+            Some(("hid/1234:5678", "left"))
+        );
+    }
+
+    #[test]
+    fn validate_home_widgets_rejects_malformed_rows() {
+        let chart = |id: &str| {
+            widget(
+                id,
+                HomeWidgetKind::Chart {
+                    sensor_id: "cpu".into(),
+                },
+            )
+        };
+        let cases = [
+            (
+                (0..=MAX_HOME_WIDGETS)
+                    .map(|i| chart(&i.to_string()))
+                    .collect::<Vec<_>>(),
+                HomeWidgetsError::TooMany,
+            ),
+            (vec![chart("a"), chart("a")], HomeWidgetsError::DuplicateId),
+            (vec![chart(" ")], HomeWidgetsError::EmptyId),
+            (
+                vec![widget(
+                    "a",
+                    HomeWidgetKind::Gauge {
+                        sensor_id: "cpu".into(),
+                        min: 50.0,
+                        max: 50.0,
+                    },
+                )],
+                HomeWidgetsError::EmptyRange,
+            ),
+            (
+                vec![widget(
+                    "a",
+                    HomeWidgetKind::Battery {
+                        batteries: (0..=MAX_BATTERY_WIDGET_ENTRIES)
+                            .map(|i| battery_ref("d", &i.to_string()))
+                            .collect(),
+                    },
+                )],
+                HomeWidgetsError::TooManyBatteries,
+            ),
+        ];
+        for (widgets, expected) in cases {
+            assert_eq!(validate_home_widgets(&widgets), Err(expected));
+        }
+    }
+
+    #[test]
+    fn validate_home_widgets_accepts_a_full_row() {
+        let widgets: Vec<_> = (0..MAX_HOME_WIDGETS)
+            .map(|i| {
+                widget(
+                    &i.to_string(),
+                    HomeWidgetKind::Chart {
+                        sensor_id: "cpu".into(),
+                    },
+                )
+            })
+            .collect();
+        assert_eq!(validate_home_widgets(&widgets), Ok(()));
     }
 
     #[test]
@@ -3243,7 +3480,6 @@ mod tests {
                 value: 45.0,
                 unit: SensorUnit::Celsius,
                 sensor_type: SensorType::Temperature,
-                visibility: VisibilityState::Visible,
             }])],
             ..Default::default()
         };

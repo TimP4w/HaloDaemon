@@ -90,6 +90,24 @@ pub fn sensor_hue(i: usize) -> Color32 {
     SENSOR_HUES[i % SENSOR_HUES.len()]
 }
 
+/// Accent choices offered when configuring a Home dashboard widget. Stored by
+/// index, so entries may be appended but never reordered.
+pub const WIDGET_HUES: [Color32; 8] = [
+    STAT_PURPLE,
+    STAT_CYAN,
+    STAT_GREEN,
+    STAT_AMBER,
+    PROGRESS_B,
+    OFFLINE,
+    PROGRESS_A,
+    hex(0x6b94e0),
+];
+
+/// Accent color for a widget's stored palette index (wraps [`WIDGET_HUES`]).
+pub fn widget_hue(i: u8) -> Color32 {
+    WIDGET_HUES[i as usize % WIDGET_HUES.len()]
+}
+
 /// Vibrant per-device accent palette (assigned by device type / id hash).
 pub const DEVICE_HUES: [Color32; 10] = [
     hex(0x53d5e8),

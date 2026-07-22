@@ -13,7 +13,7 @@ use halod_shared::types::{
     Battery, Boolean, ButtonMapping, ConnectionStatus, CoolingChannel, CoolingStatus,
     DeviceCapability, DpiStatus, EffectParamValue, Equalizer, KeyRemapStatus, KeyboardLayout,
     LcdDescriptor, LcdStatus, LightingDescriptor, LightingState, LightingStatus, Sensor,
-    SensorType, SensorUnit, VisibilityState, ZoneTopology,
+    SensorType, SensorUnit, ZoneTopology,
 };
 use halod_shared::zone_transform::ZoneContentTransform;
 use std::collections::HashMap;
@@ -458,7 +458,6 @@ pub async fn fan_sensors(device: &dyn Device) -> Vec<Sensor> {
                     value: duty as f64,
                     unit: SensorUnit::Percent,
                     sensor_type: SensorType::FanDuty,
-                    visibility: VisibilityState::Visible,
                 });
             }
             if let Some(rpm) = status.rpm {
@@ -468,7 +467,6 @@ pub async fn fan_sensors(device: &dyn Device) -> Vec<Sensor> {
                     value: rpm as f64,
                     unit: SensorUnit::Rpm,
                     sensor_type: SensorType::FanSpeed,
-                    visibility: VisibilityState::Visible,
                 });
             }
         }

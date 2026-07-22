@@ -3,11 +3,11 @@
 
 use crate::domain::events::ChangeSink as _;
 
-use std::{collections::HashMap, sync::Arc};
+use std::sync::Arc;
 
 use crate::application::state::AppState;
 use crate::domain::device::Device;
-use halod_shared::types::{Sensor, VisibilityState};
+use halod_shared::types::Sensor;
 
 const DEVICE_SAMPLE_TIMEOUT: std::time::Duration = std::time::Duration::from_secs(2);
 
@@ -17,7 +17,6 @@ const DEVICE_SAMPLE_TIMEOUT: std::time::Duration = std::time::Duration::from_sec
 /// change; the coordinator suppresses identical records.
 pub(crate) async fn observe(app: &AppState) -> std::collections::HashSet<String> {
     let known = app.config.read().await.known_devices.clone();
-    let visibility = Arc::new(app.config.read().await.sensor_visibility.clone());
     let devices = app.device_registry.read().await.clone();
     let eligible: Vec<_> = devices
         .into_iter()
@@ -44,7 +43,7 @@ pub(crate) async fn observe(app: &AppState) -> std::collections::HashSet<String>
                 sensors.extend(sampled);
             }
         }
-        tasks.spawn(sample_device(device, Arc::clone(&visibility)));
+        tasks.spawn(sample_device(device));
     }
     while let Some(result) = tasks.join_next().await {
         if let Ok(sampled) = result {
@@ -57,18 +56,12 @@ pub(crate) async fn observe(app: &AppState) -> std::collections::HashSet<String>
     affected
 }
 
-async fn sample_device(
-    device: Arc<dyn Device>,
-    visibility: Arc<HashMap<String, VisibilityState>>,
-) -> Vec<(String, Sensor)> {
+async fn sample_device(device: Arc<dyn Device>) -> Vec<(String, Sensor)> {
     let mut sensors = Vec::new();
     if let Some(capability) = device.as_sensor_capability() {
         match tokio::time::timeout(DEVICE_SAMPLE_TIMEOUT, capability.get_sensors()).await {
             Ok(Ok(readings)) => {
-                for mut sensor in readings {
-                    if let Some(state) = visibility.get(&sensor.id) {
-                        sensor.visibility = state.clone();
-                    }
+                for sensor in readings {
                     sensors.push((device.id().to_owned(), sensor));
                 }
             }
@@ -83,10 +76,7 @@ async fn sample_device(
     .await
     {
         Ok(readings) => {
-            for mut sensor in readings {
-                if let Some(state) = visibility.get(&sensor.id) {
-                    sensor.visibility = state.clone();
-                }
+            for sensor in readings {
                 sensors.push((device.id().to_owned(), sensor));
             }
         }

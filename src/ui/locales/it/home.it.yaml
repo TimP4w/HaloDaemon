@@ -18,8 +18,6 @@ home:
   search_devices: Cerca dispositivi
   grid: Griglia
   list: Elenco
-  show_sensor: Mostra sensore
-  hide_sensor: Nascondi sensore
   offline: Offline
   conflict_confirmed: Dispositivo duplicato
   conflict_possible: Possibile duplicato
@@ -50,3 +48,25 @@ home:
   no_matching_sub: Nessun dispositivo connesso corrisponde alla ricerca
   no_devices: Nessun dispositivo connesso
   no_devices_sub: Collega una periferica o verifica che halod sia in esecuzione
+  customize: Personalizza
+  customize_done: Fatto
+  widget_add: Aggiungi widget
+  widget_add_title: Aggiungi un widget
+  widget_edit_title: Modifica widget
+  widget_add_subtitle: Scegli cosa mostra questo riquadro nella dashboard
+  widget_type: Tipo
+  widget_chart: Grafico
+  widget_chart_desc: Andamento nel tempo
+  widget_gauge: Indicatore
+  widget_gauge_desc: Quadrante radiale su un intervallo a tua scelta
+  widget_battery: Batteria
+  widget_battery_desc: Livello di carica per un massimo di tre batterie
+  widget_sensor: Sensore
+  widget_batteries: "Batterie (fino a %{max})"
+  widget_no_batteries: Nessun dispositivo espone una batteria
+  widget_label: Etichetta
+  widget_color: Colore
+  widget_range: Intervallo
+  widget_min: Minimo
+  widget_max: Massimo
+  widget_unavailable: Sorgente non disponibile
