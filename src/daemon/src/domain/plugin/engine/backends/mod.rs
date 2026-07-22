@@ -1,7 +1,7 @@
 // SPDX-License-Identifier: GPL-3.0-or-later
-//! Plugin transport backends: each submits a `PluginTransportDescriptor` via
-//! `inventory`, so adding a bus is a new file here rather than a per-bus branch
-//! in the plugin core.
+//! Plugin transport backends: each defines a `PluginTransportDescriptor` listed
+//! in `DESCRIPTORS`, so adding a bus is a new file here plus one table line,
+//! rather than a per-bus branch in the plugin core.
 
 mod amd_smn;
 mod command;
@@ -13,3 +13,17 @@ mod serial;
 mod smbus;
 pub(crate) mod tcp;
 pub(crate) mod usb;
+
+use super::transport::PluginTransportDescriptor;
+
+pub(super) static DESCRIPTORS: &[PluginTransportDescriptor] = &[
+    hid::DESCRIPTOR,
+    smbus::DESCRIPTOR,
+    usb::DESCRIPTOR,
+    serial::DESCRIPTOR,
+    tcp::DESCRIPTOR,
+    hwmon::DESCRIPTOR,
+    command::DESCRIPTOR,
+    lpcio::DESCRIPTOR,
+    amd_smn::DESCRIPTOR,
+];

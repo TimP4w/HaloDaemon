@@ -284,9 +284,9 @@ pub(crate) async fn discover_one(app: &Arc<AppState>, plugin_id: &str) -> Discov
     }
 }
 
-inventory::submit!(TransportScanner {
+pub(crate) const SCANNER: TransportScanner = TransportScanner {
     name: "plugin-integrations",
     detail: halod_shared::types::DiscoveryDetail::PluginIntegrations,
     platform: None,
     scan: |app| Box::pin(discover(app)),
-});
+};

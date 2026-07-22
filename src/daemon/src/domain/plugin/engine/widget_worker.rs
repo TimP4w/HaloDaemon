@@ -9,12 +9,6 @@ use std::rc::Rc;
 use ab_glyph::{point, Font, FontArc, PxScale, ScaleFont};
 use anyhow::{anyhow, Result};
 use image::{ImageBuffer, Pixel as _, Rgba};
-use imageproc::drawing::{
-    draw_filled_circle_mut, draw_filled_rect_mut, draw_hollow_circle_mut, draw_line_segment_mut,
-    draw_polygon_mut,
-};
-use imageproc::point::Point;
-use imageproc::rect::Rect;
 use mlua::{AnyUserData, Function, Lua, LuaSerdeExt, Table, UserData, UserDataMethods, Value};
 use tokio::sync::oneshot;
 use unicode_segmentation::UnicodeSegmentation;
@@ -26,6 +20,7 @@ use halod_shared::types::{EffectParamValue, Permission, RgbColor};
 
 use super::bytebuf::{alloc_zeroed, ByteBuf};
 use super::lua_worker::LuaWorker;
+use super::raster;
 use super::sandbox;
 use super::{PLUGIN_INSTRUCTION_BUDGET, PLUGIN_VM_MEMORY_BYTES};
 
@@ -744,10 +739,12 @@ impl UserData for RenderCtx {
                 }
                 let mut canvas = canvas.borrow_mut::<ByteBuf>()?;
                 with_composed_canvas(this, &mut canvas, 1, |image| {
-                    draw_filled_rect_mut(
+                    raster::fill_rect(
                         image,
-                        Rect::at(bounded_coord(x, this.width), bounded_coord(y, this.height))
-                            .of_size(width, height),
+                        bounded_coord(x, this.width) as f32,
+                        bounded_coord(y, this.height) as f32,
+                        width as f32,
+                        height as f32,
                         color,
                     );
                 })?;
@@ -818,7 +815,7 @@ impl UserData for RenderCtx {
                     ),
                 ];
                 with_composed_canvas(this, &mut canvas, 1, |image| {
-                    stroke_polyline_mut(image, &points, stroke_width, false, color);
+                    raster::stroke_polyline(image, &points, stroke_width, false, color);
                 })?;
                 Ok(())
             },
@@ -843,10 +840,11 @@ impl UserData for RenderCtx {
                 let stroke_width = checked_stroke_width(stroke_width)?;
                 let mut canvas = canvas.borrow_mut::<ByteBuf>()?;
                 with_composed_canvas(this, &mut canvas, 1, |image| {
+                    let center = (center.0 as f32, center.1 as f32);
                     if filled {
-                        draw_filled_circle_mut(image, center, radius, color);
+                        raster::fill_circle(image, center, radius as f32, color);
                     } else {
-                        draw_stroked_circle_mut(image, center, radius, stroke_width, color);
+                        raster::stroke_circle(image, center, radius as f32, stroke_width, color);
                     }
                 })?;
                 Ok(())
@@ -874,7 +872,7 @@ impl UserData for RenderCtx {
                 let color = lua_color(lua, color, this.color)?;
                 let mut canvas = canvas.borrow_mut::<ByteBuf>()?;
                 with_composed_canvas(this, &mut canvas, 1, |image| {
-                    draw_arc_mut(
+                    raster::fill_arc(
                         image,
                         (
                             bounded_coord(x, this.width) as f32,
@@ -946,7 +944,7 @@ impl UserData for RenderCtx {
                 let color = lua_color(lua, color, this.color)?;
                 let mut canvas = canvas.borrow_mut::<ByteBuf>()?;
                 with_composed_canvas(this, &mut canvas, points.len().div_ceil(16), |image| {
-                    stroke_polyline_mut(image, &points, stroke_width, false, color);
+                    raster::stroke_polyline(image, &points, stroke_width, false, color);
                 })?;
                 Ok(())
             },
@@ -1220,69 +1218,6 @@ fn composite_layer(
     }
 }
 
-fn stroke_polyline_mut(
-    image: &mut ImageBuffer<Rgba<u8>, &mut [u8]>,
-    points: &[(f32, f32)],
-    width: f32,
-    closed: bool,
-    color: Rgba<u8>,
-) {
-    let segment_count = if closed {
-        points.len()
-    } else {
-        points.len().saturating_sub(1)
-    };
-    for index in 0..segment_count {
-        let start = points[index];
-        let end = points[(index + 1) % points.len()];
-        if width <= 1.0 {
-            draw_line_segment_mut(image, start, end, color);
-            continue;
-        }
-        let dx = end.0 - start.0;
-        let dy = end.1 - start.1;
-        let length = dx.hypot(dy);
-        let radius = width / 2.0;
-        if length > f32::EPSILON {
-            let nx = -dy / length * radius;
-            let ny = dx / length * radius;
-            let polygon = [
-                Point::new((start.0 + nx).round() as i32, (start.1 + ny).round() as i32),
-                Point::new((end.0 + nx).round() as i32, (end.1 + ny).round() as i32),
-                Point::new((end.0 - nx).round() as i32, (end.1 - ny).round() as i32),
-                Point::new((start.0 - nx).round() as i32, (start.1 - ny).round() as i32),
-            ];
-            draw_polygon_mut(image, &polygon, color);
-        }
-        draw_filled_circle_mut(
-            image,
-            (start.0.round() as i32, start.1.round() as i32),
-            radius.ceil() as i32,
-            color,
-        );
-        draw_filled_circle_mut(
-            image,
-            (end.0.round() as i32, end.1.round() as i32),
-            radius.ceil() as i32,
-            color,
-        );
-    }
-}
-
-fn draw_stroked_circle_mut(
-    image: &mut ImageBuffer<Rgba<u8>, &mut [u8]>,
-    center: (i32, i32),
-    radius: i32,
-    width: f32,
-    color: Rgba<u8>,
-) {
-    let pixels = width.ceil() as i32;
-    let start = radius.saturating_sub(pixels / 2);
-    for offset in 0..pixels {
-        draw_hollow_circle_mut(image, center, start + offset, color);
-    }
-}
-
 fn draw_polygon_or_stroke_mut(
     image: &mut ImageBuffer<Rgba<u8>, &mut [u8]>,
     points: &[(f32, f32)],
@@ -1291,13 +1226,9 @@ fn draw_polygon_or_stroke_mut(
     color: Rgba<u8>,
 ) {
     if filled {
-        let points: Vec<_> = points
-            .iter()
-            .map(|&(x, y)| Point::new(x.round() as i32, y.round() as i32))
-            .collect();
-        draw_polygon_mut(image, &points, color);
+        raster::fill_polygon(image, points, color);
     } else {
-        stroke_polyline_mut(image, points, stroke_width, true, color);
+        raster::stroke_polyline(image, points, stroke_width, true, color);
     }
 }
 
@@ -1785,10 +1716,12 @@ fn draw_styled_text_mut(
     let (width, _) = styled_text_size(font, text, size, style);
     let decoration_thickness = (size * 0.06).round().max(1.0) as u32;
     let mut decoration = |line_y: f32| {
-        draw_filled_rect_mut(
+        raster::fill_rect(
             image,
-            Rect::at(x, y + line_y.round() as i32)
-                .of_size(width.ceil().max(1.0) as u32, decoration_thickness),
+            x as f32,
+            (y + line_y.round() as i32) as f32,
+            width.ceil().max(1.0),
+            decoration_thickness as f32,
             color,
         );
     };
@@ -1877,95 +1810,6 @@ fn fill_rounded_rect_mut(
 }
 
 #[allow(clippy::too_many_arguments)]
-fn draw_arc_mut(
-    image: &mut ImageBuffer<Rgba<u8>, &mut [u8]>,
-    center: (f32, f32),
-    radius: f32,
-    thickness: f32,
-    start_degrees: f32,
-    sweep_degrees: f32,
-    cap_radius: f32,
-    color: Rgba<u8>,
-) {
-    if sweep_degrees.abs() < f32::EPSILON {
-        return;
-    }
-    let half_thickness = (thickness / 2.0).clamp(0.5, radius * 0.9);
-    let outer_radius = radius + half_thickness;
-    let inner_radius = (radius - half_thickness).max(0.1);
-    let start = start_degrees.to_radians();
-    let sweep = sweep_degrees.to_radians();
-    let steps = (radius * sweep.abs() / 2.0).ceil().clamp(1.0, 360.0) as usize;
-    let point = |angle: f32, distance: f32| {
-        Point::new(
-            (center.0 + angle.sin() * distance).round() as i32,
-            (center.1 - angle.cos() * distance).round() as i32,
-        )
-    };
-
-    for step in 0..steps {
-        let a0 = start + sweep * step as f32 / steps as f32;
-        let a1 = start + sweep * (step + 1) as f32 / steps as f32;
-        let polygon = [
-            point(a0, outer_radius),
-            point(a1, outer_radius),
-            point(a1, inner_radius),
-            point(a0, inner_radius),
-        ];
-        if polygon[0] != polygon[1] && polygon[2] != polygon[3] {
-            draw_polygon_mut(image, &polygon, color);
-        }
-    }
-
-    let cap_radius = cap_radius.clamp(0.0, half_thickness);
-    if cap_radius >= 0.5 && sweep_degrees.abs() < 359.99 {
-        let sweep_direction = sweep.signum();
-        for (angle, direction) in [(start, -sweep_direction), (start + sweep, sweep_direction)] {
-            let endpoint = (
-                center.0 + angle.sin() * radius,
-                center.1 - angle.cos() * radius,
-            );
-            let radial = (angle.sin(), -angle.cos());
-            let tangent = (angle.cos() * direction, angle.sin() * direction);
-            let inset = half_thickness - cap_radius;
-            let cap_center = |normal: f32| {
-                (
-                    endpoint.0 + radial.0 * inset * normal,
-                    endpoint.1 + radial.1 * inset * normal,
-                )
-            };
-            let upper = cap_center(1.0);
-            let lower = cap_center(-1.0);
-            let cap = cap_radius.round().max(1.0) as i32;
-            for cap_center in [upper, lower] {
-                draw_filled_circle_mut(
-                    image,
-                    (cap_center.0.round() as i32, cap_center.1.round() as i32),
-                    cap,
-                    color,
-                );
-            }
-            if inset >= 0.5 {
-                let polygon = [
-                    Point::new(upper.0.round() as i32, upper.1.round() as i32),
-                    Point::new(lower.0.round() as i32, lower.1.round() as i32),
-                    Point::new(
-                        (lower.0 + tangent.0 * cap_radius).round() as i32,
-                        (lower.1 + tangent.1 * cap_radius).round() as i32,
-                    ),
-                    Point::new(
-                        (upper.0 + tangent.0 * cap_radius).round() as i32,
-                        (upper.1 + tangent.1 * cap_radius).round() as i32,
-                    ),
-                ];
-                if polygon[0] != polygon[1] && polygon[2] != polygon[3] {
-                    draw_polygon_mut(image, &polygon, color);
-                }
-            }
-        }
-    }
-}
-
 fn bounded_text(mut text: String) -> String {
     if text.len() > MAX_DRAW_TEXT_BYTES {
         let boundary = text
@@ -2554,7 +2398,7 @@ mod tests {
         let render = |cap_radius| {
             let mut bytes = vec![0; 32 * 32 * 4];
             let mut image = ImageBuffer::from_raw(32, 32, bytes.as_mut_slice()).unwrap();
-            draw_arc_mut(
+            raster::fill_arc(
                 &mut image,
                 (16.0, 16.0),
                 8.0,
