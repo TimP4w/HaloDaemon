@@ -30,9 +30,10 @@ fn run(args: Vec<String>) -> Result<()> {
         Some("bundle") => bundle(&args[1..]),
         Some("sign") => sign(&args[1..]),
         Some("verify") => verify(&args[1..]),
+        Some("verify-assets") => verify_assets(&args[1..]),
         Some("keygen") => keygen(args.get(1).map(String::as_str)),
         _ => bail!(
-            "usage:\n  halod-plugin-signing validate <repo>\n  halod-plugin-signing index <repo> [--version <semver>] [--check]\n  halod-plugin-signing bundle <repo> --commit <sha> --output <tar>\n  halod-plugin-signing sign <repo> --key-id <id> [--key-env <name>]\n  halod-plugin-signing verify <repo> --trusted-key <id=base64>...\n  halod-plugin-signing keygen [key-id]"
+            "usage:\n  halod-plugin-signing validate <release-dir>\n  halod-plugin-signing index <release-dir> [--version <semver>] [--id <id> --name <name>] [--check]\n  halod-plugin-signing bundle <release-dir> --output <bundle>\n  halod-plugin-signing sign <release-dir> --key-id <id> [--key-env <name>]\n  halod-plugin-signing verify <release-dir> --trusted-key <id=base64>...\n  halod-plugin-signing verify-assets <asset-dir> --trusted-key <id=base64>...\n  halod-plugin-signing keygen [key-id]"
         ),
     }
 }
@@ -42,16 +43,15 @@ fn bundle(args: &[String]) -> Result<()> {
         .first()
         .map(PathBuf::from)
         .ok_or_else(|| anyhow!("missing <repo>"))?;
-    let commit = option(args, "--commit")?.ok_or_else(|| anyhow!("missing --commit"))?;
     let output = option(args, "--output")?
         .map(PathBuf::from)
         .ok_or_else(|| anyhow!("missing --output"))?;
-    let metadata = signing::write_bundle(&repo, commit, &output)?;
+    let metadata = signing::write_bundle(&repo, &output)?;
     println!(
         "wrote {} for {} at {}",
         output.display(),
         metadata.repository_id,
-        metadata.commit
+        metadata.release
     );
     Ok(())
 }
@@ -62,6 +62,8 @@ fn index(args: &[String]) -> Result<()> {
         .map(PathBuf::from)
         .ok_or_else(|| anyhow!("missing <repo>"))?;
     let mut version = None;
+    let mut id = None;
+    let mut name = None;
     let mut check = false;
     let mut i = 1;
     while i < args.len() {
@@ -74,6 +76,20 @@ fn index(args: &[String]) -> Result<()> {
                 );
             }
             "--check" => check = true,
+            "--id" => {
+                i += 1;
+                id = Some(
+                    args.get(i)
+                        .ok_or_else(|| anyhow!("--id requires a value"))?,
+                );
+            }
+            "--name" => {
+                i += 1;
+                name = Some(
+                    args.get(i)
+                        .ok_or_else(|| anyhow!("--name requires a value"))?,
+                );
+            }
             other => bail!("unknown index argument '{other}'"),
         }
         i += 1;
@@ -81,13 +97,17 @@ fn index(args: &[String]) -> Result<()> {
     if check && version.is_some() {
         bail!("--check and --version are mutually exclusive");
     }
-    let changed = signing::rewrite_index(&repo, version.map(String::as_str), check)?;
+    if id.is_some() != name.is_some() {
+        bail!("--id and --name must be provided together");
+    }
+    let identity = id.zip(name).map(|(id, name)| (id.as_str(), name.as_str()));
+    let changed = signing::rewrite_index(&repo, version.map(String::as_str), check, identity)?;
     println!(
         "{}",
         if changed {
-            "wrote repository.yaml"
+            "wrote release.yaml"
         } else {
-            "repository.yaml is current"
+            "release.yaml is current"
         }
     );
     Ok(())
@@ -118,13 +138,13 @@ fn sign(args: &[String]) -> Result<()> {
         public_key: B64.encode(signing_key.verifying_key().to_bytes()),
     });
     let payload = signing::canonical_index_bytes(&manifest)?;
-    atomic_write(&repo.join("repository.yaml"), &payload)?;
+    atomic_write(&repo.join("release.yaml"), &payload)?;
     let signature = signing_key.sign(&payload).to_bytes();
     atomic_write(
-        &repo.join("repository.sig"),
+        &repo.join("release.sig"),
         &signing::signature_bytes(key_id, &signature),
     )?;
-    println!("wrote {}", repo.join("repository.sig").display());
+    println!("wrote {}", repo.join("release.sig").display());
     Ok(())
 }
 
@@ -153,17 +173,54 @@ fn verify(args: &[String]) -> Result<()> {
         bail!("at least one --trusted-key is required");
     }
     let manifest = signing::read_repository_index(&repo)?;
-    signing::validate_compatibility(&manifest, env!("CARGO_PKG_VERSION"), signing::PLUGIN_API)?;
     signing::validate_repository(&repo, &manifest)?;
-    let payload = std::fs::read(repo.join("repository.yaml"))?;
-    let signature = std::fs::read(repo.join("repository.sig"))?;
+    let payload = std::fs::read(repo.join("release.yaml"))?;
+    let signature = std::fs::read(repo.join("release.sig"))?;
     let borrowed: Vec<(&str, &str)> = keys
         .iter()
         .map(|(id, key)| (id.as_str(), key.as_str()))
         .collect();
     signing::verify_signature(&payload, &signature, &borrowed)?;
-    println!("repository signature and all package hashes are valid");
+    println!("release signature and all package hashes are valid");
     Ok(())
+}
+
+fn verify_assets(args: &[String]) -> Result<()> {
+    let repo = args
+        .first()
+        .map(PathBuf::from)
+        .ok_or_else(|| anyhow!("missing <asset-dir>"))?;
+    let keys = trusted_keys(&args[1..])?;
+    let borrowed: Vec<(&str, &str)> = keys
+        .iter()
+        .map(|(id, key)| (id.as_str(), key.as_str()))
+        .collect();
+    signing::verify_release_assets(&repo, &borrowed)?;
+    println!("release signature and archive are valid");
+    Ok(())
+}
+
+fn trusted_keys(args: &[String]) -> Result<Vec<(String, String)>> {
+    let mut keys = Vec::new();
+    let mut i = 0;
+    while i < args.len() {
+        if args[i] != "--trusted-key" {
+            bail!("unknown verification argument '{}'", args[i]);
+        }
+        i += 1;
+        let value = args
+            .get(i)
+            .ok_or_else(|| anyhow!("--trusted-key requires id=base64"))?;
+        let (id, key) = value
+            .split_once('=')
+            .ok_or_else(|| anyhow!("trusted key must be id=base64"))?;
+        keys.push((id.to_owned(), key.to_owned()));
+        i += 1;
+    }
+    if keys.is_empty() {
+        bail!("at least one --trusted-key is required");
+    }
+    Ok(keys)
 }
 
 fn keygen(key_id: Option<&str>) -> Result<()> {

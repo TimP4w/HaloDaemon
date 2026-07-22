@@ -916,7 +916,7 @@ pub struct PluginsState {
     /// enable/disable state, for the Plugins management screen.
     #[serde(default)]
     pub plugins: Vec<PluginInfo>,
-    /// Registered git-repo plugin sources, for the "Plugin Repositories" section of the Plugins screen.
+    /// Registered plugin release sources shown on the Plugins screen.
     #[serde(default)]
     pub repos: Vec<PluginRepoInfo>,
     /// Plugins whose manifest was too malformed to load, shown as a "skipped"
@@ -944,7 +944,7 @@ pub struct SkippedPlugin {
     pub reason: String,
 }
 
-/// A registered git-repo plugin source, as shown in the GUI. Mirrors the daemon's `PluginRepoRecord`.
+/// A registered release source, as shown in the GUI.
 #[derive(Debug, Clone, Serialize, Deserialize)]
 pub struct PluginRepoInfo {
     pub url: String,
@@ -952,13 +952,14 @@ pub struct PluginRepoInfo {
     #[serde(default)]
     pub repository_id: Option<String>,
     #[serde(default)]
-    pub branch: Option<String>,
-    pub locked_sha: String,
+    pub release_tag: Option<String>,
+    #[serde(default)]
+    pub release_policy: PluginReleasePolicy,
     #[serde(default)]
     pub active_revision: Option<String>,
     #[serde(default)]
-    pub previous_verified_sha: Option<String>,
-    /// When this repo was last cloned/fetched/checked out (RFC 3339), if ever.
+    pub previous_release_tag: Option<String>,
+    /// Last successful release synchronization (RFC 3339), if any.
     #[serde(default)]
     pub last_sync: Option<String>,
     /// True for the seeded official repo — the GUI hides its remove control.
@@ -966,25 +967,37 @@ pub struct PluginRepoInfo {
     pub official: bool,
     #[serde(default)]
     pub location: PluginRepoLocation,
-    /// Whether this repository's index is authenticated by Halo's built-in
+    /// Whether this release manifest is authenticated by Halo's built-in
     /// official key or a third-party publisher key pinned on first import.
     #[serde(default)]
     pub signature: RepoSignatureStatus,
     /// SHA-256 fingerprint of the publisher key pinned at first import.
     #[serde(default, skip_serializing_if = "Option::is_none")]
     pub signing_key_fingerprint: Option<String>,
-    /// Compatibility of the latest fetched branch tip. This is independent
-    /// from signature authentication and may cause history fallback.
+}
+
+#[derive(Debug, Clone, Default, PartialEq, Eq, Serialize, Deserialize)]
+#[serde(rename_all = "snake_case", tag = "mode", content = "tag")]
+pub enum PluginReleasePolicy {
+    #[default]
+    Latest,
+    Pinned(String),
+}
+
+#[derive(Debug, Clone, PartialEq, Eq, Serialize, Deserialize)]
+pub struct PluginReleaseInfo {
+    pub tag: String,
     #[serde(default)]
-    pub compatibility: RepoCompatibilityStatus,
+    pub prerelease: bool,
+    #[serde(default)]
+    pub published_at: Option<String>,
 }
 
 #[derive(Debug, Clone, Copy, Default, PartialEq, Eq, Serialize, Deserialize)]
 #[serde(rename_all = "snake_case")]
 pub enum PluginRepoLocation {
     #[default]
-    RemoteGit,
-    LocalGit,
+    RemoteRelease,
     LocalArchive,
 }
 
@@ -1000,22 +1013,12 @@ pub enum RepoSignatureStatus {
     },
 }
 
-#[derive(Debug, Clone, Default, PartialEq, Eq, Serialize, Deserialize)]
-#[serde(tag = "status", rename_all = "snake_case")]
-pub enum RepoCompatibilityStatus {
-    #[default]
-    Compatible,
-    Incompatible {
-        reason: String,
-    },
-}
-
 /// One repo's update check result, reported in reply to `DaemonCommand::CheckPluginRepoUpdates`.
 #[derive(Debug, Clone, Serialize, Deserialize)]
 pub struct RepoUpdateStatus {
     pub slug: String,
-    pub locked_sha: String,
-    pub remote_sha: String,
+    pub installed_tag: String,
+    pub latest_tag: String,
     pub behind: bool,
 }
 
@@ -1025,10 +1028,9 @@ pub struct RepoUpdateStatus {
 pub struct PluginUpdateStatus {
     pub plugin_id: String,
     pub slug: String,
-    /// The repo's checked-out (`locked_sha`) content differs from the remote
-    /// tip — a genuine upstream update the user can pull.
+    /// The installed release differs from the selected release.
     pub update_available: bool,
-    /// The on-disk content differs from what the repo checked out — a local
+    /// The on-disk content differs from the installed release — a local
     /// edit (or tampering), not an upstream change. Distinct from
     /// `update_available` so the GUI can say "modified on disk" rather than
     /// "update available".

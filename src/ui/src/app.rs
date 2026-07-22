@@ -77,8 +77,8 @@ pub struct App {
     /// rather than going back to `None`.
     pub(crate) lcd_editor_render_cache: Option<ipc::DecodedEditorRender>,
     pub(crate) depcheck_grace: ui::screens::depcheck::GraceState,
-    /// Remote branch lists keyed by repo URL, for the Add-repository picker.
-    pub(crate) repo_branches_cache: std::collections::HashMap<String, Vec<String>>,
+    pub(crate) plugin_releases_cache:
+        std::collections::HashMap<String, Vec<halod_shared::types::PluginReleaseInfo>>,
     /// Host serial ports, for the `serial_port` config-field dropdown.
     pub(crate) serial_ports_cache: Vec<halod_shared::types::SerialPortInfo>,
     /// Set once we've requested the serial-port list, so we ask the daemon at
@@ -165,7 +165,7 @@ impl App {
             pending_lcd_template: None,
             lcd_editor_render_cache: None,
             depcheck_grace: ui::screens::depcheck::GraceState::default(),
-            repo_branches_cache: std::collections::HashMap::new(),
+            plugin_releases_cache: std::collections::HashMap::new(),
             serial_ports_cache: Vec::new(),
             serial_ports_requested: false,
         }

@@ -782,12 +782,12 @@ mod tests {
             slug: CONFIG_TEST_REPO_SLUG.to_owned(),
             repository_id: None,
             trusted_key: None,
-            source_kind: crate::config::PluginRepoSourceKind::Git,
-            branch: None,
-            locked_sha: "test".to_owned(),
+            source_kind: crate::config::PluginRepoSourceKind::Release,
+            release_tag: Some("test".to_owned()),
+            release_policy: crate::config::PluginReleasePolicy::Latest,
             active_revision: Some("test".to_owned()),
             active_source: crate::config::PluginRevisionSource::Managed,
-            previous_verified_sha: None,
+            previous_release_tag: None,
             last_sync: None,
         }
     }

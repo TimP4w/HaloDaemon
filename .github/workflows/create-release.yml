@@ -19,14 +19,10 @@ on:
           - minor
           - major
           - keep
-      plugin_branch:
-        description: "Official plugin branch containing the release commit"
+      plugin_release_tag:
+        description: "Published official plugin release tag"
         required: true
-        default: "main"
-        type: string
-      plugin_commit:
-        description: "Full SHA of the signed official plugin repository commit"
-        required: true
+        default: "v0.10.0"
         type: string
 
 permissions:
@@ -241,36 +237,50 @@ jobs:
         with:
           ref: main
 
-      - name: Pin existing Nix package to the selected plugin commit
+      - name: Pin package recipes to the embedded plugin assets
         env:
-          PLUGIN_COMMIT: ${{ inputs.plugin_commit }}
-          PLUGIN_HASH: ${{ needs.prepare-plugins.outputs.plugin_hash }}
+          BUNDLE_SHA256: ${{ needs.prepare-plugins.outputs.bundle_sha256 }}
+          BUNDLE_SRI: ${{ needs.prepare-plugins.outputs.bundle_sri }}
+          LICENSES_SHA256: ${{ needs.prepare-plugins.outputs.licenses_sha256 }}
+          LICENSES_SRI: ${{ needs.prepare-plugins.outputs.licenses_sri }}
         run: |
           set -euo pipefail
-          python3 - "$PLUGIN_COMMIT" "$PLUGIN_HASH" <<'PY'
+          v="${{ needs.version.outputs.new_version }}"
+          python3 - "$v" "$BUNDLE_SHA256" "$BUNDLE_SRI" "$LICENSES_SHA256" "$LICENSES_SRI" <<'PY'
           import pathlib, re, sys
-          commit, hash_ = sys.argv[1:]
-          path = pathlib.Path("packaging/nix/package.nix")
-          text = path.read_text()
-          text, commits = re.subn(
-              r'(officialPluginsRev = ")[0-9a-f]{40}(")',
-              lambda m: f"{m.group(1)}{commit}{m.group(2)}", text, count=1)
-          text, hashes = re.subn(
-              r'(repo = "HaloDaemon-plugins";\n    rev = officialPluginsRev;\n    hash = ")[^"]+(";)',
-              lambda m: f"{m.group(1)}{hash_}{m.group(2)}", text, count=1)
-          if commits != 1 or hashes != 1:
-              sys.exit("Failed to pin official plugin source in package.nix")
-          path.write_text(text)
+          version, bundle_hex, bundle_sri, licenses_hex, licenses_sri = sys.argv[1:]
+
+          nix = pathlib.Path("packaging/nix/package.nix")
+          text = nix.read_text()
+          replacements = (
+              (r'(officialPluginRelease = ")[^"]+(";)', rf'\g<1>v{version}\2'),
+              (r'(officialPluginBundle = pkgs\.fetchurl \{{.*?hash = ")[^"]+(";)', rf'\g<1>{bundle_sri}\2'),
+              (r'(officialPluginLicenses = pkgs\.fetchurl \{{.*?hash = ")[^"]+(";)', rf'\g<1>{licenses_sri}\2'),
+          )
+          for pattern, replacement in replacements:
+              text, count = re.subn(pattern, replacement, text, count=1, flags=re.S)
+              if count != 1:
+                  sys.exit(f"Failed to update package.nix pattern: {pattern}")
+          nix.write_text(text)
+
+          pkgbuild = pathlib.Path("packaging/arch/PKGBUILD")
+          text = pkgbuild.read_text()
+          text, count = re.subn(r'(?m)^(plugin_release=).*$', rf'\g<1>v{version}', text, count=1)
+          if count != 1:
+              sys.exit("Failed to update PKGBUILD plugin release")
+          sums = re.findall(r"(?m)^\s*'([0-9a-f]{64})'", text)
+          if len(sums) < 2:
+              sys.exit("Failed to find PKGBUILD plugin asset hashes")
+          text = text.replace(sums[0], bundle_hex, 1).replace(sums[1], licenses_hex, 1)
+          pkgbuild.write_text(text)
           PY
 
       - name: Bump version in Cargo.toml and Cargo.lock
-        env:
-          PLUGIN_COMMIT: ${{ inputs.plugin_commit }}
         run: |
           v="${{ needs.version.outputs.new_version }}"
-          python3 - "$v" "$PLUGIN_COMMIT" <<'PY'
+          python3 - "$v" <<'PY'
           import pathlib, re, sys
-          version, plugin_commit = sys.argv[1:]
+          version = sys.argv[1]
 
           toml = pathlib.Path("src/Cargo.toml")
           text, n = re.subn(
@@ -303,14 +313,6 @@ jobs:
           )
           if n == 0:
               sys.exit("Failed to patch pkgver in packaging/arch/PKGBUILD")
-          pbtext, n = re.subn(
-              r'(?m)^(plugin_commit=)[0-9a-f]{40}$',
-              lambda m: f'{m.group(1)}{plugin_commit}',
-              pbtext,
-              count=1,
-          )
-          if n == 0:
-              sys.exit("Failed to patch official plugin commit in packaging/arch/PKGBUILD")
           pkgbuild.write_text(pbtext)
           PY
 
@@ -322,8 +324,8 @@ jobs:
           git config user.email "41898282+github-actions[bot]@users.noreply.github.com"
           git add src/Cargo.toml src/Cargo.lock packaging/arch/PKGBUILD \
             packaging/nix/package.nix
-          # A `keep` re-release stages nothing when the version and plugin pin
-          # already match; the commit must still exist to be the release SHA.
+          # A `keep` re-release may stage nothing; the commit must still exist
+          # to be the release SHA.
           git commit --allow-empty -m "chore: bump version to v${v}"
           echo "sha=$(git rev-parse HEAD)" >> "$GITHUB_OUTPUT"
 
@@ -353,66 +355,69 @@ jobs:
           git push origin HEAD:main
 
   # ── Official plugin snapshot ────────────────────────────────────
-  # The branch establishes provenance; the supplied full SHA is the immutable
-  # release input and is bundled once for every platform build.
+  # Download one already-published, signed plugin release and bundle that exact
+  # immutable asset set once for every platform build.
   prepare-plugins:
     runs-on: ubuntu-latest
     outputs:
-      plugin_hash: ${{ steps.plugin_hash.outputs.value }}
+      bundle_sha256: ${{ steps.asset_hashes.outputs.bundle_sha256 }}
+      bundle_sri: ${{ steps.asset_hashes.outputs.bundle_sri }}
+      licenses_sha256: ${{ steps.asset_hashes.outputs.licenses_sha256 }}
+      licenses_sri: ${{ steps.asset_hashes.outputs.licenses_sri }}
     steps:
       - uses: actions/checkout@v7.0.0
         with:
           ref: main
 
-      - uses: actions/checkout@v7.0.0
-        with:
-          repository: TimP4w/HaloDaemon-plugins
-          ref: ${{ inputs.plugin_commit }}
-          path: official-plugins
-          fetch-depth: 0
-
-      - name: Verify selected plugin revision
-        env:
-          PLUGIN_COMMIT: ${{ inputs.plugin_commit }}
-          PLUGIN_BRANCH: ${{ inputs.plugin_branch }}
-        run: |
-          set -euo pipefail
-          [[ "$PLUGIN_COMMIT" =~ ^[0-9a-fA-F]{40}$ ]]
-          git -C official-plugins fetch origin "$PLUGIN_BRANCH"
-          git -C official-plugins merge-base --is-ancestor \
-            "$PLUGIN_COMMIT" "origin/$PLUGIN_BRANCH"
-
       - uses: dtolnay/rust-toolchain@stable
 
-      - name: Verify plugin provenance and signature
+      - name: Download immutable plugin release assets
+        env:
+          GH_TOKEN: ${{ github.token }}
+          PLUGIN_RELEASE_TAG: ${{ inputs.plugin_release_tag }}
+        run: |
+          set -euo pipefail
+          mkdir official-plugin-assets
+          gh release download "$PLUGIN_RELEASE_TAG" \
+            --repo TimP4w/HaloDaemon-plugins \
+            --dir official-plugin-assets \
+            --pattern release.yaml \
+            --pattern release.sig \
+            --pattern plugins.tar.gz
+
+      - name: Authenticate and assemble plugin release
         working-directory: src
         run: |
           set -euo pipefail
           cargo build -p halod-plugin-signing
+          target/debug/halod-plugin-signing verify-assets ../official-plugin-assets \
+            --trusted-key halodaemon-official-2026=tjbwm5X4f70e+soVNV1AfRyb/TtnEsNNl+93YMO6IhQ=
+          mkdir ../official-plugins
+          cp ../official-plugin-assets/release.yaml ../official-plugins/
+          cp ../official-plugin-assets/release.sig ../official-plugins/
+          tar --extract --gzip --file ../official-plugin-assets/plugins.tar.gz \
+            --directory ../official-plugins --no-same-owner --no-same-permissions
           target/debug/halod-plugin-signing verify ../official-plugins \
             --trusted-key halodaemon-official-2026=tjbwm5X4f70e+soVNV1AfRyb/TtnEsNNl+93YMO6IhQ=
 
       - name: Create deterministic embedded bundle and license notice
         working-directory: src
-        env:
-          PLUGIN_COMMIT: ${{ inputs.plugin_commit }}
         run: |
           set -euo pipefail
           target/debug/halod-plugin-signing bundle ../official-plugins \
-            --commit "$PLUGIN_COMMIT" \
             --output ../official-plugins.bundle
           cp ../official-plugins/licenses.txt ../official-plugins-licenses.txt
 
-      - uses: cachix/install-nix-action@v31
-
-      - name: Calculate fixed-output plugin source hash
-        id: plugin_hash
-        env:
-          PLUGIN_COMMIT: ${{ inputs.plugin_commit }}
+      - name: Calculate fixed-output asset hashes
+        id: asset_hashes
         run: |
-          archive=$(mktemp -d)
-          git -C official-plugins archive "$PLUGIN_COMMIT" | tar -x -C "$archive"
-          echo "value=$(nix hash path --type sha256 --sri "$archive")" >> "$GITHUB_OUTPUT"
+          set -euo pipefail
+          bundle=$(sha256sum official-plugins.bundle | cut -d' ' -f1)
+          licenses=$(sha256sum official-plugins-licenses.txt | cut -d' ' -f1)
+          echo "bundle_sha256=$bundle" >> "$GITHUB_OUTPUT"
+          echo "licenses_sha256=$licenses" >> "$GITHUB_OUTPUT"
+          echo "bundle_sri=sha256-$(printf %s "$bundle" | xxd -r -p | base64 -w0)" >> "$GITHUB_OUTPUT"
+          echo "licenses_sri=sha256-$(printf %s "$licenses" | xxd -r -p | base64 -w0)" >> "$GITHUB_OUTPUT"
 
       - name: Upload plugin bundle
         uses: actions/upload-artifact@v7.0.1

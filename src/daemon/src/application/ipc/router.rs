@@ -440,14 +440,14 @@ async fn dispatch(
         DaemonCommand::SetPluginConfig { id, values } => {
             crate::application::usecases::plugin::plugins::set_config(id, values, app).await
         }
-        DaemonCommand::AddPluginRepo { url, branch } => {
-            crate::application::usecases::plugin::repos::add_repo(url, branch, app).await
+        DaemonCommand::AddPluginRepo { url } => {
+            crate::application::usecases::plugin::repos::add_repo(url, app).await
         }
         DaemonCommand::RemovePluginRepo { slug } => {
             crate::application::usecases::plugin::repos::remove_repo(slug, app).await
         }
-        DaemonCommand::ListRepoBranches { url } => {
-            crate::application::usecases::plugin::repos::list_branches(url, client).await
+        DaemonCommand::ListPluginReleases { url } => {
+            crate::application::usecases::plugin::repos::list_releases(url, client).await
         }
         DaemonCommand::CheckPluginRepoUpdates => {
             crate::application::usecases::plugin::repos::check_repo_updates(app, client).await
@@ -459,6 +459,12 @@ async fn dispatch(
             // lands (a single update, unlike update-all, otherwise leaves them stale).
             crate::application::usecases::plugin::repos::broadcast_plugin_updates(&app, None).await;
             result
+        }
+        DaemonCommand::InstallPluginRelease { slug, tag } => {
+            crate::application::usecases::plugin::repos::install_release(slug, tag, true, app).await
+        }
+        DaemonCommand::FollowLatestPluginRelease { slug } => {
+            crate::application::usecases::plugin::repos::follow_latest_release(slug, app).await
         }
         DaemonCommand::UpdateAllPlugins => {
             crate::application::usecases::plugin::repos::update_all_plugins(app).await
@@ -1061,7 +1067,7 @@ mod tests {
         );
         assert_eq!(
             reply["message"],
-            "repository signature does not match repository.yaml"
+            "release signature does not match release.yaml"
         );
     }
 

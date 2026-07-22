@@ -57,7 +57,6 @@ plugins:
   repo_signature_unsigned: Unsigned repository. Package hashes are checked, but the publisher is not authenticated.
   repo_signature_verification_failed: Repository signature verification failed.
   repo_compatible_fallback: Compatible revision
-  repo_compatibility_incompatible: "The latest repository revision is incompatible, so HaloDaemon is using the newest supported commit: %{reason}"
   # Per-plugin updates
   updates_available: "%{count} plugin update available"
   updates_available_plural: "%{count} plugin updates available"

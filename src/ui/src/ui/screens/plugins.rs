@@ -11,8 +11,8 @@ use egui::{Align2, Pos2, Rect, Sense, Stroke, Vec2};
 use halod_shared::types::{
     PluginDownloadConsent, PluginInfo, PluginIssue, PluginIssueKind, PluginProvenance,
     PluginRecommendation, PluginRepoInfo, PluginRepoLocation, PluginRequirement,
-    PluginRequirementStatus, PluginSource, PluginUpdateStatus, RepoCompatibilityStatus,
-    RepoSignatureStatus, RepoUpdateStatus, RequirementImpact,
+    PluginRequirementStatus, PluginSource, PluginUpdateStatus, RepoSignatureStatus,
+    RepoUpdateStatus, RequirementImpact,
 };
 
 use crate::domain::models::plugin_issues::plugin_issue_detail;
@@ -34,17 +34,7 @@ fn plugin_description(plugin: &PluginInfo) -> &str {
 #[derive(Default)]
 struct AddRepoState {
     url: String,
-    /// Selected branch; empty means the remote's default branch.
-    branch: String,
-    /// URL we've already asked the daemon to enumerate branches for.
-    fetched_url: Option<String>,
-    /// Deadline (egui time) after which to request branches for a newly-typed
-    /// URL — a small debounce so we don't `ls-remote` on every keystroke.
-    fetch_at: Option<f64>,
 }
-
-/// Debounce before enumerating a freshly-typed repo URL's branches.
-const REPO_BRANCH_FETCH_DEBOUNCE: f64 = 0.4;
 
 /// Failsafe: drop the "checking for updates" spinner after this long even if
 /// the check never lands (e.g. an unreachable remote).
@@ -93,6 +83,7 @@ pub struct PluginsUi {
     in_flight: HashMap<String, bool>,
     /// Asset cache keys already requested, so a pending fetch isn't re-sent.
     requested_assets: HashSet<String>,
+    requested_releases: HashSet<String>,
     /// Decoded asset bytes turned into textures, keyed like `requested_assets`.
     asset_textures: HashMap<String, egui::TextureHandle>,
     /// Plugin ids whose single-plugin update is in flight → egui time it began.
@@ -159,7 +150,7 @@ impl PluginsUi {
         plugin_assets: &HashMap<String, Vec<u8>>,
         repo_updates: &[RepoUpdateStatus],
         plugin_updates: &[PluginUpdateStatus],
-        repo_branches: &HashMap<String, Vec<String>>,
+        plugin_releases: &HashMap<String, Vec<halod_shared::types::PluginReleaseInfo>>,
         udev_status: Option<&halod_shared::types::UdevRulesStatus>,
     ) {
         let now = ui.input(|input| input.time);
@@ -178,9 +169,17 @@ impl PluginsUi {
         );
         self.sync_assets(ui.ctx(), cmd, &state.plugins.plugins, plugin_assets);
 
-        self.body(ui, state, cmd, repo_updates, plugin_updates, udev_status);
+        self.body(
+            ui,
+            state,
+            cmd,
+            repo_updates,
+            plugin_updates,
+            plugin_releases,
+            udev_status,
+        );
 
-        self.add_repo_modal(ui.ctx(), cmd, repo_branches);
+        self.add_repo_modal(ui.ctx(), cmd);
         self.repo_delete_modal(ui.ctx(), cmd);
         self.repo_repair_modal(ui.ctx(), cmd);
         self.consent_modal(ui.ctx(), state, cmd);
@@ -263,6 +262,7 @@ impl PluginsUi {
         cmd: &CommandTx,
         repo_updates: &[RepoUpdateStatus],
         plugin_updates: &[PluginUpdateStatus],
+        plugin_releases: &HashMap<String, Vec<halod_shared::types::PluginReleaseInfo>>,
         udev_status: Option<&halod_shared::types::UdevRulesStatus>,
     ) {
         reconcile_in_flight(
@@ -319,7 +319,14 @@ impl PluginsUi {
                 .max_rect(detail_rect)
                 .layout(egui::Layout::top_down(egui::Align::LEFT)),
         );
-        self.detail_column(&mut detail, state, cmd, plugin_updates, udev_status);
+        self.detail_column(
+            &mut detail,
+            state,
+            cmd,
+            plugin_updates,
+            plugin_releases,
+            udev_status,
+        );
     }
 
     // ── Left: sidebar — banners, plugin list, repositories ──────────────────
@@ -600,6 +607,7 @@ impl PluginsUi {
         state: &TopicStore,
         cmd: &CommandTx,
         plugin_updates: &[PluginUpdateStatus],
+        plugin_releases: &HashMap<String, Vec<halod_shared::types::PluginReleaseInfo>>,
         udev_status: Option<&halod_shared::types::UdevRulesStatus>,
     ) {
         match &self.selection {
@@ -670,12 +678,28 @@ impl PluginsUi {
                     .as_ref()
                     .is_some_and(|c| c.slug == r.slug);
                 let updates_enabled = plugin_updates_enabled(state.gui.plugin_downloads);
+                if r.location == PluginRepoLocation::RemoteRelease
+                    && self.requested_releases.insert(r.url.clone())
+                {
+                    crate::runtime::ipc::send(
+                        cmd,
+                        halod_shared::commands::DaemonCommand::ListPluginReleases {
+                            url: r.url.clone(),
+                        },
+                    );
+                }
+                let releases = plugin_releases
+                    .get(&r.url)
+                    .map(Vec::as_slice)
+                    .unwrap_or_default();
 
                 // The whole repo is updatable when any of its plugins report an
                 // upstream update. Progress is reconciled before rendering.
-                let repo_has_updates = plugin_updates
+                let repo_has_updates = state
+                    .plugins
+                    .repo_updates
                     .iter()
-                    .any(|s| s.slug == r.slug && s.update_available);
+                    .any(|status| status.slug == r.slug && status.behind);
                 let updating_repo = self.updating_repos.contains_key(&r.slug);
 
                 let mut select_plugin = None;
@@ -689,6 +713,8 @@ impl PluginsUi {
                             select_plugin = repo_detail_body(
                                 ui,
                                 r,
+                                cmd,
+                                releases,
                                 &state.plugins.plugins,
                                 &mut self.pending_repo_delete,
                                 &mut self.pending_repo_repair,
@@ -741,21 +767,13 @@ impl PluginsUi {
 
     // ── Dialogs ─────────────────────────────────────────────────────────────
 
-    fn add_repo_modal(
-        &mut self,
-        ctx: &egui::Context,
-        cmd: &CommandTx,
-        repo_branches: &HashMap<String, Vec<String>>,
-    ) {
+    fn add_repo_modal(&mut self, ctx: &egui::Context, cmd: &CommandTx) {
         let Some(mut form) = self.add_repo.take() else {
             return;
         };
         let mut confirm = false;
         let mut cancel = false;
-        let mut pick_folder = false;
         let mut pick_archive = false;
-        let mut fetch_url: Option<String> = None;
-        let now = ctx.input(|i| i.time);
 
         let dismissed = widgets::dialog(
             ctx,
@@ -769,28 +787,12 @@ impl PluginsUi {
                         .color(theme::TEXT_MUT),
                 );
                 ui.add_space(theme::SPACE_7);
-                let resp = ui.add(
+                ui.add(
                     egui::TextEdit::singleline(&mut form.url)
                         .desired_width(f32::INFINITY)
                         .margin(egui::vec2(12.0, 9.0))
                         .hint_text(t!("plugins.repos_url_hint")),
                 );
-                if resp.changed() {
-                    // A newly-typed URL invalidates the previous branch choice.
-                    form.branch.clear();
-                    form.fetch_at = Some(now + REPO_BRANCH_FETCH_DEBOUNCE);
-                }
-                if let Some(url) = branch_fetch_due(&form, now) {
-                    form.fetched_url = Some(url.clone());
-                    form.fetch_at = None;
-                    fetch_url = Some(url);
-                }
-                ui.add_space(theme::SPACE_6);
-                widgets::caps_label(ui, &t!("plugins.repos_branch_label"));
-                ui.add_space(theme::SPACE_3);
-                if let Some(picked) = branch_selector(ui, &form, repo_branches) {
-                    form.branch = picked;
-                }
             },
             |ui| {
                 // `dialog` lays actions out right-to-left; add the primary first.
@@ -816,16 +818,6 @@ impl PluginsUi {
                 }
                 if widgets::button(
                     ui,
-                    &t!("plugins.repos_import_folder"),
-                    ButtonKind::Ghost,
-                    Vec2::new(130.0, 34.0),
-                )
-                .clicked()
-                {
-                    pick_folder = true;
-                }
-                if widgets::button(
-                    ui,
                     &t!("plugins.cancel"),
                     ButtonKind::Ghost,
                     Vec2::new(90.0, 34.0),
@@ -837,39 +829,15 @@ impl PluginsUi {
             },
         );
 
-        if let Some(url) = fetch_url {
-            crate::runtime::ipc::send(
-                cmd,
-                halod_shared::commands::DaemonCommand::ListRepoBranches { url },
-            );
-        }
-        // Keep repainting while a fetch is pending so the debounce deadline
-        // fires even without further keystrokes.
-        if form.fetch_at.is_some() {
-            ctx.request_repaint_after(std::time::Duration::from_secs_f64(
-                REPO_BRANCH_FETCH_DEBOUNCE,
-            ));
-        }
-
         if confirm {
             let url = form.url.trim().to_owned();
             if !url.is_empty() {
-                let branch = form.branch.trim();
-                let branch = if branch.is_empty() {
-                    None
-                } else {
-                    Some(branch.to_owned())
-                };
                 crate::runtime::ipc::send(
                     cmd,
-                    halod_shared::commands::DaemonCommand::AddPluginRepo { url, branch },
+                    halod_shared::commands::DaemonCommand::AddPluginRepo { url },
                 );
                 return;
             }
-        }
-        if pick_folder {
-            spawn_import_repository_folder(ctx, cmd.clone());
-            return;
         }
         if pick_archive {
             spawn_import_repository_archive(ctx, cmd.clone());
@@ -1074,7 +1042,6 @@ fn skipped_repo_location(path: &str, repos: &[PluginRepoInfo]) -> Option<(String
 /// One repo row as shown in the repositories list.
 struct RepoRow<'a> {
     slug: &'a str,
-    branch: Option<&'a str>,
     official: bool,
     locked_short: String,
     remote_short: Option<String>,
@@ -1113,11 +1080,6 @@ fn repository_integrity_problem(state: &TopicStore) -> Option<RepoIntegrityProbl
     })
 }
 
-/// A commit SHA truncated to a short, still-unambiguous display form.
-fn truncate_sha(sha: &str) -> &str {
-    &sha[..sha.len().min(8)]
-}
-
 /// Pair each repo with its update status, sorted by slug for a stable order
 /// — except the official repo, which always sorts first.
 fn repo_rows<'a>(
@@ -1132,12 +1094,9 @@ fn repo_rows<'a>(
             let behind = status.is_some_and(|s| s.behind);
             RepoRow {
                 slug: &r.slug,
-                branch: r.branch.as_deref(),
                 official: r.official,
-                locked_short: truncate_sha(&r.locked_sha).to_owned(),
-                remote_short: status
-                    .filter(|_| behind)
-                    .map(|s| truncate_sha(&s.remote_sha).to_owned()),
+                locked_short: r.release_tag.clone().unwrap_or_default(),
+                remote_short: status.filter(|_| behind).map(|s| s.latest_tag.clone()),
                 behind,
                 signature: &r.signature,
                 integrity_failed: repo_integrity_failed(&r.slug, plugins),
@@ -1284,74 +1243,7 @@ fn repo_row(ui: &mut egui::Ui, row: &RepoRow, selected: bool) -> bool {
         ("repo_integrity", row.slug),
     );
 
-    if let Some(branch) = row.branch {
-        let branch_pos = Pos2::new(rect.right() - 49.0, rect.center().y);
-        ui.painter().text(
-            branch_pos,
-            Align2::RIGHT_CENTER,
-            branch,
-            theme::value_xs(),
-            theme::TEXT_FAINT,
-        );
-    }
-
     resp.clicked()
-}
-
-/// The URL whose branches should be fetched now: `Some` once the debounce
-/// deadline has passed for a non-empty URL we haven't already enumerated.
-fn branch_fetch_due(form: &AddRepoState, now: f64) -> Option<String> {
-    let at = form.fetch_at?;
-    if now < at {
-        return None;
-    }
-    let url = form.url.trim();
-    if url.is_empty() || form.fetched_url.as_deref() == Some(url) {
-        return None;
-    }
-    Some(url.to_owned())
-}
-
-/// Combo (id, display) pairs from branch names — id and display are identical
-/// since the branch name is exactly what gets sent.
-fn branch_options(branches: &[String]) -> Vec<(String, String)> {
-    branches.iter().map(|b| (b.clone(), b.clone())).collect()
-}
-
-/// The Add-repository branch picker. Once the fetched URL's branches arrive it
-/// renders a combo (with a leading "default branch" entry mapping to empty);
-/// until then it shows a disabled placeholder combo. Returns the newly-picked
-/// branch (empty = repo default), if it changed this frame.
-fn branch_selector(
-    ui: &mut egui::Ui,
-    form: &AddRepoState,
-    repo_branches: &HashMap<String, Vec<String>>,
-) -> Option<String> {
-    let branches = form
-        .fetched_url
-        .as_deref()
-        .and_then(|u| repo_branches.get(u));
-    if let Some(branches) = branches.filter(|b| !b.is_empty()) {
-        let options = branch_options(branches);
-        return widgets::combo_picker(
-            ui,
-            "repo_branch",
-            &options,
-            &form.branch,
-            Some(&t!("plugins.repos_branch_default")),
-        );
-    }
-    let placeholder = if form.url.trim().is_empty() {
-        t!("plugins.repos_branch_enter_url")
-    } else {
-        t!("plugins.repos_branch_loading")
-    };
-    ui.add_enabled_ui(false, |ui| {
-        egui::ComboBox::from_id_salt("repo_branch_disabled")
-            .selected_text(placeholder)
-            .show_ui(ui, |_| {});
-    });
-    None
 }
 
 /// What the detail column should show: keep the current selection if its
@@ -3160,6 +3052,8 @@ fn updates_disabled_note(ui: &mut egui::Ui) {
 fn repo_detail_body(
     ui: &mut egui::Ui,
     r: &PluginRepoInfo,
+    cmd: &CommandTx,
+    releases: &[halod_shared::types::PluginReleaseInfo],
     plugins: &[PluginInfo],
     pending_repo_delete: &mut Option<String>,
     pending_repo_repair: &mut Option<PendingRepoRepair>,
@@ -3185,27 +3079,6 @@ fn repo_detail_body(
                                 .font(theme::bold(18.0))
                                 .color(theme::TEXT),
                         );
-                        if let Some(branch) = &r.branch {
-                            widgets::chip(ui, branch);
-                        }
-                        if matches!(
-                            r.compatibility,
-                            RepoCompatibilityStatus::Incompatible { .. }
-                        ) {
-                            let response = widgets::chip_colored(
-                                ui,
-                                &t!("plugins.repo_compatible_fallback"),
-                                theme::STAT_AMBER,
-                            );
-                            if let RepoCompatibilityStatus::Incompatible { reason } =
-                                &r.compatibility
-                            {
-                                response.on_hover_text(t!(
-                                    "plugins.repo_compatibility_incompatible",
-                                    reason = reason.clone()
-                                ));
-                            }
-                        }
                         let (lock_rect, _) =
                             ui.allocate_exact_size(Vec2::splat(18.0), Sense::hover());
                         draw_repo_lock(
@@ -3232,10 +3105,10 @@ fn repo_detail_body(
                         )
                         .sense(Sense::click()),
                     );
-                    if url.hovered() && r.location == PluginRepoLocation::RemoteGit {
+                    if url.hovered() && r.location == PluginRepoLocation::RemoteRelease {
                         ui.ctx().set_cursor_icon(egui::CursorIcon::PointingHand);
                     }
-                    if url.clicked() && r.location == PluginRepoLocation::RemoteGit {
+                    if url.clicked() && r.location == PluginRepoLocation::RemoteRelease {
                         ui.ctx().open_url(egui::OpenUrl {
                             url: r.url.clone(),
                             new_tab: true,
@@ -3258,14 +3131,56 @@ fn repo_detail_body(
     );
 
     ui.add_space(theme::SPACE_8);
+    if r.location == PluginRepoLocation::RemoteRelease {
+        const LATEST: &str = "__latest__";
+        let current = match &r.release_policy {
+            halod_shared::types::PluginReleasePolicy::Latest => LATEST,
+            halod_shared::types::PluginReleasePolicy::Pinned(tag) => tag,
+        };
+        let selected_text = if current == LATEST {
+            match &r.release_tag {
+                Some(tag) => format!("Latest ({tag})"),
+                None => "Latest".to_owned(),
+            }
+        } else {
+            current.to_owned()
+        };
+        let mut selected = current.to_owned();
+        egui::ComboBox::from_id_salt(("plugin_release", &r.slug))
+            .selected_text(selected_text)
+            .show_ui(ui, |ui| {
+                ui.selectable_value(&mut selected, LATEST.to_owned(), "Latest");
+                for release in releases {
+                    let label = if release.prerelease {
+                        format!("{} (prerelease)", release.tag)
+                    } else {
+                        release.tag.clone()
+                    };
+                    ui.selectable_value(&mut selected, release.tag.clone(), label);
+                }
+            });
+        if selected != current {
+            let command = if selected == LATEST {
+                halod_shared::commands::DaemonCommand::FollowLatestPluginRelease {
+                    slug: r.slug.clone(),
+                }
+            } else {
+                halod_shared::commands::DaemonCommand::InstallPluginRelease {
+                    slug: r.slug.clone(),
+                    tag: selected,
+                }
+            };
+            crate::runtime::ipc::send(cmd, command);
+        }
+        ui.add_space(theme::SPACE_5);
+    }
     let repo_plugins: Vec<&PluginInfo> = plugins
         .iter()
         .filter(|p| matches!(&p.source, PluginSource::Repo { slug } if *slug == r.slug))
         .collect();
     ui.columns(3, |cols| {
         let source = match r.location {
-            PluginRepoLocation::RemoteGit => t!("plugins.repo_source_remote_git"),
-            PluginRepoLocation::LocalGit => t!("plugins.repo_source_local_git"),
+            PluginRepoLocation::RemoteRelease => "GitHub release".into(),
             PluginRepoLocation::LocalArchive => t!("plugins.repo_source_local_archive"),
         };
         stat_box(&mut cols[0], &t!("plugins.repo_source"), &source);
@@ -3439,21 +3354,6 @@ fn repo_detail_body(
     }
 
     clicked
-}
-
-fn spawn_import_repository_folder(ctx: &egui::Context, cmd: CommandTx) {
-    let ctx = ctx.clone();
-    std::thread::spawn(move || {
-        if let Some(path) = rfd::FileDialog::new().pick_folder() {
-            crate::runtime::ipc::send(
-                &cmd,
-                halod_shared::commands::DaemonCommand::ImportPluginRepository {
-                    source_path: path.to_string_lossy().into_owned(),
-                },
-            );
-        }
-        ctx.request_repaint();
-    });
 }
 
 fn spawn_import_repository_archive(ctx: &egui::Context, cmd: CommandTx) {
@@ -3632,75 +3532,6 @@ mod tests {
             .unwrap()
             .with_timezone(&chrono::Utc);
         assert_eq!(format_last_sync_at(parsed, now), "1h ago");
-    }
-
-    #[test]
-    fn branch_fetch_due_waits_for_the_debounce_deadline() {
-        let form = AddRepoState {
-            url: "https://example.com/repo.git".into(),
-            fetch_at: Some(10.0),
-            ..Default::default()
-        };
-        assert_eq!(branch_fetch_due(&form, 9.9), None, "before the deadline");
-        assert_eq!(
-            branch_fetch_due(&form, 10.0),
-            Some("https://example.com/repo.git".to_owned()),
-            "at the deadline"
-        );
-    }
-
-    #[test]
-    fn branch_fetch_due_none_without_a_deadline_or_for_an_empty_or_repeat_url() {
-        let url = "https://example.com/repo.git";
-        // No armed deadline.
-        assert_eq!(
-            branch_fetch_due(
-                &AddRepoState {
-                    url: url.into(),
-                    fetch_at: None,
-                    ..Default::default()
-                },
-                5.0
-            ),
-            None
-        );
-        // Blank URL.
-        assert_eq!(
-            branch_fetch_due(
-                &AddRepoState {
-                    url: "   ".into(),
-                    fetch_at: Some(1.0),
-                    ..Default::default()
-                },
-                5.0
-            ),
-            None
-        );
-        // Already fetched this exact URL.
-        assert_eq!(
-            branch_fetch_due(
-                &AddRepoState {
-                    url: url.into(),
-                    fetch_at: Some(1.0),
-                    fetched_url: Some(url.into()),
-                    ..Default::default()
-                },
-                5.0
-            ),
-            None
-        );
-    }
-
-    #[test]
-    fn branch_options_maps_each_name_to_an_identical_id_and_display() {
-        let opts = branch_options(&["main".to_owned(), "dev".to_owned()]);
-        assert_eq!(
-            opts,
-            vec![
-                ("main".to_owned(), "main".to_owned()),
-                ("dev".to_owned(), "dev".to_owned()),
-            ]
-        );
     }
 
     fn info(id: &str, enabled: bool) -> PluginInfo {
@@ -3985,21 +3816,20 @@ mod tests {
         assert_eq!(logo_fit_rect(Vec2::ZERO, into), into);
     }
 
-    fn repo(slug: &str, locked_sha: &str) -> PluginRepoInfo {
+    fn repo(slug: &str, release_tag: &str) -> PluginRepoInfo {
         PluginRepoInfo {
             url: format!("https://example.com/{slug}.git"),
             slug: slug.to_owned(),
             repository_id: None,
-            branch: None,
-            locked_sha: locked_sha.to_owned(),
+            release_tag: Some(release_tag.to_owned()),
+            release_policy: Default::default(),
             active_revision: None,
-            previous_verified_sha: None,
+            previous_release_tag: None,
             last_sync: None,
             official: false,
             location: Default::default(),
             signature: RepoSignatureStatus::Unsigned,
             signing_key_fingerprint: None,
-            compatibility: RepoCompatibilityStatus::Compatible,
         }
     }
 
@@ -4024,18 +3854,12 @@ mod tests {
     }
 
     #[test]
-    fn truncate_sha_shortens_a_full_hash_and_passes_through_a_short_one() {
-        assert_eq!(truncate_sha("0123456789abcdef"), "01234567");
-        assert_eq!(truncate_sha("abc"), "abc");
-    }
-
-    #[test]
     fn invalid_signature_tooltip_does_not_expose_backend_reason() {
         let tooltip = repo_signature_tooltip(&RepoSignatureStatus::Invalid {
-            reason: "repository signature does not match repository.yaml".into(),
+            reason: "release signature does not match release.yaml".into(),
         });
         assert_eq!(tooltip, "Repository signature verification failed.");
-        assert!(!tooltip.contains("repository.yaml"));
+        assert!(!tooltip.contains("release.yaml"));
     }
 
     #[test]
@@ -4047,17 +3871,17 @@ mod tests {
         assert_eq!(rows[1].slug, "zebra");
         assert!(!rows[0].behind);
         assert!(rows[0].remote_short.is_none());
-        assert_eq!(rows[0].locked_short, "bbbbbbbb");
+        assert_eq!(rows[0].locked_short, "bbbbbbbb2222");
         assert_eq!(*rows[0].signature, RepoSignatureStatus::Unsigned);
     }
 
     #[test]
-    fn repo_rows_surfaces_the_remote_sha_only_when_behind() {
-        let repos = vec![repo("foo", "aaaaaaaa")];
+    fn repo_rows_surfaces_the_latest_tag_only_when_behind() {
+        let repos = vec![repo("foo", "v1")];
         let up_to_date = [RepoUpdateStatus {
             slug: "foo".into(),
-            locked_sha: "aaaaaaaa".into(),
-            remote_sha: "aaaaaaaa".into(),
+            installed_tag: "v1".into(),
+            latest_tag: "v1".into(),
             behind: false,
         }];
         let rows = repo_rows(&repos, &up_to_date, &[]);
@@ -4066,13 +3890,13 @@ mod tests {
 
         let behind = [RepoUpdateStatus {
             slug: "foo".into(),
-            locked_sha: "aaaaaaaa".into(),
-            remote_sha: "cccccccc9999".into(),
+            installed_tag: "v1".into(),
+            latest_tag: "v2".into(),
             behind: true,
         }];
         let rows = repo_rows(&repos, &behind, &[]);
         assert!(rows[0].behind);
-        assert_eq!(rows[0].remote_short.as_deref(), Some("cccccccc"));
+        assert_eq!(rows[0].remote_short.as_deref(), Some("v2"));
     }
 
     #[test]

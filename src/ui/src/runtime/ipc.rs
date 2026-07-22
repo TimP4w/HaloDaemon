@@ -85,9 +85,8 @@ pub struct UiRx {
     /// Decoded plugin display assets, keyed by `plugin_asset_cache_key`.
     pub plugin_assets: watch::Receiver<HashMap<String, Vec<u8>>>,
     pub udev_rules: watch::Receiver<Option<halod_shared::types::UdevRulesStatus>>,
-    /// Remote branch lists keyed by the repo URL they were fetched for; empty
-    /// until the Add-repository picker requests one via `ListRepoBranches`.
-    pub repo_branches: watch::Receiver<HashMap<String, Vec<String>>>,
+    pub plugin_releases:
+        watch::Receiver<HashMap<String, Vec<halod_shared::types::PluginReleaseInfo>>>,
     /// Host serial ports for the `serial_port` config-field dropdown; empty until
     /// a config screen requests one via `ListSerialPorts`.
     pub serial_ports: watch::Receiver<Vec<halod_shared::types::SerialPortInfo>>,
@@ -112,7 +111,7 @@ pub(crate) struct UiTx {
     running_apps: watch::Sender<Vec<RunningApp>>,
     plugin_assets: watch::Sender<HashMap<String, Vec<u8>>>,
     udev_rules: watch::Sender<Option<halod_shared::types::UdevRulesStatus>>,
-    repo_branches: watch::Sender<HashMap<String, Vec<String>>>,
+    plugin_releases: watch::Sender<HashMap<String, Vec<halod_shared::types::PluginReleaseInfo>>>,
     serial_ports: watch::Sender<Vec<halod_shared::types::SerialPortInfo>>,
     lcd_upload: watch::Sender<Option<LcdUploadProgress>>,
     lcd_template: watch::Sender<Option<(String, CustomTemplateDef)>>,
@@ -193,7 +192,7 @@ fn channels(hidden: Arc<AtomicBool>) -> (UiTx, UiRx, FrameSinks) {
     let (apps_s, apps_r) = watch::channel(Vec::new());
     let (assets_s, assets_r) = watch::channel(HashMap::new());
     let (udev_rules_s, udev_rules_r) = watch::channel(None);
-    let (repo_branches_s, repo_branches_r) = watch::channel(HashMap::new());
+    let (plugin_releases_s, plugin_releases_r) = watch::channel(HashMap::new());
     let (serial_ports_s, serial_ports_r) = watch::channel(Vec::new());
     let (upload_s, upload_r) = watch::channel(None);
     let (template_s, template_r) = watch::channel(None);
@@ -217,7 +216,7 @@ fn channels(hidden: Arc<AtomicBool>) -> (UiTx, UiRx, FrameSinks) {
         running_apps: apps_s,
         plugin_assets: assets_s,
         udev_rules: udev_rules_s,
-        repo_branches: repo_branches_s,
+        plugin_releases: plugin_releases_s,
         serial_ports: serial_ports_s,
         lcd_upload: upload_s,
         lcd_template: template_s,
@@ -237,7 +236,7 @@ fn channels(hidden: Arc<AtomicBool>) -> (UiTx, UiRx, FrameSinks) {
         running_apps: apps_r,
         plugin_assets: assets_r,
         udev_rules: udev_rules_r,
-        repo_branches: repo_branches_r,
+        plugin_releases: plugin_releases_r,
         serial_ports: serial_ports_r,
         lcd_upload: upload_r,
         lcd_template: template_r,
@@ -760,15 +759,17 @@ fn handle_json(
             }
             Reaction::default()
         }
-        Some("repo_branches") => {
-            let url = value.get("url").and_then(|u| u.as_str());
-            let branches: Option<Vec<String>> = value
-                .get("branches")
-                .and_then(|b| serde_json::from_value(b.clone()).ok());
-            if let (Some(url), Some(branches)) = (url, branches) {
-                let url = url.to_owned();
-                tx.repo_branches.send_modify(|m| {
-                    m.insert(url, branches);
+        Some("plugin_releases") => {
+            let url = value.get("url").and_then(|url| url.as_str());
+            let releases = value.get("releases").and_then(|releases| {
+                serde_json::from_value::<Vec<halod_shared::types::PluginReleaseInfo>>(
+                    releases.clone(),
+                )
+                .ok()
+            });
+            if let (Some(url), Some(releases)) = (url, releases) {
+                tx.plugin_releases.send_modify(|cache| {
+                    cache.insert(url.to_owned(), releases);
                 });
                 repaint();
             }
@@ -826,7 +827,7 @@ mod tests {
             running_apps: watch::channel(Vec::new()).0,
             plugin_assets: watch::channel(HashMap::new()).0,
             udev_rules: watch::channel(None).0,
-            repo_branches: watch::channel(HashMap::new()).0,
+            plugin_releases: watch::channel(HashMap::new()).0,
             serial_ports: watch::channel(Vec::new()).0,
             lcd_upload: upload_s,
             lcd_template: watch::channel(None).0,
@@ -978,7 +979,7 @@ mod tests {
     fn signature_failure_uses_localized_message_instead_of_backend_text() {
         let (tx, _rx) = test_tx();
         assert!(!handle_json(
-            br#"{"type":"error","code":"repository_signature_verification_failed","message":"repository signature does not match repository.yaml"}"#,
+            br#"{"type":"error","code":"repository_signature_verification_failed","message":"release signature does not match release.yaml"}"#,
             &tx,
             &|| {}, &mut None
         ).relist_lcd_images);

@@ -58,10 +58,7 @@ pub fn repository_integrity_alert(
                 .filter(|repo| {
                     repo.signature == RepoSignatureStatus::Verified
                         && (state.gui.plugin_downloads == PluginDownloadConsent::Allowed
-                            || matches!(
-                                repo.location,
-                                PluginRepoLocation::LocalGit | PluginRepoLocation::LocalArchive
-                            ))
+                            || matches!(repo.location, PluginRepoLocation::LocalArchive))
                 })
                 .map(|repo| repo.slug.clone())
         });
@@ -159,16 +156,15 @@ mod tests {
             url: "https://example.invalid/plugins.git".into(),
             slug: "official".into(),
             repository_id: None,
-            branch: None,
-            locked_sha: "abc".into(),
+            release_tag: Some("v1.0.0".into()),
             active_revision: Some("abc".into()),
-            previous_verified_sha: None,
+            previous_release_tag: None,
             last_sync: None,
             official: true,
             location: Default::default(),
             signature: RepoSignatureStatus::Verified,
             signing_key_fingerprint: None,
-            compatibility: Default::default(),
+            release_policy: Default::default(),
         };
         let mut state = TopicStore::default();
         state.gui.plugin_downloads = PluginDownloadConsent::Allowed;

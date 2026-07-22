@@ -159,24 +159,31 @@ pub enum DaemonCommand {
         id: String,
         values: HashMap<String, String>,
     },
-    /// Register a git-repo plugin source, cloning it and pinning `locked_sha` to the checked-out commit.
+    /// Register an immutable GitHub plugin release source.
     AddPluginRepo {
         url: String,
-        branch: Option<String>,
     },
-    /// Unregister a git-repo plugin source, purging every plugin id it contributed.
+    /// Unregister a plugin release source, purging every plugin id it contributed.
     RemovePluginRepo {
         slug: String,
     },
-    /// List a remote git repo's branches without cloning it, replying with a
-    /// `repo_branches` frame. Used to populate the Add-repository branch picker.
-    ListRepoBranches {
+    /// List immutable plugin releases for a GitHub source.
+    ListPluginReleases {
         url: String,
     },
-    /// Check every registered repo's remote tip against `locked_sha`, replying with `plugin_repo_updates`.
+    /// Check every registered source for a newer selected release.
     CheckPluginRepoUpdates,
-    /// Fetch and check out a repo's remote tip, advancing `locked_sha`.
+    /// Install the selected release for a plugin source.
     UpdatePluginRepo {
+        slug: String,
+    },
+    /// Atomically install a specific release and pin the source to its tag.
+    InstallPluginRelease {
+        slug: String,
+        tag: String,
+    },
+    /// Follow the newest non-prerelease again after a source was pinned.
+    FollowLatestPluginRelease {
         slug: String,
     },
     /// Update every plugin currently flagged with an update available, across every repo.
@@ -805,12 +812,11 @@ mod tests {
     #[test]
     fn add_plugin_repo_wire_format() {
         let v = roundtrip(&DaemonCommand::AddPluginRepo {
-            url: "https://example.com/foo.git".into(),
-            branch: Some("main".into()),
+            url: "https://github.com/example/foo".into(),
         });
         assert_eq!(
             v,
-            json!({"type": "add_plugin_repo", "url": "https://example.com/foo.git", "branch": "main"})
+            json!({"type": "add_plugin_repo", "url": "https://github.com/example/foo"})
         );
     }
 
@@ -818,17 +824,6 @@ mod tests {
     fn remove_plugin_repo_wire_format() {
         let v = roundtrip(&DaemonCommand::RemovePluginRepo { slug: "foo".into() });
         assert_eq!(v, json!({"type": "remove_plugin_repo", "slug": "foo"}));
-    }
-
-    #[test]
-    fn list_repo_branches_wire_format() {
-        let v = roundtrip(&DaemonCommand::ListRepoBranches {
-            url: "https://example.com/foo.git".into(),
-        });
-        assert_eq!(
-            v,
-            json!({"type": "list_repo_branches", "url": "https://example.com/foo.git"})
-        );
     }
 
     #[test]

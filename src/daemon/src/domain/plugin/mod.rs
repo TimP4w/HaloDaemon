@@ -18,6 +18,7 @@ pub mod observers;
 pub mod plugin_test;
 pub mod projection;
 pub(crate) mod recommend;
+pub mod release_source;
 pub mod repo;
 
 pub use engine::device::LuaDevice;
@@ -35,7 +36,7 @@ pub use manifest::{DeviceSpec, EffectKind, PluginManifest, ProbeMode};
 use engine::{command_resolve, device, transport, worker};
 use manifest::{requirements, udev};
 
-/// Lua host/plugin ABI implemented by this daemon. Repository compatibility,
+/// Lua host/plugin ABI implemented by this daemon. Release validation,
 /// release tooling, and [`manifest::contract::PLUGIN_API_CONTRACT`] share this value.
 pub const PLUGIN_API: u32 = halod_plugin_signing::PLUGIN_API;
 
@@ -1888,7 +1889,7 @@ fn scan_repo(repo_dir: &Path, scan: &mut LoadScan) {
             }
             return;
         }
-        Err(error) if repo_dir.join("repository.yaml").is_file() => {
+        Err(error) if repo_dir.join("release.yaml").is_file() => {
             record_invalid_repository(repo_dir, &error, scan);
             return;
         }
@@ -1955,7 +1956,7 @@ fn scan_repo_source(source: &RepoPluginSource, scan: &mut LoadScan) {
 
 /// Scan a repo without integrity verification — for the local development repo
 /// (`--dev-plugin-repo`), whose working tree is edited in place and whose hashes
-/// intentionally won't match the generated `repository.yaml`.
+/// intentionally won't match the generated `release.yaml`.
 fn scan_repo_trusted(repo_dir: &Path, scan: &mut LoadScan) {
     if let Ok(repository) = repo::read_repository_index(repo_dir) {
         for package in repository.packages {

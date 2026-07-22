@@ -250,9 +250,9 @@ fn indexed_repository_with_a_bad_digest_does_not_fall_back_to_loose_scanning() {
     .unwrap();
     std::fs::write(package.join("main.lua"), "return {}\n").unwrap();
     std::fs::write(
-        root.path().join("repository.yaml"),
+        root.path().join("release.yaml"),
         format!(
-            "schema: 1\nid: test-repo\nname: Test repository\nversion: 1.0.0\ncompatibility:\n  halod: '>=0.0.0'\n  plugin_api: 2\npackages:\n  - id: demo\n    path: plugins/demo\n    version: 1.0.0\n    sha256: {}\n",
+            "schema: 1\nid: test-release\nname: Test release\nversion: 1.0.0\npackages:\n  - id: demo\n    path: plugins/demo\n    version: 1.0.0\n    sha256: {}\n",
             "0".repeat(64)
         ),
     )
@@ -287,9 +287,9 @@ fn indexed_repository_with_a_version_mismatch_is_recoverable_integrity_failure()
     std::fs::write(package.join("main.lua"), "return {}\n").unwrap();
     let digest = halod_plugin_signing::package_hash(&package).unwrap();
     std::fs::write(
-        root.path().join("repository.yaml"),
+        root.path().join("release.yaml"),
         format!(
-            "schema: 1\nid: test-repo\nname: Test repository\nversion: 1.0.0\ncompatibility:\n  halod: '>=0.0.0'\n  plugin_api: 2\npackages:\n  - id: philips_evnia\n    path: plugins/philips_evnia\n    version: 2.0.0\n    sha256: {digest}\n"
+            "schema: 1\nid: test-release\nname: Test release\nversion: 1.0.0\npackages:\n  - id: philips_evnia\n    path: plugins/philips_evnia\n    version: 2.0.0\n    sha256: {digest}\n"
         ),
     )
     .unwrap();
@@ -327,9 +327,9 @@ fn indexed_repository_with_a_bad_digest_is_listed_as_failed() {
     .unwrap();
     std::fs::write(package.join("main.lua"), "return {}\n").unwrap();
     std::fs::write(
-        root.path().join("repository.yaml"),
+        root.path().join("release.yaml"),
         format!(
-            "schema: 1\nid: test-repo\nname: Test repository\nversion: 1.0.0\ncompatibility:\n  halod: '>=0.0.0'\n  plugin_api: 2\npackages:\n  - id: demo\n    path: plugins/demo\n    version: 1.0.0\n    sha256: {}\n",
+            "schema: 1\nid: test-release\nname: Test release\nversion: 1.0.0\npackages:\n  - id: demo\n    path: plugins/demo\n    version: 1.0.0\n    sha256: {}\n",
             "0".repeat(64)
         ),
     )
@@ -388,9 +388,9 @@ fn trusted_repo_scan_loads_packages_despite_a_bad_digest() {
     .unwrap();
     std::fs::write(package.join("main.lua"), "return {}\n").unwrap();
     std::fs::write(
-        root.path().join("repository.yaml"),
+        root.path().join("release.yaml"),
         format!(
-            "schema: 1\nid: test-repo\nname: Test repository\nversion: 1.0.0\ncompatibility:\n  halod: '>=0.0.0'\n  plugin_api: 2\npackages:\n  - id: demo\n    path: plugins/demo\n    version: 1.0.0\n    sha256: {}\n",
+            "schema: 1\nid: test-release\nname: Test release\nversion: 1.0.0\npackages:\n  - id: demo\n    path: plugins/demo\n    version: 1.0.0\n    sha256: {}\n",
             "0".repeat(64)
         ),
     )

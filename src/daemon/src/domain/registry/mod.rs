@@ -122,7 +122,6 @@ pub(crate) async fn ensure_official_repo(app: &Arc<AppState>) {
 /// instead of the real `constants::OFFICIAL_PLUGIN_REPO_URL`.
 async fn ensure_official_repo_from(app: &Arc<AppState>, url: &str) {
     use crate::config::PluginRepoRecord;
-    use crate::domain::plugin::repo;
 
     {
         let mut cfg = app.config.write().await;
@@ -137,15 +136,24 @@ async fn ensure_official_repo_from(app: &Arc<AppState>, url: &str) {
                 slug: crate::constants::OFFICIAL_PLUGIN_REPO_SLUG.to_owned(),
                 repository_id: None,
                 trusted_key: None,
-                source_kind: crate::config::PluginRepoSourceKind::Git,
-                branch: None,
-                locked_sha: String::new(),
+                source_kind: crate::config::PluginRepoSourceKind::Release,
+                release_tag: None,
+                release_policy: crate::config::PluginReleasePolicy::Latest,
                 active_revision: None,
                 active_source: crate::config::PluginRevisionSource::Managed,
-                previous_verified_sha: None,
+                previous_release_tag: None,
                 last_sync: None,
             });
             app.request_config_save();
+        }
+        if let Some(record) = cfg
+            .plugins
+            .repos
+            .iter_mut()
+            .find(|record| record.slug == crate::constants::OFFICIAL_PLUGIN_REPO_SLUG)
+        {
+            record.url = url.to_owned();
+            record.source_kind = crate::config::PluginRepoSourceKind::Release;
         }
     }
 
@@ -159,7 +167,6 @@ async fn ensure_official_repo_from(app: &Arc<AppState>, url: &str) {
         return;
     }
 
-    let dest = crate::config::plugin_repos_dir().join(crate::constants::OFFICIAL_PLUGIN_REPO_SLUG);
     let has_active_revision = app
         .config
         .read()
@@ -174,98 +181,13 @@ async fn ensure_official_repo_from(app: &Arc<AppState>, url: &str) {
     if has_active_revision {
         return;
     }
-    let url = url.to_owned();
-    let dest2 = dest.clone();
-    match tokio::task::spawn_blocking(move || -> anyhow::Result<String> {
-        // libgit2 may leave a partial checkout behind after an interrupted or
-        // failed first clone. It has no trusted active revision, so retry from
-        // a clean generated directory instead of repeatedly failing on it.
-        if dest2.exists() {
-            std::fs::remove_dir_all(&dest2)?;
-        }
-        repo::clone(&url, &dest2, None)
-    })
+    if let Err(error) = crate::application::usecases::plugin::repos::follow_latest_release(
+        crate::constants::OFFICIAL_PLUGIN_REPO_SLUG.to_owned(),
+        app.clone(),
+    )
     .await
     {
-        Ok(Ok(sha)) => {
-            let sha = {
-                let dest = dest.clone();
-                match tokio::task::spawn_blocking(move || {
-                    repo::latest_compatible_revision(&dest, &sha, &repo::RepositoryTrust::Official)
-                })
-                .await
-                {
-                    Ok(Ok(Some(revision))) => revision.sha,
-                    Ok(Ok(None)) => {
-                        log::warn!(
-                            "official plugin repository has no revision compatible with this Halo"
-                        );
-                        return;
-                    }
-                    Ok(Err(error)) => {
-                        log::warn!("scanning official plugin repository history: {error:#}");
-                        return;
-                    }
-                    Err(error) => {
-                        log::warn!("official plugin repository history task panicked: {error:#}");
-                        return;
-                    }
-                }
-            };
-            let revision = dest.join("revisions").join(&sha);
-            let materialized = {
-                let dest = dest.clone();
-                let sha = sha.clone();
-                let revision = revision.clone();
-                tokio::task::spawn_blocking(move || -> anyhow::Result<()> {
-                    if !revision.is_dir() {
-                        let staging = revision
-                            .parent()
-                            .expect("revision always has a parent")
-                            .join(format!(".{sha}.staging-bootstrap"));
-                        std::fs::create_dir_all(
-                            staging.parent().expect("staging always has a parent"),
-                        )?;
-                        repo::materialize_commit(&dest, &sha, &staging)?;
-                        repo::verify_official_repository(&staging)?;
-                        std::fs::rename(&staging, &revision)?;
-                    } else {
-                        repo::verify_official_repository(&revision)?;
-                    }
-                    Ok(())
-                })
-                .await
-            };
-            match materialized {
-                Ok(Ok(())) => {}
-                Ok(Err(e)) => {
-                    log::warn!("official plugin repository validation failed: {e:#}");
-                    return;
-                }
-                Err(e) => {
-                    log::warn!("official plugin revision materialization panicked: {e:#}");
-                    return;
-                }
-            }
-            let mut cfg = app.config.write().await;
-            if let Some(r) = cfg
-                .plugins
-                .repos
-                .iter_mut()
-                .find(|r| r.slug == crate::constants::OFFICIAL_PLUGIN_REPO_SLUG)
-            {
-                r.locked_sha = sha;
-                r.active_revision = Some(r.locked_sha.clone());
-                r.active_source = crate::config::PluginRevisionSource::Managed;
-                r.previous_verified_sha = None;
-                r.last_sync = Some(chrono::Utc::now().to_rfc3339());
-            }
-            app.request_config_save();
-        }
-        Ok(Err(e)) => {
-            log::warn!("official plugin repo clone failed (continuing with none): {e:#}");
-        }
-        Err(e) => log::warn!("official plugin repo clone task panicked: {e:#}"),
+        log::warn!("official plugin release download failed (continuing with embedded): {error:#}");
     }
 }
 
@@ -281,7 +203,7 @@ async fn install_embedded_official_bundle(app: &Arc<AppState>) {
     let staging = root.join(format!(".staging-{}", uuid::Uuid::new_v4()));
     let result = tokio::task::spawn_blocking(move || -> anyhow::Result<(String, String)> {
         let metadata = halod_plugin_signing::extract_bundle(bytes, &staging)?;
-        let revision = root.join(&metadata.commit);
+        let revision = root.join(&metadata.release);
         if revision.is_dir() {
             std::fs::remove_dir_all(&staging)?;
         } else {
@@ -289,7 +211,7 @@ async fn install_embedded_official_bundle(app: &Arc<AppState>) {
             std::fs::create_dir_all(&root)?;
             std::fs::rename(&staging, &revision)?;
         }
-        Ok((metadata.commit, metadata.repository_id))
+        Ok((metadata.release, metadata.repository_id))
     })
     .await;
     match result {
@@ -304,7 +226,7 @@ async fn install_embedded_official_bundle(app: &Arc<AppState>) {
                 if record.active_revision.is_none()
                     || record.active_source == crate::config::PluginRevisionSource::Embedded
                 {
-                    record.locked_sha = commit.clone();
+                    record.release_tag = Some(commit.clone());
                     record.active_revision = Some(commit);
                     record.active_source = crate::config::PluginRevisionSource::Embedded;
                     record.repository_id = Some(repository_id);
@@ -457,8 +379,8 @@ mod official_repo_tests {
                 .find(|r| r.slug == OFFICIAL_SLUG)
                 .expect("official repo record must be seeded even if the clone fails");
             assert!(
-                record.locked_sha.is_empty(),
-                "a failed clone must not fabricate a locked_sha"
+                record.release_tag.is_none(),
+                "a failed download must not fabricate a release tag"
             );
         })
         .await;

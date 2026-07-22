@@ -1,5 +1,5 @@
 // SPDX-License-Identifier: GPL-3.0-or-later
-//! Managing registered git-repo plugin sources: add, remove, check for updates, and update.
+//! Managing immutable plugin release sources and imported release archives.
 
 use crate::domain::events::ChangeSink as _;
 
@@ -22,10 +22,6 @@ fn now_rfc3339() -> String {
     chrono::Utc::now().to_rfc3339()
 }
 
-fn repo_cloned(dir: &std::path::Path) -> bool {
-    dir.join(".git").exists()
-}
-
 fn trust_for_record(record: &PluginRepoRecord) -> repo::RepositoryTrust {
     if record.slug == crate::constants::OFFICIAL_PLUGIN_REPO_SLUG {
         repo::RepositoryTrust::Official
@@ -34,69 +30,6 @@ fn trust_for_record(record: &PluginRepoRecord) -> repo::RepositoryTrust {
     } else {
         repo::RepositoryTrust::Unsigned
     }
-}
-
-async fn record_signature(
-    app: &AppState,
-    slug: &str,
-    repo_dir: &std::path::Path,
-    sha: &str,
-    trust: &repo::RepositoryTrust,
-) {
-    if matches!(trust, repo::RepositoryTrust::Unsigned) {
-        return;
-    }
-    let verification = {
-        let dir = repo_dir.to_owned();
-        let sha = sha.to_owned();
-        let trust = trust.clone();
-        tokio::task::spawn_blocking(move || {
-            repo::verify_repository_signature_at_commit(&dir, &sha, &trust)
-        })
-        .await
-    };
-    let status = match verification {
-        Ok(Ok(())) => halod_shared::types::RepoSignatureStatus::Verified,
-        Ok(Err(error)) => halod_shared::types::RepoSignatureStatus::Invalid {
-            reason: format!("{error:#}"),
-        },
-        Err(error) => halod_shared::types::RepoSignatureStatus::Invalid {
-            reason: format!("signature verification task failed: {error}"),
-        },
-    };
-    app.repo_signature_status
-        .lock()
-        .await
-        .insert(slug.to_owned(), (sha.to_owned(), status));
-}
-
-async fn record_tip_compatibility(
-    app: &AppState,
-    slug: &str,
-    repo_dir: &std::path::Path,
-    sha: &str,
-) {
-    let result = {
-        let dir = repo_dir.to_owned();
-        let sha = sha.to_owned();
-        tokio::task::spawn_blocking(move || {
-            repo::validate_repository_compatibility_at_commit(&dir, &sha)
-        })
-        .await
-    };
-    let status = match result {
-        Ok(Ok(())) => halod_shared::types::RepoCompatibilityStatus::Compatible,
-        Ok(Err(error)) => halod_shared::types::RepoCompatibilityStatus::Incompatible {
-            reason: format!("{error:#}"),
-        },
-        Err(error) => halod_shared::types::RepoCompatibilityStatus::Incompatible {
-            reason: format!("compatibility check task failed: {error}"),
-        },
-    };
-    app.repo_compatibility_status
-        .lock()
-        .await
-        .insert(slug.to_owned(), status);
 }
 
 async fn package_disk_hash(
@@ -110,88 +43,8 @@ async fn package_disk_hash(
         .ok()
 }
 
-/// Build and validate an immutable executable revision from fetched Git
-/// objects. The active checkout is never modified; only a fully validated
-/// staging directory is renamed into `revisions/<sha>`.
-fn materialize_revision(
-    repo_dir: &std::path::Path,
-    sha: &str,
-    trust: &repo::RepositoryTrust,
-) -> Result<repo::RepositoryManifest> {
-    let revisions = repo_dir.join("revisions");
-    let final_dir = revisions.join(sha);
-    let validate = |dir: &std::path::Path| -> Result<repo::RepositoryManifest> {
-        let manifest = repo::read_repository_manifest(dir)?;
-        if !matches!(trust, repo::RepositoryTrust::Unsigned) {
-            let yaml = std::fs::read(dir.join("repository.yaml"))?;
-            let signature = std::fs::read(dir.join("repository.sig"))?;
-            match trust {
-                repo::RepositoryTrust::Official => {
-                    repo::verify_official_repository_signature(dir)?;
-                }
-                repo::RepositoryTrust::Pinned(key) => {
-                    halod_plugin_signing::verify_advertised_signature(&yaml, &signature, key)?;
-                }
-                repo::RepositoryTrust::Unsigned => unreachable!(),
-            }
-        }
-        Ok(manifest)
-    };
-    if final_dir.is_dir() {
-        if let Ok(manifest) = validate(&final_dir) {
-            return Ok(manifest);
-        }
-        log::warn!(
-            "rebuilding corrupted repository revision {} from fetched Git objects",
-            final_dir.display()
-        );
-    }
-    std::fs::create_dir_all(&revisions)
-        .with_context(|| format!("creating revision store {}", revisions.display()))?;
-    let staging = revisions.join(format!(".{sha}.staging-{}", uuid::Uuid::new_v4()));
-    repo::materialize_commit(repo_dir, sha, &staging)?;
-    let manifest = match validate(&staging) {
-        Ok(manifest) => manifest,
-        Err(error) => {
-            let _ = std::fs::remove_dir_all(&staging);
-            return Err(error).context("validating materialized repository revision");
-        }
-    };
-    if final_dir.exists() {
-        let backup = revisions.join(format!(".{sha}.corrupt-{}", uuid::Uuid::new_v4()));
-        std::fs::rename(&final_dir, &backup)
-            .with_context(|| format!("quarantining corrupted revision {}", final_dir.display()))?;
-        if let Err(error) = std::fs::rename(&staging, &final_dir) {
-            let _ = std::fs::rename(&backup, &final_dir);
-            let _ = std::fs::remove_dir_all(&staging);
-            return Err(error).with_context(|| {
-                format!(
-                    "activating rebuilt revision {} from {}",
-                    final_dir.display(),
-                    staging.display()
-                )
-            });
-        }
-        if let Err(error) = std::fs::remove_dir_all(&backup) {
-            log::warn!(
-                "removing quarantined repository revision {}: {error}",
-                backup.display()
-            );
-        }
-    } else {
-        std::fs::rename(&staging, &final_dir).with_context(|| {
-            format!(
-                "activating immutable revision {} from {}",
-                final_dir.display(),
-                staging.display()
-            )
-        })?;
-    }
-    Ok(manifest)
-}
-
-/// Register a git-repo plugin source: clone it, pin `locked_sha`, persist, and rediscover.
-pub async fn add_repo(url: String, branch: Option<String>, app: Arc<AppState>) -> Result<()> {
+/// Register an immutable GitHub plugin release source.
+pub async fn add_repo(url: String, app: Arc<AppState>) -> Result<()> {
     let slug = sanitize_slug(&url);
     if slug == crate::constants::OFFICIAL_PLUGIN_REPO_SLUG {
         anyhow::bail!("slug '{slug}' is reserved for the official plugin repository");
@@ -202,110 +55,37 @@ pub async fn add_repo(url: String, branch: Option<String>, app: Arc<AppState>) -
             anyhow::bail!("a repo with slug '{slug}' is already registered");
         }
     }
-    let dest = crate::config::plugin_repos_dir().join(&slug);
-    remove_repo_tree(dest.clone()).await?;
-    let staging = dest.with_file_name(format!(".{}.adding-{}", slug, uuid::Uuid::new_v4()));
-    let preflight = async {
-        let tip_sha = {
-            let url = url.clone();
-            let staging = staging.clone();
-            let branch = branch.clone();
-            tokio::task::spawn_blocking(move || repo::clone(&url, &staging, branch.as_deref()))
+    if url.starts_with("https://github.com/") {
+        {
+            let mut cfg = app.config.write().await;
+            cfg.plugins.repos.push(PluginRepoRecord {
+                url: url.clone(),
+                slug: slug.clone(),
+                repository_id: None,
+                trusted_key: None,
+                source_kind: crate::config::PluginRepoSourceKind::Release,
+                release_tag: None,
+                release_policy: crate::config::PluginReleasePolicy::Latest,
+                active_revision: None,
+                active_source: crate::config::PluginRevisionSource::Managed,
+                previous_release_tag: None,
+                last_sync: None,
+            });
+        }
+        app.request_config_save();
+        if let Err(error) = follow_latest_release(slug.clone(), app.clone()).await {
+            app.config
+                .write()
                 .await
-                .context("clone task panicked")??
-        };
-        record_tip_compatibility(&app, &slug, &staging, &tip_sha).await;
-        let trusted_key = {
-            let staging = staging.clone();
-            let tip_sha = tip_sha.clone();
-            tokio::task::spawn_blocking(move || {
-                repo::advertised_signing_key_at_commit(&staging, &tip_sha)
-            })
-            .await
-            .context("repository signing-key inspection task panicked")??
-        };
-        let trust = trusted_key
-            .clone()
-            .map(repo::RepositoryTrust::Pinned)
-            .unwrap_or_default();
-        record_signature(&app, &slug, &staging, &tip_sha, &trust).await;
-
-        let compatible = {
-            let staging = staging.clone();
-            let tip_sha = tip_sha.clone();
-            let trust = trust.clone();
-            tokio::task::spawn_blocking(move || {
-                repo::latest_compatible_revision(&staging, &tip_sha, &trust)
-            })
-            .await
-            .context("repository history scan task panicked")??
-            .ok_or_else(|| {
-                anyhow::anyhow!("repository has no revision compatible with this Halo")
-            })?
-        };
-        let locked_sha = compatible.sha;
-        let manifest = {
-            let staging = staging.clone();
-            let sha = locked_sha.clone();
-            let trust = trust.clone();
-            tokio::task::spawn_blocking(move || materialize_revision(&staging, &sha, &trust))
-                .await
-                .context("repository manifest validation task panicked")??
-        };
-        Ok::<_, anyhow::Error>((tip_sha, trusted_key, locked_sha, manifest))
-    }
-    .await;
-    let (_tip_sha, trusted_key, locked_sha, manifest) = match preflight {
-        Ok(ready) => ready,
-        Err(error) => {
-            if let Err(cleanup_error) = remove_repo_tree(staging).await {
-                log::warn!("cleaning failed repository add for '{slug}': {cleanup_error:#}");
-            }
-            app.repo_signature_status.lock().await.remove(&slug);
-            app.repo_compatibility_status.lock().await.remove(&slug);
+                .plugins
+                .repos
+                .retain(|record| record.slug != slug);
+            app.request_config_save();
             return Err(error);
         }
-    };
-    let staging_for_activation = staging.clone();
-    let dest_for_activation = dest.clone();
-    if let Err(error) = tokio::task::spawn_blocking(move || {
-        std::fs::rename(&staging_for_activation, &dest_for_activation)
-            .with_context(|| format!("activating repository {}", dest_for_activation.display()))
-    })
-    .await
-    .context("repository activation task panicked")?
-    {
-        let _ = remove_repo_tree(staging).await;
-        return Err(error);
+        return Ok(());
     }
-    let packages = manifest.packages;
-    let active_revision = locked_sha.clone();
-    let plugin_ids: Vec<String> = packages.iter().map(|package| package.id.clone()).collect();
-
-    {
-        let mut cfg = app.config.write().await;
-        cfg.plugins.repos.push(PluginRepoRecord {
-            url,
-            slug,
-            repository_id: Some(manifest.id.clone()),
-            trusted_key,
-            source_kind: crate::config::PluginRepoSourceKind::Git,
-            branch,
-            locked_sha,
-            active_revision: Some(active_revision),
-            active_source: crate::config::PluginRevisionSource::Managed,
-            previous_verified_sha: None,
-            last_sync: Some(now_rfc3339()),
-        });
-        for package in &packages {
-            cfg.plugins
-                .installed_hashes
-                .insert(package.id.clone(), package.sha256.clone());
-        }
-    }
-    app.request_config_save();
-    apply_repo_plugins(app, plugin_ids).await?;
-    Ok(())
+    anyhow::bail!("only immutable GitHub release sources are supported");
 }
 
 /// Remove an unregistered or failed-add repository tree away from Tokio's
@@ -383,16 +163,16 @@ fn extract_repository_archive(
 }
 
 fn archive_repository_root(extracted: &std::path::Path) -> Result<std::path::PathBuf> {
-    if extracted.join("repository.yaml").is_file() {
+    if extracted.join("release.yaml").is_file() {
         return Ok(extracted.to_owned());
     }
     let mut candidates = std::fs::read_dir(extracted)?
         .filter_map(Result::ok)
         .map(|entry| entry.path())
-        .filter(|path| path.is_dir() && path.join("repository.yaml").is_file());
+        .filter(|path| path.is_dir() && path.join("release.yaml").is_file());
     let root = candidates
         .next()
-        .ok_or_else(|| anyhow::anyhow!("archive does not contain repository.yaml"))?;
+        .ok_or_else(|| anyhow::anyhow!("archive does not contain release.yaml"))?;
     if candidates.next().is_some() {
         anyhow::bail!("archive contains more than one repository");
     }
@@ -423,10 +203,7 @@ pub async fn import_local_repo(source_path: String, app: Arc<AppState>) -> Resul
     let source = std::fs::canonicalize(&source_path)
         .with_context(|| format!("resolving local repository source {source_path}"))?;
     if source.is_dir() {
-        let url = url::Url::from_file_path(&source)
-            .map_err(|_| anyhow::anyhow!("local repository path is not a valid file URL"))?
-            .into();
-        return add_repo(url, None, app).await;
+        anyhow::bail!("select a release archive; source repository folders are not installable");
     }
 
     std::fs::create_dir_all(crate::config::config_dir())?;
@@ -484,11 +261,11 @@ pub async fn import_local_repo(source_path: String, app: Arc<AppState>) -> Resul
             repository_id: Some(manifest.id),
             trusted_key,
             source_kind: crate::config::PluginRepoSourceKind::Archive,
-            branch: None,
-            locked_sha: revision.clone(),
+            release_tag: Some(revision.clone()),
+            release_policy: crate::config::PluginReleasePolicy::Latest,
             active_revision: Some(revision),
             active_source: crate::config::PluginRevisionSource::Managed,
-            previous_verified_sha: None,
+            previous_release_tag: None,
             last_sync: Some(now_rfc3339()),
         });
         for package in manifest.packages {
@@ -556,7 +333,7 @@ async fn refresh_archive_repo(record: PluginRepoRecord, app: Arc<AppState>) -> R
             .iter_mut()
             .find(|candidate| candidate.slug == record.slug)
             .ok_or_else(|| anyhow::anyhow!("repository disappeared during restore"))?;
-        configured.locked_sha = revision.clone();
+        configured.release_tag = Some(revision.clone());
         configured.active_revision = Some(revision);
         configured.last_sync = Some(now_rfc3339());
         for package in manifest.packages {
@@ -569,24 +346,193 @@ async fn refresh_archive_repo(record: PluginRepoRecord, app: Arc<AppState>) -> R
     apply_repo_plugins(app, plugin_ids).await
 }
 
-/// List a remote's branches without cloning and reply with a `repo_branches`
-/// frame echoing `url` so the client can match it to the in-progress form.
-pub async fn list_branches(url: String, client: ClientHandle) -> Result<()> {
-    let branches = {
-        let url = url.clone();
-        tokio::task::spawn_blocking(move || repo::list_remote_branches(&url))
+/// List immutable releases for the add-source picker. GitHub supplies ordering
+/// and tags only; the signed release manifest remains the content authority.
+pub async fn list_releases(url: String, client: ClientHandle) -> Result<()> {
+    let source = url.clone();
+    let releases =
+        tokio::task::spawn_blocking(move || crate::domain::plugin::release_source::list(&source))
             .await
-            .context("branch-list task panicked")??
-    };
+            .context("release-list task panicked")??;
     client.send_json(&json!({
-        "type": "repo_branches",
+        "type": "plugin_releases",
         "url": url,
-        "branches": branches,
+        "releases": releases.into_iter().map(|release| json!({
+            "tag": release.tag,
+            "prerelease": release.prerelease,
+            "published_at": release.published_at,
+        })).collect::<Vec<_>>(),
     }));
     Ok(())
 }
 
-/// Unregister a git-repo plugin source: purge its plugin ids, delete its clone dir, persist, and rediscover.
+/// Download, verify, and atomically activate one complete plugin release.
+pub async fn install_release(
+    slug: String,
+    tag: String,
+    pin: bool,
+    app: Arc<AppState>,
+) -> Result<()> {
+    let record = app
+        .config
+        .read()
+        .await
+        .plugins
+        .repos
+        .iter()
+        .find(|record| record.slug == slug)
+        .cloned()
+        .ok_or_else(|| anyhow::anyhow!("unknown plugin source '{slug}'"))?;
+    let source = record.url.clone();
+    let wanted = tag.clone();
+    let published = tokio::task::spawn_blocking(move || -> Result<_> {
+        crate::domain::plugin::release_source::list(&source)?
+            .into_iter()
+            .find(|release| release.tag == wanted)
+            .ok_or_else(|| anyhow::anyhow!("release '{wanted}' was not found"))
+    })
+    .await
+    .context("release lookup task panicked")??;
+
+    let initial_trust = trust_for_record(&record);
+    let inspect_release = published.clone();
+    let (manifest, manifest_bytes, signature_bytes, trusted_key) =
+        tokio::task::spawn_blocking(move || -> Result<_> {
+            let (manifest, bytes, signature) =
+                crate::domain::plugin::release_source::inspect(&inspect_release, &initial_trust)?;
+            let advertised = manifest.signing_key.clone();
+            if matches!(initial_trust, repo::RepositoryTrust::Unsigned) {
+                if let Some(key) = &advertised {
+                    halod_plugin_signing::verify_advertised_signature(&bytes, &signature, key)?;
+                }
+            }
+            // The archive descriptor is transport metadata and must be present
+            // in every network release, even though legacy embedded packs omit it.
+            if manifest.archive.is_none() {
+                anyhow::bail!("network release has no archive descriptor");
+            }
+            Ok((manifest, bytes, signature, advertised))
+        })
+        .await
+        .context("release inspection task panicked")??;
+
+    if record.trusted_key.is_some() && record.trusted_key != trusted_key {
+        anyhow::bail!("release signing key changed after first installation");
+    }
+    if let Some(expected) = &record.repository_id {
+        if expected != &manifest.id {
+            anyhow::bail!(
+                "plugin source '{}' changed identity from '{}' to '{}'",
+                slug,
+                expected,
+                manifest.id
+            );
+        }
+    }
+
+    let root = crate::config::plugin_repos_dir().join(&slug);
+    let final_dir = crate::domain::plugin::release_source::revision_dir(&root, &tag)?;
+    let staging = final_dir
+        .parent()
+        .expect("release revision has a parent")
+        .join(format!(".{}.staging-{}", tag, uuid::Uuid::new_v4()));
+    let published_for_download = published.clone();
+    let manifest_for_download = manifest.clone();
+    let bytes_for_download = manifest_bytes.clone();
+    let signature_for_download = signature_bytes.clone();
+    let staging_for_download = staging.clone();
+    tokio::task::spawn_blocking(move || -> Result<()> {
+        crate::domain::plugin::release_source::download(
+            &published_for_download,
+            &manifest_for_download,
+            &bytes_for_download,
+            &signature_for_download,
+            &staging_for_download,
+        )?;
+        repo::read_repository_manifest(&staging_for_download)?;
+        Ok(())
+    })
+    .await
+    .context("release download task panicked")??;
+
+    if final_dir.exists() {
+        let final_valid = repo::read_repository_manifest(&final_dir).is_ok()
+            && repo::verify_repository_signature(&final_dir, &trust_for_record(&record)).is_ok();
+        if final_valid {
+            remove_repo_tree(staging).await?;
+        } else {
+            let corrupt =
+                final_dir.with_file_name(format!(".{}.corrupt-{}", tag, uuid::Uuid::new_v4()));
+            std::fs::rename(&final_dir, &corrupt)?;
+            if let Err(error) = std::fs::rename(&staging, &final_dir) {
+                let _ = std::fs::rename(&corrupt, &final_dir);
+                return Err(error).context("replacing corrupted plugin release");
+            }
+            let _ = remove_repo_tree(corrupt).await;
+        }
+    } else {
+        std::fs::create_dir_all(final_dir.parent().expect("release revision has a parent"))?;
+        std::fs::rename(&staging, &final_dir)
+            .with_context(|| format!("activating plugin release '{}' for '{}'", tag, slug))?;
+    }
+    let plugin_ids = manifest
+        .packages
+        .iter()
+        .map(|package| package.id.clone())
+        .collect::<Vec<_>>();
+    {
+        let mut cfg = app.config.write().await;
+        let configured = cfg
+            .plugins
+            .repos
+            .iter_mut()
+            .find(|record| record.slug == slug)
+            .ok_or_else(|| anyhow::anyhow!("plugin source disappeared during installation"))?;
+        configured.repository_id.get_or_insert(manifest.id.clone());
+        configured.trusted_key = configured.trusted_key.clone().or(trusted_key);
+        configured.previous_release_tag = configured.release_tag.clone();
+        configured.release_tag = Some(tag.clone());
+        configured.release_policy = if pin {
+            crate::config::PluginReleasePolicy::Pinned(tag.clone())
+        } else {
+            crate::config::PluginReleasePolicy::Latest
+        };
+        configured.active_revision = Some(tag);
+        configured.active_source = crate::config::PluginRevisionSource::Managed;
+        configured.last_sync = Some(now_rfc3339());
+        for package in &manifest.packages {
+            cfg.plugins
+                .installed_hashes
+                .insert(package.id.clone(), package.sha256.clone());
+        }
+    }
+    app.request_config_save();
+    apply_repo_plugins(app, plugin_ids).await
+}
+
+pub async fn follow_latest_release(slug: String, app: Arc<AppState>) -> Result<()> {
+    let source = app
+        .config
+        .read()
+        .await
+        .plugins
+        .repos
+        .iter()
+        .find(|record| record.slug == slug)
+        .map(|record| record.url.clone())
+        .ok_or_else(|| anyhow::anyhow!("unknown plugin source '{slug}'"))?;
+    let latest = tokio::task::spawn_blocking(move || {
+        crate::domain::plugin::release_source::list(&source)?
+            .into_iter()
+            .find(|release| !release.prerelease)
+            .ok_or_else(|| anyhow::anyhow!("plugin source has no stable release"))
+    })
+    .await
+    .context("latest-release lookup task panicked")??;
+    install_release(slug, latest.tag, false, app).await
+}
+
+/// Unregister a plugin release source, purge its plugin ids, and rediscover.
 /// The official repo cannot be removed — only its content can be updated.
 pub async fn remove_repo(slug: String, app: Arc<AppState>) -> Result<()> {
     if slug == crate::constants::OFFICIAL_PLUGIN_REPO_SLUG {
@@ -602,8 +548,7 @@ pub async fn remove_repo(slug: String, app: Arc<AppState>) -> Result<()> {
             .ok_or_else(|| anyhow::anyhow!("unknown plugin repo '{slug}'"))?
     };
     let repo_dir = crate::config::plugin_repos_dir().join(&slug);
-    // The Git worktree is object storage only.  Read the selected immutable
-    // revision before removing it so a stale/mutated worktree cannot decide
+    // Read the selected immutable revision before removing it so stale content cannot decide
     // which persisted plugin state is purged.
     let plugin_ids = crate::domain::plugin::repo_plugin_ids(&repo::active_revision_dir(&record));
     for id in &plugin_ids {
@@ -627,60 +572,41 @@ pub async fn remove_repo(slug: String, app: Arc<AppState>) -> Result<()> {
     Ok(())
 }
 
-/// Fetch every registered repo's remote tip and compare to `locked_sha`; a repo whose fetch fails is logged and skipped.
+/// Compare every registered source with its selected release.
 async fn compute_repo_updates(app: &Arc<AppState>) -> Vec<RepoUpdateStatus> {
     let repos = app.config.read().await.plugins.repos.clone();
     let mut out = Vec::with_capacity(repos.len());
     for r in repos {
-        let dir = crate::config::plugin_repos_dir().join(&r.slug);
-        if !repo_cloned(&dir) {
-            continue;
-        }
-        let branch = r.branch.clone();
-        let fetch_dir = dir.clone();
-        let result = tokio::task::spawn_blocking(move || {
-            repo::fetch_remote_sha(&fetch_dir, branch.as_deref())
-        })
-        .await;
-        match result {
-            Ok(Ok(remote_sha)) => {
-                let trust = trust_for_record(&r);
-                record_signature(app, &r.slug, &dir, &remote_sha, &trust).await;
-                record_tip_compatibility(app, &r.slug, &dir, &remote_sha).await;
-                let compatible = {
-                    let dir = dir.clone();
-                    let tip_sha = remote_sha;
-                    let trust = trust.clone();
-                    tokio::task::spawn_blocking(move || {
-                        repo::latest_compatible_revision(&dir, &tip_sha, &trust)
+        if r.source_kind == crate::config::PluginRepoSourceKind::Release {
+            let source = r.url.clone();
+            let pinned = match &r.release_policy {
+                crate::config::PluginReleasePolicy::Latest => None,
+                crate::config::PluginReleasePolicy::Pinned(tag) => Some(tag.clone()),
+            };
+            match tokio::task::spawn_blocking(move || {
+                crate::domain::plugin::release_source::list(&source)?
+                    .into_iter()
+                    .find(|release| {
+                        pinned
+                            .as_deref()
+                            .map_or(!release.prerelease, |tag| release.tag == tag)
                     })
-                    .await
-                };
-                let candidate_sha = match compatible {
-                    Ok(Ok(Some(revision))) => revision.sha,
-                    Ok(Ok(None)) => r.locked_sha.clone(),
-                    Ok(Err(error)) => {
-                        log::warn!("scanning repository history for '{}': {error:#}", r.slug);
-                        continue;
-                    }
-                    Err(error) => {
-                        log::warn!(
-                            "repository-history task for '{}' panicked: {error:#}",
-                            r.slug
-                        );
-                        continue;
-                    }
-                };
-                let behind = candidate_sha != r.locked_sha;
-                out.push(RepoUpdateStatus {
+                    .ok_or_else(|| anyhow::anyhow!("selected plugin release was not found"))
+            })
+            .await
+            {
+                Ok(Ok(latest)) => out.push(RepoUpdateStatus {
                     slug: r.slug,
-                    locked_sha: r.locked_sha,
-                    remote_sha: candidate_sha,
-                    behind,
-                });
+                    installed_tag: r.release_tag.clone().unwrap_or_default(),
+                    behind: r.release_tag.as_deref() != Some(latest.tag.as_str()),
+                    latest_tag: latest.tag,
+                }),
+                Ok(Err(error)) => {
+                    log::warn!("checking releases for '{}': {error:#}", r.slug)
+                }
+                Err(error) => log::warn!("release-list task for '{}' panicked: {error}", r.slug),
             }
-            Ok(Err(e)) => log::warn!("checking updates for repo '{}': {e:#}", r.slug),
-            Err(e) => log::warn!("fetch task for repo '{}' panicked: {e:#}", r.slug),
+            continue;
         }
     }
     out
@@ -688,103 +614,28 @@ async fn compute_repo_updates(app: &Arc<AppState>) -> Vec<RepoUpdateStatus> {
 
 /// Every repository package (optionally scoped to one repo), compared to the
 /// package digest recorded when the repository was last explicitly installed.
-/// The remote index is read from Git objects and never changes the checkout.
+/// Release checks never mutate the installed revision.
 async fn compute_plugin_updates(
     app: &Arc<AppState>,
     slug_filter: Option<&str>,
 ) -> (Vec<halod_shared::types::PluginUpdateStatus>, Vec<String>) {
-    use halod_shared::types::PluginUpdateStatus;
-
-    let policy = app.config.read().await.plugins.clone();
-    let repos: Vec<_> = policy
+    let mut statuses = compute_on_disk_changes(app).await;
+    if let Some(slug) = slug_filter {
+        statuses.retain(|status| status.slug == slug);
+    }
+    let reached = app
+        .config
+        .read()
+        .await
+        .plugins
         .repos
         .iter()
-        .filter(|r| slug_filter.is_none_or(|s| s == r.slug))
-        .cloned()
+        .filter(|record| slug_filter.is_none_or(|slug| record.slug == slug))
+        .map(|record| record.slug.clone())
         .collect();
-
-    let plugins = app.registry.list(&*app.secret_store);
-    let mut out = Vec::new();
-    let mut reached = Vec::new();
-    for r in repos {
-        let dir = crate::config::plugin_repos_dir().join(&r.slug);
-        if !repo_cloned(&dir) {
-            continue;
-        }
-        let branch = r.branch.clone();
-        let remote_sha = {
-            let dir = dir.clone();
-            match tokio::task::spawn_blocking(move || {
-                repo::fetch_remote_sha(&dir, branch.as_deref())
-            })
-            .await
-            {
-                Ok(Ok(sha)) => sha,
-                Ok(Err(e)) => {
-                    log::warn!("checking plugin updates for repo '{}': {e:#}", r.slug);
-                    continue;
-                }
-                Err(e) => {
-                    log::warn!("fetch task for repo '{}' panicked: {e:#}", r.slug);
-                    continue;
-                }
-            }
-        };
-        reached.push(r.slug.clone());
-
-        let trust = trust_for_record(&r);
-        record_signature(app, &r.slug, &dir, &remote_sha, &trust).await;
-        record_tip_compatibility(app, &r.slug, &dir, &remote_sha).await;
-        let result = {
-            let dir = dir.clone();
-            let tip_sha = remote_sha.clone();
-            let trust = trust.clone();
-            tokio::task::spawn_blocking(move || {
-                repo::latest_compatible_revision(&dir, &tip_sha, &trust)
-            })
-            .await
-        };
-        match result {
-            Ok(Ok(Some(revision))) => {
-                let manifest = revision.manifest;
-                for package in manifest.packages {
-                    let installed_hash = policy.installed_hashes.get(&package.id);
-                    let active_dir = repo::active_revision_dir(&r);
-                    let local_hash = package_disk_hash(&active_dir, &package.path).await;
-                    let loaded = plugins.iter().find(|plugin| {
-                        plugin.id == package.id
-                            && matches!(
-                                &plugin.source,
-                                halod_shared::types::PluginSource::Repo { slug }
-                                    if slug == &r.slug
-                            )
-                    });
-                    out.push(PluginUpdateStatus {
-                        plugin_id: package.id.clone(),
-                        slug: r.slug.clone(),
-                        update_available: installed_hash != Some(&package.sha256),
-                        on_disk_changed: installed_hash
-                            .is_some_and(|hash| local_hash.as_deref() != Some(hash.as_str())),
-                        current_version: loaded
-                            .map(|plugin| plugin.version.clone())
-                            .unwrap_or_default(),
-                        available_version: package.version,
-                    });
-                }
-            }
-            Ok(Ok(None)) => log::info!(
-                "repository '{}' has no revision compatible with this Halo",
-                r.slug
-            ),
-            Ok(Err(e)) => log::warn!("scanning repository history for '{}': {e:#}", r.slug),
-            Err(e) => log::warn!("repository-index task for '{}' panicked: {e:#}", r.slug),
-        }
-    }
-    (out, reached)
+    (statuses, reached)
 }
 
-/// Stamp `last_sync` to now for every named repo (those a check actually
-/// reached) and push the updated state so the GUI's "LAST SYNC" reflects it.
 async fn touch_last_sync(app: &Arc<AppState>, slugs: &[String]) {
     if slugs.is_empty() {
         return;
@@ -837,6 +688,13 @@ pub async fn update_all_plugins(app: Arc<AppState>) -> Result<()> {
     for status in statuses.into_iter().filter(|s| s.update_available) {
         slugs.insert(status.slug);
     }
+    for status in compute_repo_updates(&app)
+        .await
+        .into_iter()
+        .filter(|status| status.behind)
+    {
+        slugs.insert(status.slug);
+    }
     for slug in slugs {
         if let Err(e) = update_repo(slug.clone(), app.clone()).await {
             log::warn!("updating plugin repository '{slug}': {e:#}");
@@ -881,7 +739,7 @@ async fn compute_on_disk_changes(
     let repos = policy.repos.clone();
     let mut out = Vec::new();
     for r in repos {
-        // A seeded repository whose initial clone failed has no immutable
+        // A seeded source whose initial release install failed has no immutable
         // revision to inspect. Treat it as unavailable instead of reading the
         // deliberately nonexistent `__inactive__` sentinel path and logging a
         // misleading warning on every update pass.
@@ -966,1319 +824,23 @@ pub async fn check_repo_updates(app: Arc<AppState>, _client: ClientHandle) -> Re
 /// Fetch and install a repository as one unit. The complete checkout is
 /// validated before its package digests become the new installed baselines.
 pub async fn update_repo(slug: String, app: Arc<AppState>) -> Result<()> {
-    let record = {
-        let cfg = app.config.read().await;
-        cfg.plugins
-            .repos
-            .iter()
-            .find(|r| r.slug == slug)
-            .cloned()
-            .ok_or_else(|| anyhow::anyhow!("unknown plugin repo '{slug}'"))?
-    };
-    if record.source_kind == crate::config::PluginRepoSourceKind::Archive {
-        return refresh_archive_repo(record, app).await;
-    }
-
-    let dir = crate::config::plugin_repos_dir().join(&slug);
-    let old_plugin_ids = {
-        let active_dir = repo::active_revision_dir(&record);
-        tokio::task::spawn_blocking(move || repo::read_repository_index(&active_dir))
-            .await
-            .ok()
-            .and_then(Result::ok)
-            .map(|manifest| {
-                manifest
-                    .packages
-                    .into_iter()
-                    .map(|package| package.id)
-                    .collect::<Vec<_>>()
-            })
-            .unwrap_or_default()
-    };
-    let remote_sha = {
-        let dir = dir.clone();
-        let branch = record.branch.clone();
-        tokio::task::spawn_blocking(move || repo::fetch_remote_sha(&dir, branch.as_deref()))
-            .await
-            .context("fetch task panicked")??
-    };
-    if !official_repo_slug(&slug) {
-        let dir_for_key = dir.clone();
-        let sha_for_key = remote_sha.clone();
-        let advertised = tokio::task::spawn_blocking(move || {
-            repo::advertised_signing_key_at_commit(&dir_for_key, &sha_for_key)
-        })
+    let record = app
+        .config
+        .read()
         .await
-        .context("repository signing-key inspection task panicked")??;
-        if advertised != record.trusted_key {
-            anyhow::bail!("repository signing key changed after first import");
-        }
-    }
-    let trust = trust_for_record(&record);
-    let official = slug == crate::constants::OFFICIAL_PLUGIN_REPO_SLUG;
-    record_signature(&app, &slug, &dir, &remote_sha, &trust).await;
-    record_tip_compatibility(&app, &slug, &dir, &remote_sha).await;
-    let compatible = {
-        let dir = dir.clone();
-        let tip_sha = remote_sha;
-        let trust = trust.clone();
-        tokio::task::spawn_blocking(move || {
-            repo::latest_compatible_revision(&dir, &tip_sha, &trust)
-        })
-        .await
-        .context("repository history scan task panicked")??
-        .ok_or_else(|| anyhow::anyhow!("repository has no revision compatible with this Halo"))?
-    };
-    let remote_sha = compatible.sha;
-    if !record.locked_sha.is_empty() {
-        let dir_for_floor = dir.clone();
-        let candidate = remote_sha.clone();
-        let floor = record.locked_sha.clone();
-        let floor_for_check = floor.clone();
-        let accepted = tokio::task::spawn_blocking(move || {
-            repo::revision_is_at_or_after(&dir_for_floor, &candidate, &floor_for_check)
-        })
-        .await
-        .context("repository rollback check task panicked")??;
-        if !accepted {
-            anyhow::bail!("repository update would roll back below installed revision {floor}");
-        }
-    }
-    let manifest = {
-        let dir = dir.clone();
-        let sha = remote_sha.clone();
-        let trust = trust.clone();
-        tokio::task::spawn_blocking(move || materialize_revision(&dir, &sha, &trust))
-            .await
-            .context("repository revision materialization task panicked")??
-    };
-    if let Some(expected_id) = &record.repository_id {
-        if manifest.id != *expected_id {
-            anyhow::bail!(
-                "repository '{}' changed its identity from '{}' to '{}'",
-                slug,
-                expected_id,
-                manifest.id
-            );
-        }
-    }
-    let plugin_ids: Vec<String> = manifest.packages.iter().map(|p| p.id.clone()).collect();
-    let removed_plugin_ids: Vec<String> = old_plugin_ids
-        .into_iter()
-        .filter(|id| !plugin_ids.contains(id))
-        .collect();
-
-    {
-        let mut cfg = app.config.write().await;
-        if let Some(r) = cfg.plugins.repos.iter_mut().find(|r| r.slug == slug) {
-            if r.repository_id.is_none() {
-                r.repository_id = Some(manifest.id.clone());
+        .plugins
+        .repos
+        .iter()
+        .find(|record| record.slug == slug)
+        .cloned()
+        .ok_or_else(|| anyhow::anyhow!("unknown plugin source {slug}"))?;
+    match record.source_kind {
+        crate::config::PluginRepoSourceKind::Archive => refresh_archive_repo(record, app).await,
+        crate::config::PluginRepoSourceKind::Release => match record.release_policy {
+            crate::config::PluginReleasePolicy::Latest => follow_latest_release(slug, app).await,
+            crate::config::PluginReleasePolicy::Pinned(tag) => {
+                install_release(slug, tag, true, app).await
             }
-            if official && !r.locked_sha.is_empty() {
-                r.previous_verified_sha = Some(r.locked_sha.clone());
-            }
-            r.locked_sha = remote_sha.clone();
-            r.active_revision = Some(remote_sha.clone());
-            r.active_source = crate::config::PluginRevisionSource::Managed;
-            r.last_sync = Some(now_rfc3339());
-        }
-        for package in &manifest.packages {
-            cfg.plugins
-                .installed_hashes
-                .insert(package.id.clone(), package.sha256.clone());
-        }
-    }
-    // `compute_repo_updates` is retained separately from config.  Clear the
-    // stale "behind" result as part of the same successful install so the UI
-    // cannot keep advertising the revision we just activated until the next
-    // explicit update check.
-    {
-        let mut statuses = app.plugin_repo_update_status.lock().await;
-        if let Some(status) = statuses.iter_mut().find(|status| status.slug == slug) {
-            status.locked_sha = remote_sha.clone();
-            status.remote_sha = remote_sha.clone();
-            status.behind = false;
-        }
-    }
-    for plugin_id in &removed_plugin_ids {
-        purge_plugin_state(plugin_id, &app).await;
-    }
-    app.request_config_save();
-    apply_repo_plugins(app, plugin_ids).await
-}
-
-fn official_repo_slug(slug: &str) -> bool {
-    slug == crate::constants::OFFICIAL_PLUGIN_REPO_SLUG
-}
-
-#[cfg(test)]
-mod tests {
-    use super::*;
-    use crate::application::usecases::plugin::plugins::reload_registry;
-
-    /// A `file://` URL for a local path — `add_repo`/`clone` now require an
-    /// explicit scheme, so tests clone local source repos through one.
-    fn file_url(path: &std::path::Path) -> String {
-        url::Url::from_file_path(path)
-            .expect("temporary repository path must be absolute")
-            .into()
-    }
-
-    fn source_package(dir: &std::path::Path, id: &str) -> std::path::PathBuf {
-        dir.join("plugins").join(id)
-    }
-
-    fn refresh_repository_index(repo: &git2::Repository) {
-        let root = repo.workdir().unwrap();
-        let package = std::fs::read_dir(root.join("plugins"))
-            .unwrap()
-            .next()
-            .unwrap()
-            .unwrap()
-            .path();
-        let id = package.file_name().unwrap().to_string_lossy();
-        let version = std::fs::read(package.join("plugin.yaml"))
-            .ok()
-            .and_then(|bytes| serde_yaml::from_slice::<serde_yaml::Value>(&bytes).ok())
-            .and_then(|value| value.get("version")?.as_str().map(str::to_owned))
-            .unwrap_or_else(|| "1.0.0".to_owned());
-        let digest = crate::domain::plugin::repo::package_hash(&package).unwrap();
-        std::fs::write(
-            root.join("repository.yaml"),
-            format!(
-                "schema: 1\nid: test-repo\nname: Test repository\nversion: 1.0.0\ncompatibility:\n  halod: '>=0.0.0'\n  plugin_api: 2\npackages:\n  - id: {id}\n    path: plugins/{id}\n    version: {version}\n    sha256: {digest}\n"
-            ),
-        )
-        .unwrap();
-    }
-
-    /// Init a current indexed repository with one package. Root-level hard
-    /// links keep older mutation-oriented cases concise while the daemon loads
-    /// only the indexed package under `plugins/<id>`.
-    fn init_source_repo(dir: &std::path::Path, id: &str) -> String {
-        std::fs::create_dir_all(dir).unwrap();
-        let repo = git2::Repository::init(dir).unwrap();
-        let package = source_package(dir, id);
-        std::fs::create_dir_all(&package).unwrap();
-        std::fs::write(
-            package.join("plugin.yaml"),
-            format!(
-                "id: {id}\nversion: 1.0.0\npermissions: [hid]\ndevices:\n  - vendor: x\n    model: y\n    match:\n      hid: {{ vid: 1, pid: 2 }}\n"
-            ),
-        )
-        .unwrap();
-        std::fs::write(package.join("main.lua"), "return {}").unwrap();
-        std::fs::hard_link(package.join("plugin.yaml"), dir.join("plugin.yaml")).unwrap();
-        std::fs::hard_link(package.join("main.lua"), dir.join("main.lua")).unwrap();
-        commit_all(&repo, "initial")
-    }
-
-    fn commit_all(repo: &git2::Repository, message: &str) -> String {
-        refresh_repository_index(repo);
-        commit_tree(repo, message)
-    }
-
-    fn commit_with_repository_compatibility(
-        repo: &git2::Repository,
-        message: &str,
-        halod: &str,
-        plugin_api: u32,
-    ) -> String {
-        refresh_repository_index(repo);
-        let path = repo.workdir().unwrap().join("repository.yaml");
-        let current = std::fs::read_to_string(&path).unwrap();
-        let current = current
-            .replace("halod: '>=0.0.0'", &format!("halod: '{halod}'"))
-            .replace("plugin_api: 2", &format!("plugin_api: {plugin_api}"));
-        std::fs::write(path, current).unwrap();
-        commit_tree(repo, message)
-    }
-
-    fn commit_tree(repo: &git2::Repository, message: &str) -> String {
-        let mut index = repo.index().unwrap();
-        index
-            .add_all(["*"].iter(), git2::IndexAddOption::DEFAULT, None)
-            .unwrap();
-        index.write().unwrap();
-        let tree_id = index.write_tree().unwrap();
-        let tree = repo.find_tree(tree_id).unwrap();
-        let sig = git2::Signature::now("Test", "test@example.com").unwrap();
-        let parents: Vec<git2::Commit> = match repo.head() {
-            Ok(head) => vec![head.peel_to_commit().unwrap()],
-            Err(_) => vec![],
-        };
-        let parent_refs: Vec<&git2::Commit> = parents.iter().collect();
-        let oid = repo
-            .commit(Some("HEAD"), &sig, &sig, message, &tree, &parent_refs)
-            .unwrap();
-        oid.to_string()
-    }
-
-    fn sign_and_commit(repo: &git2::Repository, key_id: &str, seed: [u8; 32]) -> String {
-        use base64::{engine::general_purpose::STANDARD as B64, Engine as _};
-        use ed25519_dalek::{Signer as _, SigningKey};
-
-        refresh_repository_index(repo);
-        let root = repo.workdir().unwrap();
-        let key = SigningKey::from_bytes(&seed);
-        let mut manifest = repo::read_repository_index(root).unwrap();
-        manifest.signing_key = Some(halod_plugin_signing::RepositorySigningKey {
-            id: key_id.to_owned(),
-            algorithm: halod_plugin_signing::SIGNATURE_ALGORITHM.to_owned(),
-            public_key: B64.encode(key.verifying_key().to_bytes()),
-        });
-        let payload = halod_plugin_signing::canonical_index_bytes(&manifest).unwrap();
-        std::fs::write(root.join("repository.yaml"), &payload).unwrap();
-        let signature = key.sign(&payload).to_bytes();
-        std::fs::write(
-            root.join("repository.sig"),
-            halod_plugin_signing::signature_bytes(key_id, &signature),
-        )
-        .unwrap();
-        commit_tree(repo, "signed repository")
-    }
-
-    #[tokio::test]
-    async fn signed_repository_pins_first_key_and_rejects_replacement() {
-        crate::test_support::with_tmp_config(|app| async move {
-            let source = tempfile::tempdir().unwrap();
-            let slug = super::sanitize_slug(&file_url(source.path()));
-            init_source_repo(source.path(), &slug);
-            let source_repo = git2::Repository::open(source.path()).unwrap();
-            sign_and_commit(&source_repo, "publisher-1", [1; 32]);
-
-            add_repo(file_url(source.path()), None, app.clone())
-                .await
-                .unwrap();
-            let pinned = app.config.read().await.plugins.repos[0]
-                .trusted_key
-                .clone()
-                .unwrap();
-            assert_eq!(pinned.id, "publisher-1");
-
-            let active = {
-                let cfg = app.config.read().await;
-                repo::active_revision_dir(&cfg.plugins.repos[0])
-            };
-            std::fs::write(active.join("repository.sig"), "invalid signature").unwrap();
-            reload_registry(&app).await;
-            let failed = app
-                .registry
-                .list(app.secret_store.as_ref())
-                .into_iter()
-                .find(|plugin| plugin.id == slug)
-                .unwrap();
-            assert!(matches!(
-                failed.health.issue,
-                Some(halod_shared::types::PluginIssue {
-                    kind: halod_shared::types::PluginIssueKind::LoadFailed,
-                    ..
-                })
-            ));
-
-            update_repo(slug.clone(), app.clone()).await.unwrap();
-            let restored = app
-                .registry
-                .list(app.secret_store.as_ref())
-                .into_iter()
-                .find(|plugin| plugin.id == slug)
-                .unwrap();
-            assert!(restored.health.issue.is_none());
-
-            std::fs::write(
-                source_package(source.path(), &slug).join("main.lua"),
-                "return { changed = true }",
-            )
-            .unwrap();
-            sign_and_commit(&source_repo, "publisher-2", [2; 32]);
-
-            let error = update_repo(slug, app).await.unwrap_err();
-            assert!(
-                error.to_string().contains("signing key changed"),
-                "{error:#}"
-            );
-        })
-        .await;
-    }
-
-    #[tokio::test]
-    async fn failed_add_removes_clone_and_allows_retry() {
-        crate::test_support::with_tmp_config(|app| async move {
-            let source = tempfile::tempdir().unwrap();
-            let url = file_url(source.path());
-            let slug = super::sanitize_slug(&url);
-            init_source_repo(source.path(), &slug);
-            let source_repo = git2::Repository::open(source.path()).unwrap();
-            sign_and_commit(&source_repo, "publisher-1", [1; 32]);
-
-            // Change the signed payload without replacing repository.sig.
-            let manifest = source.path().join("repository.yaml");
-            let contents = std::fs::read_to_string(&manifest).unwrap();
-            std::fs::write(
-                &manifest,
-                contents.replace("Test repository", "Tampered repository"),
-            )
-            .unwrap();
-            commit_tree(&source_repo, "invalidate signature");
-
-            // Simulate debris from an older failed implementation as well.
-            let destination = crate::config::plugin_repos_dir().join(&slug);
-            std::fs::create_dir_all(&destination).unwrap();
-            std::fs::write(destination.join("stale"), "stale").unwrap();
-
-            let error = add_repo(url.clone(), None, app.clone()).await.unwrap_err();
-            assert!(error.to_string().contains("signature"), "{error:#}");
-            assert!(!destination.exists(), "failed add clone must be removed");
-            assert!(app.config.read().await.plugins.repos.is_empty());
-            assert!(std::fs::read_dir(crate::config::plugin_repos_dir())
-                .unwrap()
-                .all(|entry| !entry
-                    .unwrap()
-                    .file_name()
-                    .to_string_lossy()
-                    .contains(".adding-")));
-
-            sign_and_commit(&source_repo, "publisher-1", [1; 32]);
-            add_repo(url, None, app.clone()).await.unwrap();
-            assert!(destination.is_dir());
-            assert_eq!(app.config.read().await.plugins.repos.len(), 1);
-        })
-        .await;
-    }
-
-    fn append_repository_tar<W: std::io::Write>(source: &std::path::Path, writer: W) {
-        let mut archive = tar::Builder::new(writer);
-        archive
-            .append_path_with_name(source.join("repository.yaml"), "repo/repository.yaml")
-            .unwrap();
-        if source.join("repository.sig").is_file() {
-            archive
-                .append_path_with_name(source.join("repository.sig"), "repo/repository.sig")
-                .unwrap();
-        }
-        archive
-            .append_dir_all("repo/plugins", source.join("plugins"))
-            .unwrap();
-        archive.finish().unwrap();
-    }
-
-    fn write_repository_tar(source: &std::path::Path, output: &std::path::Path) {
-        append_repository_tar(source, std::fs::File::create(output).unwrap());
-    }
-
-    #[tokio::test]
-    async fn imports_a_complete_local_repository_archive() {
-        crate::test_support::with_tmp_config(|app| async move {
-            let source = tempfile::tempdir().unwrap();
-            init_source_repo(source.path(), "archive-demo");
-            let archive_dir = tempfile::tempdir().unwrap();
-            let archive = archive_dir.path().join("plugins.tar");
-            write_repository_tar(source.path(), &archive);
-
-            import_local_repo(archive.to_string_lossy().into_owned(), app.clone())
-                .await
-                .unwrap();
-
-            let cfg = app.config.read().await;
-            let record = cfg
-                .plugins
-                .repos
-                .iter()
-                .find(|record| record.repository_id.as_deref() == Some("test-repo"))
-                .unwrap();
-            assert_eq!(
-                record.source_kind,
-                crate::config::PluginRepoSourceKind::Archive
-            );
-            assert!(record.trusted_key.is_none());
-            assert!(repo::active_revision_dir(record)
-                .join("repository.yaml")
-                .is_file());
-        })
-        .await;
-    }
-
-    #[tokio::test]
-    async fn imports_a_signed_gzip_repository_archive_and_pins_its_key() {
-        crate::test_support::with_tmp_config(|app| async move {
-            let source = tempfile::tempdir().unwrap();
-            init_source_repo(source.path(), "signed-archive");
-            let repository = git2::Repository::open(source.path()).unwrap();
-            sign_and_commit(&repository, "archive-publisher", [3; 32]);
-            let archive_dir = tempfile::tempdir().unwrap();
-            let archive = archive_dir.path().join("plugins.tar.gz");
-            let encoder = flate2::write::GzEncoder::new(
-                std::fs::File::create(&archive).unwrap(),
-                flate2::Compression::default(),
-            );
-            append_repository_tar(source.path(), encoder);
-
-            import_local_repo(archive.to_string_lossy().into_owned(), app.clone())
-                .await
-                .unwrap();
-
-            let cfg = app.config.read().await;
-            let record = cfg
-                .plugins
-                .repos
-                .iter()
-                .find(|record| record.repository_id.as_deref() == Some("test-repo"))
-                .unwrap();
-            assert_eq!(
-                record.trusted_key.as_ref().map(|key| key.id.as_str()),
-                Some("archive-publisher")
-            );
-        })
-        .await;
-    }
-
-    #[test]
-    fn archive_import_rejects_links() {
-        let source = tempfile::tempdir().unwrap();
-        let archive_path = source.path().join("bad.tar");
-        let file = std::fs::File::create(&archive_path).unwrap();
-        let mut archive = tar::Builder::new(file);
-        let mut header = tar::Header::new_gnu();
-        header.set_entry_type(tar::EntryType::Symlink);
-        header.set_size(0);
-        header.set_mode(0o777);
-        header.set_cksum();
-        archive
-            .append_link(&mut header, "repo/plugin.lua", "/etc/passwd")
-            .unwrap();
-        archive.finish().unwrap();
-        let destination = tempfile::tempdir().unwrap();
-
-        let error = extract_repository_archive(&archive_path, destination.path()).unwrap_err();
-        assert!(error.to_string().contains("link or special file"));
-    }
-
-    #[test]
-    fn materialize_revision_rebuilds_a_corrupted_existing_revision() {
-        let source = tempfile::tempdir().unwrap();
-        let id = "demo";
-        init_source_repo(source.path(), id);
-        let checkout_root = tempfile::tempdir().unwrap();
-        let checkout = checkout_root.path().join("checkout");
-        let sha = repo::clone(&file_url(source.path()), &checkout, None).unwrap();
-
-        materialize_revision(&checkout, &sha, &repo::RepositoryTrust::Unsigned).unwrap();
-        let revision = checkout.join("revisions").join(&sha);
-        std::fs::write(
-            revision.join("plugins").join(id).join("main.lua"),
-            "return { tampered = true }",
-        )
-        .unwrap();
-        assert!(repo::read_repository_manifest(&revision).is_err());
-
-        materialize_revision(&checkout, &sha, &repo::RepositoryTrust::Unsigned).unwrap();
-
-        assert!(repo::read_repository_manifest(&revision).is_ok());
-        assert_eq!(
-            std::fs::read_to_string(revision.join("plugins").join(id).join("main.lua")).unwrap(),
-            "return {}"
-        );
-    }
-
-    #[tokio::test]
-    async fn add_repo_clones_and_makes_the_plugin_discoverable() {
-        crate::test_support::with_tmp_config(|app| async move {
-            let src = tempfile::tempdir().unwrap();
-            // The plugin id inside must match the slug the clone dir is named after.
-            let slug = super::sanitize_slug(&file_url(src.path()));
-            init_source_repo(src.path(), &slug);
-
-            add_repo(file_url(src.path()), None, app.clone())
-                .await
-                .unwrap();
-
-            let cfg = app.config.read().await;
-            assert_eq!(cfg.plugins.repos.len(), 1);
-            assert_eq!(cfg.plugins.repos[0].slug, slug);
-            assert!(
-                !cfg.plugins.enabled.contains(&slug),
-                "a plugin from a user-added repo must start disabled"
-            );
-            drop(cfg);
-
-            let plugins = app.registry.list(&*app.secret_store);
-            let plugin = plugins.iter().find(|p| p.id == slug);
-            assert!(
-                plugin.is_some(),
-                "repo-sourced plugin should be discoverable after add_repo"
-            );
-            assert!(!plugin.unwrap().enabled);
-
-            let authority = app.registry.authority_for(&slug).unwrap();
-            crate::application::usecases::plugin::plugins::confirm_enable(
-                slug.clone(),
-                authority,
-                app.clone(),
-            )
-            .await
-            .unwrap();
-            let plugins = app.registry.list(&*app.secret_store);
-            assert!(plugins.iter().find(|p| p.id == slug).unwrap().enabled);
-        })
-        .await;
-    }
-
-    #[tokio::test]
-    async fn add_repo_materializes_the_indexed_revision() {
-        crate::test_support::with_tmp_config(|app| async move {
-            let src = tempfile::tempdir().unwrap();
-            let slug = super::sanitize_slug(&file_url(src.path()));
-            let tip_sha = init_source_repo(src.path(), &slug);
-
-            add_repo(file_url(src.path()), None, app.clone())
-                .await
-                .unwrap();
-
-            let cfg = app.config.read().await;
-            assert_eq!(cfg.plugins.repos[0].locked_sha, tip_sha);
-            assert_eq!(
-                cfg.plugins.repos[0].active_revision.as_deref(),
-                Some(tip_sha.as_str())
-            );
-            let active = repo::active_revision_dir(&cfg.plugins.repos[0]);
-            drop(cfg);
-            assert!(active.join("repository.yaml").is_file());
-            assert!(active
-                .join("plugins")
-                .join(&slug)
-                .join("plugin.yaml")
-                .is_file());
-            assert!(app
-                .registry
-                .list(&*app.secret_store)
-                .iter()
-                .any(|plugin| { plugin.id == slug && plugin.health.issue.is_none() }));
-        })
-        .await;
-    }
-
-    #[tokio::test]
-    async fn check_repo_updates_reports_behind_after_a_new_upstream_commit() {
-        crate::test_support::with_tmp_config(|app| async move {
-            let src = tempfile::tempdir().unwrap();
-            let slug = super::sanitize_slug(&file_url(src.path()));
-            let first_sha = init_source_repo(src.path(), &slug);
-
-            add_repo(file_url(src.path()), None, app.clone())
-                .await
-                .unwrap();
-
-            let statuses = compute_repo_updates(&app).await;
-            let status = statuses.iter().find(|s| s.slug == slug).unwrap();
-            assert!(!status.behind, "no upstream change yet");
-            assert_eq!(status.locked_sha, first_sha);
-
-            // Advance the upstream repo with a second commit.
-            let repo = git2::Repository::open(src.path()).unwrap();
-            std::fs::write(src.path().join("main.lua"), "return { extra = true }").unwrap();
-            let second_sha = commit_all(&repo, "second");
-            assert_ne!(first_sha, second_sha);
-
-            let statuses = compute_repo_updates(&app).await;
-            let status = statuses.iter().find(|s| s.slug == slug).unwrap();
-            assert!(status.behind, "remote tip moved past locked_sha");
-            assert_eq!(status.remote_sha, second_sha);
-            assert_eq!(
-                status.locked_sha, first_sha,
-                "check must not advance locked_sha"
-            );
-        })
-        .await;
-    }
-
-    #[tokio::test]
-    async fn signature_status_is_independent_of_repository_compatibility() {
-        crate::test_support::with_tmp_config(|app| async move {
-            let src = tempfile::tempdir().unwrap();
-            init_source_repo(src.path(), "unsigned");
-            let source = git2::Repository::open(src.path()).unwrap();
-            commit_with_repository_compatibility(
-                &source,
-                "requires future plugin API",
-                ">=999.0.0",
-                999,
-            );
-            let slug = crate::constants::OFFICIAL_PLUGIN_REPO_SLUG.to_owned();
-            let dest = crate::config::plugin_repos_dir().join(&slug);
-            let locked_sha = repo::clone(&file_url(src.path()), &dest, None).unwrap();
-            app.config
-                .write()
-                .await
-                .plugins
-                .repos
-                .push(PluginRepoRecord {
-                    url: file_url(src.path()),
-                    slug: slug.clone(),
-                    repository_id: None,
-                    trusted_key: None,
-                    source_kind: crate::config::PluginRepoSourceKind::Git,
-                    branch: None,
-                    locked_sha,
-                    active_revision: None,
-                    active_source: crate::config::PluginRevisionSource::Managed,
-                    previous_verified_sha: None,
-                    last_sync: None,
-                });
-
-            compute_repo_updates(&app).await;
-
-            let statuses = app.repo_signature_status.lock().await;
-            let (_, status) = statuses.get(&slug).expect("official status was recorded");
-            match status {
-                halod_shared::types::RepoSignatureStatus::Invalid { reason } => {
-                    assert!(reason.contains("repository.sig"), "{reason}");
-                    assert!(!reason.contains("plugin API"), "{reason}");
-                }
-                other => panic!("expected invalid signature, got {other:?}"),
-            }
-        })
-        .await;
-    }
-
-    #[tokio::test]
-    async fn touch_last_sync_advances_only_the_reached_repos() {
-        crate::test_support::with_tmp_config(|app| async move {
-            let src = tempfile::tempdir().unwrap();
-            let slug = super::sanitize_slug(&file_url(src.path()));
-            init_source_repo(src.path(), &slug);
-            add_repo(file_url(src.path()), None, app.clone())
-                .await
-                .unwrap();
-
-            // Force a stale sentinel so a fresh stamp is detectable.
-            const STALE: &str = "2000-01-01T00:00:00+00:00";
-            {
-                let mut cfg = app.config.write().await;
-                for r in cfg.plugins.repos.iter_mut() {
-                    r.last_sync = Some(STALE.to_owned());
-                }
-            }
-
-            touch_last_sync(&app, std::slice::from_ref(&slug)).await;
-
-            let cfg = app.config.read().await;
-            let r = cfg.plugins.repos.iter().find(|r| r.slug == slug).unwrap();
-            assert_ne!(
-                r.last_sync.as_deref(),
-                Some(STALE),
-                "a reached repo's last_sync must advance on check"
-            );
-            assert!(r.last_sync.is_some());
-        })
-        .await;
-    }
-
-    #[tokio::test]
-    async fn update_repo_advances_locked_sha_without_revoking_permissions() {
-        crate::test_support::with_tmp_config(|app| async move {
-            let src = tempfile::tempdir().unwrap();
-            let slug = super::sanitize_slug(&file_url(src.path()));
-            init_source_repo(src.path(), &slug);
-
-            add_repo(file_url(src.path()), None, app.clone())
-                .await
-                .unwrap();
-
-            let hash_before = app
-                .config
-                .read()
-                .await
-                .plugins
-                .installed_hashes
-                .get(&slug)
-                .cloned()
-                .unwrap();
-
-            // Advance the upstream repo with a content change.
-            let repo = git2::Repository::open(src.path()).unwrap();
-            std::fs::write(src.path().join("main.lua"), "return { extra = true }").unwrap();
-            let second_sha = commit_all(&repo, "second");
-
-            update_repo(slug.clone(), app.clone()).await.unwrap();
-
-            let cfg = app.config.read().await;
-            let record = cfg.plugins.repos.iter().find(|r| r.slug == slug).unwrap();
-            assert_eq!(
-                record.locked_sha, second_sha,
-                "locked_sha advances to the new tip"
-            );
-
-            let hash_after = cfg.plugins.installed_hashes.get(&slug).unwrap();
-            assert_ne!(
-                &hash_before, hash_after,
-                "content_hash must change once the script content changed"
-            );
-        })
-        .await;
-    }
-
-    #[tokio::test]
-    async fn update_repo_clears_retained_behind_status_for_local_source() {
-        crate::test_support::with_tmp_config(|app| async move {
-            let src = tempfile::tempdir().unwrap();
-            let slug = super::sanitize_slug(&file_url(src.path()));
-            init_source_repo(src.path(), &slug);
-            add_repo(file_url(src.path()), None, app.clone())
-                .await
-                .unwrap();
-
-            let source = git2::Repository::open(src.path()).unwrap();
-            std::fs::write(src.path().join("main.lua"), "return { extra = true }").unwrap();
-            let second_sha = commit_all(&source, "second");
-            publish_repo_updates(&app, compute_repo_updates(&app).await).await;
-            assert!(app.plugin_repo_update_status.lock().await[0].behind);
-
-            update_repo(slug, app.clone()).await.unwrap();
-
-            let statuses = app.plugin_repo_update_status.lock().await;
-            assert_eq!(statuses[0].locked_sha, second_sha);
-            assert_eq!(statuses[0].remote_sha, second_sha);
-            assert!(!statuses[0].behind);
-        })
-        .await;
-    }
-
-    #[tokio::test]
-    async fn mutable_git_worktree_is_never_loaded_as_plugin_input() {
-        crate::test_support::with_tmp_config(|app| async move {
-            let src = tempfile::tempdir().unwrap();
-            let slug = super::sanitize_slug(&file_url(src.path()));
-            init_source_repo(src.path(), &slug);
-
-            add_repo(file_url(src.path()), None, app.clone())
-                .await
-                .unwrap();
-
-            let worktree_package = crate::config::plugin_repos_dir()
-                .join(&slug)
-                .join("plugins")
-                .join(&slug);
-            std::fs::write(
-                worktree_package.join("plugin.yaml"),
-                "id: broken\nid: duplicate\n",
-            )
-            .unwrap();
-            reload_registry(&app).await;
-            assert!(
-                app.registry
-                    .list(&*app.secret_store)
-                    .iter()
-                    .any(|p| p.id == slug && p.health.issue.is_none()),
-                "registry reload must continue reading the immutable active revision"
-            );
-            let cfg = app.config.read().await;
-            let record = cfg.plugins.repos.iter().find(|r| r.slug == slug).unwrap();
-            assert!(
-                repo::active_revision_dir(record)
-                    .join("plugins")
-                    .join(&slug)
-                    .join("plugin.yaml")
-                    .is_file(),
-                "the selected immutable package remains intact"
-            );
-        })
-        .await;
-    }
-
-    #[tokio::test]
-    async fn update_all_plugins_commits_a_cleared_update_flag() {
-        crate::test_support::with_tmp_config(|app| async move {
-            let src = tempfile::tempdir().unwrap();
-            let slug = super::sanitize_slug(&file_url(src.path()));
-            init_source_repo(src.path(), &slug);
-            add_repo(file_url(src.path()), None, app.clone())
-                .await
-                .unwrap();
-
-            // Advance the upstream repo so the plugin has an update available.
-            let repo = git2::Repository::open(src.path()).unwrap();
-            std::fs::write(src.path().join("main.lua"), "return { extra = true }").unwrap();
-            commit_all(&repo, "second");
-            let (before, _) = compute_plugin_updates(&app, Some(&slug)).await;
-            assert!(
-                before
-                    .iter()
-                    .any(|s| s.plugin_id == slug && s.update_available),
-                "the plugin should report an available update before updating"
-            );
-
-            update_all_plugins(app.clone()).await.unwrap();
-
-            let cleared = app
-                .data_bus
-                .state_snapshot(&[halod_shared::bus::topic::PLUGINS.into()])
-                .records
-                .into_iter()
-                .find_map(|record| match record.value {
-                    halod_shared::bus::BusValue::Plugins(plugins) => plugins
-                        .updates
-                        .into_iter()
-                        .find(|status| status.plugin_id == slug)
-                        .map(|status| status.update_available),
-                    _ => None,
-                });
-            assert_eq!(
-                cleared,
-                Some(false),
-                "update_all_plugins must commit a plugins record clearing the flag"
-            );
-        })
-        .await;
-    }
-
-    #[tokio::test]
-    async fn update_all_plugins_returns_repository_failures_to_the_client() {
-        crate::test_support::with_tmp_config(|app| async move {
-            let src = tempfile::tempdir().unwrap();
-            let slug = super::sanitize_slug(&file_url(src.path()));
-            let first_sha = init_source_repo(src.path(), &slug);
-            add_repo(file_url(src.path()), None, app.clone())
-                .await
-                .unwrap();
-
-            let source = git2::Repository::open(src.path()).unwrap();
-            std::fs::write(src.path().join("main.lua"), "return { extra = true }").unwrap();
-            commit_all(&source, "second");
-            update_repo(slug.clone(), app.clone()).await.unwrap();
-
-            // Force the local source branch behind the installed revision. The
-            // update remains advertised because its indexed package digest is
-            // different, but applying it must trip the rollback guard.
-            let head_name = source.head().unwrap().name().unwrap().to_owned();
-            source
-                .find_reference(&head_name)
-                .unwrap()
-                .set_target(git2::Oid::from_str(&first_sha).unwrap(), "test rollback")
-                .unwrap();
-
-            let error = update_all_plugins(app).await.unwrap_err();
-            let message = format!("{error:#}");
-            assert!(message.contains(&slug), "{message}");
-            assert!(message.contains("would roll back"), "{message}");
-        })
-        .await;
-    }
-
-    #[tokio::test]
-    async fn update_plugin_keeps_the_checkout_unchanged_when_validation_fails() {
-        crate::test_support::with_tmp_config(|app| async move {
-            let src = tempfile::tempdir().unwrap();
-            let slug = super::sanitize_slug(&file_url(src.path()));
-            let first_sha = init_source_repo(src.path(), &slug);
-            add_repo(file_url(src.path()), None, app.clone())
-                .await
-                .unwrap();
-
-            // Publish an upstream commit whose plugin.yaml id no longer matches
-            // the directory name — parse_manifest_from_dir rejects that.
-            let repo = git2::Repository::open(src.path()).unwrap();
-            std::fs::write(
-                src.path().join("plugin.yaml"),
-                "id: not-the-slug\nversion: 1.0.0\npermissions: [hid]\ndevices:\n  - vendor: x\n    model: y\n    match:\n      hid: { vid: 1, pid: 2 }\n",
-            )
-            .unwrap();
-            let second_sha = commit_all(&repo, "broken");
-            assert_ne!(first_sha, second_sha);
-
-            let err = update_repo(slug.clone(), app.clone()).await.unwrap_err();
-            assert!(
-                format!("{err:#}").contains("does not match its plugin.yaml id"),
-                "{err:#}"
-            );
-
-            let cfg = app.config.read().await;
-            let r = cfg.plugins.repos.iter().find(|r| r.slug == slug).unwrap();
-            assert_eq!(
-                r.locked_sha, first_sha,
-                "a failed update must not advance locked_sha"
-            );
-            let active = repo::active_revision_dir(r);
-            drop(cfg);
-
-            // Validation happened in staging, so the installed working tree was
-            // never replaced with the invalid content.
-            let manifest = crate::domain::plugin::parse_manifest_from_dir(
-                &active.join("plugins").join(&slug),
-            )
-            .expect("the reverted checkout must parse again");
-            assert_eq!(manifest.plugin_id, slug);
-        })
-        .await;
-    }
-
-    #[tokio::test]
-    async fn add_repo_does_not_disable_a_preexisting_plugin_id() {
-        crate::test_support::with_tmp_config(|app| async move {
-            let src = tempfile::tempdir().unwrap();
-            let slug = super::sanitize_slug(&file_url(src.path()));
-            init_source_repo(src.path(), &slug);
-
-            let local_dir = crate::config::plugins_dir().join(&slug);
-            std::fs::create_dir_all(&local_dir).unwrap();
-            std::fs::copy(
-                src.path().join("plugin.yaml"),
-                local_dir.join("plugin.yaml"),
-            )
-            .unwrap();
-            std::fs::copy(src.path().join("main.lua"), local_dir.join("main.lua")).unwrap();
-            app.registry.load_all(&crate::config::plugins_dir());
-            assert!(app
-                .registry
-                .list(&*app.secret_store)
-                .iter()
-                .any(|plugin| plugin.id == slug));
-
-            add_repo(file_url(src.path()), None, app.clone())
-                .await
-                .unwrap();
-
-            assert!(
-                !app.config.read().await.plugins.enabled.contains(&slug),
-                "an id collision must not disable the pre-existing plugin owner"
-            );
-        })
-        .await;
-    }
-
-    #[tokio::test]
-    async fn incompatible_remote_repository_keeps_latest_compatible_revision() {
-        crate::test_support::with_tmp_config(|app| async move {
-            let src = tempfile::tempdir().unwrap();
-            let slug = super::sanitize_slug(&file_url(src.path()));
-            let first_sha = init_source_repo(src.path(), &slug);
-            add_repo(file_url(src.path()), None, app.clone())
-                .await
-                .unwrap();
-
-            let repo = git2::Repository::open(src.path()).unwrap();
-            let tip_sha = commit_with_repository_compatibility(
-                &repo,
-                "requires future plugin API",
-                ">=0.0.0",
-                crate::domain::plugin::PLUGIN_API + 1,
-            );
-
-            let repo_statuses = compute_repo_updates(&app).await;
-            assert_eq!(repo_statuses[0].remote_sha, first_sha);
-            assert!(!repo_statuses[0].behind);
-
-            let (statuses, _) = compute_plugin_updates(&app, Some(&slug)).await;
-            assert!(
-                statuses.iter().all(|status| !status.update_available),
-                "an incompatible tip is not advertised as an update"
-            );
-
-            update_repo(slug.clone(), app.clone()).await.unwrap();
-            let config = app.config.read().await;
-            let record = config
-                .plugins
-                .repos
-                .iter()
-                .find(|r| r.slug == slug)
-                .unwrap();
-            assert_ne!(tip_sha, first_sha);
-            assert_eq!(record.locked_sha, first_sha);
-            assert_eq!(record.active_revision.as_deref(), Some(first_sha.as_str()));
-        })
-        .await;
-    }
-
-    #[tokio::test]
-    async fn add_repo_selects_latest_compatible_commit_behind_tip() {
-        crate::test_support::with_tmp_config(|app| async move {
-            let src = tempfile::tempdir().unwrap();
-            let slug = super::sanitize_slug(&file_url(src.path()));
-            let compatible_sha = init_source_repo(src.path(), &slug);
-            let source = git2::Repository::open(src.path()).unwrap();
-            let tip_sha = commit_with_repository_compatibility(
-                &source,
-                "requires future plugin API",
-                ">=0.0.0",
-                crate::domain::plugin::PLUGIN_API + 1,
-            );
-
-            add_repo(file_url(src.path()), None, app.clone())
-                .await
-                .unwrap();
-
-            let config = app.config.read().await;
-            let record = &config.plugins.repos[0];
-            assert_ne!(tip_sha, compatible_sha);
-            assert_eq!(record.locked_sha, compatible_sha);
-            assert_eq!(
-                record.active_revision.as_deref(),
-                Some(compatible_sha.as_str())
-            );
-        })
-        .await;
-    }
-
-    #[tokio::test]
-    async fn invalid_checked_out_plugin_can_update_to_a_valid_remote_revision() {
-        crate::test_support::with_tmp_config(|app| async move {
-            let src = tempfile::tempdir().unwrap();
-            let slug = super::sanitize_slug(&file_url(src.path()));
-            init_source_repo(src.path(), &slug);
-            add_repo(file_url(src.path()), None, app.clone())
-                .await
-                .unwrap();
-
-            // Simulate a previously valid plugin becoming invalid under newer
-            // Halo validation while a compatible fix is available upstream.
-            let record = app
-                .config
-                .read()
-                .await
-                .plugins
-                .repos
-                .iter()
-                .find(|record| record.slug == slug)
-                .cloned()
-                .unwrap();
-            let active_package = repo::active_revision_dir(&record)
-                .join("plugins")
-                .join(&slug);
-            std::fs::write(
-                active_package.join("plugin.yaml"),
-                "id: broken\nid: duplicate\n",
-            )
-            .unwrap();
-            reload_registry(&app).await;
-
-            let failed = app
-                .registry
-                .list(&*app.secret_store)
-                .into_iter()
-                .find(|plugin| plugin.id == slug)
-                .expect("invalid manifest remains visible for recovery");
-            assert_eq!(
-                failed.health.issue.map(|issue| issue.kind),
-                Some(halod_shared::types::PluginIssueKind::LoadFailed)
-            );
-
-            let upstream = git2::Repository::open(src.path()).unwrap();
-            std::fs::write(src.path().join("main.lua"), "return { fixed = true }").unwrap();
-            commit_all(&upstream, "compatible fix");
-
-            let (statuses, _) = compute_plugin_updates(&app, Some(&slug)).await;
-            let status = statuses
-                .iter()
-                .find(|status| status.plugin_id == slug)
-                .expect("failed repo plugin still receives update status");
-            assert!(status.update_available);
-
-            update_repo(slug.clone(), app.clone()).await.unwrap();
-
-            let recovered = app
-                .registry
-                .list(&*app.secret_store)
-                .into_iter()
-                .find(|plugin| plugin.id == slug)
-                .expect("updated plugin is loaded again");
-            assert!(recovered.health.issue.is_none());
-        })
-        .await;
-    }
-
-    #[tokio::test]
-    async fn compute_plugin_updates_flags_a_local_edit_as_changed_not_an_update() {
-        crate::test_support::with_tmp_config(|app| async move {
-            let src = tempfile::tempdir().unwrap();
-            let slug = super::sanitize_slug(&file_url(src.path()));
-            init_source_repo(src.path(), &slug);
-            add_repo(file_url(src.path()), None, app.clone())
-                .await
-                .unwrap();
-
-            // No upstream change, but the checked-out working-tree file is edited.
-            let record = app
-                .config
-                .read()
-                .await
-                .plugins
-                .repos
-                .iter()
-                .find(|record| record.slug == slug)
-                .cloned()
-                .unwrap();
-            let active_main = repo::active_revision_dir(&record)
-                .join("plugins")
-                .join(&slug)
-                .join("main.lua");
-            std::fs::write(&active_main, "return { hacked = true }").unwrap();
-            reload_registry(&app).await;
-
-            let (statuses, _) = compute_plugin_updates(&app, Some(&slug)).await;
-            let s = statuses.iter().find(|s| s.plugin_id == slug).unwrap();
-            assert!(
-                s.on_disk_changed,
-                "a local edit to the checked-out file must be flagged as changed on disk"
-            );
-            assert!(
-                !s.update_available,
-                "a local edit with no upstream change is not an available update"
-            );
-        })
-        .await;
-    }
-
-    #[tokio::test]
-    async fn compute_on_disk_changes_detects_a_local_edit_without_a_remote() {
-        crate::test_support::with_tmp_config(|app| async move {
-            let src = tempfile::tempdir().unwrap();
-            let slug = super::sanitize_slug(&file_url(src.path()));
-            init_source_repo(src.path(), &slug);
-            add_repo(file_url(src.path()), None, app.clone())
-                .await
-                .unwrap();
-
-            // Nothing changed on disk yet.
-            assert!(
-                compute_on_disk_changes(&app).await.is_empty(),
-                "a pristine checkout reports no on-disk changes"
-            );
-
-            // Edit the checked-out file, then drop the upstream so no network is
-            // reachable — the local check must still flag the change.
-            let record = app
-                .config
-                .read()
-                .await
-                .plugins
-                .repos
-                .iter()
-                .find(|record| record.slug == slug)
-                .cloned()
-                .unwrap();
-            let active_main = repo::active_revision_dir(&record)
-                .join("plugins")
-                .join(&slug)
-                .join("main.lua");
-            std::fs::write(&active_main, "return { hacked = true }").unwrap();
-            reload_registry(&app).await;
-            drop(src);
-
-            let changed = compute_on_disk_changes(&app).await;
-            assert_eq!(changed.len(), 1);
-            assert_eq!(changed[0].plugin_id, slug);
-            assert!(changed[0].on_disk_changed);
-            assert!(!changed[0].update_available);
-        })
-        .await;
-    }
-
-    #[tokio::test]
-    async fn remove_repo_deletes_the_clone_dir_and_purges_plugin_state() {
-        crate::test_support::with_tmp_config(|app| async move {
-            let src = tempfile::tempdir().unwrap();
-            let slug = super::sanitize_slug(&file_url(src.path()));
-            init_source_repo(src.path(), &slug);
-
-            add_repo(file_url(src.path()), None, app.clone())
-                .await
-                .unwrap();
-            {
-                let mut cfg = app.config.write().await;
-                cfg.plugins.enabled.push(slug.clone());
-            }
-            app.registry
-                .replace_policy(&app.config.read().await.plugins);
-
-            let clone_dir = crate::config::plugin_repos_dir().join(&slug);
-            assert!(clone_dir.exists());
-
-            remove_repo(slug.clone(), app.clone()).await.unwrap();
-
-            assert!(!clone_dir.exists(), "clone directory must be removed");
-            let cfg = app.config.read().await;
-            assert!(cfg.plugins.repos.is_empty());
-            assert!(
-                !cfg.plugins.enabled.contains(&slug),
-                "the removed plugin's disabled flag must be purged"
-            );
-            drop(cfg);
-            let plugins = app.registry.list(&*app.secret_store);
-            assert!(!plugins.iter().any(|p| p.id == slug));
-        })
-        .await;
-    }
-
-    #[tokio::test]
-    async fn remove_repo_rejects_the_official_slug() {
-        crate::test_support::with_tmp_config(|app| async move {
-            let err = remove_repo(
-                crate::constants::OFFICIAL_PLUGIN_REPO_SLUG.to_owned(),
-                app.clone(),
-            )
-            .await
-            .unwrap_err();
-            assert!(err.to_string().contains("cannot be removed"));
-        })
-        .await;
-    }
-
-    #[tokio::test]
-    async fn update_check_skips_a_repo_that_was_never_cloned() {
-        crate::test_support::with_tmp_config(|app| async move {
-            // Seed a repo record whose clone dir was never created (e.g. an
-            // offline first launch where the initial clone failed). Background
-            // update checks must skip it silently instead of trying to open a
-            // missing repo and logging a fetch failure on every cycle.
-            {
-                let mut cfg = app.config.write().await;
-                cfg.plugins.repos.push(PluginRepoRecord {
-                    url: "https://example.invalid/repo".to_owned(),
-                    slug: "never-cloned".to_owned(),
-                    repository_id: None,
-                    trusted_key: None,
-                    source_kind: crate::config::PluginRepoSourceKind::Git,
-                    branch: None,
-                    locked_sha: String::new(),
-                    active_revision: None,
-                    active_source: crate::config::PluginRevisionSource::Managed,
-                    previous_verified_sha: None,
-                    last_sync: None,
-                });
-            }
-
-            let statuses = compute_repo_updates(&app).await;
-            assert!(
-                !statuses.iter().any(|s| s.slug == "never-cloned"),
-                "an uncloned repo must be skipped by the repo update check"
-            );
-
-            let (plugin_statuses, reached) = compute_plugin_updates(&app, None).await;
-            assert!(
-                !reached.iter().any(|s| s == "never-cloned"),
-                "an uncloned repo must not be reported as reached"
-            );
-            assert!(
-                plugin_statuses.iter().all(|s| s.slug != "never-cloned"),
-                "an uncloned repo yields no plugin update statuses"
-            );
-            assert!(
-                compute_on_disk_changes(&app).await.is_empty(),
-                "an uncloned repo has no active revision to inspect"
-            );
-        })
-        .await;
-    }
-
-    #[tokio::test]
-    async fn add_repo_rejects_a_slug_that_collides_with_official() {
-        crate::test_support::with_tmp_config(|app| async move {
-            // sanitize_slug("official") == "official" — a URL that sanitizes
-            // to the reserved slug must be rejected outright.
-            let err = add_repo("official".to_owned(), None, app.clone())
-                .await
-                .unwrap_err();
-            assert!(err.to_string().contains("reserved"));
-        })
-        .await;
+        },
     }
 }

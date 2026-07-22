@@ -67,8 +67,6 @@ chrono     = { version = "0.4.45", default-features = false, features = ["clock"
 rustfft    = "6.4.1"
 chacha20poly1305 = "0.11.0"
 keyring = "4.1.5"
-# Fully vendored (libgit2/libssh2/openssl via `cc`), matching mlua's `vendored` Lua.
-git2 = { version = "0.21.0", default-features = false, features = ["ssh", "https", "vendored-libgit2", "vendored-openssl"] }
 futures-util = "0.3.33"
 url      = "2.5.8"
 flate2   = "1.1.9"

@@ -28,29 +28,26 @@ Plugins are disabled until explicitly enabled. HaloDaemon shows the permissions
 and hardware or service access requested by a plugin before activation, then
 limits it to those declared transports and resources at runtime.
 
-## Distribution and repository trust
+## Distribution and release trust
 
-HaloDaemon installs complete repositories, not standalone plugin directories.
-A repository can come from an HTTPS/SSH Git URL, a local `file://` Git checkout,
-or a local `.tar`, `.tar.gz`, or `.tgz` archive. Every repository has a generated
-`repository.yaml` index containing the package versions and SHA-256 digests;
-packages whose contents do not match that index are never loaded.
+A plugin is standalone. Publishers may bundle one or several plugins as a pack
+in an immutable GitHub release. HaloDaemon reads only three release assets:
+generated `release.yaml`, detached `release.sig`, and `plugins.tar.gz`. It never
+clones the source repository and has no legacy manifest fallback.
 
-The official repository is authenticated with keys built into HaloDaemon. A
-third-party repository may optionally advertise one Ed25519 public key in its
-index and provide `repository.sig`. On first import HaloDaemon verifies the
-self-signature and pins that key (trust on first use). Every later revision must
-verify with the pinned key; changing or adding a key requires removing and
-importing the repository again. The UI displays the pinned key fingerprint.
-Repositories without a key remain unsigned but still receive package-hash
-validation. A signature proves continuity after the first import; it does not
-independently prove the publisher's real-world identity.
+`release.yaml` contains the release identity, package versions and SHA-256
+digests, and the exact archive name, size, and digest. HaloDaemon validates the
+whole pack before atomically activating it. Users follow the newest stable
+release by default and can pin an older release tag from the source selector.
 
-### Signing a third-party repository
+The official source is authenticated with keys built into HaloDaemon. A
+third-party source may advertise an Ed25519 public key; HaloDaemon verifies
+`release.sig` and pins the key on first import. Every later release must verify
+with that key. Unsigned sources still receive package and archive hash checks.
 
-The public key is advertised in the repository root's `repository.yaml`, as a
-top-level `signing_key` block (next to `compatibility`, not inside a package's
-`plugin.yaml`):
+### Signing a third-party release
+
+The public key is a top-level `signing_key` block in `release.yaml`:
 
 ```yaml
 schema: 1
@@ -62,10 +59,6 @@ signing_key:
   id: example-repository-2026
   algorithm: ed25519
   public_key: "<base64-encoded raw 32-byte Ed25519 public key>"
-
-compatibility:
-  halod: ">=0.5.0"
-  plugin_api: 2
 
 packages: []
 ```
@@ -85,45 +78,17 @@ cargo run --manifest-path src/Cargo.toml -p halod-plugin-signing -- \
 export HALOD_PLUGIN_SIGNING_KEY_B64='<private_seed_b64>'
 
 # Refresh package versions/hashes, advertise the derived public key, and write
-# repository.sig over the exact canonical repository.yaml bytes.
+# release.sig over the exact canonical release.yaml bytes.
 cargo run --manifest-path src/Cargo.toml -p halod-plugin-signing -- \
   index /path/to/repository --version 2026.7.1
 cargo run --manifest-path src/Cargo.toml -p halod-plugin-signing -- \
   sign /path/to/repository --key-id example-repository-2026
 ```
 
-Commit both `repository.yaml` and `repository.sig`, but never the private seed.
-The `key_id` in `repository.sig` must match `signing_key.id`. HaloDaemon verifies
-this self-signature on first import, shows the public-key fingerprint, and pins
-the key. A later public-key addition, removal, or replacement is rejected; key
-rotation therefore requires users to remove and re-import the repository.
-
-#### Testing a signed local repository
-
-`--dev-plugin-repo` is an intentionally unverified development override. It
-loads a working tree whose files and hashes may change on every edit, so adding
-`signing_key` there does not change its UI provenance from **Development
-source**. Do not use that flag to test signing or first-import trust.
-
-To test the signed-local flow:
-
-1. Run `index`, then `sign`, so package metadata/hashes, `signing_key`, and
-   `repository.sig` all describe the same exact repository state.
-2. Commit `repository.yaml`, `repository.sig`, and the indexed package changes.
-   **Local Git folder imports the committed `HEAD`; it ignores uncommitted
-   working-tree edits.** Alternatively, create and import a new signed archive.
-3. Start HaloDaemon without `--dev-plugin-repo`, remove any earlier unsigned
-   registration of this repository, and import it using **Local Git folder**.
-
-An existing unsigned registration cannot silently become signed: the absence
-of a key was part of its first-import trust state. Remove and re-import it after
-signing. Likewise, copying a public key into `repository.yaml` is not enough;
-without a matching `repository.sig` made by the corresponding private seed,
-HaloDaemon cannot verify that the repository controls that key.
-
-If import still fails, run `halod-plugin-signing validate <repo>` first. Fix any
-package `id`, version, or SHA-256 mismatch before signing; changing any indexed
-content after `sign` invalidates the detached signature.
+Publish `release.yaml`, `release.sig`, and `plugins.tar.gz` as assets on the same
+GitHub release. Never publish the private seed. The signature key id must match
+`signing_key.id`; changing the pinned key requires removing and re-adding the
+source. Run `halod-plugin-signing validate <pack>` before publication.
 
 ## Plugin development
 

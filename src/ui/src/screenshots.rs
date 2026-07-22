@@ -242,10 +242,9 @@ fn plugins_state() -> TopicStore {
         {
             "url": "https://github.com/HaloDaemon/HaloDaemon-plugins",
             "slug": "halodaemon-plugins",
-            "locked_sha": "9f2c1ab7d4e6",
+            "release_tag": "v2026.7.0",
             "official": true,
             "signature": {"status": "verified"},
-            "compatibility": {"status": "compatible"},
         },
     ]);
 

@@ -6,9 +6,7 @@ use std::sync::Arc;
 
 use crate::application::state::AppState;
 use crate::config::{Config, PluginRepoRecord, PluginRepoSourceKind};
-use halod_shared::types::{
-    PluginRepoInfo, PluginsState, RepoCompatibilityStatus, RepoSignatureStatus, WireDevice,
-};
+use halod_shared::types::{PluginRepoInfo, PluginsState, RepoSignatureStatus, WireDevice};
 
 fn active_signature_status(record: &PluginRepoRecord) -> RepoSignatureStatus {
     let trust = if record.slug == crate::constants::OFFICIAL_PLUGIN_REPO_SLUG {
@@ -18,10 +16,7 @@ fn active_signature_status(record: &PluginRepoRecord) -> RepoSignatureStatus {
     } else {
         return RepoSignatureStatus::Unsigned;
     };
-    let root = crate::config::plugin_repos_dir().join(&record.slug);
-    let result = if !record.locked_sha.is_empty() && root.join(".git").is_dir() {
-        super::repo::verify_repository_signature_at_commit(&root, &record.locked_sha, &trust)
-    } else if record.active_revision.is_some() {
+    let result = if record.active_revision.is_some() {
         super::repo::verify_repository_signature(&super::repo::active_revision_dir(record), &trust)
     } else {
         return RepoSignatureStatus::Invalid {
@@ -37,7 +32,6 @@ fn active_signature_status(record: &PluginRepoRecord) -> RepoSignatureStatus {
 
 pub async fn project(app: &AppState, cfg: &Config, devices: &[WireDevice]) -> PluginsState {
     let observed_signatures = app.repo_signature_status.lock().await.clone();
-    let compatibility = app.repo_compatibility_status.lock().await.clone();
     let mut plugins = app.registry.list(app.secret_store.as_ref());
     for plugin in &mut plugins {
         if plugin.plugin_type == halod_shared::types::PluginKind::Integration
@@ -79,34 +73,36 @@ pub async fn project(app: &AppState, cfg: &Config, devices: &[WireDevice]) -> Pl
                 url: record.url.clone(),
                 slug: record.slug.clone(),
                 repository_id: record.repository_id.clone(),
-                branch: record.branch.clone(),
-                locked_sha: record.locked_sha.clone(),
+                release_tag: record.release_tag.clone(),
+                release_policy: match &record.release_policy {
+                    crate::config::PluginReleasePolicy::Latest => {
+                        halod_shared::types::PluginReleasePolicy::Latest
+                    }
+                    crate::config::PluginReleasePolicy::Pinned(tag) => {
+                        halod_shared::types::PluginReleasePolicy::Pinned(tag.clone())
+                    }
+                },
                 active_revision: record.active_revision.clone(),
-                previous_verified_sha: record.previous_verified_sha.clone(),
+                previous_release_tag: record.previous_release_tag.clone(),
                 last_sync: record.last_sync.clone(),
                 official: record.slug == crate::constants::OFFICIAL_PLUGIN_REPO_SLUG,
                 location: match record.source_kind {
                     PluginRepoSourceKind::Archive => {
                         halod_shared::types::PluginRepoLocation::LocalArchive
                     }
-                    PluginRepoSourceKind::Git if record.url.starts_with("file://") => {
-                        halod_shared::types::PluginRepoLocation::LocalGit
+                    PluginRepoSourceKind::Release => {
+                        halod_shared::types::PluginRepoLocation::RemoteRelease
                     }
-                    PluginRepoSourceKind::Git => halod_shared::types::PluginRepoLocation::RemoteGit,
                 },
                 signature: observed_signatures
                     .get(&record.slug)
-                    .filter(|(sha, _)| sha != &record.locked_sha)
+                    .filter(|(tag, _)| Some(tag.as_str()) != record.release_tag.as_deref())
                     .map(|(_, status)| status.clone())
                     .unwrap_or_else(|| active_signature_status(record)),
                 signing_key_fingerprint: record
                     .trusted_key
                     .as_ref()
                     .and_then(|key| halod_plugin_signing::signing_key_fingerprint(key).ok()),
-                compatibility: compatibility
-                    .get(&record.slug)
-                    .cloned()
-                    .unwrap_or(RepoCompatibilityStatus::Compatible),
             })
             .collect(),
         skipped: app.registry.skipped(),
@@ -126,12 +122,12 @@ mod tests {
             slug: slug.to_owned(),
             repository_id: None,
             trusted_key: None,
-            source_kind: PluginRepoSourceKind::Git,
-            branch: None,
-            locked_sha: String::new(),
+            source_kind: PluginRepoSourceKind::Release,
+            release_tag: None,
+            release_policy: crate::config::PluginReleasePolicy::Latest,
             active_revision: None,
             active_source: crate::config::PluginRevisionSource::Managed,
-            previous_verified_sha: None,
+            previous_release_tag: None,
             last_sync: None,
         }
     }
@@ -156,7 +152,7 @@ mod tests {
     async fn rejected_remote_signature_is_projected() {
         let app = Arc::new(AppState::new(Config::default()));
         let mut record = repo_record(crate::constants::OFFICIAL_PLUGIN_REPO_SLUG);
-        record.locked_sha = "active".to_owned();
+        record.release_tag = Some("active".to_owned());
         let mut cfg = app.config.read().await.clone();
         cfg.plugins.repos.push(record);
         app.repo_signature_status.lock().await.insert(
@@ -164,7 +160,7 @@ mod tests {
             (
                 "remote".to_owned(),
                 RepoSignatureStatus::Invalid {
-                    reason: "repository.sig is missing".to_owned(),
+                    reason: "release.sig is missing".to_owned(),
                 },
             ),
         );
@@ -172,7 +168,7 @@ mod tests {
         let projected = project(&app, &cfg, &[]).await;
         assert!(matches!(
             &projected.repos[0].signature,
-            RepoSignatureStatus::Invalid { reason } if reason == "repository.sig is missing"
+            RepoSignatureStatus::Invalid { reason } if reason == "release.sig is missing"
         ));
     }
 }

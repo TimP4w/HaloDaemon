@@ -276,13 +276,13 @@ pub fn plugins_dir() -> PathBuf {
     config_dir().join("plugins")
 }
 
-/// Directory holding checked-out git-repo plugin sources, one subdirectory per repo (see `PluginRepoRecord`).
+/// Directory holding installed plugin release revisions, grouped by source.
 pub fn plugin_repos_dir() -> PathBuf {
     config_dir().join("plugin_repos")
 }
 
 /// Immutable revisions materialized from the daemon's release-embedded plugin
-/// bundle. Kept outside Git checkout roots so a later official clone can use
+/// bundle. Kept outside managed release roots so a later download can use
 /// the normal mutable repository location unchanged.
 pub fn embedded_plugin_revisions_dir() -> PathBuf {
     config_dir().join("embedded_plugin_revisions")
@@ -369,20 +369,21 @@ pub struct PluginPolicy {
     /// used as a consent gate.
     #[serde(default, skip_serializing_if = "HashMap::is_empty")]
     pub installed_hashes: HashMap<String, String>,
-    /// Registered git-repo plugin sources. See `PluginRepoRecord`.
+    /// Registered release sources. See `PluginRepoRecord`.
     #[serde(default, skip_serializing_if = "Vec::is_empty")]
     pub repos: Vec<PluginRepoRecord>,
 }
 
-/// A registered git-repo plugin source, pinned to a commit SHA that only an explicit "update" advances.
+/// A registered immutable release source.
 #[derive(Debug, Clone, Serialize, Deserialize)]
+#[serde(deny_unknown_fields)]
 pub struct PluginRepoRecord {
     pub url: String,
     /// Directory name under `plugin_repos_dir()`, derived from the URL at `add_repo` time
     /// (fixed to `constants::OFFICIAL_PLUGIN_REPO_SLUG` for the seeded official repo).
     pub slug: String,
-    /// Stable identity declared by `repository.yaml`.  Pinning this prevents a
-    /// URL or branch from silently becoming a different repository.
+    /// Stable identity declared by `release.yaml`. Pinning this prevents a
+    /// URL from silently becoming a different release pack.
     #[serde(default)]
     pub repository_id: Option<String>,
     /// Publisher key pinned on first successful signed import. A later
@@ -391,32 +392,39 @@ pub struct PluginRepoRecord {
     pub trusted_key: Option<halod_plugin_signing::RepositorySigningKey>,
     #[serde(default)]
     pub source_kind: PluginRepoSourceKind,
+    /// GitHub release tag currently active.
+    #[serde(default, skip_serializing_if = "Option::is_none")]
+    pub release_tag: Option<String>,
     #[serde(default)]
-    pub branch: Option<String>,
-    /// Commit SHA the checked-out working tree is pinned to.
-    pub locked_sha: String,
+    pub release_policy: PluginReleasePolicy,
     /// Immutable revision directory currently selected for execution. `None`
     /// means the source is registered but has not installed a revision yet.
     #[serde(default)]
     pub active_revision: Option<String>,
-    /// Storage backing the active revision. Older configurations predate
-    /// embedded bundles and therefore resolve to the managed Git revision.
+    /// Storage backing the active revision.
     #[serde(default)]
     pub active_source: PluginRevisionSource,
-    /// Last verified official revision retained for rollback diagnostics.
+    /// Previously active release tag retained for rollback diagnostics.
     #[serde(default)]
-    pub previous_verified_sha: Option<String>,
-    /// When this repo's clone directory was last cloned/fetched/checked out
-    /// (RFC 3339), for the GUI's repo detail panel. `None` until the first sync.
+    pub previous_release_tag: Option<String>,
+    /// Last successful release synchronization (RFC 3339).
     #[serde(default)]
     pub last_sync: Option<String>,
+}
+
+#[derive(Debug, Clone, Default, PartialEq, Eq, Serialize, Deserialize)]
+#[serde(rename_all = "snake_case", tag = "mode", content = "tag")]
+pub enum PluginReleasePolicy {
+    #[default]
+    Latest,
+    Pinned(String),
 }
 
 #[derive(Debug, Clone, Copy, Default, PartialEq, Eq, Serialize, Deserialize)]
 #[serde(rename_all = "snake_case")]
 pub enum PluginRepoSourceKind {
     #[default]
-    Git,
+    Release,
     Archive,
 }
 
@@ -779,16 +787,16 @@ mod tests {
 
         let mut cfg = Config::default();
         cfg.plugins.repos.push(PluginRepoRecord {
-            url: "https://example.com/foo.git".into(),
+            url: "https://github.com/example/foo".into(),
             slug: "foo".into(),
             repository_id: None,
             trusted_key: None,
-            source_kind: PluginRepoSourceKind::Git,
-            branch: Some("main".into()),
-            locked_sha: "deadbeef".into(),
-            active_revision: Some("deadbeef".into()),
+            source_kind: PluginRepoSourceKind::Release,
+            release_tag: Some("v1.0.0".into()),
+            release_policy: PluginReleasePolicy::Latest,
+            active_revision: Some("v1.0.0".into()),
             active_source: PluginRevisionSource::Managed,
-            previous_verified_sha: None,
+            previous_release_tag: None,
             last_sync: None,
         });
         save(&cfg).unwrap();
@@ -796,24 +804,16 @@ mod tests {
 
         assert_eq!(reloaded.plugins.repos.len(), 1);
         assert_eq!(reloaded.plugins.repos[0].slug, "foo");
-        assert_eq!(reloaded.plugins.repos[0].locked_sha, "deadbeef");
-        assert_eq!(reloaded.plugins.repos[0].branch.as_deref(), Some("main"));
+        assert_eq!(
+            reloaded.plugins.repos[0].release_tag.as_deref(),
+            Some("v1.0.0")
+        );
         assert_eq!(
             reloaded.plugins.repos[0].source_kind,
-            PluginRepoSourceKind::Git
+            PluginRepoSourceKind::Release
         );
         assert!(reloaded.plugins.repos[0].trusted_key.is_none());
 
         unsafe { std::env::remove_var("HALOD_CONFIG_DIR") };
-    }
-
-    #[test]
-    fn legacy_repository_record_defaults_to_unsigned_git() {
-        let record: PluginRepoRecord = serde_yaml::from_str(
-            "url: https://example.com/plugins.git\nslug: plugins\nlocked_sha: abc\n",
-        )
-        .unwrap();
-        assert_eq!(record.source_kind, PluginRepoSourceKind::Git);
-        assert!(record.trusted_key.is_none());
     }
 }

@@ -75,9 +75,6 @@ pub struct AppState {
     pub repo_signature_status: Mutex<
         std::collections::HashMap<String, (String, halod_shared::types::RepoSignatureStatus)>,
     >,
-    /// Compatibility result for the latest fetched tip of each repository.
-    pub repo_compatibility_status:
-        Mutex<std::collections::HashMap<String, halod_shared::types::RepoCompatibilityStatus>>,
     /// The device-plugin registry (loaded manifests, consent/config, notice
     /// dedup, load warnings).
     pub registry: crate::domain::plugin::Registry,
@@ -115,7 +112,6 @@ impl AppState {
             plugin_update_status: Mutex::new(Vec::new()),
             plugin_repo_update_status: Mutex::new(Vec::new()),
             repo_signature_status: Mutex::new(std::collections::HashMap::new()),
-            repo_compatibility_status: Mutex::new(std::collections::HashMap::new()),
             registry: crate::domain::plugin::Registry::default(),
             data_bus: Arc::new(crate::application::bus::data_bus::DataBus::default()),
             #[cfg(feature = "dev-plugin-repo")]

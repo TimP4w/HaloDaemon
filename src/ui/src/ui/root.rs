@@ -92,10 +92,10 @@ impl App {
             self.plugin_assets_cache = std::sync::Arc::new(assets);
         }
         let plugin_assets = std::sync::Arc::clone(&self.plugin_assets_cache);
-        if let Some(branches) =
-            crate::runtime::ipc::take_changed(&mut self.ui.repo_branches, "repo_branches")
+        if let Some(releases) =
+            crate::runtime::ipc::take_changed(&mut self.ui.plugin_releases, "plugin_releases")
         {
-            self.repo_branches_cache = branches;
+            self.plugin_releases_cache = releases;
         }
         if let Some(ports) =
             crate::runtime::ipc::take_changed(&mut self.ui.serial_ports, "serial_ports")
@@ -502,7 +502,7 @@ impl App {
                             &plugin_assets,
                             &state.plugins.repo_updates,
                             &state.plugins.updates,
-                            &self.repo_branches_cache,
+                            &self.plugin_releases_cache,
                             udev_rules,
                         );
                     }

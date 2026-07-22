@@ -9,16 +9,16 @@
   src,
 }:
 let
-  # Updated by the release action together with the daemon version. This is
-  # deliberately part of the existing package derivation: the NixOS module's
-  # default package therefore embeds the same official plugin revision without
-  # an extra option or a networked build step.
-  officialPluginsRev = "eba5024e43de09dc88a041e2115174730ec441b3";
-  officialPlugins = pkgs.fetchFromGitHub {
-    owner = "TimP4w";
-    repo = "HaloDaemon-plugins";
-    rev = officialPluginsRev;
-    hash = "sha256-TMMDN4nGg/FkhT/2p5+tGVK+rIuHK6EcDq7VOoVSQ70=";
+  # The release workflow pins these immutable daemon release assets and their
+  # fixed-output hashes. Both were produced from one authenticated plugin release.
+  officialPluginRelease = "v0.10.0";
+  officialPluginBundle = pkgs.fetchurl {
+    url = "https://github.com/TimP4w/HaloDaemon/releases/download/${officialPluginRelease}/official-plugins.bundle";
+    hash = "sha256-gEssoOyM4wb9JwBIqR3CsIMRSET8f599gUh2/qMTOgc=";
+  };
+  officialPluginLicenses = pkgs.fetchurl {
+    url = "https://github.com/TimP4w/HaloDaemon/releases/download/${officialPluginRelease}/official-plugins-licenses.txt";
+    hash = "sha256-rkjCGSVOABR7lfLbcxAr3tEFABa7wHWPce3f9+t4bY8=";
   };
 in
 pkgs.rustPlatform.buildRustPackage {
@@ -59,7 +59,6 @@ pkgs.rustPlatform.buildRustPackage {
     makeWrapper
     rustPlatform.bindgenHook
     cargo-about
-    perl # git2 needs perl for vendored-openssl
   ];
 
   buildInputs = with pkgs; [
@@ -78,21 +77,13 @@ pkgs.rustPlatform.buildRustPackage {
   # `cargo test -p halod` separately.
   doCheck = false;
 
-  # Generate the exact same embedded payload inside the sandbox from the
-  # fixed-output plugin source. No network is available or needed here.
+  # Embed the exact bundle already produced and authenticated by the release job.
   preBuild = ''
     export HALOD_REQUIRE_LICENSES=1
-    cargo build --release --manifest-path src/Cargo.toml -p halod-plugin-signing
     mkdir -p plugin-bundle
-    src/target/release/halod-plugin-signing verify ${officialPlugins} \
-      --trusted-key halodaemon-official-2026=tjbwm5X4f70e+soVNV1AfRyb/TtnEsNNl+93YMO6IhQ=
-    src/target/release/halod-plugin-signing bundle ${officialPlugins} \
-      --commit ${officialPluginsRev} \
-      --output plugin-bundle/official-plugins.bundle
-    if [ -f ${officialPlugins}/licenses.txt ]; then
-      cp ${officialPlugins}/licenses.txt plugin-bundle/official-plugins-licenses.txt
-      export HALOD_OFFICIAL_PLUGIN_LICENSES=$PWD/plugin-bundle/official-plugins-licenses.txt
-    fi
+    cp ${officialPluginBundle} plugin-bundle/official-plugins.bundle
+    cp ${officialPluginLicenses} plugin-bundle/official-plugins-licenses.txt
+    export HALOD_OFFICIAL_PLUGIN_LICENSES=$PWD/plugin-bundle/official-plugins-licenses.txt
     export HALOD_REQUIRE_PLUGIN_BUNDLE=1
     export HALOD_OFFICIAL_PLUGIN_BUNDLE=$PWD/plugin-bundle/official-plugins.bundle
   '';
@@ -111,11 +102,6 @@ pkgs.rustPlatform.buildRustPackage {
       install -Dm444 plugin-bundle/official-plugins-licenses.txt \
         $out/share/licenses/halod/plugins/licenses.txt
     fi
-    install -Dm444 ${officialPlugins}/REUSE.toml \
-      $out/share/licenses/halod/plugins/REUSE.toml
-    for license in ${officialPlugins}/LICENSES/*; do
-      install -Dm444 "$license" "$out/share/licenses/halod/plugins/$(basename "$license")"
-    done
   '';
 
   # eframe/wgpu dlopens libGL and libwayland at runtime; wrap the binary
