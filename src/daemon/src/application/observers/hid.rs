@@ -134,16 +134,18 @@ async fn discover(app: Arc<AppState>) -> Result<()> {
     Ok(())
 }
 
-inventory::submit!(TransportScanner {
+pub(crate) const SCANNER: TransportScanner = TransportScanner {
     name: "HID",
     detail: halod_shared::types::DiscoveryDetail::Hid,
     platform: None,
-    scan: |app| Box::pin(async move {
-        if let Err(e) = discover(app).await {
-            log::error!("HID discovery failed: {e}");
-        }
-    }),
-});
+    scan: |app| {
+        Box::pin(async move {
+            if let Err(e) = discover(app).await {
+                log::error!("HID discovery failed: {e}");
+            }
+        })
+    },
+};
 
 /// Owned snapshot of a single enumerated HID collection.
 ///

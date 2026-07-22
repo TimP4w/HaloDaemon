@@ -11,10 +11,9 @@
 //! See [`PluginIo`] for the full set of shapes.
 //!
 //! Which backend a plugin gets is decided by a [`PluginTransportDescriptor`]
-//! registered next to the transport via `inventory::submit!` — the same
-//! pattern built-in discovery roots use for `DeviceDescriptor`. Adding a bus is one
-//! descriptor plus, if its I/O shape is new, a new `PluginIo` variant; the
-//! plugin core (`manifest`/`worker`/`mod`) never grows a per-bus branch.
+//! defined next to the transport and listed in `backends::DESCRIPTORS`. Adding a
+//! bus is one descriptor plus, if its I/O shape is new, a new `PluginIo` variant;
+//! the plugin core (`manifest`/`worker`/`mod`) never grows a per-bus branch.
 
 use std::io::Read;
 use std::process::{Command, Stdio};
@@ -442,16 +441,16 @@ pub struct PluginTransportDescriptor {
     /// for a config-instantiated backend (an integration declares no device specs).
     pub validate: Option<fn(&DeviceSpec) -> Result<()>>,
 }
-inventory::collect!(PluginTransportDescriptor);
 
 /// Resolve a `match.transport` kind to its registered backend.
 pub fn descriptor_for(kind: &str) -> Option<&'static PluginTransportDescriptor> {
-    inventory::iter::<PluginTransportDescriptor>().find(|d| d.kind == kind)
+    super::backends::DESCRIPTORS.iter().find(|d| d.kind == kind)
 }
 
 /// Every registered backend kind, for error messages.
 pub fn known_kinds() -> Vec<&'static str> {
-    inventory::iter::<PluginTransportDescriptor>()
+    super::backends::DESCRIPTORS
+        .iter()
         .map(|d| d.kind)
         .collect()
 }
@@ -459,6 +458,16 @@ pub fn known_kinds() -> Vec<&'static str> {
 #[cfg(test)]
 mod tests {
     use super::{command_result_table, CommandExecutor};
+
+    #[test]
+    fn every_backend_kind_resolves_to_exactly_one_descriptor() {
+        let kinds = super::known_kinds();
+        for kind in &kinds {
+            assert_eq!(kinds.iter().filter(|k| *k == kind).count(), 1, "{kind}");
+            assert_eq!(super::descriptor_for(kind).unwrap().kind, *kind);
+        }
+        assert!(super::descriptor_for("nope").is_none());
+    }
 
     #[test]
     fn command_executor_rejects_undeclared_executable() {

@@ -9,12 +9,12 @@ use crate::{
     domain::registry::observers::discovery::{self, DiscoveryHandle, TransportScanner},
 };
 
-inventory::submit!(TransportScanner {
+pub(crate) const SCANNER: TransportScanner = TransportScanner {
     name: "Plugin host transports",
     detail: halod_shared::types::DiscoveryDetail::PluginHostTransports,
     platform: None,
     scan: |app| Box::pin(scan(app)),
-});
+};
 
 async fn scan(app: Arc<AppState>) {
     let specs = app.registry.active_device_specs();

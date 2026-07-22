@@ -1,17 +1,17 @@
 // SPDX-License-Identifier: GPL-3.0-or-later
-//! Runtime SMBus scan entries contributed by plugins. `inventory` (what native
-//! drivers use for `SmBusScanEntry`) is link-time, so plugins — loaded from a
-//! directory at runtime — hand the SMBus scanner these instead. The scanner
-//! probes only the declared `addresses`; a plugin can never widen the set at
-//! runtime, which keeps the raw bus off-limits to untrusted scripts.
+//! Runtime SMBus scan entries contributed by plugins. Plugins are loaded from a
+//! directory at runtime, so they hand the SMBus scanner these rather than being
+//! compiled into a table. The scanner probes only the declared `addresses`; a
+//! plugin can never widen the set at runtime, which keeps the raw bus off-limits
+//! to untrusted scripts.
 
 use halod_shared::types::WriteRateLimit;
 
 use super::manifest::ProbeMode;
 use crate::infrastructure::drivers::transports::smbus::{PciMatch, SmbusBusKind};
 
-/// One plugin-declared SMBus scan, mirroring the fields the scanner reads from a
-/// native `SmBusScanEntry` plus what it needs to run the plugin's `pre_scan`.
+/// One plugin-declared SMBus scan: the fields the scanner needs to probe the bus
+/// plus what it needs to run the plugin's `pre_scan`.
 pub struct PluginScanEntry {
     pub plugin_id: String,
     /// Full script text, so the scanner can build a throwaway VM for `pre_scan`.

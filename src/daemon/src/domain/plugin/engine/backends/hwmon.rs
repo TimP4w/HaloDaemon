@@ -32,10 +32,10 @@ fn open(
     }
 }
 
-inventory::submit!(PluginTransportDescriptor {
+pub(super) const DESCRIPTOR: PluginTransportDescriptor = PluginTransportDescriptor {
     kind: "hwmon",
     matches: None,
     open,
     id_suffix: None,
-    validate: None
-});
+    validate: None,
+};

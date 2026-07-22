@@ -65,10 +65,10 @@ fn validate(spec: &DeviceSpec) -> Result<()> {
     Ok(())
 }
 
-inventory::submit!(PluginTransportDescriptor {
+pub(super) const DESCRIPTOR: PluginTransportDescriptor = PluginTransportDescriptor {
     kind: "smbus",
     matches: Some(matches),
     open,
     id_suffix: Some(id_suffix),
     validate: Some(validate),
-});
+};

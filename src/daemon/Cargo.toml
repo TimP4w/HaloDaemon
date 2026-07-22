@@ -45,7 +45,6 @@ log        = { workspace = true }
 async-trait = { workspace = true }
 fnv        = "1.0.7"
 hidapi     = "2.6.6"
-inventory  = "0.3.24"
 # Embedded Lua runtime for device plugins (statically vendored, no system Lua).
 # `serialize` bridges manifest tables straight into serde types.
 mlua       = { version = "0.12.0", features = ["lua54", "vendored", "serialize"] }
@@ -58,7 +57,6 @@ gif        = "0.14.2"
 # Q565 — QOI-derived RGB565 codec. The NZXT Kraken type-0x08 LCD streaming path
 # expects frames in this format (verified against NZXT CAM USB captures).
 q565       = { git = "https://github.com/seritools/q565", rev = "aeb432dc7d73757b20cd45b71755e8573a978541" }
-imageproc  = { version = "0.27.0", default-features = false }
 ab_glyph   = "0.2.32"
 unicode-segmentation = "1.13.3"
 tiny-skia = "0.12.0"
@@ -66,7 +64,6 @@ resvg      = { version = "0.47.0", default-features = false }
 chrono     = { version = "0.4.45", default-features = false, features = ["clock"] }
 rustfft    = "6.4.1"
 chacha20poly1305 = "0.11.0"
-keyring = "4.1.5"
 futures-util = "0.3.33"
 url      = "2.5.8"
 flate2   = "1.1.9"
@@ -106,6 +103,7 @@ windows    = { version = "0.62.2", features = [
     "Win32_Foundation",
     "Win32_Security",
     "Win32_Security_Authorization",
+    "Win32_Security_Credentials",
     "Win32_Security_Cryptography",
     "Win32_Storage_FileSystem",
     "Win32_System_Com",

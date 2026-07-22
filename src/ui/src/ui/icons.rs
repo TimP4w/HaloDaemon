@@ -122,7 +122,7 @@ fn texture(ctx: &egui::Context, icon: Icon) -> egui::TextureHandle {
                 ) {
                     rasterize_mask(icon.svg(), ICON_PX)
                 } else {
-                    rasterize(icon.svg(), ICON_PX)
+                    crate::svg::color_image(icon.svg(), ICON_PX)
                 }
                 .unwrap_or_else(|| egui::ColorImage::from_rgba_unmultiplied([1, 1], &[0; 4]));
                 ctx.load_texture(icon.key(), img, egui::TextureOptions::LINEAR)
@@ -131,42 +131,12 @@ fn texture(ctx: &egui::Context, icon: Icon) -> egui::TextureHandle {
     })
 }
 
-fn render_svg(bytes: &[u8], target: u32) -> Option<resvg::tiny_skia::Pixmap> {
-    use resvg::{tiny_skia, usvg};
-
-    let tree = usvg::Tree::from_data(bytes, &usvg::Options::default()).ok()?;
-    let size = tree.size().to_int_size();
-    let long_edge = size.width().max(size.height()) as f32;
-    if long_edge <= 0.0 {
-        return None;
-    }
-    let scale = target as f32 / long_edge;
-    let w = (size.width() as f32 * scale).ceil() as u32;
-    let h = (size.height() as f32 * scale).ceil() as u32;
-    let mut pixmap = tiny_skia::Pixmap::new(w.max(1), h.max(1))?;
-    resvg::render(
-        &tree,
-        tiny_skia::Transform::from_scale(scale, scale),
-        &mut pixmap.as_mut(),
-    );
-    Some(pixmap)
-}
-
-/// Rasterize SVG bytes to an RGBA image `target` px on the long edge.
-fn rasterize(bytes: &[u8], target: u32) -> Option<egui::ColorImage> {
-    let pixmap = render_svg(bytes, target)?;
-    Some(egui::ColorImage::from_rgba_unmultiplied(
-        [pixmap.width() as usize, pixmap.height() as usize],
-        pixmap.data(),
-    ))
-}
-
 /// Rasterize SVG bytes to a white alpha mask, so egui's multiplicative tint
 /// recolors the glyph regardless of the fill colors in the source SVG. The
 /// device SVGs' viewBoxes are cropped tight to the artwork (enforced by test),
 /// so the mask centers correctly without further cropping.
 fn rasterize_mask(bytes: &[u8], target: u32) -> Option<egui::ColorImage> {
-    let pixmap = render_svg(bytes, target)?;
+    let pixmap = crate::svg::rasterize(bytes, Some(target))?;
     let rgba: Vec<u8> = pixmap
         .data()
         .chunks_exact(4)
@@ -273,7 +243,7 @@ mod tests {
             Icon::VerifiedBadge,
             Icon::IntegrityShield,
         ] {
-            let img = rasterize(icon.svg(), ICON_PX)
+            let img = crate::svg::color_image(icon.svg(), ICON_PX)
                 .unwrap_or_else(|| panic!("{} failed to rasterize", icon.key()));
             assert_eq!(img.width().max(img.height()), ICON_PX as usize);
             assert!(
@@ -326,6 +296,40 @@ mod tests {
             assert!(
                 center_off(x0, x1, w) <= 1.5 && center_off(y0, y1, h) <= 1.5,
                 "{ty:?} artwork not centered in its viewBox"
+            );
+        }
+    }
+
+    /// `resvg` is built without its `text` feature, so a `<text>` element in a
+    /// bundled asset would silently render as nothing.
+    #[test]
+    fn no_bundled_svg_needs_text_shaping() {
+        fn walk(dir: &std::path::Path, found: &mut Vec<std::path::PathBuf>) {
+            let Ok(entries) = std::fs::read_dir(dir) else {
+                return;
+            };
+            for entry in entries.flatten() {
+                let path = entry.path();
+                if path.is_dir() {
+                    walk(&path, found);
+                } else if path.extension().is_some_and(|ext| ext == "svg") {
+                    found.push(path);
+                }
+            }
+        }
+
+        let manifest = std::path::Path::new(env!("CARGO_MANIFEST_DIR"));
+        let mut svgs = Vec::new();
+        walk(&manifest.join("assets"), &mut svgs);
+        walk(&manifest.join("../../assets"), &mut svgs);
+        assert!(!svgs.is_empty(), "no SVG assets found to check");
+
+        for path in svgs {
+            let body = std::fs::read_to_string(&path).expect("asset is UTF-8");
+            assert!(
+                !body.contains("<text") && !body.contains("font-family"),
+                "{} uses text; it will not render without resvg's text feature",
+                path.display()
             );
         }
     }
