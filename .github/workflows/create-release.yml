@@ -37,7 +37,7 @@ jobs:
     outputs:
       new_version: ${{ steps.calc.outputs.new }}
     steps:
-      - uses: actions/checkout@v7.0.0
+      - uses: actions/checkout@v7.0.1
         with:
           ref: main
 
@@ -69,7 +69,7 @@ jobs:
     needs: [prepare, prepare-plugins]
     runs-on: ubuntu-latest
     steps:
-      - uses: actions/checkout@v7.0.0
+      - uses: actions/checkout@v7.0.1
         with:
           ref: ${{ needs.prepare.outputs.release_sha }}
 
@@ -159,7 +159,7 @@ jobs:
     needs: [prepare, prepare-plugins]
     runs-on: windows-latest
     steps:
-      - uses: actions/checkout@v7.0.0
+      - uses: actions/checkout@v7.0.1
         with:
           ref: ${{ needs.prepare.outputs.release_sha }}
 
@@ -233,7 +233,7 @@ jobs:
       new_version: ${{ needs.version.outputs.new_version }}
       release_sha: ${{ steps.release_commit.outputs.sha }}
     steps:
-      - uses: actions/checkout@v7.0.0
+      - uses: actions/checkout@v7.0.1
         with:
           ref: main
 
@@ -365,7 +365,7 @@ jobs:
       licenses_sha256: ${{ steps.asset_hashes.outputs.licenses_sha256 }}
       licenses_sri: ${{ steps.asset_hashes.outputs.licenses_sri }}
     steps:
-      - uses: actions/checkout@v7.0.0
+      - uses: actions/checkout@v7.0.1
         with:
           ref: main
 
@@ -434,7 +434,7 @@ jobs:
     needs: [test-windows, prepare, prepare-plugins]
     runs-on: windows-latest
     steps:
-      - uses: actions/checkout@v7.0.0
+      - uses: actions/checkout@v7.0.1
         with:
           ref: ${{ needs.prepare.outputs.release_sha }}
 
@@ -485,7 +485,7 @@ jobs:
     needs: [test-linux, prepare, prepare-plugins]
     runs-on: ubuntu-latest
     steps:
-      - uses: actions/checkout@v7.0.0
+      - uses: actions/checkout@v7.0.1
         with:
           ref: ${{ needs.prepare.outputs.release_sha }}
 
@@ -556,7 +556,7 @@ jobs:
     needs: [test-linux, prepare]
     runs-on: ubuntu-latest
     steps:
-      - uses: actions/checkout@v7.0.0
+      - uses: actions/checkout@v7.0.1
         with:
           ref: ${{ needs.prepare.outputs.release_sha }}
 
@@ -603,7 +603,7 @@ jobs:
     needs: [test-linux, prepare]
     runs-on: ubuntu-latest
     steps:
-      - uses: actions/checkout@v7.0.0
+      - uses: actions/checkout@v7.0.1
         with:
           ref: ${{ needs.prepare.outputs.release_sha }}
 
@@ -654,7 +654,7 @@ jobs:
       ]
     runs-on: ubuntu-latest
     steps:
-      - uses: actions/checkout@v7.0.0
+      - uses: actions/checkout@v7.0.1
         with:
           ref: ${{ needs.prepare.outputs.release_sha }}
 
