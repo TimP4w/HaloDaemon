@@ -300,8 +300,8 @@ mod tests {
         }
     }
 
-    /// `resvg` is built without its `text` feature, so a `<text>` element in a
-    /// bundled asset would silently render as nothing.
+    /// Bundled SVGs should remain path-only so their rendering does not depend
+    /// on fonts installed on the host.
     #[test]
     fn no_bundled_svg_needs_text_shaping() {
         fn walk(dir: &std::path::Path, found: &mut Vec<std::path::PathBuf>) {

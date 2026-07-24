@@ -240,6 +240,11 @@ pub enum DaemonCommand {
     SetHomeWidgets {
         widgets: Vec<crate::types::HomeWidget>,
     },
+    /// Replace the Cooling page's widget row. Mirrors [`SetHomeWidgets`] but
+    /// persists to a separate config key so the two pages don't share a row.
+    SetCoolingWidgets {
+        widgets: Vec<crate::types::HomeWidget>,
+    },
     SetUiConfig {
         close_to_tray: bool,
         suppress_dependency_warning: bool,
@@ -680,6 +685,32 @@ mod tests {
             v,
             json!({
                 "type": "set_home_widgets",
+                "widgets": [{
+                    "id": "w1",
+                    "kind": {"type": "chart", "sensor_id": "cpu"},
+                    "color": 2,
+                    "label": "CPU",
+                }],
+            })
+        );
+    }
+
+    #[test]
+    fn set_cooling_widgets_wire_format() {
+        let v = roundtrip(&DaemonCommand::SetCoolingWidgets {
+            widgets: vec![crate::types::HomeWidget {
+                id: "w1".into(),
+                kind: crate::types::HomeWidgetKind::Chart {
+                    sensor_id: "cpu".into(),
+                },
+                color: 2,
+                label: "CPU".into(),
+            }],
+        });
+        assert_eq!(
+            v,
+            json!({
+                "type": "set_cooling_widgets",
                 "widgets": [{
                     "id": "w1",
                     "kind": {"type": "chart", "sensor_id": "cpu"},

@@ -2,22 +2,18 @@
 //! Storage for plugin-declared secret config values (`ConfigFieldDef::secure`).
 //!
 //! Two backends implement [`SecretStore`]:
-//! - [`os_store::OsStore`] — the OS credential store (Windows Credential
+//! - [`keyring_store::KeyringStore`] — the OS credential store (Windows Credential
 //!   Manager / Linux Secret Service), used when reachable.
 //! - [`file_store::FileKeyStore`] — an XChaCha20-Poly1305-encrypted fallback for
 //!   headless/no-D-Bus environments, keyed by a machine-local file.
 //!
-//! [`open_secret_store`] probes the OS store once and picks whichever backend is
+//! [`open_secret_store`] probes the keyring once and picks whichever backend is
 //! live; callers never know which one is in play. Neither backend is a vault
 //! against an attacker who already runs as this user — see `docs/plugins.md`
 //! for the threat model.
 
 mod file_store;
-mod os_store;
-#[cfg(target_os = "linux")]
-mod secret_service;
-#[cfg(target_os = "windows")]
-mod windows_credentials;
+mod keyring_store;
 
 pub use file_store::FileKeyStore;
 
@@ -40,7 +36,7 @@ pub trait SecretStore: Send + Sync {
 /// Secret Service, headless session, …) falls back rather than erroring, since
 /// secrets must keep working on a server install.
 pub fn open_secret_store() -> Arc<dyn SecretStore> {
-    match os_store::OsStore::probe() {
+    match keyring_store::KeyringStore::probe() {
         Ok(store) => {
             log::info!("[secrets] using the OS keyring for secure plugin config");
             Arc::new(store)

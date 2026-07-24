@@ -1,17 +1,28 @@
 // SPDX-License-Identifier: GPL-3.0-or-later
 //! SVG rasterization for the bundled icon set, the tray/window icon, and
 //! desktop-entry icons picked up from the system icon theme.
-//!
-//! `resvg` is built without its `text` feature, so `<text>` elements do not
-//! render. Every SVG this crate ships is path-only (pinned by a test in
-//! `ui/src/ui/icons.rs`).
+
+use std::sync::{Arc, OnceLock};
 
 use resvg::{tiny_skia, usvg};
+
+fn system_fonts() -> &'static Arc<usvg::fontdb::Database> {
+    static FONTS: OnceLock<Arc<usvg::fontdb::Database>> = OnceLock::new();
+    FONTS.get_or_init(|| {
+        let mut fonts = usvg::fontdb::Database::new();
+        fonts.load_system_fonts();
+        Arc::new(fonts)
+    })
+}
 
 /// Rasterize `bytes`, scaled so the long edge is `target` px. `None` renders at
 /// the SVG's own size.
 pub fn rasterize(bytes: &[u8], target: Option<u32>) -> Option<tiny_skia::Pixmap> {
-    let tree = usvg::Tree::from_data(bytes, &usvg::Options::default()).ok()?;
+    let options = usvg::Options {
+        fontdb: Arc::clone(system_fonts()),
+        ..Default::default()
+    };
+    let tree = usvg::Tree::from_data(bytes, &options).ok()?;
     let size = tree.size().to_int_size();
     let long_edge = size.width().max(size.height()) as f32;
     if long_edge <= 0.0 {

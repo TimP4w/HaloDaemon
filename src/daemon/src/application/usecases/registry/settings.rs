@@ -110,6 +110,20 @@ pub async fn set_home_widgets(
     Ok(())
 }
 
+pub async fn set_cooling_widgets(
+    widgets: Vec<halod_shared::types::HomeWidget>,
+    app: Arc<AppState>,
+) -> Result<()> {
+    halod_shared::types::validate_home_widgets(&widgets)?;
+    {
+        let mut cfg = app.config.write().await;
+        cfg.gui.cooling_widgets = widgets;
+    }
+    app.request_config_save();
+    app.record_change(crate::domain::events::Change::Gui).await;
+    Ok(())
+}
+
 pub async fn set_ui_config(
     close_to_tray: bool,
     suppress_dependency_warning: bool,
@@ -337,6 +351,27 @@ mod tests {
                 .unwrap_err();
             assert!(err.to_string().contains("duplicate"), "{err}");
             assert!(app.config.read().await.gui.home_widgets.is_empty());
+        })
+        .await;
+    }
+
+    #[tokio::test]
+    async fn set_cooling_widgets_persists_separately_from_home() {
+        with_tmp_config(|app| async move {
+            set_home_widgets(vec![chart_widget("a")], app.clone())
+                .await
+                .unwrap();
+            let cooling = vec![chart_widget("b"), chart_widget("c")];
+            set_cooling_widgets(cooling.clone(), app.clone())
+                .await
+                .unwrap();
+            let cfg = app.config.read().await;
+            assert_eq!(cfg.gui.cooling_widgets, cooling);
+            assert_eq!(
+                cfg.gui.home_widgets,
+                vec![chart_widget("a")],
+                "the cooling row must not disturb the home row"
+            );
         })
         .await;
     }

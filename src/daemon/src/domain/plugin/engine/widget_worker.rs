@@ -1809,7 +1809,6 @@ fn fill_rounded_rect_mut(
     }
 }
 
-#[allow(clippy::too_many_arguments)]
 fn bounded_text(mut text: String) -> String {
     if text.len() > MAX_DRAW_TEXT_BYTES {
         let boundary = text

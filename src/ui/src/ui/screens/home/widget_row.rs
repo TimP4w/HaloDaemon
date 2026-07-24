@@ -23,11 +23,43 @@ use super::GAP;
 const UNITS: usize = 8;
 const BADGE: f32 = 20.0;
 const SAVE_DEBOUNCE: f64 = 0.25;
-const SAVE_KEY: &str = "home_widgets";
+
+/// Which page's widget row an [`EditState`] reads from and persists to. The Home
+/// and Cooling rows are the same kind of widget, kept under separate config keys.
+#[derive(Clone, Copy, Default)]
+pub enum Target {
+    #[default]
+    Home,
+    Cooling,
+}
+
+impl Target {
+    fn persisted(self, state: &TopicStore) -> &[HomeWidget] {
+        match self {
+            Target::Home => &state.gui.home_widgets,
+            Target::Cooling => &state.gui.cooling_widgets,
+        }
+    }
+
+    fn command(self, widgets: Vec<HomeWidget>) -> DaemonCommand {
+        match self {
+            Target::Home => DaemonCommand::SetHomeWidgets { widgets },
+            Target::Cooling => DaemonCommand::SetCoolingWidgets { widgets },
+        }
+    }
+
+    fn save_key(self) -> &'static str {
+        match self {
+            Target::Home => "home_widgets",
+            Target::Cooling => "cooling_widgets",
+        }
+    }
+}
 
 /// Customize mode and its unsaved working copy.
 #[derive(Default)]
 pub struct EditState {
+    target: Target,
     /// `None` follows the bus; `Some` is Customize mode's working copy.
     draft: Option<Vec<HomeWidget>>,
     /// The open add/edit modal.
@@ -36,6 +68,13 @@ pub struct EditState {
 }
 
 impl EditState {
+    pub fn new(target: Target) -> Self {
+        Self {
+            target,
+            ..Default::default()
+        }
+    }
+
     pub fn customizing(&self) -> bool {
         self.draft.is_some()
     }
@@ -44,26 +83,26 @@ impl EditState {
     pub fn toggle(&mut self, state: &TopicStore) {
         self.draft = match self.draft {
             Some(_) => None,
-            None => Some(state.gui.home_widgets.clone()),
+            None => Some(self.target.persisted(state).to_vec()),
         };
         self.modal = None;
     }
 
     fn row<'a>(&'a self, state: &'a TopicStore) -> &'a [HomeWidget] {
-        self.draft.as_deref().unwrap_or(&state.gui.home_widgets)
+        self.draft
+            .as_deref()
+            .unwrap_or_else(|| self.target.persisted(state))
     }
 
     /// Edit the working copy and schedule the persist.
     fn apply(&mut self, state: &TopicStore, time: f64, edit: impl FnOnce(&mut Vec<HomeWidget>)) {
         let row = self
             .draft
-            .get_or_insert_with(|| state.gui.home_widgets.clone());
+            .get_or_insert_with(|| self.target.persisted(state).to_vec());
         edit(row);
         self.save.queue(
-            SAVE_KEY,
-            DaemonCommand::SetHomeWidgets {
-                widgets: row.clone(),
-            },
+            self.target.save_key(),
+            self.target.command(row.clone()),
             time,
             SAVE_DEBOUNCE,
         );

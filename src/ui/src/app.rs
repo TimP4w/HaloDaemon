@@ -42,6 +42,7 @@ pub struct App {
     /// First-run onboarding wizard state (step, selections, scan timer).
     pub(crate) onboarding_ui: ui::screens::onboarding::OnboardingUi,
     pub(crate) home_ui: ui::screens::home::HomeUi,
+    pub(crate) cooling_ui: ui::screens::cooling::CoolingUi,
     pub(crate) sensor_history: HashMap<String, VecDeque<f32>>,
     /// Rolling write-rate throughput (bytes/sec) per device id.
     pub(crate) write_rate_history: HashMap<String, VecDeque<f32>>,
@@ -141,6 +142,7 @@ impl App {
             onboarding_completed: false,
             onboarding_ui: ui::screens::onboarding::OnboardingUi::default(),
             home_ui: ui::screens::home::HomeUi::default(),
+            cooling_ui: ui::screens::cooling::CoolingUi::default(),
             sensor_history: HashMap::new(),
             write_rate_history: HashMap::new(),
             last_sample: 0.0,

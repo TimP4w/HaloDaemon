@@ -519,6 +519,10 @@ async fn dispatch(
         DaemonCommand::SetHomeWidgets { widgets } => {
             crate::application::usecases::registry::settings::set_home_widgets(widgets, app).await
         }
+        DaemonCommand::SetCoolingWidgets { widgets } => {
+            crate::application::usecases::registry::settings::set_cooling_widgets(widgets, app)
+                .await
+        }
         DaemonCommand::SetUiConfig {
             close_to_tray,
             suppress_dependency_warning,

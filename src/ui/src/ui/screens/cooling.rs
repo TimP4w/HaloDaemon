@@ -67,6 +67,23 @@ fn curve_preset_command(
 
 // ── Entry point ───────────────────────────────────────────────────────────────
 
+/// Everything the Cooling page owns across frames.
+pub struct CoolingUi {
+    /// The Cooling page's configurable sensor widget row. Same widget as Home,
+    /// persisted under its own config key.
+    widgets: crate::ui::screens::home::widget_row::EditState,
+}
+
+impl Default for CoolingUi {
+    fn default() -> Self {
+        Self {
+            widgets: crate::ui::screens::home::widget_row::EditState::new(
+                crate::ui::screens::home::widget_row::Target::Cooling,
+            ),
+        }
+    }
+}
+
 #[allow(clippy::too_many_arguments)]
 pub fn show(
     ui: &mut egui::Ui,
@@ -75,6 +92,7 @@ pub fn show(
     history: &HashMap<String, VecDeque<f32>>,
     time: f64,
     page: &mut Page,
+    cooling: &mut CoolingUi,
 ) {
     egui::ScrollArea::vertical()
         .auto_shrink([false, false])
@@ -115,13 +133,57 @@ pub fn show(
                     Some(crate::domain::tour::AnchorId::CoolingCurve),
                 );
 
-                if !crate::domain::models::sensors::sensors(state).is_empty() {
-                    crate::ui::screens::home::sensors_grid(ui, state, history, 3);
-                    ui.add_space(22.0);
-                }
+                widget_header(ui, state, cmd, history, time, cooling);
+
                 cooler_grid(ui, state, cmd, &coolers, time, page);
             });
         });
+}
+
+/// The configurable sensor widget row, mirroring Home's, with a Customize pill.
+fn widget_header(
+    ui: &mut egui::Ui,
+    state: &TopicStore,
+    cmd: &CommandTx,
+    history: &HashMap<String, VecDeque<f32>>,
+    time: f64,
+    cooling: &mut CoolingUi,
+) {
+    use crate::ui::screens::home::widget_row;
+    let sensors = crate::domain::models::sensors::sensors(state);
+    let customizing = cooling.widgets.customizing();
+
+    ui.horizontal(|ui| {
+        ui.with_layout(egui::Layout::right_to_left(egui::Align::Center), |ui| {
+            let label = if customizing {
+                t!("home.customize_done")
+            } else {
+                t!("home.customize")
+            };
+            if widgets::pill(ui, &label, customizing) {
+                cooling.widgets.toggle(state);
+            }
+        });
+    });
+
+    let has_row = customizing || !state.gui.cooling_widgets.is_empty();
+    if has_row {
+        ui.add_space(theme::SPACE_5);
+    }
+    widget_row::show(
+        ui,
+        &mut cooling.widgets,
+        widget_row::RowCtx {
+            state,
+            cmd,
+            history,
+            sensors: &sensors,
+            time,
+        },
+    );
+    if has_row {
+        ui.add_space(22.0);
+    }
 }
 
 // ── Cooler grid (2-col) ───────────────────────────────────────────────────────

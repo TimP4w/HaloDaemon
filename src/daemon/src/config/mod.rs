@@ -25,7 +25,12 @@ use halod_shared::keyboard::KeyboardLayoutSelection;
 //   profiles/<slug>.yaml  - one Profile per file, named for a human to read
 
 pub fn load() -> Result<Config> {
-    let main: MainFile = load_file(&main_config_path(), "config.yaml")?;
+    let main_path = main_config_path();
+    let first_run = !main_path.exists();
+    let mut main: MainFile = load_file(&main_path, "config.yaml")?;
+    if first_run {
+        main.gui.language = halod_shared::types::detect_system_language().to_string();
+    }
     let devices: DevicesFile = load_file(&devices_config_path(), "devices.yaml")?;
     let app_rules: AppRulesFile = load_file(&app_rules_config_path(), "app_rules.yaml")?;
     let plugins: PluginPolicy = load_file(&plugins_config_path(), "plugins.yaml")?;
