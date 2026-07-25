@@ -254,8 +254,8 @@ jobs:
           text = nix.read_text()
           replacements = (
               (r'(officialPluginRelease = ")[^"]+(";)', rf'\g<1>v{version}\2'),
-              (r'(officialPluginBundle = pkgs\.fetchurl \{{.*?hash = ")[^"]+(";)', rf'\g<1>{bundle_sri}\2'),
-              (r'(officialPluginLicenses = pkgs\.fetchurl \{{.*?hash = ")[^"]+(";)', rf'\g<1>{licenses_sri}\2'),
+              (r'(officialPluginBundle = pkgs\.fetchurl \{.*?hash = ")[^"]+(";)', rf'\g<1>{bundle_sri}\2'),
+              (r'(officialPluginLicenses = pkgs\.fetchurl \{.*?hash = ")[^"]+(";)', rf'\g<1>{licenses_sri}\2'),
           )
           for pattern, replacement in replacements:
               text, count = re.subn(pattern, replacement, text, count=1, flags=re.S)
