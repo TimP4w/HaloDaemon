@@ -134,6 +134,21 @@ pub fn show(ui: &mut egui::Ui, ctx: &TabCtx, st: &mut DeviceUi) {
                 },
             );
 
+            let sensors = crate::domain::models::sensors::device_sensors(ctx.state, &dev.id);
+            if !sensors.is_empty() {
+                ui.add_space(theme::SPACE_8);
+                widgets::card_titled(
+                    ui,
+                    &t!("devtabs.cap_sensors"),
+                    |_| {},
+                    |ui| {
+                        for s in &sensors {
+                            row(ui, &s.label, format!("{:.1} {}", s.value, s.unit));
+                        }
+                    },
+                );
+            }
+
             let (write_rate, via_hub) = match dev.write_rate {
                 Some(wr) => (Some(wr), false),
                 None => (find_hub_write_rate(ctx.state, &dev.id), true),

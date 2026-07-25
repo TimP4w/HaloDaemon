@@ -2,7 +2,7 @@
 //! Sensor list derived from the daemon's `TopicStore`, for the home dashboard.
 
 use crate::domain::topic_store::TopicStore;
-use halod_shared::types::DeviceCapability;
+use halod_shared::types::{DeviceCapability, WireDevice};
 
 use super::device::unit;
 
@@ -14,37 +14,47 @@ pub struct SensorView {
     pub unit: &'static str,
 }
 
-/// Sensors across all devices, in device order. Sensors without their own name
-/// (e.g. an hwmon channel with a blank `_label`) fall back to the device name.
+/// One device's sensors. Sensors without their own name (e.g. an hwmon channel
+/// with a blank `_label`) fall back to the device name.
+fn views(d: &WireDevice) -> impl Iterator<Item = SensorView> + '_ {
+    d.capabilities
+        .iter()
+        .filter_map(|cap| match cap {
+            DeviceCapability::Sensors(ss) => Some(ss),
+            _ => None,
+        })
+        .flatten()
+        .map(move |s| SensorView {
+            id: s.id.clone(),
+            label: if s.name.trim().is_empty() {
+                d.name.clone()
+            } else {
+                s.name.clone()
+            },
+            value: s.value,
+            unit: unit(&s.unit),
+        })
+}
+
+/// Sensors across all devices, in device order.
 pub fn sensors(state: &TopicStore) -> Vec<SensorView> {
-    let mut out = Vec::new();
-    for d in &state.devices {
-        for cap in &d.capabilities {
-            let DeviceCapability::Sensors(ss) = cap else {
-                continue;
-            };
-            for s in ss {
-                let label = if s.name.trim().is_empty() {
-                    d.name.clone()
-                } else {
-                    s.name.clone()
-                };
-                out.push(SensorView {
-                    id: s.id.clone(),
-                    label,
-                    value: s.value,
-                    unit: unit(&s.unit),
-                });
-            }
-        }
-    }
-    out
+    state.devices.iter().flat_map(views).collect()
+}
+
+/// One device's sensors, in report order.
+pub fn device_sensors(state: &TopicStore, device_id: &str) -> Vec<SensorView> {
+    state
+        .devices
+        .iter()
+        .filter(|d| d.id == device_id)
+        .flat_map(views)
+        .collect()
 }
 
 #[cfg(test)]
 mod tests {
     use super::*;
-    use halod_shared::types::{DeviceType, Sensor, SensorType, SensorUnit, WireDevice};
+    use halod_shared::types::{DeviceType, Sensor, SensorType, SensorUnit};
 
     fn dev(ty: DeviceType, caps: Vec<DeviceCapability>) -> WireDevice {
         WireDevice {
@@ -98,6 +108,36 @@ mod tests {
         };
         let s = sensors(&state);
         assert_eq!(s[0].label, "My Device");
+    }
+
+    #[test]
+    fn device_sensors_selects_only_the_named_device() {
+        let mut a = dev(
+            DeviceType::Sensor,
+            vec![DeviceCapability::Sensors(vec![sensor(
+                "a1",
+                SensorType::Load,
+            )])],
+        );
+        a.id = "a".into();
+        let mut b = dev(
+            DeviceType::Gpu,
+            vec![DeviceCapability::Sensors(vec![
+                sensor("b1", SensorType::Temperature),
+                sensor("b2", SensorType::FanSpeed),
+            ])],
+        );
+        b.id = "b".into();
+        let state = TopicStore {
+            devices: vec![a, b],
+            ..Default::default()
+        };
+        let ids: Vec<_> = device_sensors(&state, "b")
+            .into_iter()
+            .map(|s| s.id)
+            .collect();
+        assert_eq!(ids, vec!["b1".to_string(), "b2".to_string()]);
+        assert!(device_sensors(&state, "missing").is_empty());
     }
 
     #[test]
