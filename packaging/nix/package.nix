@@ -11,10 +11,10 @@
 let
   # The release workflow pins these immutable daemon release assets and their
   # fixed-output hashes. Both were produced from one authenticated plugin release.
-  officialPluginRelease = "v0.10.0";
+  officialPluginRelease = "v0.11.0";
   officialPluginBundle = pkgs.fetchurl {
     url = "https://github.com/TimP4w/HaloDaemon/releases/download/${officialPluginRelease}/official-plugins.bundle";
-    hash = "sha256-gEssoOyM4wb9JwBIqR3CsIMRSET8f599gUh2/qMTOgc=";
+    hash = "sha256-UeyboCAS3ZSPuOeihS41yC8WaDZMYqJe2ojySza8xQ0=";
   };
   officialPluginLicenses = pkgs.fetchurl {
     url = "https://github.com/TimP4w/HaloDaemon/releases/download/${officialPluginRelease}/official-plugins-licenses.txt";
