@@ -93,7 +93,10 @@ pub fn cooling_needing_action(state: &TopicStore) -> usize {
             {
                 return false;
             }
-            !matches!(&curve.status, FanCurveStatus::Ok)
+            !matches!(
+                &curve.status,
+                FanCurveStatus::Ok | FanCurveStatus::Disconnected
+            )
         })
         .count()
 }

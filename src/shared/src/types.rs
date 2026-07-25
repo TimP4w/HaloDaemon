@@ -2630,6 +2630,10 @@ pub enum FanCurveStatus {
     /// The fan has a saved curve but its device is not currently present
     /// (unplugged or not yet discovered). No write was attempted.
     NoDevice,
+    /// No fan is physically connected to this controllable header: probing it
+    /// at full duty produced no RPM. The channel is inert — not driven, not
+    /// configurable — until a fan is detected (any RPM > 0).
+    Disconnected,
 }
 
 #[derive(Debug, Clone, Serialize, Deserialize)]
