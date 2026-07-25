@@ -14,11 +14,10 @@ async fn discover(app: Arc<AppState>) {
     crate::application::usecases::registry::registration::register_device(&app, device).await;
 }
 
-inventory::submit!(
+pub(crate) const SCANNER: crate::domain::registry::observers::discovery::TransportScanner =
     crate::domain::registry::observers::discovery::TransportScanner {
         name: "computer",
         detail: halod_shared::types::DiscoveryDetail::Computer,
         platform: None,
         scan: |app| Box::pin(discover(app)),
-    }
-);
+    };

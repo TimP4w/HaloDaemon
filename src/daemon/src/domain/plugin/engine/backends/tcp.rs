@@ -73,13 +73,13 @@ fn open(
 // `tcp` is config-instantiated (an integration reads its host/port from config),
 // never discovery-matched, so it carries only `open` — `matches`/`id_suffix`/
 // `validate` are `None`. See `integration_scan`, which calls `open` directly.
-inventory::submit!(PluginTransportDescriptor {
+pub(super) const DESCRIPTOR: PluginTransportDescriptor = PluginTransportDescriptor {
     kind: "tcp",
     matches: None,
     open,
     id_suffix: None,
     validate: None,
-});
+};
 
 #[cfg(test)]
 mod tests {

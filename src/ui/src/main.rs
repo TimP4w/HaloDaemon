@@ -16,6 +16,7 @@ mod domain;
 mod runtime;
 #[cfg(all(test, target_os = "linux", feature = "screenshots"))]
 mod screenshots;
+mod svg;
 mod ui;
 #[cfg(not(target_os = "linux"))]
 use std::sync::atomic::AtomicBool;

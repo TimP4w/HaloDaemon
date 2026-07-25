@@ -50,14 +50,9 @@ pub fn battery_lines(state: &TopicStore) -> Vec<String> {
 
 /// The embedded app icon rendered to RGBA8 pixels: `(rgba, width, height)`.
 fn render_icon_rgba() -> (Vec<u8>, u32, u32) {
-    use resvg::{tiny_skia, usvg};
     let bytes = include_bytes!("../../../../../assets/icon.svg");
-    let tree = usvg::Tree::from_data(bytes, &usvg::Options::default())
-        .expect("embedded icon is valid SVG");
-    let size = tree.size().to_int_size();
-    let (w, h) = (size.width(), size.height());
-    let mut pixmap = tiny_skia::Pixmap::new(w, h).expect("pixmap");
-    resvg::render(&tree, tiny_skia::Transform::default(), &mut pixmap.as_mut());
+    let pixmap = crate::svg::rasterize(bytes, None).expect("embedded icon is valid SVG");
+    let (w, h) = (pixmap.width(), pixmap.height());
     (pixmap.take(), w, h)
 }
 

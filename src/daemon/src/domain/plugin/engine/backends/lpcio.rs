@@ -59,10 +59,10 @@ fn validate(spec: &DeviceSpec) -> Result<()> {
     }
     Ok(())
 }
-inventory::submit!(PluginTransportDescriptor {
+pub(super) const DESCRIPTOR: PluginTransportDescriptor = PluginTransportDescriptor {
     kind: "lpcio",
     matches: Some(matches),
     open,
     id_suffix: Some(suffix),
-    validate: Some(validate)
-});
+    validate: Some(validate),
+};

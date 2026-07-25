@@ -134,20 +134,32 @@ pub fn show(ui: &mut egui::Ui, ctx: &TabCtx, st: &mut DeviceUi) {
         });
         ui.add_space(theme::SPACE_6);
     }
-    top_row(ui, ctx, st, &fan, &sensors, sensor_temp, &selected);
-    ui.add_space(theme::SPACE_8);
+    let disconnected =
+        crate::ui::screens::cooling::is_disconnected(fan.as_ref(), curve.map(|c| &c.status));
+    if disconnected {
+        ui.label(
+            egui::RichText::new(t!("cooling.status_disconnected"))
+                .font(theme::body_sm())
+                .color(theme::TEXT_FAINT),
+        );
+        ui.add_space(theme::SPACE_4);
+    }
+    ui.add_enabled_ui(!disconnected, |ui| {
+        top_row(ui, ctx, st, &fan, &sensors, sensor_temp, &selected);
+        ui.add_space(theme::SPACE_8);
 
-    let curve_title = t!("cooling.fan_curve");
-    curve_card(
-        ui,
-        ctx,
-        st,
-        &fan_id,
-        &selected,
-        curve.map(|c| c.status.clone()),
-        sensor_temp,
-        &curve_title,
-    );
+        let curve_title = t!("cooling.fan_curve");
+        curve_card(
+            ui,
+            ctx,
+            st,
+            &fan_id,
+            &selected,
+            curve.map(|c| c.status.clone()),
+            sensor_temp,
+            &curve_title,
+        );
+    });
 }
 
 fn top_row(

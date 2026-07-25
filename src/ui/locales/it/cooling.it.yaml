@@ -22,8 +22,9 @@ cooling:
     full_speed: Velocità massima
     fifty_percent: "50%"
   curve_hint: "Trascina un punto per modificare la curva · clicca su uno spazio vuoto per aggiungere · tasto destro su un punto per eliminare"
-  status_no_sensor: "Nessun sensore di temperatura assegnato. La ventola resta al 75%."
-  status_sensor_malfunction: "È stato rilevato un guasto al sensore. La ventola resta al 75%."
+  status_no_sensor: "Nessun sensore di temperatura assegnato. La ventola gira alla velocità di sicurezza finché non ne assegni uno."
+  status_sensor_malfunction: "È stato rilevato un guasto al sensore. La ventola gira alla velocità di sicurezza."
+  status_disconnected: Nessuna ventola rilevata su questo connettore.
   status_permission_denied: "Non hai i permessi per scrivere i valori PWM. Unisciti al gruppo halod, accedi di nuovo, poi esegui: sudo udevadm trigger --action=change --subsystem-match=hwmon"
   status_write_error: Impossibile impostare la velocità della ventola. Controlla i log del daemon.
   status_fan_stalled: "La ventola non gira (0 RPM). Controlla i collegamenti o sostituiscila."

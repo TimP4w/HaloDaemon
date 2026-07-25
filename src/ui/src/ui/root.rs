@@ -466,6 +466,7 @@ impl App {
                             &self.sensor_history,
                             time,
                             &mut self.page,
+                            &mut self.cooling_ui,
                         );
                     }
                     Page::Lighting => {

@@ -67,6 +67,23 @@ fn curve_preset_command(
 
 // ── Entry point ───────────────────────────────────────────────────────────────
 
+/// Everything the Cooling page owns across frames.
+pub struct CoolingUi {
+    /// The Cooling page's configurable sensor widget row. Same widget as Home,
+    /// persisted under its own config key.
+    widgets: crate::ui::screens::home::widget_row::EditState,
+}
+
+impl Default for CoolingUi {
+    fn default() -> Self {
+        Self {
+            widgets: crate::ui::screens::home::widget_row::EditState::new(
+                crate::ui::screens::home::widget_row::Target::Cooling,
+            ),
+        }
+    }
+}
+
 #[allow(clippy::too_many_arguments)]
 pub fn show(
     ui: &mut egui::Ui,
@@ -75,6 +92,7 @@ pub fn show(
     history: &HashMap<String, VecDeque<f32>>,
     time: f64,
     page: &mut Page,
+    cooling: &mut CoolingUi,
 ) {
     egui::ScrollArea::vertical()
         .auto_shrink([false, false])
@@ -100,12 +118,13 @@ pub fn show(
                         .collect();
                 coolers.sort_by_key(|(device, channel)| {
                     let channel_id = channel.map(|c| c.id.as_str()).unwrap_or("default");
-                    let has_sensor = state.cooling.fan_curves.iter().any(|c| {
-                        c.device_id == device.id
-                            && c.channel_id == channel_id
-                            && c.sensor_id.is_some()
-                    });
-                    is_idle(channel.and_then(|c| c.rpm), has_sensor)
+                    let status = state
+                        .cooling
+                        .fan_curves
+                        .iter()
+                        .find(|c| c.device_id == device.id && c.channel_id == channel_id)
+                        .map(|c| &c.status);
+                    is_disconnected(*channel, status)
                 });
 
                 widgets::page_header(
@@ -115,13 +134,57 @@ pub fn show(
                     Some(crate::domain::tour::AnchorId::CoolingCurve),
                 );
 
-                if !crate::domain::models::sensors::sensors(state).is_empty() {
-                    crate::ui::screens::home::sensors_grid(ui, state, history, 3);
-                    ui.add_space(22.0);
-                }
+                widget_header(ui, state, cmd, history, time, cooling);
+
                 cooler_grid(ui, state, cmd, &coolers, time, page);
             });
         });
+}
+
+/// The configurable sensor widget row, mirroring Home's, with a Customize pill.
+fn widget_header(
+    ui: &mut egui::Ui,
+    state: &TopicStore,
+    cmd: &CommandTx,
+    history: &HashMap<String, VecDeque<f32>>,
+    time: f64,
+    cooling: &mut CoolingUi,
+) {
+    use crate::ui::screens::home::widget_row;
+    let sensors = crate::domain::models::sensors::sensors(state);
+    let customizing = cooling.widgets.customizing();
+
+    ui.horizontal(|ui| {
+        ui.with_layout(egui::Layout::right_to_left(egui::Align::Center), |ui| {
+            let label = if customizing {
+                t!("home.customize_done")
+            } else {
+                t!("home.customize")
+            };
+            if widgets::pill(ui, &label, customizing) {
+                cooling.widgets.toggle(state);
+            }
+        });
+    });
+
+    let has_row = customizing || !state.gui.cooling_widgets.is_empty();
+    if has_row {
+        ui.add_space(theme::SPACE_5);
+    }
+    widget_row::show(
+        ui,
+        &mut cooling.widgets,
+        widget_row::RowCtx {
+            state,
+            cmd,
+            history,
+            sensors: &sensors,
+            time,
+        },
+    );
+    if has_row {
+        ui.add_space(22.0);
+    }
 }
 
 // ── Cooler grid (2-col) ───────────────────────────────────────────────────────
@@ -198,11 +261,17 @@ fn cooler_card(
         })
         .unwrap_or_else(|| dev.name.clone());
 
-    if is_idle(channel.and_then(|c| c.rpm), sensor_id.is_some()) {
+    let disconnected = is_disconnected(channel, curve.map(|c| &c.status));
+    if disconnected {
         ui.multiply_opacity(IDLE_OPACITY);
     }
 
     widgets::card(ui, |ui| {
+        // A header with no fan is inert: dimmed above, and here made truly
+        // non-interactive so presets/sensor/curve cannot be changed.
+        if disconnected {
+            ui.disable();
+        }
         // ── Header: rotating fan + name/type + RPM ────────────────────────────
         ui.horizontal(|ui| {
             let (icon, _) = ui.allocate_exact_size(Vec2::splat(40.0), Sense::hover());
@@ -343,7 +412,14 @@ fn cooler_card(
         );
 
         // ── Curve status warning (e.g. no sensor, stalled fan) ────────────────
-        if let Some(warning) = curve.map(|c| &c.status).and_then(curve_status_text) {
+        if disconnected {
+            ui.add_space(theme::SPACE_5);
+            ui.label(
+                egui::RichText::new(t!("cooling.status_disconnected"))
+                    .font(theme::body_sm())
+                    .color(theme::TEXT_FAINT),
+            );
+        } else if let Some(warning) = curve.map(|c| &c.status).and_then(curve_status_text) {
             ui.add_space(theme::SPACE_5);
             ui.label(
                 egui::RichText::new(warning)
@@ -483,11 +559,15 @@ fn fan_icon(p: &egui::Painter, center: Pos2, r: f32, time: f64, rpm: u32, color:
 
 const IDLE_OPACITY: f32 = 0.45;
 
-/// A channel with nothing attached — reports 0 RPM and drives no curve sensor —
-/// is dimmed and sorted last. A channel that reports no RPM at all (pumps,
-/// tach-less headers) says nothing about what is plugged in, so it stays put.
-fn is_idle(rpm: Option<u32>, has_sensor: bool) -> bool {
-    rpm == Some(0) && !has_sensor
+/// A header with no fan physically connected: either the device reports it as
+/// not controllable (e.g. an empty NZXT header via `fan_type`) or the daemon's
+/// presence probe found no RPM at full duty (`Disconnected`). Such cards are
+/// dimmed, non-interactive, and sorted last.
+pub fn is_disconnected(
+    channel: Option<&halod_shared::types::CoolingChannel>,
+    status: Option<&FanCurveStatus>,
+) -> bool {
+    channel.is_some_and(|c| !c.controllable) || matches!(status, Some(FanCurveStatus::Disconnected))
 }
 
 fn rpm_for(dev: &WireDevice) -> u32 {
@@ -542,6 +622,8 @@ pub fn curve_status_text(status: &FanCurveStatus) -> Option<std::borrow::Cow<'st
         FanCurveStatus::WriteError(_) => Some(t!("cooling.status_write_error")),
         FanCurveStatus::FanStalled => Some(t!("cooling.status_fan_stalled")),
         FanCurveStatus::NoDevice => Some(t!("cooling.status_no_device")),
+        // A disconnected header renders its own muted caption, not an amber warning.
+        FanCurveStatus::Disconnected => None,
     }
 }
 
@@ -605,36 +687,64 @@ mod tests {
     }
 
     #[test]
-    fn only_stopped_and_sensorless_coolers_are_dimmed() {
-        assert!(is_idle(Some(0), false));
-        assert!(!is_idle(Some(900), false));
-        assert!(!is_idle(Some(0), true));
+    fn disconnected_when_not_controllable_or_probe_failed() {
+        use halod_shared::types::CoolingChannel;
+        let controllable = CoolingChannel {
+            controllable: true,
+            ..Default::default()
+        };
+        let uncontrollable = CoolingChannel {
+            controllable: false,
+            ..Default::default()
+        };
+
+        assert!(is_disconnected(Some(&uncontrollable), None));
+        assert!(is_disconnected(
+            Some(&controllable),
+            Some(&FanCurveStatus::Disconnected)
+        ));
+        assert!(!is_disconnected(
+            Some(&controllable),
+            Some(&FanCurveStatus::Ok)
+        ));
+        assert!(!is_disconnected(Some(&controllable), None));
         assert!(
-            !is_idle(None, false),
-            "no tach reading is not proof of idle"
+            !is_disconnected(Some(&controllable), Some(&FanCurveStatus::NoSensor)),
+            "a present, unconfigured fan must stay editable"
         );
+        assert!(!is_disconnected(None, None));
     }
 
     #[test]
-    fn idle_sort_key_sinks_idle_coolers_and_keeps_the_rest_in_order() {
+    fn disconnected_sort_key_sinks_absent_coolers_and_keeps_the_rest_in_order() {
+        use halod_shared::types::CoolingChannel;
+        let ctrl = CoolingChannel {
+            controllable: true,
+            ..Default::default()
+        };
+        let no_ctrl = CoolingChannel {
+            controllable: false,
+            ..Default::default()
+        };
         let mut coolers = [
-            ("a", Some(0), false),
-            ("b", Some(900), false),
-            ("c", Some(0), true),
-            ("d", None, false),
-            ("e", Some(0), false),
+            ("a", Some(&no_ctrl), None),
+            ("b", Some(&ctrl), Some(FanCurveStatus::Ok)),
+            ("c", Some(&ctrl), Some(FanCurveStatus::NoSensor)),
+            ("d", Some(&ctrl), Some(FanCurveStatus::Disconnected)),
+            ("e", None, None),
         ];
-        coolers.sort_by_key(|&(_, rpm, has_sensor)| is_idle(rpm, has_sensor));
+        coolers.sort_by_key(|(_, ch, st)| is_disconnected(*ch, st.as_ref()));
         assert_eq!(
             coolers.map(|c| c.0),
-            ["b", "c", "d", "a", "e"],
-            "idle cards go last, everything else keeps its order"
+            ["b", "c", "e", "a", "d"],
+            "disconnected cards go last, everything else keeps its order"
         );
     }
 
     #[test]
-    fn curve_status_text_only_silent_when_ok() {
+    fn curve_status_text_only_silent_when_ok_or_disconnected() {
         assert_eq!(curve_status_text(&FanCurveStatus::Ok), None);
+        assert_eq!(curve_status_text(&FanCurveStatus::Disconnected), None);
         for s in [
             FanCurveStatus::NoSensor,
             FanCurveStatus::SensorMalfunction,

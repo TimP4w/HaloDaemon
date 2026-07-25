@@ -81,15 +81,6 @@ pub const LOGO_STOPS: [Color32; 6] = [
     hex(0xc58cff),
 ];
 
-/// Per-sensor accent palette, shared by the Home dashboard and the Cooling
-/// page so the same sensor index always reads the same color.
-pub const SENSOR_HUES: [Color32; 4] = [STAT_CYAN, STAT_GREEN, hex(0x9b7fe0), STAT_AMBER];
-
-/// Accent color for sensor `i` (wraps the [`SENSOR_HUES`] palette).
-pub fn sensor_hue(i: usize) -> Color32 {
-    SENSOR_HUES[i % SENSOR_HUES.len()]
-}
-
 /// Accent choices offered when configuring a Home dashboard widget. Stored by
 /// index, so entries may be appended but never reordered.
 pub const WIDGET_HUES: [Color32; 8] = [

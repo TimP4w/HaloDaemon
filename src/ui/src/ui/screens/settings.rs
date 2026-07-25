@@ -701,7 +701,7 @@ fn tag_pill(ui: &mut egui::Ui, right: f32, y: f32, text: &str, color: Color32) {
 
 /// Supported UI languages as `(code, native display name)`. Codes must match
 /// `halod_shared::types::SUPPORTED_LANGUAGES`; the parity is asserted in tests.
-pub(crate) const LANGUAGES: &[(&str, &str)] = &[("en", "English"), ("it", "Italiano")];
+pub(crate) const LANGUAGES: &[(&str, &str); 2] = &[("en", "English"), ("it", "Italiano")];
 
 /// Native display name for a language code, falling back to the code itself.
 pub(crate) fn language_display(code: &str) -> &str {
@@ -810,7 +810,7 @@ fn language_row(ui: &mut egui::Ui, state: &TopicStore, cmd: &CommandTx) {
 
 // ── LOGGING rows ──────────────────────────────────────────────────────────────
 
-const LOG_LEVELS: &[&str] = &["error", "warn", "info", "debug"];
+const LOG_LEVELS: &[&str; 4] = &["error", "warn", "info", "debug"];
 
 fn log_level_row(ui: &mut egui::Ui, state: &TopicStore, cmd: &CommandTx) {
     let rect = row_rect(ui);

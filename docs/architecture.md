@@ -118,42 +118,41 @@ compose per-zone frames; see [chain.rs](../src/daemon/src/drivers/chain.rs).
 
 ### Discovery: how a device gets constructed
 
-There is **no central registry**. Each device module registers itself next to its
-own code via `inventory::submit!`, and discovery walks those submissions
-([registry/discovery.rs](../src/daemon/src/registry/discovery.rs)):
+Discovery is driven by **transport scanners**, listed in the `SCANNERS` table in
+[registry/observers/discovery.rs](../src/daemon/src/domain/registry/observers/discovery.rs).
+`discover_devices()` walks that table in order (skipping any entry whose
+`platform` doesn't match the host) and runs each bus scan; a scanner registered
+in a module elsewhere in the tree exposes a `pub(crate) const SCANNER` that the
+table names, so the full set is visible at the loop that runs it.
 
-- **`TransportScanner`** - submitted by each transport. `discover_devices()` loops
-  over every registered scanner (optionally platform-gated) and runs its bus scan.
-- **`DeviceDescriptor`** `{ matches, make }` - submitted by each device module.
-  Bus scanners build a `DiscoveryHandle` (carrying VID/PID, SMBus addr + bus kind,
-  chain accessory id, Logitech slot, …) and `make_device()` returns the first
-  descriptor whose `matches(handle)` is true, calling its `make(handle)` to
-  construct the `Arc<dyn Device>`.
-- **`SmBusScanEntry`** - SMBus devices also submit one of these so the scanner
-  knows which addresses to probe on which bus (with an optional `pre_scan`).
+Each scan builds a `DiscoveryHandle` (carrying VID/PID, SMBus addr + bus kind,
+chain accessory id, …) and hands it to `discover_handle()`. **Peripheral
+construction itself is owned exclusively by the runtime plugin registry**:
+`discover_handle()` calls `registry.make_device()`, which matches the handle
+against loaded plugin manifests. Plugin SMBus packages contribute a
+`PluginScanEntry` ([plugin/scan.rs](../src/daemon/src/domain/plugin/scan.rs)) so
+the SMBus scanner knows which addresses to probe (with an optional `pre_scan`).
 
-A device file's tail therefore looks like:
-
-```rust
-inventory::submit!(DeviceDescriptor {
-    matches: |h| matches!(h, DiscoveryHandle::UsbNonHid { vid: VID, pid: PID }),
-    make: |_h| Ok(Arc::new(MyDevice::new()) as Arc<dyn crate::drivers::Device>),
-});
-```
+Whichever transport backend a matched plugin gets is resolved through the
+`DESCRIPTORS` table in
+[plugin/engine/backends/mod.rs](../src/daemon/src/domain/plugin/engine/backends/mod.rs):
+one `PluginTransportDescriptor` per bus, defined next to the transport it wraps
+and listed there, looked up by the manifest's `match.transport` string.
 
 `discover_handle()` then registers the constructed device through
-[registry::usecases::registration](../src/daemon/src/registry/usecases/registration.rs), which stores
+[registry::usecases::registration](../src/daemon/src/application/usecases/registry/registration.rs), which stores
 it in `AppState`, restores its saved config, runs `discover_children()`, and calls
 `after_register()`.
 
 ### Plugins: devices without recompiling
 
-Built-in host devices register at **compile time** via `inventory`. **Device plugins**
-([plugin/](../src/daemon/src/plugin/)) add a parallel **runtime**
+Discovery roots and transport backends are fixed at **compile time** in those
+tables; the devices they find are not. **Device plugins**
+([domain/plugin/](../src/daemon/src/domain/plugin/)) are the **runtime**
 registry: `load_all_with_repos()` reads packages (`plugin.yaml` + entry script)
 only from registered remote Git, local Git, or imported archive repositories, and
-`make_device()` consults `plugins::match_handle()` *before* built-in descriptors,
-so a plugin **shadows** a built-in host device for the same hardware. A single generic
+`make_device()` matches a `DiscoveryHandle` against those manifests via
+`match_handle()`. A single generic
 `LuaDevice` implements the `Device` + capability traits and forwards each call into a
 per-physical-root Lua worker thread (which owns the VM + transport). Dynamic children
 use persistent routed `dev` tables on that same serialized worker. Plugins expose only
@@ -304,8 +303,8 @@ primitive first, then consume it from Lua. When you do touch a built-in:
    new transport module only for a genuinely new bus, and document it in
    [transports/](transports/).
 2. **Device** - a file under `drivers/vendors/<vendor>/devices/` implementing
-   `Device`, declaring `capabilities()`, plus the
-   `inventory::submit!(DeviceDescriptor …)` (and `SmBusScanEntry` for SMBus parts).
+   `Device` and declaring `capabilities()`, reached from the discovery root that
+   constructs it.
 3. **udev rule** (Linux) - add built-in-driver access to
    [udev/60-halod.rules](../udev/60-halod.rules). Plugin HID/USB access is
    instead derived from the manifest by `halod udev-rules`.

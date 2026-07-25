@@ -241,6 +241,28 @@ pub const DEFAULT_LANGUAGE: &str = "en";
 /// the daemon accepts only these in `SetLanguage`; add a code here when adding
 /// a set of `locales/<code>/` catalogs.
 pub const SUPPORTED_LANGUAGES: &[&str] = &["en", "it"];
+
+/// Best-effort UI language read from the operating system's locale, narrowed to
+/// a `SUPPORTED_LANGUAGES` code. Falls back to `DEFAULT_LANGUAGE` when the OS
+/// locale is unknown or has no matching catalog.
+pub fn detect_system_language() -> &'static str {
+    sys_locale::get_locale().map_or(DEFAULT_LANGUAGE, |locale| narrow_language(&locale))
+}
+
+/// Narrow a BCP-47-ish locale (e.g. `it-IT`, `en_US.UTF-8`) to a supported UI
+/// language code, or `DEFAULT_LANGUAGE` if none matches.
+fn narrow_language(locale: &str) -> &'static str {
+    let primary = locale
+        .split(['-', '_', '.'])
+        .next()
+        .unwrap_or_default()
+        .to_ascii_lowercase();
+    SUPPORTED_LANGUAGES
+        .iter()
+        .copied()
+        .find(|code| *code == primary)
+        .unwrap_or(DEFAULT_LANGUAGE)
+}
 /// Default for the per-engine enable toggles.
 pub const DEFAULT_ENGINE_ENABLED: bool = true;
 /// Keepalive interval for LCD preview; kept well under `LCD_PREVIEW_LEASE_SECS`.
@@ -674,6 +696,9 @@ pub struct GuiConfig {
     pub plugin_downloads: PluginDownloadConsent,
     /// The Home dashboard's widget row, in display order.
     pub home_widgets: Vec<HomeWidget>,
+    /// The Cooling page's widget row, in display order. Kept separate from
+    /// [`home_widgets`] so each page keeps its own sensor selection.
+    pub cooling_widgets: Vec<HomeWidget>,
 }
 
 impl Default for GuiConfig {
@@ -688,6 +713,7 @@ impl Default for GuiConfig {
             log_level: DEFAULT_LOG_LEVEL.to_string(),
             plugin_downloads: PluginDownloadConsent::Allowed,
             home_widgets: Vec::new(),
+            cooling_widgets: Vec::new(),
         }
     }
 }
@@ -2604,6 +2630,10 @@ pub enum FanCurveStatus {
     /// The fan has a saved curve but its device is not currently present
     /// (unplugged or not yet discovered). No write was attempted.
     NoDevice,
+    /// No fan is physically connected to this controllable header: probing it
+    /// at full duty produced no RPM. The channel is inert — not driven, not
+    /// configurable — until a fan is detected (any RPM > 0).
+    Disconnected,
 }
 
 #[derive(Debug, Clone, Serialize, Deserialize)]
@@ -3022,6 +3052,20 @@ mod app_rule_tests {
 #[cfg(test)]
 mod tests {
     use super::*;
+
+    #[test]
+    fn narrow_language_matches_supported_regardless_of_region_or_charset() {
+        assert_eq!(narrow_language("it-IT"), "it");
+        assert_eq!(narrow_language("en_US.UTF-8"), "en");
+        assert_eq!(narrow_language("IT"), "it");
+    }
+
+    #[test]
+    fn narrow_language_falls_back_to_default_for_unsupported_or_empty() {
+        assert_eq!(narrow_language("fr-FR"), DEFAULT_LANGUAGE);
+        assert_eq!(narrow_language(""), DEFAULT_LANGUAGE);
+        assert!(SUPPORTED_LANGUAGES.contains(&detect_system_language()));
+    }
 
     #[test]
     fn notification_detail_and_severity_for_detail_codes() {

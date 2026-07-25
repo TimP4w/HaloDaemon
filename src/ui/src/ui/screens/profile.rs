@@ -214,28 +214,8 @@ fn find_xdg_icon(name: &str) -> Option<std::path::PathBuf> {
 
 /// Rasterize an SVG file to RGBA at roughly `target` pixels on the long edge.
 fn rasterize_svg(path: &std::path::Path, target: u32) -> Option<egui::ColorImage> {
-    use resvg::{tiny_skia, usvg};
-
     let data = std::fs::read(path).ok()?;
-    let tree = usvg::Tree::from_data(&data, &usvg::Options::default()).ok()?;
-    let size = tree.size().to_int_size();
-    let long_edge = size.width().max(size.height()) as f32;
-    if long_edge <= 0.0 {
-        return None;
-    }
-    let scale = target as f32 / long_edge;
-    let w = (size.width() as f32 * scale).ceil() as u32;
-    let h = (size.height() as f32 * scale).ceil() as u32;
-    let mut pixmap = tiny_skia::Pixmap::new(w.max(1), h.max(1))?;
-    resvg::render(
-        &tree,
-        tiny_skia::Transform::from_scale(scale, scale),
-        &mut pixmap.as_mut(),
-    );
-    Some(egui::ColorImage::from_rgba_unmultiplied(
-        [pixmap.width() as usize, pixmap.height() as usize],
-        pixmap.data(),
-    ))
+    crate::svg::color_image(&data, target)
 }
 
 /// Texture size icons are normalized to. Larger than the on-screen render size

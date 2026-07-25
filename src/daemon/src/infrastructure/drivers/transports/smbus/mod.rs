@@ -452,16 +452,18 @@ async fn run_pre_scan(
     }
 }
 
-inventory::submit!(TransportScanner {
+pub(crate) const SCANNER: TransportScanner = TransportScanner {
     name: "SMBus",
     detail: halod_shared::types::DiscoveryDetail::Smbus,
     platform: None,
-    scan: |app| Box::pin(async move {
-        if let Err(e) = discover(app).await {
-            log::error!("SMBus discovery failed: {e}");
-        }
-    }),
-});
+    scan: |app| {
+        Box::pin(async move {
+            if let Err(e) = discover(app).await {
+                log::error!("SMBus discovery failed: {e}");
+            }
+        })
+    },
+};
 
 #[cfg(test)]
 mod tests {

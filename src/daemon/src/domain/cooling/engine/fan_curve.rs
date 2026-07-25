@@ -106,12 +106,32 @@ struct StallState {
     notified: bool,
 }
 
+/// Physical-fan presence for a controllable header. `Unknown` until the first
+/// RPM reading; a header that reads 0 is `Probing` (driven to full duty to see
+/// if a fan spins up) and then resolves to `Connected` or `Absent`.
+#[derive(Default, Clone, Copy, PartialEq, Debug)]
+enum Presence {
+    #[default]
+    Unknown,
+    Probing,
+    Connected,
+    Absent,
+}
+
+#[derive(Clone, Copy)]
+struct ProbeState {
+    saved_duty: u8,
+    started: std::time::Instant,
+}
+
 #[derive(Default)]
 struct PerFanState {
     missing_device_ticks: u32,
     stall: Option<StallState>,
     control_temp: Option<f32>,
     failsafe_error_logged: bool,
+    presence: Presence,
+    probe: Option<ProbeState>,
 }
 
 pub struct FanCurveEngine {
@@ -240,6 +260,39 @@ impl FanCurveEngine {
         first
     }
 
+    fn presence_snapshot(&self, key: &str) -> (Presence, Option<ProbeState>) {
+        Self::lock_mutex(&self.per_fan)
+            .get(key)
+            .map_or((Presence::Unknown, None), |state| {
+                (state.presence, state.probe)
+            })
+    }
+
+    fn set_presence(&self, key: &str, presence: Presence) {
+        let mut map = Self::lock_mutex(&self.per_fan);
+        let state = map.entry(key.to_string()).or_default();
+        state.presence = presence;
+        state.probe = None;
+    }
+
+    fn begin_probe(&self, key: &str, saved_duty: u8) {
+        let mut map = Self::lock_mutex(&self.per_fan);
+        let state = map.entry(key.to_string()).or_default();
+        state.presence = Presence::Probing;
+        state.probe = Some(ProbeState {
+            saved_duty,
+            started: std::time::Instant::now(),
+        });
+    }
+
+    #[cfg(test)]
+    fn seed_presence(&self, fan_id: &str, presence: Presence, probe: Option<ProbeState>) {
+        let mut map = Self::lock_mutex(&self.per_fan);
+        let state = map.entry(curve_key(fan_id, "default")).or_default();
+        state.presence = presence;
+        state.probe = probe;
+    }
+
     #[cfg(test)]
     fn seed_stall(&self, fan_id: &str, since: std::time::Instant, notified: bool) {
         Self::lock_mutex(&self.per_fan)
@@ -331,9 +384,29 @@ impl FanCurveEngine {
         let sensors = self.app_state.data_bus.sensors();
         let mut new_statuses = HashMap::with_capacity(curves.len());
         for (key, (target, record)) in &curves {
-            let status = self
-                .process_curve(key, target, record, &sensors, failsafe_duty)
-                .await;
+            let device = self.app_state.find_device_by_id(&target.device_id).await;
+            let status = match device {
+                Some(ref dev) if dev.is_live() => {
+                    match self.advance_presence(key, dev, &target.channel_id).await {
+                        Presence::Absent => {
+                            self.clear_missing_device(key);
+                            FanCurveStatus::Disconnected
+                        }
+                        Presence::Probing => {
+                            self.clear_missing_device(key);
+                            FanCurveStatus::Ok
+                        }
+                        Presence::Connected | Presence::Unknown => {
+                            self.process_curve(key, target, record, &sensors, failsafe_duty)
+                                .await
+                        }
+                    }
+                }
+                _ => {
+                    self.process_curve(key, target, record, &sensors, failsafe_duty)
+                        .await
+                }
+            };
             new_statuses.insert(key.clone(), status);
         }
 
@@ -461,6 +534,87 @@ impl FanCurveEngine {
             failsafe_duty,
         )
         .await
+    }
+
+    /// Resolve whether a physical fan is on this controllable header. A header
+    /// reading 0 RPM is driven to full duty (`Probing`) briefly: at 100% every
+    /// present fan spins, so a sustained 0 means nothing is connected. The prior
+    /// duty is restored once the verdict is in. Tach-less headers (pumps) can't
+    /// be measured and are always `Connected`. An `Absent` header re-connects the
+    /// moment it reports any RPM.
+    async fn advance_presence(
+        &self,
+        key: &str,
+        device: &Arc<dyn crate::domain::device::Device>,
+        channel_id: &str,
+    ) -> Presence {
+        const PROBE_DUTY: u8 = 100;
+        const PROBE_SECS: u64 = 2;
+
+        let (presence, probe) = self.presence_snapshot(key);
+        if presence == Presence::Connected {
+            return Presence::Connected;
+        }
+
+        let rpm = match current_rpm(device, channel_id).await {
+            Some(rpm) => rpm,
+            None => {
+                self.set_presence(key, Presence::Connected);
+                return Presence::Connected;
+            }
+        };
+
+        match presence {
+            Presence::Connected => Presence::Connected,
+            Presence::Absent => {
+                if rpm > 0 {
+                    self.set_presence(key, Presence::Connected);
+                    Presence::Connected
+                } else {
+                    Presence::Absent
+                }
+            }
+            Presence::Probing => {
+                let done = probe.is_none_or(|p| p.started.elapsed().as_secs() >= PROBE_SECS);
+                let saved = probe.map_or(0, |p| p.saved_duty);
+                if rpm > 0 {
+                    let _ = apply_duty(device, channel_id, saved).await;
+                    self.set_presence(key, Presence::Connected);
+                    Presence::Connected
+                } else if done {
+                    let _ = apply_duty(device, channel_id, saved).await;
+                    self.set_presence(key, Presence::Absent);
+                    Presence::Absent
+                } else {
+                    Presence::Probing
+                }
+            }
+            Presence::Unknown => {
+                if rpm > 0 {
+                    self.set_presence(key, Presence::Connected);
+                    Presence::Connected
+                } else {
+                    let saved = current_duty(device, channel_id)
+                        .await
+                        .round()
+                        .clamp(0.0, 100.0) as u8;
+                    self.begin_probe(key, saved);
+                    let _ = apply_duty(device, channel_id, PROBE_DUTY).await;
+                    Presence::Probing
+                }
+            }
+        }
+    }
+
+    // Single-output shim over `advance_presence`, used only by tests.
+    #[cfg(test)]
+    async fn probe_presence(
+        &self,
+        fan_id: &str,
+        device: &Arc<dyn crate::domain::device::Device>,
+    ) -> Presence {
+        self.advance_presence(&curve_key(fan_id, "default"), device, "default")
+            .await
     }
 
     /// Stalled (0 RPM at >20% target duty) for more than 10s fires a one-shot
@@ -1489,6 +1643,137 @@ mod tests {
         );
     }
 
+    #[tokio::test]
+    async fn probe_of_spinning_fan_is_connected() {
+        let fan = MockFan::new("fan_0"); // rpm 1000, duty 20
+        let app = make_app(fan.clone(), None);
+        let engine = FanCurveEngine::new(app);
+        let device: Arc<dyn crate::domain::device::Device> = fan.clone();
+        assert_eq!(
+            engine.probe_presence("fan_0", &device).await,
+            Presence::Connected
+        );
+        assert_eq!(fan.last_duty(), 20, "a spinning fan is never probed");
+    }
+
+    #[tokio::test]
+    async fn probe_drives_full_duty_when_header_reads_zero() {
+        let fan = MockFan::new("fan_0");
+        *fan.rpm.lock().unwrap() = 0;
+        let app = make_app(fan.clone(), None);
+        let engine = FanCurveEngine::new(app);
+        let device: Arc<dyn crate::domain::device::Device> = fan.clone();
+        assert_eq!(
+            engine.probe_presence("fan_0", &device).await,
+            Presence::Probing
+        );
+        assert_eq!(
+            fan.last_duty(),
+            100,
+            "a stopped header is driven to full duty to test for a fan"
+        );
+    }
+
+    #[tokio::test]
+    async fn probe_concludes_absent_after_timeout_and_restores_duty() {
+        let fan = MockFan::new("fan_0");
+        *fan.rpm.lock().unwrap() = 0;
+        *fan.duty.lock().unwrap() = 100; // held at full by the probe
+        let app = make_app(fan.clone(), None);
+        let engine = FanCurveEngine::new(app);
+        engine.seed_presence(
+            "fan_0",
+            Presence::Probing,
+            Some(ProbeState {
+                saved_duty: 20,
+                started: std::time::Instant::now() - std::time::Duration::from_secs(5),
+            }),
+        );
+        let device: Arc<dyn crate::domain::device::Device> = fan.clone();
+        assert_eq!(
+            engine.probe_presence("fan_0", &device).await,
+            Presence::Absent
+        );
+        assert_eq!(fan.last_duty(), 20, "probe restores the pre-probe duty");
+    }
+
+    #[tokio::test]
+    async fn probe_concludes_connected_when_fan_spins_up() {
+        let fan = MockFan::new("fan_0");
+        *fan.rpm.lock().unwrap() = 400; // spun up under the probe
+        *fan.duty.lock().unwrap() = 100;
+        let app = make_app(fan.clone(), None);
+        let engine = FanCurveEngine::new(app);
+        engine.seed_presence(
+            "fan_0",
+            Presence::Probing,
+            Some(ProbeState {
+                saved_duty: 30,
+                started: std::time::Instant::now(),
+            }),
+        );
+        let device: Arc<dyn crate::domain::device::Device> = fan.clone();
+        assert_eq!(
+            engine.probe_presence("fan_0", &device).await,
+            Presence::Connected
+        );
+        assert_eq!(
+            fan.last_duty(),
+            30,
+            "probe restores duty once a fan is found"
+        );
+    }
+
+    #[tokio::test]
+    async fn absent_fan_reconnects_when_rpm_returns() {
+        let fan = MockFan::new("fan_0");
+        *fan.rpm.lock().unwrap() = 800;
+        let app = make_app(fan.clone(), None);
+        let engine = FanCurveEngine::new(app);
+        engine.seed_presence("fan_0", Presence::Absent, None);
+        let device: Arc<dyn crate::domain::device::Device> = fan.clone();
+        assert_eq!(
+            engine.probe_presence("fan_0", &device).await,
+            Presence::Connected
+        );
+    }
+
+    #[tokio::test]
+    async fn absent_fan_stays_absent_while_zero() {
+        let fan = MockFan::new("fan_0");
+        *fan.rpm.lock().unwrap() = 0;
+        let app = make_app(fan.clone(), None);
+        let engine = FanCurveEngine::new(app);
+        engine.seed_presence("fan_0", Presence::Absent, None);
+        let device: Arc<dyn crate::domain::device::Device> = fan.clone();
+        assert_eq!(
+            engine.probe_presence("fan_0", &device).await,
+            Presence::Absent
+        );
+    }
+
+    #[tokio::test]
+    async fn tick_publishes_disconnected_and_does_not_drive_absent_fan() {
+        let fan = MockFan::new("fan_0"); // duty 20
+        *fan.rpm.lock().unwrap() = 0;
+        let app = make_app(fan.clone(), None);
+        let engine = FanCurveEngine::new(app.clone());
+        engine.seed_presence("fan_0", Presence::Absent, None);
+        let initial = fan.last_duty();
+
+        engine.tick(75).await;
+
+        assert_eq!(
+            fan.last_duty(),
+            initial,
+            "an absent header must not be driven to the failsafe duty"
+        );
+        assert_eq!(
+            app.cooling.statuses.lock().await[&curve_key("fan_0", "default")],
+            FanCurveStatus::Disconnected
+        );
+    }
+
     struct MockPump {
         id: &'static str,
         duty: StdMutex<u8>,
@@ -1596,6 +1881,24 @@ mod tests {
             FanCurveStatus::Ok,
             "pump with no RPM skips stall check"
         );
+    }
+
+    #[tokio::test]
+    async fn tachless_header_is_always_connected_and_never_probed() {
+        let record = FanCurveRecord {
+            sensor_id: None,
+            points: vec![(0.0, 50.0), (100.0, 100.0)],
+        };
+        let pump = MockPump::new_with_curve("pump_0", record);
+        let app = Arc::new(AppState::new(Config::default()));
+        *app.device_registry.try_write().unwrap() = vec![pump.clone() as Arc<dyn Device>];
+        let engine = FanCurveEngine::new(app);
+        let device: Arc<dyn crate::domain::device::Device> = pump.clone();
+        let presence = engine
+            .advance_presence(&curve_key("pump_0", "pump"), &device, "pump")
+            .await;
+        assert_eq!(presence, Presence::Connected);
+        assert_eq!(pump.last_duty(), 50, "a tach-less header is never probed");
     }
 }
 

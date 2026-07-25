@@ -847,13 +847,73 @@ fn rotate_widget_image(source: &RgbaImage, theta: f32) -> RgbaImage {
         i64::from(rotated_w.saturating_sub(source.width()) / 2),
         i64::from(rotated_h.saturating_sub(source.height()) / 2),
     );
-    imageproc::geometric_transformations::rotate(
-        &padded,
-        (rotated_w as f32 / 2.0, rotated_h as f32 / 2.0),
-        theta,
-        imageproc::geometric_transformations::Interpolation::Bilinear,
-        imageproc::geometric_transformations::Border::Constant(Rgba([0, 0, 0, 0])),
-    )
+    rotate_bilinear(&padded, theta)
+}
+
+/// Rotate `source` about its center by `theta` radians, sampling bilinearly and
+/// leaving anything outside the source transparent.
+fn rotate_bilinear(source: &RgbaImage, theta: f32) -> RgbaImage {
+    let (width, height) = (source.width(), source.height());
+    let (center_x, center_y) = (width as f32 / 2.0, height as f32 / 2.0);
+    let (sin, cos) = (-theta).sin_cos();
+    let mut out = RgbaImage::from_pixel(width, height, Rgba([0, 0, 0, 0]));
+
+    for y in 0..height {
+        for x in 0..width {
+            let dx = x as f32 + 0.5 - center_x;
+            let dy = y as f32 + 0.5 - center_y;
+            let source_x = center_x + dx * cos - dy * sin - 0.5;
+            let source_y = center_y + dx * sin + dy * cos - 0.5;
+            if let Some(pixel) = sample_bilinear(source, source_x, source_y) {
+                out.put_pixel(x, y, pixel);
+            }
+        }
+    }
+    out
+}
+
+/// Bilinear sample at a continuous pixel coordinate, weighting each channel by
+/// alpha so transparent neighbours don't bleed their color into the edge.
+fn sample_bilinear(source: &RgbaImage, x: f32, y: f32) -> Option<Rgba<u8>> {
+    let (width, height) = (source.width() as i32, source.height() as i32);
+    let x0 = x.floor();
+    let y0 = y.floor();
+    if x < -1.0 || y < -1.0 || x0 >= width as f32 || y0 >= height as f32 {
+        return None;
+    }
+    let (fx, fy) = (x - x0, y - y0);
+    let (x0, y0) = (x0 as i32, y0 as i32);
+
+    let mut channels = [0.0f32; 3];
+    let mut alpha = 0.0f32;
+    for (dx, dy, weight) in [
+        (0, 0, (1.0 - fx) * (1.0 - fy)),
+        (1, 0, fx * (1.0 - fy)),
+        (0, 1, (1.0 - fx) * fy),
+        (1, 1, fx * fy),
+    ] {
+        let (sx, sy) = (x0 + dx, y0 + dy);
+        if sx < 0 || sy < 0 || sx >= width || sy >= height || weight <= 0.0 {
+            continue;
+        }
+        let pixel = source.get_pixel(sx as u32, sy as u32).0;
+        let pixel_alpha = f32::from(pixel[3]);
+        for (index, channel) in channels.iter_mut().enumerate() {
+            *channel += f32::from(pixel[index]) * pixel_alpha * weight;
+        }
+        alpha += pixel_alpha * weight;
+    }
+
+    if alpha <= 0.0 {
+        return None;
+    }
+    let unweight = |value: f32| (value / alpha).round().clamp(0.0, 255.0) as u8;
+    Some(Rgba([
+        unweight(channels[0]),
+        unweight(channels[1]),
+        unweight(channels[2]),
+        alpha.round().clamp(0.0, 255.0) as u8,
+    ]))
 }
 
 /// Blend only the non-transparent pixels retained from a transformed widget.

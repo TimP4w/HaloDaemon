@@ -60,6 +60,13 @@ mod pending_rediscovery_tests {
         pending.merge(PendingRediscovery::PluginSet(ids(&["b"])));
         assert_eq!(pending, PendingRediscovery::Full);
     }
+
+    #[test]
+    fn no_discovery_root_is_listed_twice() {
+        let names: Vec<&str> = super::SCANNERS.iter().map(|s| s.name).collect();
+        let unique: HashSet<&str> = names.iter().copied().collect();
+        assert_eq!(names.len(), unique.len(), "{names:?}");
+    }
 }
 
 /// All information a bus scanner passes to a device descriptor.
@@ -151,14 +158,24 @@ pub struct TransportScanner {
     pub platform: Option<&'static str>,
     pub scan: TransportScan,
 }
-inventory::collect!(TransportScanner);
 
-inventory::submit!(TransportScanner {
+const USB_NON_HID_SCANNER: TransportScanner = TransportScanner {
     name: "USB non-HID",
     detail: halod_shared::types::DiscoveryDetail::Usb,
     platform: None,
     scan: |app| Box::pin(scan_usb_non_hid(app)),
-});
+};
+
+/// Every discovery root, run in this order. Scanners are independent — each
+/// registers handles through `discover_handle` and reads no other's results.
+static SCANNERS: &[TransportScanner] = &[
+    crate::application::observers::computer::SCANNER,
+    crate::application::observers::hid::SCANNER,
+    USB_NON_HID_SCANNER,
+    crate::infrastructure::drivers::transports::smbus::SCANNER,
+    crate::domain::plugin::observers::host_scan::SCANNER,
+    crate::domain::plugin::observers::integration_scan::SCANNER,
+];
 
 pub async fn scan_usb_non_hid(app: Arc<crate::application::state::AppState>) {
     let present = tokio::task::spawn_blocking(|| {
@@ -305,7 +322,7 @@ pub async fn discover_devices(app: Arc<AppState>) {
     // scanners under `cfg(test)` — device construction/matching is covered
     // directly via `make_device`/`discover_handle` with hand-built handles.
     if !cfg!(test) {
-        for scanner in inventory::iter::<TransportScanner> {
+        for scanner in SCANNERS {
             if let Some(platform) = scanner.platform {
                 if platform != std::env::consts::OS {
                     continue;

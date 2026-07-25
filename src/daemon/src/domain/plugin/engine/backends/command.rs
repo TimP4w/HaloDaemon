@@ -32,15 +32,13 @@ fn open(
     )))
 }
 
-inventory::submit! {
-    PluginTransportDescriptor {
-        kind: "command",
-        matches: Some(matches),
-        open,
-        id_suffix: None,
-        validate: Some(validate),
-    }
-}
+pub(super) const DESCRIPTOR: PluginTransportDescriptor = PluginTransportDescriptor {
+    kind: "command",
+    matches: Some(matches),
+    open,
+    id_suffix: None,
+    validate: Some(validate),
+};
 
 fn validate(spec: &DeviceSpec) -> Result<()> {
     if spec.r#match.command.is_none() {

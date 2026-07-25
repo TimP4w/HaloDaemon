@@ -498,24 +498,12 @@ fn placeholder_editor_render(
 /// Rasterize the app logo (`assets/icon.svg`) to a `target`-px-long-edge RGBA
 /// sprite, so the logo widget shows the real mark rather than a placeholder box.
 fn logo_sprite(target: u32) -> (u32, u32, Vec<u8>) {
-    use resvg::{tiny_skia, usvg};
-
     const ICON: &[u8] = include_bytes!(concat!(
         env!("CARGO_MANIFEST_DIR"),
         "/../../assets/icon.svg"
     ));
-    let tree = usvg::Tree::from_data(ICON, &usvg::Options::default()).expect("icon.svg parses");
-    let size = tree.size().to_int_size();
-    let scale = target as f32 / size.width().max(size.height()) as f32;
-    let w = ((size.width() as f32 * scale).ceil() as u32).max(1);
-    let h = ((size.height() as f32 * scale).ceil() as u32).max(1);
-    let mut pixmap = tiny_skia::Pixmap::new(w, h).expect("logo pixmap");
-    resvg::render(
-        &tree,
-        tiny_skia::Transform::from_scale(scale, scale),
-        &mut pixmap.as_mut(),
-    );
-    (w, h, pixmap.data().to_vec())
+    let pixmap = crate::svg::rasterize(ICON, Some(target)).expect("icon.svg parses");
+    (pixmap.width(), pixmap.height(), pixmap.data().to_vec())
 }
 
 /// A placeholder RGBA sprite for one widget, shaped by kind and sized off its
