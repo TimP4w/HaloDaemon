@@ -168,21 +168,52 @@ impl IconRanker {
     }
 }
 
-/// Walk XDG_DATA_DIRS icon directories for `name`, returning the best match.
+/// Data directories to search for icons, user-level first. `XDG_DATA_HOME` is
+/// separate from `XDG_DATA_DIRS` and is where Steam writes per-game icons.
+#[cfg(unix)]
+fn icon_data_dirs() -> Vec<String> {
+    icon_data_dirs_from(
+        std::env::var("XDG_DATA_HOME").ok().as_deref(),
+        std::env::var("HOME").ok().as_deref(),
+        std::env::var("XDG_DATA_DIRS").ok().as_deref(),
+    )
+}
+
+#[cfg(unix)]
+fn icon_data_dirs_from(
+    data_home: Option<&str>,
+    home: Option<&str>,
+    data_dirs: Option<&str>,
+) -> Vec<String> {
+    let mut dirs = Vec::new();
+    match data_home.filter(|d| !d.is_empty()) {
+        Some(d) => dirs.push(d.to_string()),
+        None => {
+            if let Some(home) = home.filter(|h| !h.is_empty()) {
+                dirs.push(format!("{home}/.local/share"));
+            }
+        }
+    }
+    dirs.extend(
+        data_dirs
+            .filter(|d| !d.is_empty())
+            .unwrap_or("/usr/local/share:/usr/share")
+            .split(':')
+            .filter(|d| !d.is_empty())
+            .map(String::from),
+    );
+    dirs
+}
+
+/// Walk the icon data directories for `name`, returning the best match.
 /// Prefers the largest raster (PNG/JPEG) so it stays crisp; falls back to a
 /// scalable SVG (rasterized at load time) and finally the pixmaps directory.
 #[cfg(unix)]
 fn find_xdg_icon(name: &str) -> Option<std::path::PathBuf> {
-    let data_dirs = std::env::var("XDG_DATA_DIRS")
-        .unwrap_or_else(|_| "/usr/local/share:/usr/share".to_string());
-
     let mut ranker = IconRanker::default();
 
-    for base in data_dirs.split(':') {
-        if base.is_empty() {
-            continue;
-        }
-        let hicolor = std::path::PathBuf::from(base).join("icons/hicolor");
+    for base in icon_data_dirs() {
+        let hicolor = std::path::PathBuf::from(&base).join("icons/hicolor");
         if let Ok(entries) = std::fs::read_dir(&hicolor) {
             for entry in entries.flatten() {
                 let apps_dir = entry.path().join("apps");
@@ -200,7 +231,7 @@ fn find_xdg_icon(name: &str) -> Option<std::path::PathBuf> {
             }
         }
         for ext in ["png", "jpg", "jpeg", "svg"] {
-            let p = std::path::PathBuf::from(base)
+            let p = std::path::PathBuf::from(&base)
                 .join("pixmaps")
                 .join(format!("{name}.{ext}"));
             if p.exists() {
@@ -1524,6 +1555,23 @@ mod tests {
         // ...unknown/dynamic state keys fall back to title-casing.
         assert_eq!(capability_label("button_mapping"), "Button Mapping");
         assert_eq!(capability_label("brightness"), "Brightness");
+    }
+
+    #[cfg(unix)]
+    #[test]
+    fn icon_data_dirs_searches_data_home_before_system_dirs() {
+        assert_eq!(
+            icon_data_dirs_from(None, Some("/home/u"), Some("/usr/share")),
+            vec!["/home/u/.local/share".to_string(), "/usr/share".to_string()]
+        );
+        assert_eq!(
+            icon_data_dirs_from(Some("/xdg/data"), Some("/home/u"), Some("/usr/share")),
+            vec!["/xdg/data".to_string(), "/usr/share".to_string()]
+        );
+        assert_eq!(
+            icon_data_dirs_from(None, None, Some("")),
+            vec!["/usr/local/share".to_string(), "/usr/share".to_string()]
+        );
     }
 
     fn state_with_profiles(profiles: &[&str], active: &str, rules: Vec<AppRule>) -> TopicStore {

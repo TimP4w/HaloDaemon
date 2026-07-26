@@ -1,9 +1,7 @@
 // SPDX-License-Identifier: GPL-3.0-or-later
+use crate::application::ipc::ClientHandle;
 use anyhow::Result;
 use std::collections::HashMap;
-use std::sync::Mutex;
-
-use crate::application::ipc::ClientHandle;
 
 #[cfg(target_os = "linux")]
 mod linux;
@@ -16,23 +14,11 @@ mod windows;
 /// populated whenever running apps are enumerated (so an app must have been seen
 /// running once). Unknown processes are simply omitted.
 ///
-/// Called on every broadcast, so the result is memoized keyed on the name list
-/// and only recomputed when it changes.
 pub fn resolve_process_icons(process_names: &[String]) -> HashMap<String, String> {
     if process_names.is_empty() {
         return HashMap::new();
     }
-    type ProcessIconCache = Option<(Vec<String>, HashMap<String, String>)>;
-    static CACHE: Mutex<ProcessIconCache> = Mutex::new(None);
-    let mut cache = CACHE.lock().unwrap();
-    if let Some((names, icons)) = cache.as_ref() {
-        if names.as_slice() == process_names {
-            return icons.clone();
-        }
-    }
-    let icons = resolve_process_icons_uncached(process_names);
-    *cache = Some((process_names.to_vec(), icons.clone()));
-    icons
+    resolve_process_icons_uncached(process_names)
 }
 
 fn resolve_process_icons_uncached(process_names: &[String]) -> HashMap<String, String> {

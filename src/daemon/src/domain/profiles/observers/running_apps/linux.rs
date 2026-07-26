@@ -266,13 +266,33 @@ fn exec_icon_map() -> &'static HashMap<String, String> {
     })
 }
 
+fn running_icon_map() -> &'static std::sync::Mutex<HashMap<String, String>> {
+    use std::sync::{Mutex, OnceLock};
+    static MAP: OnceLock<Mutex<HashMap<String, String>>> = OnceLock::new();
+    MAP.get_or_init(|| Mutex::new(HashMap::new()))
+}
+
 /// Resolve icons for the given process names from the installed `.desktop`
-/// catalog. Processes with no matching desktop entry are omitted.
+/// catalog and associations discovered during running-app scans.
 pub(super) fn resolve_icons(process_names: &[String]) -> HashMap<String, String> {
-    let map = exec_icon_map();
+    let desktop = exec_icon_map();
+    let running = running_icon_map().lock().unwrap();
+    resolve_icons_from(process_names, desktop, &running)
+}
+
+fn resolve_icons_from(
+    process_names: &[String],
+    desktop: &HashMap<String, String>,
+    running: &HashMap<String, String>,
+) -> HashMap<String, String> {
     process_names
         .iter()
-        .filter_map(|name| map.get(name).map(|icon| (name.clone(), icon.clone())))
+        .filter_map(|name| {
+            desktop
+                .get(name)
+                .or_else(|| running.get(name))
+                .map(|icon| (name.clone(), icon.clone()))
+        })
         .collect()
 }
 
@@ -306,7 +326,7 @@ pub(super) fn build_apps() -> Vec<RunningApp> {
         }
     }
 
-    name_to_pid
+    let apps: Vec<RunningApp> = name_to_pid
         .into_iter()
         .filter_map(|(proc_name, pid_path)| {
             if let Some((dn, icon)) = exec_map.get(&proc_name) {
@@ -339,7 +359,15 @@ pub(super) fn build_apps() -> Vec<RunningApp> {
             }
             None
         })
-        .collect()
+        .collect();
+
+    let mut icons = running_icon_map().lock().unwrap();
+    for app in &apps {
+        if !app.icon_name.is_empty() {
+            icons.insert(app.process_name.clone(), app.icon_name.clone());
+        }
+    }
+    apps
 }
 
 #[cfg(test)]
@@ -351,6 +379,20 @@ mod tests {
         assert_eq!(
             extract_exec_basename("/usr/bin/firefox"),
             Some("firefox".to_string())
+        );
+    }
+
+    #[test]
+    fn resolves_icon_discovered_from_running_steam_app() {
+        let names = vec!["cyberpunk2077".to_string()];
+        let running = HashMap::from([(
+            "cyberpunk2077".to_string(),
+            "steam_icon_1091500".to_string(),
+        )]);
+
+        assert_eq!(
+            resolve_icons_from(&names, &HashMap::new(), &running),
+            running
         );
     }
 
