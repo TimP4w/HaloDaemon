@@ -366,6 +366,47 @@ pub async fn list_releases(url: String, client: ClientHandle) -> Result<()> {
     Ok(())
 }
 
+/// Preconditions a release must satisfy before its content is downloaded. The
+/// update check runs it too, so a release is only advertised when it installs.
+fn inspect_installable(
+    record: &PluginRepoRecord,
+    release: &crate::domain::plugin::release_source::PublishedRelease,
+) -> Result<(
+    repo::RepositoryManifest,
+    Vec<u8>,
+    Vec<u8>,
+    Option<halod_plugin_signing::RepositorySigningKey>,
+)> {
+    let trust = trust_for_record(record);
+    let (manifest, bytes, signature) =
+        crate::domain::plugin::release_source::inspect(release, &trust)?;
+    let advertised = manifest.signing_key.clone();
+    if matches!(trust, repo::RepositoryTrust::Unsigned) {
+        if let Some(key) = &advertised {
+            halod_plugin_signing::verify_advertised_signature(&bytes, &signature, key)?;
+        }
+    }
+    // The archive descriptor is transport metadata and must be present
+    // in every network release, even though legacy embedded packs omit it.
+    if manifest.archive.is_none() {
+        anyhow::bail!("network release has no archive descriptor");
+    }
+    if record.trusted_key.is_some() && record.trusted_key != advertised {
+        anyhow::bail!("release signing key changed after first installation");
+    }
+    if let Some(expected) = &record.repository_id {
+        if expected != &manifest.id {
+            anyhow::bail!(
+                "plugin source '{}' changed identity from '{}' to '{}'",
+                record.slug,
+                expected,
+                manifest.id
+            );
+        }
+    }
+    Ok((manifest, bytes, signature, advertised))
+}
+
 /// Download, verify, and atomically activate one complete plugin release.
 pub async fn install_release(
     slug: String,
@@ -394,41 +435,12 @@ pub async fn install_release(
     .await
     .context("release lookup task panicked")??;
 
-    let initial_trust = trust_for_record(&record);
+    let inspect_record = record.clone();
     let inspect_release = published.clone();
     let (manifest, manifest_bytes, signature_bytes, trusted_key) =
-        tokio::task::spawn_blocking(move || -> Result<_> {
-            let (manifest, bytes, signature) =
-                crate::domain::plugin::release_source::inspect(&inspect_release, &initial_trust)?;
-            let advertised = manifest.signing_key.clone();
-            if matches!(initial_trust, repo::RepositoryTrust::Unsigned) {
-                if let Some(key) = &advertised {
-                    halod_plugin_signing::verify_advertised_signature(&bytes, &signature, key)?;
-                }
-            }
-            // The archive descriptor is transport metadata and must be present
-            // in every network release, even though legacy embedded packs omit it.
-            if manifest.archive.is_none() {
-                anyhow::bail!("network release has no archive descriptor");
-            }
-            Ok((manifest, bytes, signature, advertised))
-        })
-        .await
-        .context("release inspection task panicked")??;
-
-    if record.trusted_key.is_some() && record.trusted_key != trusted_key {
-        anyhow::bail!("release signing key changed after first installation");
-    }
-    if let Some(expected) = &record.repository_id {
-        if expected != &manifest.id {
-            anyhow::bail!(
-                "plugin source '{}' changed identity from '{}' to '{}'",
-                slug,
-                expected,
-                manifest.id
-            );
-        }
-    }
+        tokio::task::spawn_blocking(move || inspect_installable(&inspect_record, &inspect_release))
+            .await
+            .context("release inspection task panicked")??;
 
     let root = crate::config::plugin_repos_dir().join(&slug);
     let final_dir = crate::domain::plugin::release_source::revision_dir(&root, &tag)?;
@@ -497,7 +509,7 @@ pub async fn install_release(
         } else {
             crate::config::PluginReleasePolicy::Latest
         };
-        configured.active_revision = Some(tag);
+        configured.active_revision = Some(tag.clone());
         configured.active_source = crate::config::PluginRevisionSource::Managed;
         configured.last_sync = Some(now_rfc3339());
         for package in &manifest.packages {
@@ -507,6 +519,7 @@ pub async fn install_release(
         }
     }
     app.request_config_save();
+    settle_repo_update_status(&app, &slug, Some(&tag)).await;
     apply_repo_plugins(app, plugin_ids).await
 }
 
@@ -589,46 +602,95 @@ async fn compute_repo_updates(
     let mut out = Vec::with_capacity(repos.len());
     let mut plugins = Vec::new();
     for r in repos {
-        if r.source_kind == crate::config::PluginRepoSourceKind::Release {
-            let source = r.url.clone();
-            let pinned = match &r.release_policy {
-                crate::config::PluginReleasePolicy::Latest => None,
-                crate::config::PluginReleasePolicy::Pinned(tag) => Some(tag.clone()),
-            };
-            match tokio::task::spawn_blocking(move || {
-                crate::domain::plugin::release_source::list(&source)?
-                    .into_iter()
-                    .find(|release| {
-                        pinned
-                            .as_deref()
-                            .map_or(!release.prerelease, |tag| release.tag == tag)
-                    })
-                    .ok_or_else(|| anyhow::anyhow!("selected plugin release was not found"))
-            })
-            .await
-            {
-                Ok(Ok(latest)) => {
-                    let behind = r.release_tag.as_deref() != Some(latest.tag.as_str());
-                    if behind {
-                        plugins
-                            .extend(remote_package_updates(&r, &latest, &installed_hashes).await);
-                    }
-                    out.push(RepoUpdateStatus {
-                        installed_tag: r.release_tag.clone().unwrap_or_default(),
-                        slug: r.slug,
-                        behind,
-                        latest_tag: latest.tag,
-                    });
-                }
-                Ok(Err(error)) => {
-                    log::warn!("checking releases for '{}': {error:#}", r.slug)
-                }
-                Err(error) => log::warn!("release-list task for '{}' panicked: {error}", r.slug),
-            }
+        if r.source_kind != crate::config::PluginRepoSourceKind::Release {
             continue;
         }
+        let source = r.url.clone();
+        let releases = match tokio::task::spawn_blocking(move || {
+            crate::domain::plugin::release_source::list(&source)
+        })
+        .await
+        {
+            Ok(Ok(releases)) => releases,
+            Ok(Err(error)) => {
+                log::warn!("checking releases for '{}': {error:#}", r.slug);
+                continue;
+            }
+            Err(error) => {
+                log::warn!("release-list task for '{}' panicked: {error}", r.slug);
+                continue;
+            }
+        };
+        let pinned = match &r.release_policy {
+            crate::config::PluginReleasePolicy::Latest => None,
+            crate::config::PluginReleasePolicy::Pinned(tag) => Some(tag.as_str()),
+        };
+        let Some(index) = releases
+            .iter()
+            .position(|release| pinned.map_or(!release.prerelease, |tag| release.tag == tag))
+        else {
+            log::warn!("selected plugin release for '{}' was not found", r.slug);
+            continue;
+        };
+        let selected = &releases[index];
+        let behind = r.release_tag.as_deref() != Some(selected.tag.as_str());
+        if behind {
+            plugins.extend(remote_package_updates(&r, selected, &installed_hashes).await);
+        }
+        // GitHub lists newest first, so everything above the pin was published later.
+        let newer_tag = match pinned {
+            Some(_) => newer_installable_release(&r, &releases[..index]).await,
+            None => None,
+        };
+        match (behind, &newer_tag) {
+            (true, _) => log::info!(
+                "plugin repository '{}' is behind: {} → {}",
+                r.slug,
+                r.release_tag.as_deref().unwrap_or("none"),
+                selected.tag
+            ),
+            (false, Some(tag)) => log::info!(
+                "plugin repository '{}' is pinned to {} and release {tag} is available",
+                r.slug,
+                pinned.unwrap_or_default()
+            ),
+            (false, None) => log::debug!(
+                "plugin repository '{}' is up to date at {}",
+                r.slug,
+                selected.tag
+            ),
+        }
+        out.push(RepoUpdateStatus {
+            installed_tag: r.release_tag.clone().unwrap_or_default(),
+            slug: r.slug.clone(),
+            behind,
+            latest_tag: selected.tag.clone(),
+            newer_tag,
+        });
     }
     (out, plugins)
+}
+
+/// Newest stable release published after a pinned selection.
+async fn newer_installable_release(
+    record: &PluginRepoRecord,
+    later: &[crate::domain::plugin::release_source::PublishedRelease],
+) -> Option<String> {
+    let candidate = later.iter().find(|release| !release.prerelease)?.clone();
+    let tag = candidate.tag.clone();
+    let slug = record.slug.clone();
+    let record = record.clone();
+    match tokio::task::spawn_blocking(move || inspect_installable(&record, &candidate)).await {
+        Ok(Ok(_)) => Some(tag),
+        Ok(Err(error)) => {
+            log::info!("release '{tag}' of '{slug}' is not installable: {error:#}");
+            None
+        }
+        Err(error) => {
+            log::warn!("release inspection task for '{slug}' panicked: {error}");
+            None
+        }
+    }
 }
 
 async fn remote_package_updates(
@@ -673,7 +735,7 @@ async fn remote_package_updates(
             _ => std::collections::HashMap::new(),
         };
 
-    manifest
+    let updates: Vec<_> = manifest
         .packages
         .into_iter()
         .filter(|package| {
@@ -692,7 +754,17 @@ async fn remote_package_updates(
             on_disk_changed: false,
             available_version: package.version,
         })
-        .collect()
+        .collect();
+    for update in &updates {
+        log::info!(
+            "plugin '{}' update available in '{}': {} → {}",
+            update.plugin_id,
+            record.slug,
+            update.current_version,
+            update.available_version
+        );
+    }
+    updates
 }
 
 fn merge_plugin_updates(
@@ -946,20 +1018,23 @@ pub async fn update_repo(slug: String, app: Arc<AppState>) -> Result<()> {
         },
     };
     if result.is_ok() {
-        settle_repo_update_status(&app, &slug).await;
+        settle_repo_update_status(&app, &slug, None).await;
     }
     result
 }
 
-/// The repository now holds its selected release, so it is no longer behind.
-/// Without this the GUI keeps offering "Update repo" after a successful pull —
-/// the repo-level status is only otherwise recomputed by an explicit check.
-async fn settle_repo_update_status(app: &Arc<AppState>, slug: &str) {
+/// The repo now holds the release it was asked for: nothing pending until the
+/// next check. Without this the GUI keeps offering "Update repo" after a pull.
+async fn settle_repo_update_status(app: &Arc<AppState>, slug: &str, installed_tag: Option<&str>) {
     let mut statuses = app.plugin_repo_update_status.lock().await.clone();
     let Some(status) = statuses.iter_mut().find(|status| status.slug == slug) else {
         return;
     };
+    if let Some(tag) = installed_tag {
+        status.latest_tag = tag.to_owned();
+    }
     status.installed_tag = status.latest_tag.clone();
     status.behind = false;
+    status.newer_tag = None;
     publish_repo_updates(app, statuses).await;
 }

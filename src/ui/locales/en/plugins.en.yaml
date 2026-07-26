@@ -24,6 +24,11 @@ plugins:
   repos_empty: No plugin repositories registered.
   repos_update: Update
   repos_update_repo: Update repo
+  repos_move_pin: "Update to %{tag}"
+  repo_pinned: PINNED
+  repo_pinned_hint: This repository stays on the selected release. New releases are reported but never installed automatically.
+  repo_pinned_update_title: "Release %{tag} is available"
+  repo_pinned_update_body: "This repository is pinned to %{pinned}. Updating moves the pin to %{tag}."
   repos_repair: Force pull
   repos_repair_title: Repair repository?
   repos_repair_body: This restores the repository's active revision from its verified source. Any local changes within that repository will be lost.

@@ -24,6 +24,11 @@ plugins:
   repos_empty: Nessun repository di plugin registrato.
   repos_update: Aggiorna
   repos_update_repo: Aggiorna il repository
+  repos_move_pin: "Aggiorna a %{tag}"
+  repo_pinned: FISSATO
+  repo_pinned_hint: Questo repository resta sulla release selezionata. Le nuove release vengono segnalate ma non installate automaticamente.
+  repo_pinned_update_title: "La release %{tag} è disponibile"
+  repo_pinned_update_body: "Questo repository è fissato a %{pinned}. L'aggiornamento sposta il vincolo a %{tag}."
   repos_repair: Pull forzato
   repos_repair_title: Riparare il repository?
   repos_repair_body: Questa operazione ripristina la revisione attiva del repository dalla sua sorgente verificata. Tutte le modifiche locali nel repository andranno perse.

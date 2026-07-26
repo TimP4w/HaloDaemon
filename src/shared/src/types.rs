@@ -1046,6 +1046,8 @@ pub struct RepoUpdateStatus {
     pub installed_tag: String,
     pub latest_tag: String,
     pub behind: bool,
+    #[serde(default)]
+    pub newer_tag: Option<String>,
 }
 
 /// One package's update-availability inside a repository update check. A

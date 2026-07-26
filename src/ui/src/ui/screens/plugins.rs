@@ -705,11 +705,18 @@ impl PluginsUi {
                     .repo_updates
                     .iter()
                     .any(|status| status.slug == r.slug && status.behind);
+                let pinned_update = state
+                    .plugins
+                    .repo_updates
+                    .iter()
+                    .find(|status| status.slug == r.slug)
+                    .and_then(|status| status.newer_tag.clone());
                 let updating_repo = self.updating_repos.contains_key(&r.slug);
 
                 let mut select_plugin = None;
                 let mut start_check = false;
                 let mut start_update = false;
+                let mut start_pinned_update = None;
                 egui::ScrollArea::vertical()
                     .id_salt("plugin_detail_scroll")
                     .auto_shrink([false, false])
@@ -726,9 +733,11 @@ impl PluginsUi {
                                 checking,
                                 updates_enabled,
                                 repo_has_updates,
+                                pinned_update.as_deref(),
                                 updating_repo,
                                 &mut start_check,
                                 &mut start_update,
+                                &mut start_pinned_update,
                             );
                         });
                     });
@@ -749,6 +758,16 @@ impl PluginsUi {
                         cmd,
                         halod_shared::commands::DaemonCommand::UpdatePluginRepo {
                             slug: r.slug.clone(),
+                        },
+                    );
+                }
+                if let Some(tag) = start_pinned_update {
+                    self.updating_repos.insert(r.slug.clone(), now);
+                    crate::runtime::ipc::send(
+                        cmd,
+                        halod_shared::commands::DaemonCommand::InstallPluginRelease {
+                            slug: r.slug.clone(),
+                            tag,
                         },
                     );
                 }
@@ -1051,6 +1070,7 @@ struct RepoRow<'a> {
     locked_short: String,
     remote_short: Option<String>,
     behind: bool,
+    pinned_update: bool,
     signature: &'a RepoSignatureStatus,
     integrity_failed: bool,
 }
@@ -1097,12 +1117,18 @@ fn repo_rows<'a>(
         .map(|r| {
             let status = updates.iter().find(|u| u.slug == r.slug);
             let behind = status.is_some_and(|s| s.behind);
+            let newer = status.and_then(|s| s.newer_tag.clone());
             RepoRow {
                 slug: &r.slug,
                 official: r.official,
                 locked_short: r.release_tag.clone().unwrap_or_default(),
-                remote_short: status.filter(|_| behind).map(|s| s.latest_tag.clone()),
+                remote_short: if behind {
+                    status.map(|s| s.latest_tag.clone())
+                } else {
+                    newer.clone()
+                },
                 behind,
+                pinned_update: newer.is_some(),
                 signature: &r.signature,
                 integrity_failed: repo_integrity_failed(&r.slug, plugins),
             }
@@ -1224,7 +1250,7 @@ fn repo_row(ui: &mut egui::Ui, row: &RepoRow, selected: bool) -> bool {
             Align2::LEFT_TOP,
             sha_text,
             theme::value_xs(),
-            if row.behind {
+            if row.behind || row.pinned_update {
                 theme::STAT_AMBER
             } else {
                 theme::TEXT_FAINT2
@@ -1302,7 +1328,7 @@ fn clear_finished_repo_updates(
     updating_repos.retain(|slug, started| {
         let behind = repo_updates
             .iter()
-            .any(|status| status.slug == *slug && status.behind);
+            .any(|status| status.slug == *slug && (status.behind || status.newer_tag.is_some()));
         let dirty = plugin_updates.iter().any(|status| {
             status.slug == *slug && (status.update_available || status.on_disk_changed)
         });
@@ -3073,9 +3099,11 @@ fn repo_detail_body(
     checking: bool,
     updates_enabled: bool,
     has_updates: bool,
+    pinned_update: Option<&str>,
     updating: bool,
     start_check: &mut bool,
     start_update: &mut bool,
+    start_pinned_update: &mut Option<String>,
 ) -> Option<String> {
     let integrity_failed = repo_integrity_failed(&r.slug, plugins);
     let repairable = r.signature == RepoSignatureStatus::Verified;
@@ -3159,19 +3187,33 @@ fn repo_detail_body(
             current.to_owned()
         };
         let mut selected = current.to_owned();
-        egui::ComboBox::from_id_salt(("plugin_release", &r.slug))
-            .selected_text(selected_text)
-            .show_ui(ui, |ui| {
-                ui.selectable_value(&mut selected, LATEST.to_owned(), "Latest");
-                for release in releases {
-                    let label = if release.prerelease {
-                        format!("{} (prerelease)", release.tag)
-                    } else {
-                        release.tag.clone()
-                    };
-                    ui.selectable_value(&mut selected, release.tag.clone(), label);
-                }
-            });
+        ui.horizontal(|ui| {
+            egui::ComboBox::from_id_salt(("plugin_release", &r.slug))
+                .selected_text(selected_text)
+                .show_ui(ui, |ui| {
+                    ui.selectable_value(&mut selected, LATEST.to_owned(), "Latest");
+                    for release in releases {
+                        let label = if release.prerelease {
+                            format!("{} (prerelease)", release.tag)
+                        } else {
+                            release.tag.clone()
+                        };
+                        ui.selectable_value(&mut selected, release.tag.clone(), label);
+                    }
+                });
+            if current != LATEST {
+                ui.add_space(theme::SPACE_3);
+                let _ = widgets::chip_colored(ui, &t!("plugins.repo_pinned"), theme::STAT_AMBER);
+            }
+        });
+        if current != LATEST {
+            ui.add_space(theme::SPACE_3);
+            ui.label(
+                egui::RichText::new(t!("plugins.repo_pinned_hint"))
+                    .font(theme::body(10.0))
+                    .color(theme::TEXT_MUT),
+            );
+        }
         if selected != current {
             let command = if selected == LATEST {
                 halod_shared::commands::DaemonCommand::FollowLatestPluginRelease {
@@ -3236,6 +3278,17 @@ fn repo_detail_body(
         updates_disabled_note(ui);
         ui.add_space(theme::SPACE_5);
     }
+    if let Some(tag) = pinned_update {
+        widgets::Banner::warn(&t!("plugins.repo_pinned_update_title", tag = tag))
+            .subtitle(&t!(
+                "plugins.repo_pinned_update_body",
+                pinned = r.release_tag.clone().unwrap_or_default(),
+                tag = tag
+            ))
+            .dot(theme::STAT_AMBER)
+            .show(ui);
+        ui.add_space(theme::SPACE_5);
+    }
     ui.horizontal(|ui| {
         let size = Vec2::new(180.0, 32.0);
         if !updates_enabled {
@@ -3274,6 +3327,23 @@ fn repo_detail_body(
                 .clicked()
             {
                 *start_update = true;
+            }
+        }
+
+        if let Some(tag) = pinned_update.filter(|_| !has_updates && updates_enabled && !checking) {
+            ui.add_space(theme::SPACE_5);
+            let size = Vec2::new(190.0, 32.0);
+            if updating {
+                widgets::button_loading(ui, &t!("plugins.updating"), ButtonKind::Warn, size);
+            } else if widgets::button(
+                ui,
+                &t!("plugins.repos_move_pin", tag = tag),
+                ButtonKind::Warn,
+                size,
+            )
+            .clicked()
+            {
+                *start_pinned_update = Some(tag.to_owned());
             }
         }
 
@@ -3494,6 +3564,7 @@ mod tests {
             installed_tag: "v1".to_owned(),
             latest_tag: "v2".to_owned(),
             behind,
+            newer_tag: None,
         }
     }
 
@@ -3943,6 +4014,7 @@ mod tests {
             installed_tag: "v1".into(),
             latest_tag: "v1".into(),
             behind: false,
+            newer_tag: None,
         }];
         let rows = repo_rows(&repos, &up_to_date, &[]);
         assert!(!rows[0].behind);
@@ -3953,10 +4025,40 @@ mod tests {
             installed_tag: "v1".into(),
             latest_tag: "v2".into(),
             behind: true,
+            newer_tag: None,
         }];
         let rows = repo_rows(&repos, &behind, &[]);
         assert!(rows[0].behind);
         assert_eq!(rows[0].remote_short.as_deref(), Some("v2"));
+    }
+
+    #[test]
+    fn repo_rows_surfaces_a_release_available_beyond_a_pin_without_claiming_behind() {
+        let repos = vec![repo("foo", "v1")];
+        let pinned = [RepoUpdateStatus {
+            slug: "foo".into(),
+            installed_tag: "v1".into(),
+            latest_tag: "v1".into(),
+            behind: false,
+            newer_tag: Some("v2".into()),
+        }];
+        let rows = repo_rows(&repos, &pinned, &[]);
+        assert!(!rows[0].behind);
+        assert!(rows[0].pinned_update);
+        assert_eq!(rows[0].remote_short.as_deref(), Some("v2"));
+    }
+
+    #[test]
+    fn repository_update_progress_holds_while_a_pin_is_being_moved() {
+        let mut updating = HashMap::from([("repo-a".to_owned(), 0.0)]);
+        let mut pinned = repo_status("repo-a", false);
+        pinned.newer_tag = Some("v2".into());
+
+        clear_finished_repo_updates(&mut updating, std::slice::from_ref(&pinned), &[], 1.0);
+        assert!(updating.contains_key("repo-a"));
+
+        clear_finished_repo_updates(&mut updating, &[repo_status("repo-a", false)], &[], 2.0);
+        assert!(updating.is_empty());
     }
 
     #[test]
