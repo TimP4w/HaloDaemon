@@ -200,6 +200,16 @@ struct PluginState {
 /// forever and needlessly hammers the device.
 const TRANSPORT_OPEN_ATTEMPTS: u8 = 3;
 
+/// Minimum spacing between attempts. Polling scanners re-offer an unregistered
+/// handle every few seconds, which would burn the whole attempt budget before a
+/// transient owner (e.g. a previous halod instance shutting down) lets go.
+const TRANSPORT_OPEN_BACKOFF: std::time::Duration = std::time::Duration::from_secs(10);
+
+struct TransportOpenEpisode {
+    attempts: u8,
+    last_attempt: std::time::Instant,
+}
+
 /// The device-plugin registry: every piece of runtime-mutable plugin state the
 /// daemon owns. Held as [`crate::application::state::AppState::registry`] (one per process in
 /// production, one per `AppState` in tests — so tests are isolated without a
@@ -227,8 +237,9 @@ pub struct Registry {
     /// must be coalesced per plugin.
     runtime_recovery_pending: RwLock<HashSet<String>>,
     /// Failed transport opens in the current plugin-load episode, keyed by the
-    /// stable plugin device id. A successful open (or plugin reload) resets it.
-    transport_open_failures: RwLock<HashMap<(String, String), u8>>,
+    /// stable plugin device id. A successful open, plugin reload, or a USB
+    /// replug resets it.
+    transport_open_failures: RwLock<HashMap<(String, String), TransportOpenEpisode>>,
     content_revision: std::sync::atomic::AtomicU64,
 }
 
@@ -685,6 +696,26 @@ impl Registry {
     /// A user-requested full discovery is another explicit retry boundary.
     pub(crate) fn reset_transport_open_failures(&self) {
         write_recover(&self.transport_open_failures).clear();
+    }
+
+    fn transport_open_blocked(&self, key: &(String, String)) -> bool {
+        read_recover(&self.transport_open_failures)
+            .get(key)
+            .is_some_and(|episode| {
+                episode.attempts >= TRANSPORT_OPEN_ATTEMPTS
+                    || episode.last_attempt.elapsed() < TRANSPORT_OPEN_BACKOFF
+            })
+    }
+
+    fn note_transport_open_failure(&self, key: (String, String)) -> u8 {
+        let mut failures = write_recover(&self.transport_open_failures);
+        let episode = failures.entry(key).or_insert(TransportOpenEpisode {
+            attempts: 0,
+            last_attempt: std::time::Instant::now(),
+        });
+        episode.attempts = episode.attempts.saturating_add(1);
+        episode.last_attempt = std::time::Instant::now();
+        episode.attempts
     }
 
     fn is_disabled(&self, plugin_id: &str) -> bool {
@@ -2196,10 +2227,7 @@ impl Registry {
     ) -> Option<Arc<dyn Device>> {
         let id = device_id(manifest, spec, handle);
         let failure_key = (manifest.plugin_id.clone(), id.clone());
-        if read_recover(&self.transport_open_failures)
-            .get(&failure_key)
-            .is_some_and(|attempts| *attempts >= TRANSPORT_OPEN_ATTEMPTS)
-        {
+        if self.transport_open_blocked(&failure_key) {
             return None;
         }
         let notify = Arc::downgrade(app);
@@ -2233,15 +2261,10 @@ impl Registry {
             Some(Ok(t)) => t,
             Some(Err(e)) => {
                 *runtime_state.lock().unwrap() = device::RuntimeState::Closed;
-                let attempt = {
-                    let mut failures = write_recover(&self.transport_open_failures);
-                    let attempts = failures.entry(failure_key.clone()).or_default();
-                    *attempts = attempts.saturating_add(1);
-                    *attempts
-                };
+                let attempt = self.note_transport_open_failure(failure_key);
                 if attempt == TRANSPORT_OPEN_ATTEMPTS {
                     log::warn!(
-                        "plugin '{}' transport open failed (attempt {attempt}/{TRANSPORT_OPEN_ATTEMPTS}); giving up until plugins are reloaded: {e:#}",
+                        "plugin '{}' transport open failed (attempt {attempt}/{TRANSPORT_OPEN_ATTEMPTS}); giving up until a replug, rescan, or plugin reload: {e:#}",
                         manifest.plugin_id
                     );
                 } else {

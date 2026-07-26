@@ -13,20 +13,45 @@ fn declared_write_rate_limit_preserves_manifest_value() {
 #[test]
 fn transport_open_attempt_resets_have_the_right_scope() {
     let registry = super::Registry::default();
-    {
-        let mut failures = registry.transport_open_failures.write().unwrap();
-        failures.insert(("kraken".into(), "kraken-1".into()), 3);
-        failures.insert(("other".into(), "other-1".into()), 2);
-    }
+    registry.note_transport_open_failure(("kraken".into(), "kraken-1".into()));
+    registry.note_transport_open_failure(("other".into(), "other-1".into()));
 
     registry.reset_transport_open_failures_for("kraken");
-    let failures = registry.transport_open_failures.read().unwrap();
-    assert!(!failures.keys().any(|(plugin_id, _)| plugin_id == "kraken"));
-    assert_eq!(failures.get(&("other".into(), "other-1".into())), Some(&2));
-    drop(failures);
+    {
+        let failures = registry.transport_open_failures.read().unwrap();
+        assert!(!failures.keys().any(|(plugin_id, _)| plugin_id == "kraken"));
+        assert!(failures.contains_key(&("other".into(), "other-1".into())));
+    }
 
     registry.reset_transport_open_failures();
     assert!(registry.transport_open_failures.read().unwrap().is_empty());
+}
+
+#[test]
+fn transport_open_failures_back_off_between_attempts() {
+    let registry = super::Registry::default();
+    let key = ("kraken".to_owned(), "kraken-1".to_owned());
+    assert!(!registry.transport_open_blocked(&key));
+
+    // A fresh failure blocks immediate re-offers from polling scanners...
+    assert_eq!(registry.note_transport_open_failure(key.clone()), 1);
+    assert!(registry.transport_open_blocked(&key));
+
+    // ...but only until the backoff elapses.
+    let age = |registry: &super::Registry| {
+        let mut failures = registry.transport_open_failures.write().unwrap();
+        failures.get_mut(&key).unwrap().last_attempt =
+            std::time::Instant::now() - super::TRANSPORT_OPEN_BACKOFF;
+    };
+    age(&registry);
+    assert!(!registry.transport_open_blocked(&key));
+
+    // Exhausting the budget blocks regardless of elapsed time.
+    for attempt in 2..=super::TRANSPORT_OPEN_ATTEMPTS {
+        assert_eq!(registry.note_transport_open_failure(key.clone()), attempt);
+    }
+    age(&registry);
+    assert!(registry.transport_open_blocked(&key));
 }
 
 #[test]

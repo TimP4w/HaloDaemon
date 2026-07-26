@@ -29,6 +29,9 @@ pub async fn run(app: Arc<AppState>) {
             .await;
         }
         if present != last_present {
+            // A plug event is a user retry boundary: replugging must re-arm
+            // devices that exhausted their transport-open attempts.
+            app.registry.reset_transport_open_failures();
             crate::domain::registry::observers::discovery::scan_usb_non_hid(Arc::clone(&app)).await;
         }
         last_present = present;
