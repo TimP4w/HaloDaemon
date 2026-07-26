@@ -1044,10 +1044,10 @@ pub enum RepoSignatureStatus {
 pub struct RepoUpdateStatus {
     pub slug: String,
     pub installed_tag: String,
-    pub latest_tag: String,
-    pub behind: bool,
     #[serde(default)]
-    pub newer_tag: Option<String>,
+    pub available_tag: Option<String>,
+    #[serde(default)]
+    pub pinned: bool,
 }
 
 /// One package's update-availability inside a repository update check. A

@@ -3,7 +3,9 @@
 
 use crate::domain::topic_store::TopicStore;
 use egui::{Align2, Color32, Pos2, Rect, Sense, Stroke, Vec2};
-use halod_shared::types::{FanCurveStatus, PluginIssueKind, PluginUpdateStatus, UdevRulesStatus};
+use halod_shared::types::{
+    FanCurveStatus, PluginIssueKind, PluginUpdateStatus, RepoUpdateStatus, UdevRulesStatus,
+};
 
 use crate::domain::models::device as model;
 use crate::domain::models::udev::udev_rules_need_action;
@@ -41,6 +43,22 @@ pub fn plugins_needing_action(state: &TopicStore, plugin_updates: &[PluginUpdate
                 && p.health.issue.is_some())
                 || crate::ui::screens::plugins::plugin_requires_regrant(p)
                 || update_available
+        })
+        .count()
+}
+
+fn repos_needing_action(
+    updates: &[RepoUpdateStatus],
+    plugin_updates: &[PluginUpdateStatus],
+) -> usize {
+    updates
+        .iter()
+        .filter(|status| {
+            !status.pinned
+                && status.available_tag.is_some()
+                && !plugin_updates
+                    .iter()
+                    .any(|plugin| plugin.slug == status.slug && plugin.update_available)
         })
         .count()
 }
@@ -107,9 +125,11 @@ pub fn sidebar(
     connected: bool,
     page: &mut Page,
     plugin_updates: &[PluginUpdateStatus],
+    repo_updates: &[RepoUpdateStatus],
     udev_status: Option<&UdevRulesStatus>,
 ) {
     let plugin_actions = plugins_needing_action(state, plugin_updates)
+        + repos_needing_action(repo_updates, plugin_updates)
         + usize::from(udev_status.is_some_and(udev_rules_need_action));
     let plugin_errors = plugins_have_errors(state);
     let integration_actions = integrations_needing_action(state);
@@ -580,6 +600,22 @@ mod tests {
         let mut state = TopicStore::default();
         state.plugins.plugins = vec![plugin("a", true), plugin("b", true)];
         assert_eq!(plugins_needing_action(&state, &[]), 0);
+    }
+
+    #[test]
+    fn repository_hint_excludes_pinned_updates() {
+        let repo_status = |pinned| RepoUpdateStatus {
+            slug: "official".into(),
+            installed_tag: "v1".into(),
+            available_tag: Some("v2".into()),
+            pinned,
+        };
+        assert_eq!(repos_needing_action(&[repo_status(false)], &[]), 1);
+        assert_eq!(repos_needing_action(&[repo_status(true)], &[]), 0);
+        assert_eq!(
+            repos_needing_action(&[repo_status(false)], &[update("plugin", true)]),
+            0
+        );
     }
 
     #[test]

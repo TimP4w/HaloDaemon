@@ -158,7 +158,12 @@ pub async fn set_plugin_download_consent(allowed: bool, app: Arc<AppState>) -> R
     }
     app.request_config_save();
     app.record_change(crate::domain::events::Change::Gui).await;
-    if allowed {
+    if !allowed {
+        app.plugin_repo_update_status.lock().await.clear();
+        app.plugin_update_status.lock().await.clear();
+        app.record_change(crate::domain::events::Change::PluginData)
+            .await;
+    } else {
         crate::domain::registry::ensure_official_repo(&app).await;
         crate::application::usecases::plugin::plugins::reload_registry(&app).await;
         let official_plugins = app

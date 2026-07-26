@@ -395,7 +395,7 @@ impl PluginsUi {
             }
             ui.add_space(theme::SPACE_5);
         }
-        let due = plugin_updates.iter().filter(|s| s.update_available).count();
+        let due = Self::updates_due_count(repo_updates, plugin_updates);
         if due > 0 {
             if update_all_banner(ui, due, self.updating_all.is_some()) {
                 self.updating_all = Some(now);
@@ -420,6 +420,27 @@ impl PluginsUi {
                 self.skipped_notice(ui, state);
                 self.repositories(ui, state, repo_updates);
             });
+    }
+
+    fn updates_due_count(
+        repo_updates: &[RepoUpdateStatus],
+        plugin_updates: &[PluginUpdateStatus],
+    ) -> usize {
+        let package_updates = plugin_updates
+            .iter()
+            .filter(|status| status.update_available)
+            .count();
+        package_updates
+            + repo_updates
+                .iter()
+                .filter(|repo| {
+                    !repo.pinned
+                        && repo.available_tag.is_some()
+                        && !plugin_updates
+                            .iter()
+                            .any(|plugin| plugin.slug == repo.slug && plugin.update_available)
+                })
+                .count()
     }
 
     fn plugin_list(
@@ -700,17 +721,16 @@ impl PluginsUi {
 
                 // The whole repo is updatable when any of its plugins report an
                 // upstream update. Progress is reconciled before rendering.
-                let repo_has_updates = state
-                    .plugins
-                    .repo_updates
-                    .iter()
-                    .any(|status| status.slug == r.slug && status.behind);
+                let repo_has_updates = state.plugins.repo_updates.iter().any(|status| {
+                    status.slug == r.slug && !status.pinned && status.available_tag.is_some()
+                });
                 let pinned_update = state
                     .plugins
                     .repo_updates
                     .iter()
                     .find(|status| status.slug == r.slug)
-                    .and_then(|status| status.newer_tag.clone());
+                    .filter(|status| status.pinned)
+                    .and_then(|status| status.available_tag.clone());
                 let updating_repo = self.updating_repos.contains_key(&r.slug);
 
                 let mut select_plugin = None;
@@ -1069,8 +1089,6 @@ struct RepoRow<'a> {
     official: bool,
     locked_short: String,
     remote_short: Option<String>,
-    behind: bool,
-    pinned_update: bool,
     signature: &'a RepoSignatureStatus,
     integrity_failed: bool,
 }
@@ -1116,19 +1134,12 @@ fn repo_rows<'a>(
         .iter()
         .map(|r| {
             let status = updates.iter().find(|u| u.slug == r.slug);
-            let behind = status.is_some_and(|s| s.behind);
-            let newer = status.and_then(|s| s.newer_tag.clone());
+            let available = status.and_then(|s| s.available_tag.clone());
             RepoRow {
                 slug: &r.slug,
                 official: r.official,
                 locked_short: r.release_tag.clone().unwrap_or_default(),
-                remote_short: if behind {
-                    status.map(|s| s.latest_tag.clone())
-                } else {
-                    newer.clone()
-                },
-                behind,
-                pinned_update: newer.is_some(),
+                remote_short: available,
                 signature: &r.signature,
                 integrity_failed: repo_integrity_failed(&r.slug, plugins),
             }
@@ -1250,7 +1261,7 @@ fn repo_row(ui: &mut egui::Ui, row: &RepoRow, selected: bool) -> bool {
             Align2::LEFT_TOP,
             sha_text,
             theme::value_xs(),
-            if row.behind || row.pinned_update {
+            if row.remote_short.is_some() {
                 theme::STAT_AMBER
             } else {
                 theme::TEXT_FAINT2
@@ -1328,7 +1339,7 @@ fn clear_finished_repo_updates(
     updating_repos.retain(|slug, started| {
         let behind = repo_updates
             .iter()
-            .any(|status| status.slug == *slug && (status.behind || status.newer_tag.is_some()));
+            .any(|status| status.slug == *slug && status.available_tag.is_some());
         let dirty = plugin_updates.iter().any(|status| {
             status.slug == *slug && (status.update_available || status.on_disk_changed)
         });
@@ -3521,6 +3532,36 @@ mod tests {
     }
 
     #[test]
+    fn update_banner_counts_repo_only_updates_without_counting_pins_or_duplicates() {
+        let repos = [
+            RepoUpdateStatus {
+                slug: "repo-only".into(),
+                installed_tag: "v1".into(),
+                available_tag: Some("v2".into()),
+                pinned: false,
+            },
+            RepoUpdateStatus {
+                slug: "package-update".into(),
+                installed_tag: "v1".into(),
+                available_tag: Some("v2".into()),
+                pinned: false,
+            },
+            RepoUpdateStatus {
+                slug: "pinned".into(),
+                installed_tag: "v1".into(),
+                available_tag: Some("v2".into()),
+                pinned: true,
+            },
+        ];
+        let packages = [PluginUpdateStatus {
+            slug: "package-update".into(),
+            ..status("plugin", true)
+        }];
+
+        assert_eq!(PluginsUi::updates_due_count(&repos, &packages), 2);
+    }
+
+    #[test]
     fn clear_finished_updates_retires_a_plugin_that_finished_updating() {
         let mut updating = HashMap::from([("a".to_owned(), 0.0)]);
         let mut updating_all = None;
@@ -3562,9 +3603,8 @@ mod tests {
         RepoUpdateStatus {
             slug: slug.to_owned(),
             installed_tag: "v1".to_owned(),
-            latest_tag: "v2".to_owned(),
-            behind,
-            newer_tag: None,
+            available_tag: behind.then(|| "v2".to_owned()),
+            pinned: false,
         }
     }
 
@@ -4000,35 +4040,30 @@ mod tests {
         assert_eq!(rows.len(), 2);
         assert_eq!(rows[0].slug, "alpha");
         assert_eq!(rows[1].slug, "zebra");
-        assert!(!rows[0].behind);
         assert!(rows[0].remote_short.is_none());
         assert_eq!(rows[0].locked_short, "bbbbbbbb2222");
         assert_eq!(*rows[0].signature, RepoSignatureStatus::Unsigned);
     }
 
     #[test]
-    fn repo_rows_surfaces_the_latest_tag_only_when_behind() {
+    fn repo_rows_surfaces_only_an_available_release_tag() {
         let repos = vec![repo("foo", "v1")];
         let up_to_date = [RepoUpdateStatus {
             slug: "foo".into(),
             installed_tag: "v1".into(),
-            latest_tag: "v1".into(),
-            behind: false,
-            newer_tag: None,
+            available_tag: None,
+            pinned: false,
         }];
         let rows = repo_rows(&repos, &up_to_date, &[]);
-        assert!(!rows[0].behind);
         assert!(rows[0].remote_short.is_none());
 
         let behind = [RepoUpdateStatus {
             slug: "foo".into(),
             installed_tag: "v1".into(),
-            latest_tag: "v2".into(),
-            behind: true,
-            newer_tag: None,
+            available_tag: Some("v2".into()),
+            pinned: false,
         }];
         let rows = repo_rows(&repos, &behind, &[]);
-        assert!(rows[0].behind);
         assert_eq!(rows[0].remote_short.as_deref(), Some("v2"));
     }
 
@@ -4038,13 +4073,10 @@ mod tests {
         let pinned = [RepoUpdateStatus {
             slug: "foo".into(),
             installed_tag: "v1".into(),
-            latest_tag: "v1".into(),
-            behind: false,
-            newer_tag: Some("v2".into()),
+            available_tag: Some("v2".into()),
+            pinned: true,
         }];
         let rows = repo_rows(&repos, &pinned, &[]);
-        assert!(!rows[0].behind);
-        assert!(rows[0].pinned_update);
         assert_eq!(rows[0].remote_short.as_deref(), Some("v2"));
     }
 
@@ -4052,7 +4084,8 @@ mod tests {
     fn repository_update_progress_holds_while_a_pin_is_being_moved() {
         let mut updating = HashMap::from([("repo-a".to_owned(), 0.0)]);
         let mut pinned = repo_status("repo-a", false);
-        pinned.newer_tag = Some("v2".into());
+        pinned.available_tag = Some("v2".into());
+        pinned.pinned = true;
 
         clear_finished_repo_updates(&mut updating, std::slice::from_ref(&pinned), &[], 1.0);
         assert!(updating.contains_key("repo-a"));

@@ -366,9 +366,8 @@ pub async fn list_releases(url: String, client: ClientHandle) -> Result<()> {
     Ok(())
 }
 
-/// Preconditions a release must satisfy before its content is downloaded. The
-/// update check runs it too, so a release is only advertised when it installs.
-fn inspect_installable(
+/// Validate the release metadata that gates both advertising and installation.
+fn inspect_release(
     record: &PluginRepoRecord,
     release: &crate::domain::plugin::release_source::PublishedRelease,
 ) -> Result<(
@@ -436,9 +435,9 @@ pub async fn install_release(
     .context("release lookup task panicked")??;
 
     let inspect_record = record.clone();
-    let inspect_release = published.clone();
+    let release_to_inspect = published.clone();
     let (manifest, manifest_bytes, signature_bytes, trusted_key) =
-        tokio::task::spawn_blocking(move || inspect_installable(&inspect_record, &inspect_release))
+        tokio::task::spawn_blocking(move || inspect_release(&inspect_record, &release_to_inspect))
             .await
             .context("release inspection task panicked")??;
 
@@ -592,13 +591,7 @@ async fn compute_repo_updates(
     Vec<RepoUpdateStatus>,
     Vec<halod_shared::types::PluginUpdateStatus>,
 ) {
-    let (repos, installed_hashes) = {
-        let cfg = app.config.read().await;
-        (
-            cfg.plugins.repos.clone(),
-            cfg.plugins.installed_hashes.clone(),
-        )
-    };
+    let repos = app.config.read().await.plugins.repos.clone();
     let mut out = Vec::with_capacity(repos.len());
     let mut plugins = Vec::new();
     for r in repos {
@@ -621,67 +614,70 @@ async fn compute_repo_updates(
                 continue;
             }
         };
-        let pinned = match &r.release_policy {
+        let pin = match &r.release_policy {
             crate::config::PluginReleasePolicy::Latest => None,
             crate::config::PluginReleasePolicy::Pinned(tag) => Some(tag.as_str()),
         };
-        let Some(index) = releases
+        let Some(selected_index) = releases
             .iter()
-            .position(|release| pinned.map_or(!release.prerelease, |tag| release.tag == tag))
+            .position(|release| pin.map_or(!release.prerelease, |tag| release.tag == tag))
         else {
             log::warn!("selected plugin release for '{}' was not found", r.slug);
             continue;
         };
-        let selected = &releases[index];
-        let behind = r.release_tag.as_deref() != Some(selected.tag.as_str());
-        if behind {
-            plugins.extend(remote_package_updates(&r, selected, &installed_hashes).await);
-        }
-        // GitHub lists newest first, so everything above the pin was published later.
-        let newer_tag = match pinned {
-            Some(_) => newer_installable_release(&r, &releases[..index]).await,
+        let installed_tag = r.release_tag.as_deref();
+        let candidate = match pin {
+            Some(_) if installed_tag == Some(releases[selected_index].tag.as_str()) => releases
+                [..selected_index]
+                .iter()
+                .find(|release| !release.prerelease),
+            _ if selected_release_is_update(installed_tag, &releases[selected_index].tag) => {
+                Some(&releases[selected_index])
+            }
+            _ => None,
+        };
+        let inspected = match candidate {
+            Some(release) => inspect_update_candidate(&r, release).await,
             None => None,
         };
-        match (behind, &newer_tag) {
-            (true, _) => log::info!(
-                "plugin repository '{}' is behind: {} → {}",
+        let available_tag = inspected.as_ref().map(|(tag, _)| tag.clone());
+        if let Some((tag, manifest)) = inspected {
+            log::info!(
+                "plugin repository '{}' update available: {} → {tag}",
                 r.slug,
-                r.release_tag.as_deref().unwrap_or("none"),
-                selected.tag
-            ),
-            (false, Some(tag)) => log::info!(
-                "plugin repository '{}' is pinned to {} and release {tag} is available",
-                r.slug,
-                pinned.unwrap_or_default()
-            ),
-            (false, None) => log::debug!(
-                "plugin repository '{}' is up to date at {}",
-                r.slug,
-                selected.tag
-            ),
+                r.release_tag.as_deref().unwrap_or("none")
+            );
+            if pin.is_none() {
+                plugins.extend(remote_package_updates(&r, manifest).await);
+            }
+        } else {
+            log::debug!("plugin repository '{}' is up to date", r.slug);
         }
         out.push(RepoUpdateStatus {
             installed_tag: r.release_tag.clone().unwrap_or_default(),
             slug: r.slug.clone(),
-            behind,
-            latest_tag: selected.tag.clone(),
-            newer_tag,
+            available_tag,
+            pinned: pin.is_some(),
         });
     }
     (out, plugins)
 }
 
+fn selected_release_is_update(installed_tag: Option<&str>, selected_tag: &str) -> bool {
+    installed_tag != Some(selected_tag)
+}
+
 /// Newest stable release published after a pinned selection.
-async fn newer_installable_release(
+async fn inspect_update_candidate(
     record: &PluginRepoRecord,
-    later: &[crate::domain::plugin::release_source::PublishedRelease],
-) -> Option<String> {
-    let candidate = later.iter().find(|release| !release.prerelease)?.clone();
+    candidate: &crate::domain::plugin::release_source::PublishedRelease,
+) -> Option<(String, repo::RepositoryManifest)> {
+    let candidate = candidate.clone();
     let tag = candidate.tag.clone();
     let slug = record.slug.clone();
     let record = record.clone();
-    match tokio::task::spawn_blocking(move || inspect_installable(&record, &candidate)).await {
-        Ok(Ok(_)) => Some(tag),
+    match tokio::task::spawn_blocking(move || inspect_release(&record, &candidate)).await {
+        Ok(Ok((manifest, _, _, _))) => Some((tag, manifest)),
         Ok(Err(error)) => {
             log::info!("release '{tag}' of '{slug}' is not installable: {error:#}");
             None
@@ -695,42 +691,15 @@ async fn newer_installable_release(
 
 async fn remote_package_updates(
     record: &PluginRepoRecord,
-    release: &crate::domain::plugin::release_source::PublishedRelease,
-    installed_hashes: &std::collections::HashMap<String, String>,
+    manifest: repo::RepositoryManifest,
 ) -> Vec<halod_shared::types::PluginUpdateStatus> {
-    let trust = trust_for_record(record);
-    let target = release.clone();
-    let manifest = match tokio::task::spawn_blocking(move || {
-        crate::domain::plugin::release_source::inspect(&target, &trust)
-            .map(|(manifest, _, _)| manifest)
-    })
-    .await
-    {
-        Ok(Ok(manifest)) => manifest,
-        Ok(Err(error)) => {
-            log::warn!(
-                "inspecting release '{}' of '{}': {error:#}",
-                release.tag,
-                record.slug
-            );
-            return Vec::new();
-        }
-        Err(error) => {
-            log::warn!(
-                "release inspection task for '{}' panicked: {error}",
-                record.slug
-            );
-            return Vec::new();
-        }
-    };
-
     let active_dir = repo::active_revision_dir(record);
-    let installed_versions: std::collections::HashMap<String, String> =
+    let installed: std::collections::HashMap<String, (String, String)> =
         match tokio::task::spawn_blocking(move || repo::read_repository_index(&active_dir)).await {
             Ok(Ok(index)) => index
                 .packages
                 .into_iter()
-                .map(|package| (package.id, package.version))
+                .map(|package| (package.id, (package.version, package.sha256)))
                 .collect(),
             _ => std::collections::HashMap::new(),
         };
@@ -738,15 +707,11 @@ async fn remote_package_updates(
     let updates: Vec<_> = manifest
         .packages
         .into_iter()
-        .filter(|package| {
-            installed_hashes
-                .get(&package.id)
-                .is_some_and(|installed| installed != &package.sha256)
-        })
+        .filter(|package| package_has_update(installed.get(&package.id), &package.sha256))
         .map(|package| halod_shared::types::PluginUpdateStatus {
-            current_version: installed_versions
+            current_version: installed
                 .get(&package.id)
-                .cloned()
+                .map(|(version, _)| version.clone())
                 .unwrap_or_default(),
             plugin_id: package.id,
             slug: record.slug.clone(),
@@ -765,6 +730,10 @@ async fn remote_package_updates(
         );
     }
     updates
+}
+
+fn package_has_update(installed: Option<&(String, String)>, available_hash: &str) -> bool {
+    installed.is_none_or(|(_, hash)| hash != available_hash)
 }
 
 fn merge_plugin_updates(
@@ -874,7 +843,7 @@ pub async fn update_all_plugins(app: Arc<AppState>) -> Result<()> {
         .await
         .0
         .into_iter()
-        .filter(|status| status.behind)
+        .filter(|status| status.available_tag.is_some() && !status.pinned)
     {
         slugs.insert(status.slug);
     }
@@ -895,6 +864,11 @@ pub async fn update_all_plugins(app: Arc<AppState>) -> Result<()> {
 /// status and commit both to the retained plugins record.
 /// Errors are logged per-repo inside the compute helpers, so this never fails.
 pub async fn check_updates_broadcast(app: Arc<AppState>) {
+    if app.config.read().await.gui.plugin_downloads
+        != halod_shared::types::PluginDownloadConsent::Allowed
+    {
+        return;
+    }
     let (repo_statuses, remote_updates) = compute_repo_updates(&app).await;
     let reached: Vec<String> = repo_statuses.iter().map(|s| s.slug.clone()).collect();
     publish_repo_updates(&app, repo_statuses).await;
@@ -1031,10 +1005,28 @@ async fn settle_repo_update_status(app: &Arc<AppState>, slug: &str, installed_ta
         return;
     };
     if let Some(tag) = installed_tag {
-        status.latest_tag = tag.to_owned();
+        status.installed_tag = tag.to_owned();
     }
-    status.installed_tag = status.latest_tag.clone();
-    status.behind = false;
-    status.newer_tag = None;
+    status.available_tag = None;
     publish_repo_updates(app, statuses).await;
+}
+
+#[cfg(test)]
+mod tests {
+    use super::{package_has_update, selected_release_is_update};
+
+    #[test]
+    fn selected_release_is_only_an_update_when_the_tag_changed() {
+        assert!(!selected_release_is_update(Some("v2"), "v2"));
+        assert!(selected_release_is_update(Some("v1"), "v2"));
+        assert!(selected_release_is_update(None, "v2"));
+    }
+
+    #[test]
+    fn package_update_uses_the_installed_repository_revision() {
+        let installed = ("1.0.0".to_owned(), "old-hash".to_owned());
+        assert!(!package_has_update(Some(&installed), "old-hash"));
+        assert!(package_has_update(Some(&installed), "new-hash"));
+        assert!(package_has_update(None, "new-package-hash"));
+    }
 }

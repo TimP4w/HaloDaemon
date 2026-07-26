@@ -401,6 +401,7 @@ impl App {
                     connected,
                     &mut self.page,
                     &state.plugins.updates,
+                    &state.plugins.repo_updates,
                     udev_rules,
                 );
             });
