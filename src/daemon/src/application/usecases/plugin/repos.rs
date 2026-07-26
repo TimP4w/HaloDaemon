@@ -573,9 +573,21 @@ pub async fn remove_repo(slug: String, app: Arc<AppState>) -> Result<()> {
 }
 
 /// Compare every registered source with its selected release.
-async fn compute_repo_updates(app: &Arc<AppState>) -> Vec<RepoUpdateStatus> {
-    let repos = app.config.read().await.plugins.repos.clone();
+async fn compute_repo_updates(
+    app: &Arc<AppState>,
+) -> (
+    Vec<RepoUpdateStatus>,
+    Vec<halod_shared::types::PluginUpdateStatus>,
+) {
+    let (repos, installed_hashes) = {
+        let cfg = app.config.read().await;
+        (
+            cfg.plugins.repos.clone(),
+            cfg.plugins.installed_hashes.clone(),
+        )
+    };
     let mut out = Vec::with_capacity(repos.len());
+    let mut plugins = Vec::new();
     for r in repos {
         if r.source_kind == crate::config::PluginRepoSourceKind::Release {
             let source = r.url.clone();
@@ -595,12 +607,19 @@ async fn compute_repo_updates(app: &Arc<AppState>) -> Vec<RepoUpdateStatus> {
             })
             .await
             {
-                Ok(Ok(latest)) => out.push(RepoUpdateStatus {
-                    slug: r.slug,
-                    installed_tag: r.release_tag.clone().unwrap_or_default(),
-                    behind: r.release_tag.as_deref() != Some(latest.tag.as_str()),
-                    latest_tag: latest.tag,
-                }),
+                Ok(Ok(latest)) => {
+                    let behind = r.release_tag.as_deref() != Some(latest.tag.as_str());
+                    if behind {
+                        plugins
+                            .extend(remote_package_updates(&r, &latest, &installed_hashes).await);
+                    }
+                    out.push(RepoUpdateStatus {
+                        installed_tag: r.release_tag.clone().unwrap_or_default(),
+                        slug: r.slug,
+                        behind,
+                        latest_tag: latest.tag,
+                    });
+                }
                 Ok(Err(error)) => {
                     log::warn!("checking releases for '{}': {error:#}", r.slug)
                 }
@@ -609,7 +628,90 @@ async fn compute_repo_updates(app: &Arc<AppState>) -> Vec<RepoUpdateStatus> {
             continue;
         }
     }
-    out
+    (out, plugins)
+}
+
+async fn remote_package_updates(
+    record: &PluginRepoRecord,
+    release: &crate::domain::plugin::release_source::PublishedRelease,
+    installed_hashes: &std::collections::HashMap<String, String>,
+) -> Vec<halod_shared::types::PluginUpdateStatus> {
+    let trust = trust_for_record(record);
+    let target = release.clone();
+    let manifest = match tokio::task::spawn_blocking(move || {
+        crate::domain::plugin::release_source::inspect(&target, &trust)
+            .map(|(manifest, _, _)| manifest)
+    })
+    .await
+    {
+        Ok(Ok(manifest)) => manifest,
+        Ok(Err(error)) => {
+            log::warn!(
+                "inspecting release '{}' of '{}': {error:#}",
+                release.tag,
+                record.slug
+            );
+            return Vec::new();
+        }
+        Err(error) => {
+            log::warn!(
+                "release inspection task for '{}' panicked: {error}",
+                record.slug
+            );
+            return Vec::new();
+        }
+    };
+
+    let active_dir = repo::active_revision_dir(record);
+    let installed_versions: std::collections::HashMap<String, String> =
+        match tokio::task::spawn_blocking(move || repo::read_repository_index(&active_dir)).await {
+            Ok(Ok(index)) => index
+                .packages
+                .into_iter()
+                .map(|package| (package.id, package.version))
+                .collect(),
+            _ => std::collections::HashMap::new(),
+        };
+
+    manifest
+        .packages
+        .into_iter()
+        .filter(|package| {
+            installed_hashes
+                .get(&package.id)
+                .is_some_and(|installed| installed != &package.sha256)
+        })
+        .map(|package| halod_shared::types::PluginUpdateStatus {
+            current_version: installed_versions
+                .get(&package.id)
+                .cloned()
+                .unwrap_or_default(),
+            plugin_id: package.id,
+            slug: record.slug.clone(),
+            update_available: true,
+            on_disk_changed: false,
+            available_version: package.version,
+        })
+        .collect()
+}
+
+fn merge_plugin_updates(
+    mut into: Vec<halod_shared::types::PluginUpdateStatus>,
+    from: Vec<halod_shared::types::PluginUpdateStatus>,
+) -> Vec<halod_shared::types::PluginUpdateStatus> {
+    for status in from {
+        match into
+            .iter_mut()
+            .find(|existing| existing.plugin_id == status.plugin_id)
+        {
+            Some(existing) => {
+                existing.update_available |= status.update_available;
+                existing.on_disk_changed |= status.on_disk_changed;
+            }
+            None => into.push(status),
+        }
+    }
+    into
 }
 
 /// Every repository package (optionally scoped to one repo), compared to the
@@ -661,7 +763,15 @@ async fn touch_last_sync(app: &Arc<AppState>, slugs: &[String]) {
 pub(crate) async fn broadcast_plugin_updates(app: &Arc<AppState>, slug_filter: Option<&str>) {
     let (statuses, reached) = compute_plugin_updates(app, slug_filter).await;
     touch_last_sync(app, &reached).await;
-    publish_plugin_updates(app, statuses).await;
+    let retained: Vec<_> = app
+        .plugin_update_status
+        .lock()
+        .await
+        .iter()
+        .filter(|status| !reached.contains(&status.slug))
+        .cloned()
+        .collect();
+    publish_plugin_updates(app, merge_plugin_updates(retained, statuses)).await;
 }
 
 /// Cache and commit the latest plugin-update status.
@@ -690,6 +800,7 @@ pub async fn update_all_plugins(app: Arc<AppState>) -> Result<()> {
     }
     for status in compute_repo_updates(&app)
         .await
+        .0
         .into_iter()
         .filter(|status| status.behind)
     {
@@ -712,20 +823,14 @@ pub async fn update_all_plugins(app: Arc<AppState>) -> Result<()> {
 /// status and commit both to the retained plugins record.
 /// Errors are logged per-repo inside the compute helpers, so this never fails.
 pub async fn check_updates_broadcast(app: Arc<AppState>) {
-    let repo_statuses = compute_repo_updates(&app).await;
+    let (repo_statuses, remote_updates) = compute_repo_updates(&app).await;
     let reached: Vec<String> = repo_statuses.iter().map(|s| s.slug.clone()).collect();
     publish_repo_updates(&app, repo_statuses).await;
     touch_last_sync(&app, &reached).await;
 
-    let (mut statuses, plugin_reached) = compute_plugin_updates(&app, None).await;
-    // Re-add on-disk flags for repos whose remote fetch failed (skipped above).
-    for od in compute_on_disk_changes(&app).await {
-        if !statuses.iter().any(|s| s.plugin_id == od.plugin_id) {
-            statuses.push(od);
-        }
-    }
+    let (on_disk, plugin_reached) = compute_plugin_updates(&app, None).await;
     touch_last_sync(&app, &plugin_reached).await;
-    publish_plugin_updates(&app, statuses).await;
+    publish_plugin_updates(&app, merge_plugin_updates(remote_updates, on_disk)).await;
 }
 
 /// Every repo plugin whose package content differs from the digest installed
@@ -810,14 +915,7 @@ pub async fn quarantine_changed_plugins(app: Arc<AppState>) {
 
 /// Check every registered repo for updates and commit the result.
 pub async fn check_repo_updates(app: Arc<AppState>, _client: ClientHandle) -> Result<()> {
-    let statuses = compute_repo_updates(&app).await;
-    // Each returned status is a repo we successfully reached — stamp their sync.
-    let reached: Vec<String> = statuses.iter().map(|s| s.slug.clone()).collect();
-    touch_last_sync(&app, &reached).await;
-    publish_repo_updates(&app, statuses).await;
-    // A repo check must also refresh the per-plugin update flags, or the plugin
-    // update banners never appear until the daemon restarts.
-    broadcast_plugin_updates(&app, None).await;
+    check_updates_broadcast(app).await;
     Ok(())
 }
 

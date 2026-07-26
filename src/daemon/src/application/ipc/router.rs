@@ -454,10 +454,13 @@ async fn dispatch(
         }
         DaemonCommand::UpdatePluginRepo { slug } => {
             let result =
-                crate::application::usecases::plugin::repos::update_repo(slug, app.clone()).await;
-            // Refresh per-plugin update flags so the banners clear once the pull
-            // lands (a single update, unlike update-all, otherwise leaves them stale).
-            crate::application::usecases::plugin::repos::broadcast_plugin_updates(&app, None).await;
+                crate::application::usecases::plugin::repos::update_repo(slug.clone(), app.clone())
+                    .await;
+            crate::application::usecases::plugin::repos::broadcast_plugin_updates(
+                &app,
+                Some(&slug),
+            )
+            .await;
             result
         }
         DaemonCommand::InstallPluginRelease { slug, tag } => {
