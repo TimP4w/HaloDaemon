@@ -834,13 +834,34 @@ pub async fn update_repo(slug: String, app: Arc<AppState>) -> Result<()> {
         .find(|record| record.slug == slug)
         .cloned()
         .ok_or_else(|| anyhow::anyhow!("unknown plugin source {slug}"))?;
-    match record.source_kind {
-        crate::config::PluginRepoSourceKind::Archive => refresh_archive_repo(record, app).await,
+    let result = match record.source_kind {
+        crate::config::PluginRepoSourceKind::Archive => {
+            refresh_archive_repo(record, app.clone()).await
+        }
         crate::config::PluginRepoSourceKind::Release => match record.release_policy {
-            crate::config::PluginReleasePolicy::Latest => follow_latest_release(slug, app).await,
+            crate::config::PluginReleasePolicy::Latest => {
+                follow_latest_release(slug.clone(), app.clone()).await
+            }
             crate::config::PluginReleasePolicy::Pinned(tag) => {
-                install_release(slug, tag, true, app).await
+                install_release(slug.clone(), tag, true, app.clone()).await
             }
         },
+    };
+    if result.is_ok() {
+        settle_repo_update_status(&app, &slug).await;
     }
+    result
+}
+
+/// The repository now holds its selected release, so it is no longer behind.
+/// Without this the GUI keeps offering "Update repo" after a successful pull —
+/// the repo-level status is only otherwise recomputed by an explicit check.
+async fn settle_repo_update_status(app: &Arc<AppState>, slug: &str) {
+    let mut statuses = app.plugin_repo_update_status.lock().await.clone();
+    let Some(status) = statuses.iter_mut().find(|status| status.slug == slug) else {
+        return;
+    };
+    status.installed_tag = status.latest_tag.clone();
+    status.behind = false;
+    publish_repo_updates(app, statuses).await;
 }

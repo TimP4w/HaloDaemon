@@ -245,14 +245,19 @@ impl PluginsUi {
         decode_new_assets(ctx, plugin_assets, &mut self.asset_textures);
     }
 
-    fn sync_update_progress(&mut self, plugin_updates: &[PluginUpdateStatus], now: f64) {
+    fn sync_update_progress(
+        &mut self,
+        repo_updates: &[RepoUpdateStatus],
+        plugin_updates: &[PluginUpdateStatus],
+        now: f64,
+    ) {
         clear_finished_updates(
             &mut self.updating,
             &mut self.updating_all,
             plugin_updates,
             now,
         );
-        clear_finished_repo_updates(&mut self.updating_repos, plugin_updates, now);
+        clear_finished_repo_updates(&mut self.updating_repos, repo_updates, plugin_updates, now);
     }
 
     fn body(
@@ -274,7 +279,7 @@ impl PluginsUi {
             ),
         );
         let now = ui.input(|i| i.time);
-        self.sync_update_progress(plugin_updates, now);
+        self.sync_update_progress(repo_updates, plugin_updates, now);
         if self.updating_all.is_some()
             || !self.updating.is_empty()
             || !self.updating_repos.is_empty()
@@ -1284,16 +1289,24 @@ fn clear_finished_updates(
     }
 }
 
+/// A repo update is in flight until the reason it was offered is gone: the repo
+/// is no longer behind its selected release and no package it owns is still
+/// changed on disk. Keyed off the repo-level status, not per-plugin
+/// `update_available` — a repo can be behind while every package is unchanged.
 fn clear_finished_repo_updates(
     updating_repos: &mut HashMap<String, f64>,
+    repo_updates: &[RepoUpdateStatus],
     plugin_updates: &[PluginUpdateStatus],
     now: f64,
 ) {
     updating_repos.retain(|slug, started| {
-        plugin_updates
+        let behind = repo_updates
             .iter()
-            .any(|status| status.slug == *slug && status.update_available)
-            && now - *started < UPDATE_TIMEOUT
+            .any(|status| status.slug == *slug && status.behind);
+        let dirty = plugin_updates.iter().any(|status| {
+            status.slug == *slug && (status.update_available || status.on_disk_changed)
+        });
+        (behind || dirty) && now - *started < UPDATE_TIMEOUT
     });
 }
 
@@ -3475,18 +3488,65 @@ mod tests {
         assert_eq!(updating_all, None);
     }
 
+    fn repo_status(slug: &str, behind: bool) -> RepoUpdateStatus {
+        RepoUpdateStatus {
+            slug: slug.to_owned(),
+            installed_tag: "v1".to_owned(),
+            latest_tag: "v2".to_owned(),
+            behind,
+        }
+    }
+
     #[test]
     fn repository_update_progress_tracks_multiple_repositories_independently() {
         let mut updating = HashMap::from([("repo-a".to_owned(), 0.0), ("repo-b".to_owned(), 0.0)]);
-        let mut repo_a = status("a", false);
-        repo_a.slug = "repo-a".into();
-        let mut repo_b = status("b", true);
-        repo_b.slug = "repo-b".into();
 
-        clear_finished_repo_updates(&mut updating, &[repo_a, repo_b], 1.0);
+        clear_finished_repo_updates(
+            &mut updating,
+            &[repo_status("repo-a", false), repo_status("repo-b", true)],
+            &[],
+            1.0,
+        );
 
         assert!(!updating.contains_key("repo-a"));
         assert!(updating.contains_key("repo-b"));
+    }
+
+    #[test]
+    fn repository_update_progress_survives_a_repo_with_no_per_plugin_updates() {
+        let mut updating = HashMap::from([("repo-a".to_owned(), 0.0)]);
+
+        // A repo can be behind while every package it owns is unchanged; the
+        // spinner must not be retired the frame after the click.
+        clear_finished_repo_updates(&mut updating, &[repo_status("repo-a", true)], &[], 1.0);
+        assert!(updating.contains_key("repo-a"));
+
+        clear_finished_repo_updates(&mut updating, &[repo_status("repo-a", false)], &[], 2.0);
+        assert!(updating.is_empty());
+    }
+
+    #[test]
+    fn repository_update_progress_holds_while_a_package_is_changed_on_disk() {
+        let mut updating = HashMap::from([("repo-a".to_owned(), 0.0)]);
+        let mut dirty = status("a", false);
+        dirty.slug = "repo-a".into();
+        dirty.on_disk_changed = true;
+
+        clear_finished_repo_updates(
+            &mut updating,
+            &[repo_status("repo-a", false)],
+            std::slice::from_ref(&dirty),
+            1.0,
+        );
+        assert!(updating.contains_key("repo-a"));
+
+        clear_finished_repo_updates(
+            &mut updating,
+            &[repo_status("repo-a", false)],
+            &[],
+            UPDATE_TIMEOUT + 1.0,
+        );
+        assert!(updating.is_empty());
     }
 
     #[test]
