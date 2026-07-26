@@ -671,7 +671,7 @@ pub(crate) fn show_native_notifications(notifications: &[halod_shared::types::No
         }
         let (title, message) =
             crate::domain::models::notifications::notification_text(&notification.code);
-        crate::domain::native_notification::show(&title, &message);
+        crate::domain::native_notification::show(&title, &message, notification.code.severity());
     }
 }
 

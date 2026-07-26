@@ -1,10 +1,12 @@
 // SPDX-License-Identifier: GPL-3.0-or-later
 //! Best-effort native desktop notifications for events discovered by the GUI.
 
+use halod_shared::types::NotificationSeverity;
+
 /// Show a native notification without blocking the render loop. Delivery is
 /// best-effort: the in-app error toast remains the authoritative notification.
-pub fn show(title: &str, message: &str) {
-    platform::show(title, message);
+pub fn show(title: &str, message: &str, severity: NotificationSeverity) {
+    platform::show(title, message, severity);
 }
 
 #[cfg(target_os = "linux")]
@@ -15,14 +17,34 @@ mod platform {
 
     use zbus::zvariant::{Str, Value};
 
+    use super::NotificationSeverity;
+
     static NEXT_NOTIFICATION_ID: AtomicU64 = AtomicU64::new(1);
 
-    pub(super) fn show(title: &str, message: &str) {
+    /// Only critical urgency is exempt from the server's expiry timer, so
+    /// anything below an error has to stay under it to auto-dismiss.
+    fn gtk_priority(severity: NotificationSeverity) -> &'static str {
+        match severity {
+            NotificationSeverity::Info => "normal",
+            NotificationSeverity::Warning => "high",
+            NotificationSeverity::Error => "urgent",
+        }
+    }
+
+    fn freedesktop_urgency(severity: NotificationSeverity) -> u8 {
+        match severity {
+            NotificationSeverity::Info => 1,
+            NotificationSeverity::Warning => 1,
+            NotificationSeverity::Error => 2,
+        }
+    }
+
+    pub(super) fn show(title: &str, message: &str, severity: NotificationSeverity) {
         let title = title.to_owned();
         let message = message.to_owned();
         std::thread::spawn(move || {
             for attempt in 1..=3 {
-                match send(&title, &message) {
+                match send(&title, &message, severity) {
                     Ok(backend) => {
                         log::debug!("showed native notification through {backend}");
                         return;
@@ -41,13 +63,17 @@ mod platform {
         });
     }
 
-    fn send(title: &str, message: &str) -> zbus::Result<&'static str> {
+    fn send(
+        title: &str,
+        message: &str,
+        severity: NotificationSeverity,
+    ) -> zbus::Result<&'static str> {
         let connection = zbus::blocking::Connection::session()?;
-        match send_gtk(&connection, title, message) {
+        match send_gtk(&connection, title, message, severity) {
             Ok(()) => Ok("GTK notification service"),
             Err(gtk_error) => {
                 log::debug!("GTK notification service unavailable: {gtk_error}");
-                send_freedesktop(&connection, title, message)?;
+                send_freedesktop(&connection, title, message, severity)?;
                 Ok("freedesktop service")
             }
         }
@@ -57,6 +83,7 @@ mod platform {
         connection: &zbus::blocking::Connection,
         title: &str,
         message: &str,
+        severity: NotificationSeverity,
     ) -> zbus::Result<()> {
         let proxy = zbus::blocking::Proxy::new(
             connection,
@@ -67,7 +94,7 @@ mod platform {
         let mut notification: HashMap<&str, Value<'_>> = HashMap::new();
         notification.insert("title", Value::Str(Str::from(title)));
         notification.insert("body", Value::Str(Str::from(message)));
-        notification.insert("priority", Value::Str(Str::from("urgent")));
+        notification.insert("priority", Value::Str(Str::from(gtk_priority(severity))));
 
         // Reusing a GTK notification ID replaces the existing notification.
         // Include the process ID so notifications retained across GUI restarts
@@ -84,6 +111,7 @@ mod platform {
         connection: &zbus::blocking::Connection,
         title: &str,
         message: &str,
+        severity: NotificationSeverity,
     ) -> zbus::Result<()> {
         let proxy = zbus::blocking::Proxy::new(
             connection,
@@ -93,7 +121,7 @@ mod platform {
         )?;
         let actions: Vec<&str> = Vec::new();
         let mut hints: HashMap<&str, Value<'_>> = HashMap::new();
-        hints.insert("urgency", Value::U8(2));
+        hints.insert("urgency", Value::U8(freedesktop_urgency(severity)));
         hints.insert(
             "desktop-entry",
             Value::Str(Str::from(halod_shared::app::APP_ID)),
@@ -113,6 +141,21 @@ mod platform {
         )?;
         Ok(())
     }
+
+    #[cfg(test)]
+    mod tests {
+        use super::*;
+
+        #[test]
+        fn only_errors_opt_out_of_the_expiry_timer() {
+            for severity in [NotificationSeverity::Info, NotificationSeverity::Warning] {
+                assert_ne!(gtk_priority(severity), "urgent");
+                assert_ne!(freedesktop_urgency(severity), 2);
+            }
+            assert_eq!(gtk_priority(NotificationSeverity::Error), "urgent");
+            assert_eq!(freedesktop_urgency(NotificationSeverity::Error), 2);
+        }
+    }
 }
 
 #[cfg(target_os = "windows")]
@@ -124,7 +167,7 @@ mod platform {
         UI::Notifications::{ToastNotification, ToastNotificationManager},
     };
 
-    pub(super) fn show(title: &str, message: &str) {
+    pub(super) fn show(title: &str, message: &str, _severity: super::NotificationSeverity) {
         if let Err(error) = send(title, message) {
             log::warn!("failed to show native notification: {error}");
         }
@@ -158,5 +201,5 @@ mod platform {
 
 #[cfg(not(any(target_os = "linux", target_os = "windows")))]
 mod platform {
-    pub(super) fn show(_title: &str, _message: &str) {}
+    pub(super) fn show(_title: &str, _message: &str, _severity: super::NotificationSeverity) {}
 }
