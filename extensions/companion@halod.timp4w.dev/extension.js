@@ -54,20 +54,24 @@ export default class HalodFocusWatcher extends Extension {
       const [, bytes] = GLib.file_get_contents(`/proc/${pid}/cmdline`);
       const args = new TextDecoder().decode(bytes).split("\0");
 
+      // GLib.path_get_basename only splits on "/", so DOS paths need both.
+      const basename = (p) => p.split(/[\\/]/).pop().toLowerCase();
+      // Reject Windows system paths — Wine-internal processes, not real apps.
+      const isSystem = (a) => a.toLowerCase().includes("\\windows\\");
+
       // Prefer an arg ending in .exe.
-      const exeArg = args.find((a) => a.toLowerCase().endsWith(".exe"));
+      const exeArg = args.find(
+        (a) => a.toLowerCase().endsWith(".exe") && !isSystem(a),
+      );
       if (exeArg) {
-        const base = GLib.path_get_basename(exeArg);
-        return base.replace(/\.exe$/i, "").toLowerCase() || null;
+        return basename(exeArg).replace(/\.exe$/, "") || null;
       }
 
       // Fallback: Wine maps the Linux fs under z:\ — match any Windows-style
       // path (e.g. "z:\...\ds") and take its basename.
-      const winPath = args.find((a) => /^[a-z]:\\/i.test(a));
+      const winPath = args.find((a) => /^[a-z]:\\/i.test(a) && !isSystem(a));
       if (winPath) {
-        const parts = winPath.split("\\");
-        const base = parts[parts.length - 1].toLowerCase();
-        return base || null;
+        return basename(winPath) || null;
       }
 
       return null;
