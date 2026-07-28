@@ -96,6 +96,7 @@ pub enum DaemonCommand {
         name: String,
     },
     RemoveProfileOverride {
+        profile: String,
         target: OverrideTarget,
     },
     /// Persist the RGB Lighting view's device/zone selection in the active profile.
@@ -1317,6 +1318,7 @@ mod tests {
     fn remove_profile_override_parses_device_capability() {
         let cmd: DaemonCommand = serde_json::from_value(json!({
             "type": "remove_profile_override",
+            "profile": "Gaming",
             "target": { "kind": "device_capability", "device_id": "d", "state_key": "fan_curve" }
         }))
         .unwrap();
@@ -1327,13 +1329,15 @@ mod tests {
     fn remove_profile_override_parses_canvas() {
         let cmd: DaemonCommand = serde_json::from_value(json!({
             "type": "remove_profile_override",
+            "profile": "Gaming",
             "target": { "kind": "canvas" }
         }))
         .unwrap();
         assert!(matches!(
             cmd,
             DaemonCommand::RemoveProfileOverride {
-                target: OverrideTarget::Canvas
+                target: OverrideTarget::Canvas,
+                ..
             }
         ));
     }

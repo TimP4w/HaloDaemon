@@ -896,21 +896,28 @@ pub struct LightingTargets {
     pub channels: HashMap<String, Vec<String>>,
 }
 
-#[derive(Debug, Clone, Default, Serialize, Deserialize)]
-pub struct ProfileOverrides {
-    /// device_id -> overridden capability state_keys. `BTreeMap` for
-    /// deterministic serialization order, which UI change-detection hashes.
+/// A profile's persisted value for one state key next to the default
+/// profile's value it shadows (`Null` when the default has none).
+#[derive(Debug, Clone, Default, PartialEq, Serialize, Deserialize)]
+pub struct OverrideDiff {
+    pub value: serde_json::Value,
     #[serde(default)]
-    pub device_capabilities: std::collections::BTreeMap<String, Vec<String>>,
-    #[serde(default)]
-    pub canvas: bool,
-    /// True when the active profile is `default` (nothing is overridable).
-    #[serde(default)]
-    pub active_is_default: bool,
+    pub default: serde_json::Value,
 }
 
-/// Active profile, the available profile names, app-focus rules, and the
-/// active profile's per-device capability overrides.
+#[derive(Debug, Clone, Default, Serialize, Deserialize)]
+pub struct ProfileOverrides {
+    /// device_id -> state_key -> value diff. `BTreeMap` for deterministic
+    /// serialization order, which UI change-detection hashes.
+    #[serde(default)]
+    pub device_capabilities:
+        std::collections::BTreeMap<String, std::collections::BTreeMap<String, OverrideDiff>>,
+    #[serde(default)]
+    pub canvas: bool,
+}
+
+/// Active profile, the available profile names, app-focus rules, and every
+/// non-default profile's per-device capability overrides, keyed by profile name.
 #[derive(Debug, Clone, Default, Serialize, Deserialize)]
 pub struct ProfileState {
     #[serde(default)]
@@ -920,7 +927,7 @@ pub struct ProfileState {
     #[serde(default)]
     pub app_rules: Vec<AppRule>,
     #[serde(default)]
-    pub overrides: ProfileOverrides,
+    pub overrides: std::collections::BTreeMap<String, ProfileOverrides>,
 }
 
 /// Results of the daemon's host-capability probes, gating optional UI features.

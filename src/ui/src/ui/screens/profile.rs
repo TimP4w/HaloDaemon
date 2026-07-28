@@ -89,6 +89,31 @@ fn title_case_key(key: &str) -> String {
     s
 }
 
+fn scalar_override_value(v: &serde_json::Value) -> Option<String> {
+    match v {
+        serde_json::Value::Null => Some("—".to_string()),
+        serde_json::Value::Bool(b) => Some(b.to_string()),
+        serde_json::Value::Number(n) => Some(n.to_string()),
+        serde_json::Value::String(s) => Some(s.clone()),
+        _ => None,
+    }
+}
+
+fn override_diff_lines(default: &serde_json::Value, value: &serde_json::Value) -> Vec<String> {
+    let (Some(d), Some(v)) = (default.as_object(), value.as_object()) else {
+        return Vec::new();
+    };
+    let keys: std::collections::BTreeSet<&String> = d.keys().chain(v.keys()).collect();
+    keys.into_iter()
+        .filter(|k| d.get(*k) != v.get(*k))
+        .filter_map(|k| {
+            let from = scalar_override_value(d.get(k).unwrap_or(&serde_json::Value::Null))?;
+            let to = scalar_override_value(v.get(k).unwrap_or(&serde_json::Value::Null))?;
+            Some(format!("{}: {from} → {to}", title_case_key(k)))
+        })
+        .collect()
+}
+
 /// State of a background icon load. `Failed` is terminal so a missing icon is
 /// not re-resolved every frame.
 pub enum IconState {
@@ -960,7 +985,7 @@ pub fn show(
                     ui.add_space(20.0);
 
                     // ── OVERRIDES section ────────────────────────────────────
-                    overrides_section(ui, state, cmd, is_active, is_default);
+                    overrides_section(ui, state, cmd, profile, is_default);
                 });
                 ui.add_space(36.0);
             });
@@ -1182,7 +1207,7 @@ fn overrides_section(
     ui: &mut egui::Ui,
     state: &TopicStore,
     cmd: &CommandTx,
-    is_active: bool,
+    profile: &str,
     is_default: bool,
 ) {
     if is_default {
@@ -1199,16 +1224,8 @@ fn overrides_section(
                 crate::domain::tour::AnchorId::ProfileOverrides,
                 ui.max_rect(),
             );
-            if !is_active {
-                ui.label(
-                    egui::RichText::new(t!("profile.overrides_inactive"))
-                        .font(theme::body_md())
-                        .color(theme::TEXT_FAINT),
-                );
-                return;
-            }
-
-            let overrides = &state.profiles.overrides;
+            let empty = halod_shared::types::ProfileOverrides::default();
+            let overrides = state.profiles.overrides.get(profile).unwrap_or(&empty);
             if overrides.device_capabilities.is_empty() && !overrides.canvas {
                 ui.label(
                     egui::RichText::new(t!("profile.overrides_empty"))
@@ -1261,7 +1278,7 @@ fn overrides_section(
                 widgets::caps_label(ui, device_name);
                 ui.add_space(theme::SPACE_2);
 
-                for key in keys {
+                for (key, diff) in keys {
                     let label = capability_label(key);
                     ui.horizontal(|ui| {
                         ui.label(
@@ -1287,13 +1304,26 @@ fn overrides_section(
                             }
                         });
                     });
+                    for line in override_diff_lines(&diff.default, &diff.value) {
+                        ui.horizontal(|ui| {
+                            ui.add_space(theme::SPACE_4);
+                            ui.label(
+                                egui::RichText::new(line)
+                                    .font(theme::body_md())
+                                    .color(theme::TEXT_FAINT),
+                            );
+                        });
+                    }
                 }
             }
 
             if let Some(target) = remove_target {
                 crate::runtime::ipc::send(
                     cmd,
-                    halod_shared::commands::DaemonCommand::RemoveProfileOverride { target },
+                    halod_shared::commands::DaemonCommand::RemoveProfileOverride {
+                        profile: profile.to_string(),
+                        target,
+                    },
                 );
             }
         },
@@ -1555,6 +1585,45 @@ mod tests {
         // ...unknown/dynamic state keys fall back to title-casing.
         assert_eq!(capability_label("button_mapping"), "Button Mapping");
         assert_eq!(capability_label("brightness"), "Brightness");
+    }
+
+    #[test]
+    fn override_diff_lines_reports_only_changed_fields() {
+        let default = serde_json::json!({ "nc_mode": 0, "boost": true });
+        let value = serde_json::json!({ "nc_mode": 2, "boost": true });
+        assert_eq!(
+            override_diff_lines(&default, &value),
+            vec!["Nc Mode: 0 → 2".to_string()]
+        );
+    }
+
+    #[test]
+    fn override_diff_lines_marks_fields_missing_on_either_side() {
+        let default = serde_json::json!({ "a": 1 });
+        let value = serde_json::json!({ "b": 2 });
+        assert_eq!(
+            override_diff_lines(&default, &value),
+            vec!["A: 1 → —".to_string(), "B: — → 2".to_string()]
+        );
+    }
+
+    #[test]
+    fn override_diff_lines_skips_composite_values_like_fan_curves() {
+        let default =
+            serde_json::json!({ "fan1": { "points": [[20, 25], [40, 30]] }, "boost": false });
+        let value =
+            serde_json::json!({ "fan1": { "points": [[20, 40], [40, 55]] }, "boost": true });
+        assert_eq!(
+            override_diff_lines(&default, &value),
+            vec!["Boost: false → true".to_string()]
+        );
+    }
+
+    #[test]
+    fn override_diff_lines_empty_for_non_object_state() {
+        let value = serde_json::json!({ "nc_mode": 2 });
+        assert!(override_diff_lines(&serde_json::Value::Null, &value).is_empty());
+        assert!(override_diff_lines(&value.clone(), &value).is_empty());
     }
 
     #[cfg(unix)]

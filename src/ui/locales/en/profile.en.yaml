@@ -29,7 +29,6 @@ profile:
   auto_activate_desc: "Switch to this profile automatically when any of these apps are in focus."
   add_processes: "+ Add processes"
   overrides_title: "OVERRIDES"
-  overrides_inactive: "Activate this profile to see its settings for each device."
   overrides_empty: "No device-specific settings yet. Changes you make while this profile is active are saved here."
   canvas_effects: "Canvas effects"
   revert: "Revert"

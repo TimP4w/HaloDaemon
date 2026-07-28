@@ -8,19 +8,24 @@ use crate::application::state::AppState;
 use halod_shared::commands::OverrideTarget;
 use halod_shared::types::DEFAULT_PROFILE_NAME;
 
-/// Drop a tracked override from the active profile so the unit reverts to the
-/// default profile, then re-apply effective state to the live devices.
-pub async fn remove_profile_override(target: OverrideTarget, app: Arc<AppState>) -> Result<()> {
-    {
+/// Drop a tracked override from the named profile so the unit reverts to the
+/// default profile, then re-apply effective state to the live devices when
+/// that profile is active.
+pub async fn remove_profile_override(
+    profile_name: String,
+    target: OverrideTarget,
+    app: Arc<AppState>,
+) -> Result<()> {
+    let is_active = {
         let mut cfg = app.config.write().await;
-        if cfg.active_profile == DEFAULT_PROFILE_NAME {
+        if profile_name == DEFAULT_PROFILE_NAME {
             bail!("cannot remove overrides from the default profile");
         }
-        log::info!(
-            "[Profile] Removing override {target:?} from '{}'",
-            cfg.active_profile
-        );
-        let profile = cfg.active_profile_data_mut();
+        log::info!("[Profile] Removing override {target:?} from '{profile_name}'");
+        let is_active = cfg.active_profile == profile_name;
+        let Some(profile) = cfg.profiles.get_mut(&profile_name) else {
+            bail!("unknown profile '{profile_name}'");
+        };
         match target {
             OverrideTarget::DeviceCapability {
                 device_id,
@@ -44,11 +49,17 @@ pub async fn remove_profile_override(target: OverrideTarget, app: Arc<AppState>)
                 profile.lighting.canvas = None;
             }
         }
-    }
+        is_active
+    };
     app.request_config_save();
-    super::lifecycle::load_active_profile(app.clone()).await;
-    app.record_change(crate::domain::events::Change::ProfileSwitch)
-        .await;
+    if is_active {
+        super::lifecycle::load_active_profile(app.clone()).await;
+        app.record_change(crate::domain::events::Change::ProfileSwitch)
+            .await;
+    } else {
+        app.record_change(crate::domain::events::Change::Profiles)
+            .await;
+    }
     Ok(())
 }
 
@@ -75,6 +86,7 @@ mod tests {
     async fn removes_one_capability_keeps_others() {
         let app = app_with_override();
         remove_profile_override(
+            "Gaming".into(),
             OverrideTarget::DeviceCapability {
                 device_id: "dev1".into(),
                 state_key: "fan_curve".into(),
@@ -95,6 +107,7 @@ mod tests {
         let app = app_with_override();
         for key in ["fan_curve", "rgb"] {
             remove_profile_override(
+                "Gaming".into(),
                 OverrideTarget::DeviceCapability {
                     device_id: "dev1".into(),
                     state_key: key.into(),
@@ -127,7 +140,7 @@ mod tests {
         cfg.active_profile = "Gaming".into();
         let app = Arc::new(AppState::new(cfg));
 
-        remove_profile_override(OverrideTarget::Canvas, app.clone())
+        remove_profile_override("Gaming".into(), OverrideTarget::Canvas, app.clone())
             .await
             .unwrap();
 
@@ -140,6 +153,7 @@ mod tests {
     async fn absent_device_is_graceful_noop() {
         let app = app_with_override();
         remove_profile_override(
+            "Gaming".into(),
             OverrideTarget::DeviceCapability {
                 device_id: "nonexistent".into(),
                 state_key: "fan_curve".into(),
@@ -161,9 +175,47 @@ mod tests {
     #[tokio::test]
     async fn rejects_default_profile() {
         let app = Arc::new(AppState::new(Config::default()));
-        let err = remove_profile_override(OverrideTarget::Canvas, app)
+        let err = remove_profile_override(DEFAULT_PROFILE_NAME.into(), OverrideTarget::Canvas, app)
             .await
             .unwrap_err();
         assert!(err.to_string().contains("default"));
+    }
+
+    #[tokio::test]
+    async fn rejects_unknown_profile() {
+        let app = Arc::new(AppState::new(Config::default()));
+        let err = remove_profile_override("Ghost".into(), OverrideTarget::Canvas, app)
+            .await
+            .unwrap_err();
+        assert!(err.to_string().contains("unknown profile"));
+    }
+
+    #[tokio::test]
+    async fn removes_override_from_inactive_profile() {
+        let app = app_with_override();
+        {
+            let mut cfg = app.config.write().await;
+            cfg.active_profile = DEFAULT_PROFILE_NAME.into();
+        }
+        remove_profile_override(
+            "Gaming".into(),
+            OverrideTarget::DeviceCapability {
+                device_id: "dev1".into(),
+                state_key: "fan_curve".into(),
+            },
+            app.clone(),
+        )
+        .await
+        .unwrap();
+        let cfg = app.config.read().await;
+        let dev = cfg
+            .profiles
+            .get("Gaming")
+            .unwrap()
+            .device_states
+            .get("dev1")
+            .unwrap();
+        assert!(dev.get("fan_curve").is_none());
+        assert!(dev.get("rgb").is_some());
     }
 }

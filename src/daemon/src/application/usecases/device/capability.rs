@@ -267,8 +267,8 @@ mod tests {
             })
             .expect("persisted capability mutation must publish profile overrides");
         assert_eq!(
-            profiles.overrides.device_capabilities["dev1"],
-            vec!["range".to_string()]
+            profiles.overrides["Gaming"].device_capabilities["dev1"]["range"].value,
+            serde_json::json!({ "nc_level": 50 })
         );
     }
 
@@ -338,8 +338,8 @@ mod tests {
             })
             .expect("persisted capability mutation must publish profile overrides");
         assert_eq!(
-            profiles.overrides.device_capabilities["dev1"],
-            vec!["choice".to_string()]
+            profiles.overrides["Gaming"].device_capabilities["dev1"]["choice"].value,
+            serde_json::json!({ "nc_mode": 2 })
         );
     }
 

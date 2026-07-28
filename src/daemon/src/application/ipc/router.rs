@@ -373,9 +373,9 @@ async fn dispatch(
         DaemonCommand::SwitchProfile { name } => {
             crate::application::usecases::profiles::lifecycle::switch_profile(name, app).await
         }
-        DaemonCommand::RemoveProfileOverride { target } => {
+        DaemonCommand::RemoveProfileOverride { profile, target } => {
             crate::application::usecases::profiles::profile_override::remove_profile_override(
-                target, app,
+                profile, target, app,
             )
             .await
         }

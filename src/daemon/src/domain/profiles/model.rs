@@ -36,30 +36,50 @@ impl Config {
         names
     }
 
-    /// Which device capabilities and the canvas the active (non-default)
-    /// profile overrides, for the GUI's override badges. Empty when the active
-    /// profile is `default` (nothing is overridable there).
-    pub fn profile_overrides(&self) -> halod_shared::types::ProfileOverrides {
-        use halod_shared::types::ProfileOverrides;
-        let mut ov = ProfileOverrides {
-            active_is_default: self.active_profile == DEFAULT_PROFILE_NAME,
-            ..Default::default()
-        };
-        if ov.active_is_default {
-            return ov;
-        }
-        if let Some(p) = self.profiles.get(&self.active_profile) {
-            for (device_id, state) in &p.device_states {
-                if let Some(obj) = state.as_object() {
-                    let keys: Vec<String> = obj.keys().cloned().collect();
-                    if !keys.is_empty() {
-                        ov.device_capabilities.insert(device_id.clone(), keys);
+    /// Which device capabilities and the canvas each non-default profile
+    /// overrides, keyed by profile name, for the GUI's override badges. The
+    /// `default` profile is omitted (nothing is overridable there).
+    pub fn profile_overrides(
+        &self,
+    ) -> std::collections::BTreeMap<String, halod_shared::types::ProfileOverrides> {
+        use halod_shared::types::{OverrideDiff, ProfileOverrides};
+        let default_states = self
+            .profiles
+            .get(DEFAULT_PROFILE_NAME)
+            .map(|p| &p.device_states);
+        self.profiles
+            .iter()
+            .filter(|(name, _)| name.as_str() != DEFAULT_PROFILE_NAME)
+            .map(|(name, p)| {
+                let mut ov = ProfileOverrides::default();
+                for (device_id, state) in &p.device_states {
+                    if let Some(obj) = state.as_object() {
+                        let diffs: std::collections::BTreeMap<String, OverrideDiff> = obj
+                            .iter()
+                            .map(|(key, value)| {
+                                let default = default_states
+                                    .and_then(|ds| ds.get(device_id))
+                                    .and_then(|v| v.get(key))
+                                    .cloned()
+                                    .unwrap_or(Value::Null);
+                                (
+                                    key.clone(),
+                                    OverrideDiff {
+                                        value: value.clone(),
+                                        default,
+                                    },
+                                )
+                            })
+                            .collect();
+                        if !diffs.is_empty() {
+                            ov.device_capabilities.insert(device_id.clone(), diffs);
+                        }
                     }
                 }
-            }
-            ov.canvas = p.lighting.canvas.is_some();
-        }
-        ov
+                ov.canvas = p.lighting.canvas.is_some();
+                (name.clone(), ov)
+            })
+            .collect()
     }
 
     /// Effective per-device capability state: the default profile's object
@@ -172,29 +192,40 @@ mod tests {
     }
 
     #[test]
-    fn profile_overrides_maps_active_profile() {
+    fn profile_overrides_maps_every_non_default_profile() {
         let mut cfg = Config::default();
+        cfg.profiles
+            .get_mut(DEFAULT_PROFILE_NAME)
+            .unwrap()
+            .device_states
+            .insert("dev1".into(), serde_json::json!({ "fan_curve": {"a": 0} }));
         let mut g = Profile::default();
         g.device_states
             .insert("dev1".into(), serde_json::json!({ "fan_curve": {"a": 1} }));
         g.lighting.canvas = Some(Default::default());
         cfg.profiles.insert("Gaming".into(), g);
+        let mut w = Profile::default();
+        w.device_states
+            .insert("dev2".into(), serde_json::json!({ "rgb": {"m": "x"} }));
+        cfg.profiles.insert("Work".into(), w);
         cfg.active_profile = "Gaming".into();
 
         let ov = cfg.profile_overrides();
-        assert!(!ov.active_is_default);
-        assert_eq!(
-            ov.device_capabilities["dev1"],
-            vec!["fan_curve".to_string()]
-        );
-        assert!(ov.canvas);
+        assert!(!ov.contains_key(DEFAULT_PROFILE_NAME));
+        let diff = &ov["Gaming"].device_capabilities["dev1"]["fan_curve"];
+        assert_eq!(diff.value, serde_json::json!({"a": 1}));
+        assert_eq!(diff.default, serde_json::json!({"a": 0}));
+        assert!(ov["Gaming"].canvas);
+        // Non-active profiles are projected too; no default value → Null.
+        let diff = &ov["Work"].device_capabilities["dev2"]["rgb"];
+        assert_eq!(diff.value, serde_json::json!({"m": "x"}));
+        assert_eq!(diff.default, serde_json::Value::Null);
+        assert!(!ov["Work"].canvas);
     }
 
     #[test]
-    fn profile_overrides_empty_on_default_profile() {
+    fn profile_overrides_omits_default_profile() {
         let cfg = Config::default();
-        let ov = cfg.profile_overrides();
-        assert!(ov.active_is_default);
-        assert!(ov.device_capabilities.is_empty());
+        assert!(cfg.profile_overrides().is_empty());
     }
 }

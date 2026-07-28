@@ -242,8 +242,8 @@ mod tests {
             })
             .expect("engine-originated persistence must publish profile overrides");
         assert_eq!(
-            profiles.overrides.device_capabilities["dev1"],
-            vec!["choice".to_string()]
+            profiles.overrides["Gaming"].device_capabilities["dev1"]["choice"].value,
+            serde_json::json!({ "nc_mode": 2 })
         );
 
         app.config.persistence().shutdown_tx.send_replace(true);
