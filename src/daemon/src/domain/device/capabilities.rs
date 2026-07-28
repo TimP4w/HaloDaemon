@@ -557,7 +557,7 @@ pub trait LcdCapability: Send + Sync {
     }
 
     /// Whether uploading an image resets the device's RGB LEDs, requiring the
-    /// saved RGB state to be re-applied afterward (NZXT Kraken panels do this).
+    /// saved RGB state to be re-applied afterward.
     fn needs_rgb_restore_after_upload(&self) -> bool {
         false
     }

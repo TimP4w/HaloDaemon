@@ -305,8 +305,8 @@ async fn run_daemon(
     );
 
     // Liveness watcher for plugin devices whose primary transport is a plain USB
-    // device (e.g. the Philips Evnia). HID hotplug does not cover them, so a
-    // disconnect would otherwise strand a stale handle forever.
+    // device. HID hotplug does not cover them, so a disconnect would otherwise
+    // strand a stale handle forever.
     let usb_hotplug_app = Arc::clone(&app);
     supervisor.register(
         "USB hotplug monitor",

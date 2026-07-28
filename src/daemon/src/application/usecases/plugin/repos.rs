@@ -13,7 +13,7 @@ use crate::application::state::AppState;
 use crate::config::PluginRepoRecord;
 use crate::domain::plugin::repo;
 
-use halod_shared::types::RepoUpdateStatus;
+use halod_shared::types::{PluginUpdateStatus, RepoUpdateStatus};
 
 use super::plugins::{apply_repo_plugins, purge_plugin_state, sanitize_slug};
 
@@ -32,6 +32,16 @@ fn trust_for_record(record: &PluginRepoRecord) -> repo::RepositoryTrust {
     }
 }
 
+/// Advance `record` to `revision`, retiring the currently selected tag to
+/// `previous_release_tag`. Returns the retired tag so pruning retains it.
+fn advance_active_release(record: &mut PluginRepoRecord, revision: &str) -> Option<String> {
+    record.previous_release_tag = record.release_tag.clone();
+    record.release_tag = Some(revision.to_owned());
+    record.active_revision = Some(revision.to_owned());
+    record.last_sync = Some(now_rfc3339());
+    record.previous_release_tag.clone()
+}
+
 async fn package_disk_hash(
     repo_dir: &std::path::Path,
     subpath: &std::path::Path,
@@ -43,9 +53,32 @@ async fn package_disk_hash(
         .ok()
 }
 
+fn github_owner_project(url: &str) -> Option<(String, String)> {
+    let parsed = url::Url::parse(url).ok()?;
+    if parsed.scheme() != "https" || parsed.host_str() != Some("github.com") {
+        return None;
+    }
+    let mut parts = parsed.path_segments()?.filter(|part| !part.is_empty());
+    let owner = parts.next()?;
+    let project = parts.next()?.trim_end_matches(".git");
+    if parts.next().is_some()
+        || !owner.bytes().all(github_name_byte)
+        || !project.bytes().all(github_name_byte)
+    {
+        return None;
+    }
+    Some((owner.to_owned(), project.to_owned()))
+}
+
+fn github_name_byte(byte: u8) -> bool {
+    byte.is_ascii_alphanumeric() || matches!(byte, b'-' | b'_' | b'.')
+}
+
 /// Register an immutable GitHub plugin release source.
 pub async fn add_repo(url: String, app: Arc<AppState>) -> Result<()> {
-    let slug = sanitize_slug(&url);
+    let (owner, project) = github_owner_project(&url)
+        .ok_or_else(|| anyhow::anyhow!("only immutable GitHub release sources are supported"))?;
+    let slug = sanitize_slug(&format!("{owner}-{project}"));
     if slug == crate::constants::OFFICIAL_PLUGIN_REPO_SLUG {
         anyhow::bail!("slug '{slug}' is reserved for the official plugin repository");
     }
@@ -55,37 +88,34 @@ pub async fn add_repo(url: String, app: Arc<AppState>) -> Result<()> {
             anyhow::bail!("a repo with slug '{slug}' is already registered");
         }
     }
-    if url.starts_with("https://github.com/") {
-        {
-            let mut cfg = app.config.write().await;
-            cfg.plugins.repos.push(PluginRepoRecord {
-                url: url.clone(),
-                slug: slug.clone(),
-                repository_id: None,
-                trusted_key: None,
-                source_kind: crate::config::PluginRepoSourceKind::Release,
-                release_tag: None,
-                release_policy: crate::config::PluginReleasePolicy::Latest,
-                active_revision: None,
-                active_source: crate::config::PluginRevisionSource::Managed,
-                previous_release_tag: None,
-                last_sync: None,
-            });
-        }
-        app.request_config_save();
-        if let Err(error) = follow_latest_release(slug.clone(), app.clone()).await {
-            app.config
-                .write()
-                .await
-                .plugins
-                .repos
-                .retain(|record| record.slug != slug);
-            app.request_config_save();
-            return Err(error);
-        }
-        return Ok(());
+    {
+        let mut cfg = app.config.write().await;
+        cfg.plugins.repos.push(PluginRepoRecord {
+            url: url.clone(),
+            slug: slug.clone(),
+            repository_id: None,
+            trusted_key: None,
+            source_kind: crate::config::PluginRepoSourceKind::Release,
+            release_tag: None,
+            release_policy: crate::config::PluginReleasePolicy::Latest,
+            active_revision: None,
+            active_source: crate::config::PluginRevisionSource::Managed,
+            previous_release_tag: None,
+            last_sync: None,
+        });
     }
-    anyhow::bail!("only immutable GitHub release sources are supported");
+    app.request_config_save();
+    if let Err(error) = follow_latest_release(slug.clone(), app.clone()).await {
+        app.config
+            .write()
+            .await
+            .plugins
+            .repos
+            .retain(|record| record.slug != slug);
+        app.request_config_save();
+        return Err(error);
+    }
+    Ok(())
 }
 
 /// Remove an unregistered or failed-add repository tree away from Tokio's
@@ -247,6 +277,7 @@ pub async fn import_local_repo(source_path: String, app: Arc<AppState>) -> Resul
     let final_revision = destination.join("revisions").join(&revision);
     std::fs::create_dir_all(final_revision.parent().expect("revision has parent"))?;
     std::fs::rename(&root, &final_revision)?;
+    app.invalidate_signature_status(&slug).await;
 
     let plugin_ids: Vec<_> = manifest
         .packages
@@ -325,6 +356,7 @@ async fn refresh_archive_repo(record: PluginRepoRecord, app: Arc<AppState>) -> R
         .iter()
         .map(|package| package.id.clone())
         .collect();
+    let previous;
     {
         let mut cfg = app.config.write().await;
         let configured = cfg
@@ -333,9 +365,7 @@ async fn refresh_archive_repo(record: PluginRepoRecord, app: Arc<AppState>) -> R
             .iter_mut()
             .find(|candidate| candidate.slug == record.slug)
             .ok_or_else(|| anyhow::anyhow!("repository disappeared during restore"))?;
-        configured.release_tag = Some(revision.clone());
-        configured.active_revision = Some(revision);
-        configured.last_sync = Some(now_rfc3339());
+        previous = advance_active_release(configured, &revision);
         for package in manifest.packages {
             cfg.plugins
                 .installed_hashes
@@ -343,7 +373,38 @@ async fn refresh_archive_repo(record: PluginRepoRecord, app: Arc<AppState>) -> R
         }
     }
     app.request_config_save();
-    apply_repo_plugins(app, plugin_ids).await
+    app.invalidate_signature_status(&record.slug).await;
+    apply_repo_plugins(app.clone(), plugin_ids).await?;
+    broadcast_plugin_updates(&app, Some(&record.slug)).await;
+    prune_release_revisions(destination, revision, previous).await;
+    Ok(())
+}
+
+async fn prune_release_revisions(
+    root: std::path::PathBuf,
+    active: String,
+    previous: Option<String>,
+) {
+    let for_log = root.clone();
+    let result = tokio::task::spawn_blocking(move || {
+        let mut keep: Vec<&str> = vec![active.as_str()];
+        if let Some(previous) = previous.as_deref() {
+            keep.push(previous);
+        }
+        repo::prune_revisions(&root, &keep)
+    })
+    .await;
+    match result {
+        Ok(Ok(())) => {}
+        Ok(Err(error)) => log::warn!(
+            "pruning old plugin revisions under {}: {error:#}",
+            for_log.display()
+        ),
+        Err(error) => log::warn!(
+            "revision prune task for {} panicked: {error}",
+            for_log.display()
+        ),
+    }
 }
 
 /// List immutable releases for the add-source picker. GitHub supplies ordering
@@ -466,11 +527,13 @@ pub async fn install_release(
     .await
     .context("release download task panicked")??;
 
+    let reused_existing_final;
     if final_dir.exists() {
         let final_valid = repo::read_repository_manifest(&final_dir).is_ok()
             && repo::verify_repository_signature(&final_dir, &trust_for_record(&record)).is_ok();
         if final_valid {
             remove_repo_tree(staging).await?;
+            reused_existing_final = true;
         } else {
             let corrupt =
                 final_dir.with_file_name(format!(".{}.corrupt-{}", tag, uuid::Uuid::new_v4()));
@@ -480,17 +543,37 @@ pub async fn install_release(
                 return Err(error).context("replacing corrupted plugin release");
             }
             let _ = remove_repo_tree(corrupt).await;
+            reused_existing_final = false;
         }
     } else {
         std::fs::create_dir_all(final_dir.parent().expect("release revision has a parent"))?;
         std::fs::rename(&staging, &final_dir)
             .with_context(|| format!("activating plugin release '{}' for '{}'", tag, slug))?;
+        reused_existing_final = false;
     }
     let plugin_ids = manifest
         .packages
         .iter()
         .map(|package| package.id.clone())
         .collect::<Vec<_>>();
+    let network_packages: Vec<(String, String)> = manifest
+        .packages
+        .iter()
+        .map(|package| (package.id.clone(), package.sha256.clone()))
+        .collect();
+    let disk_packages = reused_existing_final
+        .then(|| repo::read_repository_index(&final_dir).ok())
+        .flatten()
+        .map(|index| {
+            index
+                .packages
+                .into_iter()
+                .map(|package| (package.id, package.sha256))
+                .collect::<Vec<_>>()
+        });
+    let installed_packages =
+        hashes_to_install(reused_existing_final, disk_packages, network_packages);
+    let previous;
     {
         let mut cfg = app.config.write().await;
         let configured = cfg
@@ -501,25 +584,41 @@ pub async fn install_release(
             .ok_or_else(|| anyhow::anyhow!("plugin source disappeared during installation"))?;
         configured.repository_id.get_or_insert(manifest.id.clone());
         configured.trusted_key = configured.trusted_key.clone().or(trusted_key);
-        configured.previous_release_tag = configured.release_tag.clone();
-        configured.release_tag = Some(tag.clone());
+        previous = advance_active_release(configured, &tag);
         configured.release_policy = if pin {
             crate::config::PluginReleasePolicy::Pinned(tag.clone())
         } else {
             crate::config::PluginReleasePolicy::Latest
         };
-        configured.active_revision = Some(tag.clone());
         configured.active_source = crate::config::PluginRevisionSource::Managed;
-        configured.last_sync = Some(now_rfc3339());
-        for package in &manifest.packages {
+        for (id, sha256) in &installed_packages {
             cfg.plugins
                 .installed_hashes
-                .insert(package.id.clone(), package.sha256.clone());
+                .insert(id.clone(), sha256.clone());
         }
     }
     app.request_config_save();
-    settle_repo_update_status(&app, &slug, Some(&tag)).await;
-    apply_repo_plugins(app, plugin_ids).await
+    app.invalidate_signature_status(&slug).await;
+    let settled = app.plugin_update_plan.lock().await.settle_repo(&slug, &tag);
+    if settled {
+        app.record_change(crate::domain::events::Change::PluginData)
+            .await;
+    }
+    apply_repo_plugins(app.clone(), plugin_ids).await?;
+    broadcast_plugin_updates(&app, Some(&slug)).await;
+    prune_release_revisions(root, tag, previous).await;
+    Ok(())
+}
+
+fn hashes_to_install(
+    reused_existing_final: bool,
+    disk_packages: Option<Vec<(String, String)>>,
+    network_packages: Vec<(String, String)>,
+) -> Vec<(String, String)> {
+    match (reused_existing_final, disk_packages) {
+        (true, Some(disk)) => disk,
+        _ => network_packages,
+    }
 }
 
 pub async fn follow_latest_release(slug: String, app: Arc<AppState>) -> Result<()> {
@@ -580,6 +679,10 @@ pub async fn remove_repo(slug: String, app: Arc<AppState>) -> Result<()> {
         cfg.plugins.repos.retain(|r| r.slug != slug);
     }
     app.request_config_save();
+    app.plugin_update_plan.lock().await.purge_slug(&slug);
+    app.invalidate_signature_status(&slug).await;
+    app.record_change(crate::domain::events::Change::PluginData)
+        .await;
     apply_repo_plugins(app, plugin_ids).await?;
     Ok(())
 }
@@ -587,10 +690,7 @@ pub async fn remove_repo(slug: String, app: Arc<AppState>) -> Result<()> {
 /// Compare every registered source with its selected release.
 async fn compute_repo_updates(
     app: &Arc<AppState>,
-) -> (
-    Vec<RepoUpdateStatus>,
-    Vec<halod_shared::types::PluginUpdateStatus>,
-) {
+) -> (Vec<RepoUpdateStatus>, Vec<PluginUpdateStatus>) {
     let repos = app.config.read().await.plugins.repos.clone();
     let mut out = Vec::with_capacity(repos.len());
     let mut plugins = Vec::new();
@@ -692,7 +792,7 @@ async fn inspect_update_candidate(
 async fn remote_package_updates(
     record: &PluginRepoRecord,
     manifest: repo::RepositoryManifest,
-) -> Vec<halod_shared::types::PluginUpdateStatus> {
+) -> Vec<PluginUpdateStatus> {
     let active_dir = repo::active_revision_dir(record);
     let installed: std::collections::HashMap<String, (String, String)> =
         match tokio::task::spawn_blocking(move || repo::read_repository_index(&active_dir)).await {
@@ -708,7 +808,7 @@ async fn remote_package_updates(
         .packages
         .into_iter()
         .filter(|package| package_has_update(installed.get(&package.id), &package.sha256))
-        .map(|package| halod_shared::types::PluginUpdateStatus {
+        .map(|package| PluginUpdateStatus {
             current_version: installed
                 .get(&package.id)
                 .map(|(version, _)| version.clone())
@@ -736,23 +836,81 @@ fn package_has_update(installed: Option<&(String, String)>, available_hash: &str
     installed.is_none_or(|(_, hash)| hash != available_hash)
 }
 
-fn merge_plugin_updates(
-    mut into: Vec<halod_shared::types::PluginUpdateStatus>,
-    from: Vec<halod_shared::types::PluginUpdateStatus>,
-) -> Vec<halod_shared::types::PluginUpdateStatus> {
-    for status in from {
-        match into
-            .iter_mut()
-            .find(|existing| existing.plugin_id == status.plugin_id)
-        {
-            Some(existing) => {
-                existing.update_available |= status.update_available;
-                existing.on_disk_changed |= status.on_disk_changed;
+/// Retained update-availability state: the single source of truth behind the
+/// `updates`/`repo_updates` wire vecs. Callers mutate it under
+/// `AppState::plugin_update_plan`, then commit `Change::PluginData`.
+#[derive(Default)]
+pub struct UpdatePlan {
+    packages: Vec<PluginUpdateStatus>,
+    repos: Vec<RepoUpdateStatus>,
+}
+
+impl UpdatePlan {
+    pub fn packages(&self) -> Vec<PluginUpdateStatus> {
+        self.packages.clone()
+    }
+
+    pub fn repos(&self) -> Vec<RepoUpdateStatus> {
+        self.repos.clone()
+    }
+
+    pub fn apply_repo_check(&mut self, repos: Vec<RepoUpdateStatus>) {
+        self.repos = repos;
+    }
+
+    pub fn apply_package_check(
+        &mut self,
+        remote: Vec<PluginUpdateStatus>,
+        on_disk: Vec<PluginUpdateStatus>,
+    ) {
+        self.packages = remote;
+        self.merge_packages(on_disk);
+    }
+
+    pub fn apply_disk_scan(&mut self, reached: &[String], statuses: Vec<PluginUpdateStatus>) {
+        self.packages
+            .retain(|status| !reached.contains(&status.slug));
+        self.merge_packages(statuses);
+    }
+
+    /// The repo now holds the release it was asked for: nothing pending until
+    /// the next check. Without this the GUI keeps offering "Update repo" after
+    /// a pull. Returns false when the slug has no retained status.
+    pub fn settle_repo(&mut self, slug: &str, installed_tag: &str) -> bool {
+        let Some(status) = self.repos.iter_mut().find(|status| status.slug == slug) else {
+            return false;
+        };
+        status.installed_tag = installed_tag.to_owned();
+        if status.available_tag.as_deref() == Some(installed_tag) {
+            status.available_tag = None;
+        }
+        true
+    }
+
+    pub fn purge_slug(&mut self, slug: &str) {
+        self.packages.retain(|status| status.slug != slug);
+        self.repos.retain(|status| status.slug != slug);
+    }
+
+    pub fn clear(&mut self) {
+        *self = Self::default();
+    }
+
+    fn merge_packages(&mut self, from: Vec<PluginUpdateStatus>) {
+        for status in from {
+            match self
+                .packages
+                .iter_mut()
+                .find(|existing| existing.plugin_id == status.plugin_id)
+            {
+                Some(existing) => {
+                    existing.update_available |= status.update_available;
+                    existing.on_disk_changed |= status.on_disk_changed;
+                }
+                None => self.packages.push(status),
             }
-            None => into.push(status),
         }
     }
-    into
 }
 
 /// Every repository package (optionally scoped to one repo), compared to the
@@ -761,7 +919,7 @@ fn merge_plugin_updates(
 async fn compute_plugin_updates(
     app: &Arc<AppState>,
     slug_filter: Option<&str>,
-) -> (Vec<halod_shared::types::PluginUpdateStatus>, Vec<String>) {
+) -> (Vec<PluginUpdateStatus>, Vec<String>) {
     let mut statuses = compute_on_disk_changes(app).await;
     if let Some(slug) = slug_filter {
         statuses.retain(|status| status.slug == slug);
@@ -801,52 +959,41 @@ async fn touch_last_sync(app: &Arc<AppState>, slugs: &[String]) {
 
 /// Recompute per-plugin update status (optionally scoped to one repo) and
 /// commit it to the retained plugins topic.
-pub(crate) async fn broadcast_plugin_updates(app: &Arc<AppState>, slug_filter: Option<&str>) {
+async fn broadcast_plugin_updates(app: &Arc<AppState>, slug_filter: Option<&str>) {
     let (statuses, reached) = compute_plugin_updates(app, slug_filter).await;
-    touch_last_sync(app, &reached).await;
-    let retained: Vec<_> = app
-        .plugin_update_status
+    app.plugin_update_plan
         .lock()
         .await
-        .iter()
-        .filter(|status| !reached.contains(&status.slug))
-        .cloned()
-        .collect();
-    publish_plugin_updates(app, merge_plugin_updates(retained, statuses)).await;
-}
-
-/// Cache and commit the latest plugin-update status.
-pub(crate) async fn publish_plugin_updates(
-    app: &Arc<AppState>,
-    statuses: Vec<halod_shared::types::PluginUpdateStatus>,
-) {
-    *app.plugin_update_status.lock().await = statuses;
+        .apply_disk_scan(&reached, statuses);
     app.record_change(crate::domain::events::Change::PluginData)
         .await;
 }
 
-async fn publish_repo_updates(app: &Arc<AppState>, statuses: Vec<RepoUpdateStatus>) {
-    *app.plugin_repo_update_status.lock().await = statuses;
-    app.record_change(crate::domain::events::Change::PluginData)
-        .await;
-}
-
-/// Update every plugin currently flagged as having an update available, across every repo.
-pub async fn update_all_plugins(app: Arc<AppState>) -> Result<()> {
-    let (statuses, _reached) = compute_plugin_updates(&app, None).await;
+fn slugs_to_update(
+    plugin_statuses: &[PluginUpdateStatus],
+    repo_statuses: &[RepoUpdateStatus],
+) -> std::collections::HashSet<String> {
     let mut slugs = std::collections::HashSet::new();
-    let mut failures = Vec::new();
-    for status in statuses.into_iter().filter(|s| s.update_available) {
-        slugs.insert(status.slug);
+    for status in plugin_statuses
+        .iter()
+        .filter(|s| s.update_available || s.on_disk_changed)
+    {
+        slugs.insert(status.slug.clone());
     }
-    for status in compute_repo_updates(&app)
-        .await
-        .0
-        .into_iter()
+    for status in repo_statuses
+        .iter()
         .filter(|status| status.available_tag.is_some() && !status.pinned)
     {
-        slugs.insert(status.slug);
+        slugs.insert(status.slug.clone());
     }
+    slugs
+}
+
+pub async fn update_all_plugins(app: Arc<AppState>) -> Result<()> {
+    let (statuses, _reached) = compute_plugin_updates(&app, None).await;
+    let repo_statuses = compute_repo_updates(&app).await.0;
+    let slugs = slugs_to_update(&statuses, &repo_statuses);
+    let mut failures = Vec::new();
     for slug in slugs {
         if let Err(e) = update_repo(slug.clone(), app.clone()).await {
             log::warn!("updating plugin repository '{slug}': {e:#}");
@@ -871,21 +1018,27 @@ pub async fn check_updates_broadcast(app: Arc<AppState>) {
     }
     let (repo_statuses, remote_updates) = compute_repo_updates(&app).await;
     let reached: Vec<String> = repo_statuses.iter().map(|s| s.slug.clone()).collect();
-    publish_repo_updates(&app, repo_statuses).await;
+    app.plugin_update_plan
+        .lock()
+        .await
+        .apply_repo_check(repo_statuses);
+    app.record_change(crate::domain::events::Change::PluginData)
+        .await;
     touch_last_sync(&app, &reached).await;
 
-    let (on_disk, plugin_reached) = compute_plugin_updates(&app, None).await;
-    touch_last_sync(&app, &plugin_reached).await;
-    publish_plugin_updates(&app, merge_plugin_updates(remote_updates, on_disk)).await;
+    let (on_disk, _plugin_reached) = compute_plugin_updates(&app, None).await;
+    app.plugin_update_plan
+        .lock()
+        .await
+        .apply_package_check(remote_updates, on_disk);
+    app.record_change(crate::domain::events::Change::PluginData)
+        .await;
 }
 
 /// Every repo plugin whose package content differs from the digest installed
 /// from its repository index. This is informational; an enabled plugin is
 /// already covered by the consent modal and is not silently disabled.
-async fn compute_on_disk_changes(
-    app: &Arc<AppState>,
-) -> Vec<halod_shared::types::PluginUpdateStatus> {
-    use halod_shared::types::PluginUpdateStatus;
+async fn compute_on_disk_changes(app: &Arc<AppState>) -> Vec<PluginUpdateStatus> {
     let policy = app.config.read().await.plugins.clone();
     let repos = policy.repos.clone();
     let mut out = Vec::new();
@@ -956,7 +1109,12 @@ pub async fn quarantine_changed_plugins(app: Arc<AppState>) {
         );
     }
 
-    publish_plugin_updates(&app, statuses).await;
+    app.plugin_update_plan
+        .lock()
+        .await
+        .apply_package_check(Vec::new(), statuses);
+    app.record_change(crate::domain::events::Change::PluginData)
+        .await;
 }
 
 /// Check every registered repo for updates and commit the result.
@@ -991,29 +1149,12 @@ pub async fn update_repo(slug: String, app: Arc<AppState>) -> Result<()> {
             }
         },
     };
-    if result.is_ok() {
-        settle_repo_update_status(&app, &slug, None).await;
-    }
     result
-}
-
-/// The repo now holds the release it was asked for: nothing pending until the
-/// next check. Without this the GUI keeps offering "Update repo" after a pull.
-async fn settle_repo_update_status(app: &Arc<AppState>, slug: &str, installed_tag: Option<&str>) {
-    let mut statuses = app.plugin_repo_update_status.lock().await.clone();
-    let Some(status) = statuses.iter_mut().find(|status| status.slug == slug) else {
-        return;
-    };
-    if let Some(tag) = installed_tag {
-        status.installed_tag = tag.to_owned();
-    }
-    status.available_tag = None;
-    publish_repo_updates(app, statuses).await;
 }
 
 #[cfg(test)]
 mod tests {
-    use super::{package_has_update, selected_release_is_update};
+    use super::*;
 
     #[test]
     fn selected_release_is_only_an_update_when_the_tag_changed() {
@@ -1028,5 +1169,308 @@ mod tests {
         assert!(!package_has_update(Some(&installed), "old-hash"));
         assert!(package_has_update(Some(&installed), "new-hash"));
         assert!(package_has_update(None, "new-package-hash"));
+    }
+
+    fn plugin_status(
+        slug: &str,
+        update_available: bool,
+        on_disk_changed: bool,
+    ) -> PluginUpdateStatus {
+        PluginUpdateStatus {
+            plugin_id: format!("{slug}-plugin"),
+            slug: slug.to_owned(),
+            update_available,
+            on_disk_changed,
+            current_version: String::new(),
+            available_version: String::new(),
+        }
+    }
+
+    fn repo_status(slug: &str, available_tag: Option<&str>, pinned: bool) -> RepoUpdateStatus {
+        RepoUpdateStatus {
+            installed_tag: "v1".to_owned(),
+            slug: slug.to_owned(),
+            available_tag: available_tag.map(str::to_owned),
+            pinned,
+        }
+    }
+
+    #[test]
+    fn a_repo_url_slug_includes_the_owner() {
+        let alice = github_owner_project("https://github.com/alice/plugins").unwrap();
+        let bob = github_owner_project("https://github.com/bob/plugins").unwrap();
+        assert_ne!(
+            sanitize_slug(&format!("{}-{}", alice.0, alice.1)),
+            sanitize_slug(&format!("{}-{}", bob.0, bob.1)),
+            "same project under different owners must not collide"
+        );
+        assert_eq!(alice.1, "plugins");
+    }
+
+    #[test]
+    fn only_single_project_github_urls_are_accepted() {
+        assert!(github_owner_project("https://github.com/owner/project").is_some());
+        assert!(github_owner_project("https://github.com/owner/project.git").is_some());
+        assert!(github_owner_project("https://github.com/owner/project/releases").is_none());
+        assert!(github_owner_project("https://github.com/owner").is_none());
+        assert!(github_owner_project("http://github.com/owner/project").is_none());
+        assert!(github_owner_project("https://example.com/owner/project").is_none());
+        assert!(github_owner_project("not a url").is_none());
+    }
+
+    #[test]
+    fn on_disk_only_changes_still_select_the_repo_for_update() {
+        let plugins = [plugin_status("dirty", false, true)];
+        let selected = slugs_to_update(&plugins, &[]);
+        assert!(
+            selected.contains("dirty"),
+            "a changed-on-disk package must be restored by update-all"
+        );
+    }
+
+    #[test]
+    fn update_selection_covers_available_updates_and_unpinned_behind_repos() {
+        let plugins = [
+            plugin_status("has-update", true, false),
+            plugin_status("clean", false, false),
+        ];
+        let repos = [
+            repo_status("behind", Some("v2"), false),
+            repo_status("pinned-behind", Some("v2"), true),
+            repo_status("uptodate", None, false),
+        ];
+        let selected = slugs_to_update(&plugins, &repos);
+        assert!(selected.contains("has-update"));
+        assert!(selected.contains("behind"));
+        assert!(!selected.contains("clean"));
+        assert!(!selected.contains("pinned-behind"));
+        assert!(!selected.contains("uptodate"));
+    }
+
+    #[test]
+    fn settling_keeps_a_newer_pinned_release_but_clears_the_installed_one() {
+        let mut plan = UpdatePlan::default();
+        plan.apply_repo_check(vec![repo_status("pinned", Some("v3"), true)]);
+
+        assert!(plan.settle_repo("pinned", "v2"));
+        let status = plan.repos().remove(0);
+        assert_eq!(status.installed_tag, "v2");
+        assert_eq!(
+            status.available_tag.as_deref(),
+            Some("v3"),
+            "a newer stable stays advertised after installing an older tag"
+        );
+
+        assert!(plan.settle_repo("pinned", "v3"));
+        let status = plan.repos().remove(0);
+        assert_eq!(status.installed_tag, "v3");
+        assert!(
+            status.available_tag.is_none(),
+            "installing the advertised tag clears the flag"
+        );
+    }
+
+    #[test]
+    fn settling_an_unknown_slug_reports_no_change() {
+        let mut plan = UpdatePlan::default();
+        assert!(!plan.settle_repo("missing", "v1"));
+        assert!(plan.repos().is_empty());
+    }
+
+    #[test]
+    fn package_check_or_merges_remote_and_on_disk_status_per_plugin() {
+        let mut plan = UpdatePlan::default();
+        let mut remote = plugin_status("repo", true, false);
+        remote.available_version = "2.0.0".to_owned();
+
+        plan.apply_package_check(vec![remote], vec![plugin_status("repo", false, true)]);
+
+        let packages = plan.packages();
+        assert_eq!(packages.len(), 1, "one merged entry per plugin id");
+        assert!(packages[0].update_available);
+        assert!(packages[0].on_disk_changed);
+        assert_eq!(
+            packages[0].available_version, "2.0.0",
+            "the remote status keeps its advertised version through the merge"
+        );
+    }
+
+    #[test]
+    fn a_scoped_disk_scan_retains_statuses_of_unreached_slugs() {
+        let mut plan = UpdatePlan::default();
+        plan.apply_package_check(
+            vec![
+                plugin_status("reached", true, false),
+                plugin_status("other", true, false),
+            ],
+            Vec::new(),
+        );
+
+        plan.apply_disk_scan(
+            &["reached".to_owned()],
+            vec![plugin_status("reached", false, true)],
+        );
+
+        let packages = plan.packages();
+        assert_eq!(packages.len(), 2);
+        let reached = packages
+            .iter()
+            .find(|status| status.slug == "reached")
+            .unwrap();
+        assert!(
+            !reached.update_available,
+            "a rescanned slug drops its stale remote status"
+        );
+        assert!(reached.on_disk_changed);
+        assert!(
+            packages
+                .iter()
+                .any(|status| status.slug == "other" && status.update_available),
+            "an unreached slug keeps its retained status"
+        );
+    }
+
+    #[test]
+    fn purging_a_slug_removes_both_package_and_repo_statuses() {
+        let mut plan = UpdatePlan::default();
+        plan.apply_repo_check(vec![
+            repo_status("gone", Some("v2"), false),
+            repo_status("kept", None, false),
+        ]);
+        plan.apply_package_check(
+            vec![
+                plugin_status("gone", true, false),
+                plugin_status("kept", false, true),
+            ],
+            Vec::new(),
+        );
+
+        plan.purge_slug("gone");
+
+        assert!(plan.packages().iter().all(|status| status.slug == "kept"));
+        assert!(plan.repos().iter().all(|status| status.slug == "kept"));
+        assert_eq!(plan.packages().len(), 1);
+        assert_eq!(plan.repos().len(), 1);
+    }
+
+    #[test]
+    fn clearing_the_plan_empties_all_update_state() {
+        let mut plan = UpdatePlan::default();
+        plan.apply_repo_check(vec![repo_status("repo", Some("v2"), false)]);
+        plan.apply_package_check(vec![plugin_status("repo", true, false)], Vec::new());
+
+        plan.clear();
+
+        assert!(plan.packages().is_empty());
+        assert!(plan.repos().is_empty());
+    }
+
+    #[test]
+    fn reused_revision_records_disk_hashes_over_the_network_manifest() {
+        let network = vec![("pkg".to_owned(), "net-hash".to_owned())];
+        let disk = vec![("pkg".to_owned(), "disk-hash".to_owned())];
+        assert_eq!(
+            hashes_to_install(true, Some(disk.clone()), network.clone()),
+            disk,
+            "a reused validated revision records its on-disk digests"
+        );
+        assert_eq!(
+            hashes_to_install(false, Some(disk), network.clone()),
+            network,
+            "a fresh install records the downloaded content's digests"
+        );
+        assert_eq!(
+            hashes_to_install(true, None, network.clone()),
+            network,
+            "an unreadable reused index falls back to the network manifest"
+        );
+    }
+
+    #[test]
+    fn advancing_a_release_retires_the_active_tag_for_pruning() {
+        let mut record = release_repo_record("repo");
+
+        let previous = advance_active_release(&mut record, "v2");
+
+        assert_eq!(previous.as_deref(), Some("v1"));
+        assert_eq!(record.previous_release_tag.as_deref(), Some("v1"));
+        assert_eq!(record.release_tag.as_deref(), Some("v2"));
+        assert_eq!(record.active_revision.as_deref(), Some("v2"));
+        assert!(record.last_sync.is_some());
+    }
+
+    fn release_repo_record(slug: &str) -> PluginRepoRecord {
+        PluginRepoRecord {
+            url: format!("https://github.com/example/{slug}"),
+            slug: slug.to_owned(),
+            repository_id: None,
+            trusted_key: None,
+            source_kind: crate::config::PluginRepoSourceKind::Release,
+            release_tag: Some("v1".to_owned()),
+            release_policy: crate::config::PluginReleasePolicy::Latest,
+            active_revision: Some("v1".to_owned()),
+            active_source: crate::config::PluginRevisionSource::Managed,
+            previous_release_tag: None,
+            last_sync: None,
+        }
+    }
+
+    #[tokio::test]
+    async fn broadcasting_updates_settles_stale_per_plugin_status_for_a_slug() {
+        crate::test_support::with_tmp_config(|app| async move {
+            app.config
+                .write()
+                .await
+                .plugins
+                .repos
+                .push(release_repo_record("stale-repo"));
+            app.plugin_update_plan
+                .lock()
+                .await
+                .apply_package_check(vec![plugin_status("stale-repo", true, false)], Vec::new());
+
+            broadcast_plugin_updates(&app, Some("stale-repo")).await;
+
+            assert!(
+                !app.plugin_update_plan
+                    .lock()
+                    .await
+                    .packages()
+                    .iter()
+                    .any(|status| status.slug == "stale-repo" && status.update_available),
+                "no stale update_available may survive a re-broadcast for the slug"
+            );
+        })
+        .await;
+    }
+
+    #[tokio::test]
+    async fn removing_a_repo_purges_its_retained_update_statuses() {
+        crate::test_support::with_tmp_config(|app| async move {
+            app.config
+                .write()
+                .await
+                .plugins
+                .repos
+                .push(release_repo_record("gone"));
+            {
+                let mut plan = app.plugin_update_plan.lock().await;
+                plan.apply_package_check(vec![plugin_status("gone", true, false)], Vec::new());
+                plan.apply_repo_check(vec![repo_status("gone", Some("v2"), false)]);
+            }
+
+            remove_repo("gone".to_owned(), app.clone()).await.unwrap();
+
+            let plan = app.plugin_update_plan.lock().await;
+            assert!(
+                plan.packages().is_empty(),
+                "per-plugin statuses for the removed slug must be purged"
+            );
+            assert!(
+                plan.repos().is_empty(),
+                "repo statuses for the removed slug must be purged"
+            );
+        })
+        .await;
     }
 }

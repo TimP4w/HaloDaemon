@@ -935,79 +935,54 @@ pub enum ProbeMode {
     None,
 }
 
-/// Declarative device match + per-device identity (`None` match fields mean "don't care").
-#[derive(Debug, Clone, Serialize, Deserialize)]
-#[serde(deny_unknown_fields)]
+/// A resolved device declaration: identity plus exactly one typed transport.
+#[derive(Debug, Clone, Serialize)]
 pub struct DeviceSpec {
     /// Required (validated non-empty in `validate_manifest`).
-    #[serde(default)]
     pub vendor: String,
     /// Required (validated non-empty in `validate_manifest`).
-    #[serde(default)]
     pub model: String,
     /// Display-name override; defaults to `model`.
+    pub name: Option<String>,
+    pub device_type: Option<DeviceType>,
+    /// Grid placement for the Controls tab's category cards. Empty ⇒ one
+    /// full-width row per category, alphabetically.
+    pub control_layout: Vec<CategoryLayout>,
+    /// Capability subset this device exposes. Empty ⇒ every capability the
+    /// plugin advertises.
+    pub capabilities: Vec<String>,
+    pub transport: TransportSpec,
+}
+
+/// A `devices` entry as deserialized from `plugin.yaml`, resolved into a
+/// [`DeviceSpec`] once its single transport matcher validates.
+#[derive(Debug, Clone, Deserialize)]
+#[serde(deny_unknown_fields)]
+pub struct RawDeviceSpec {
+    #[serde(default)]
+    pub vendor: String,
+    #[serde(default)]
+    pub model: String,
     #[serde(default)]
     pub name: Option<String>,
     #[serde(default, rename = "type")]
     pub device_type: Option<DeviceType>,
-    /// Grid placement for the Controls tab's category cards. Empty ⇒ one
-    /// full-width row per category, alphabetically.
     #[serde(default)]
     pub control_layout: Vec<CategoryLayout>,
-
-    #[serde(skip)]
-    pub transport: String,
-    /// Nested transport matcher. It is normalized into the runtime matcher
-    /// fields while worker interfaces are being replaced.
+    #[serde(default)]
+    pub capabilities: Vec<String>,
     #[serde(default, rename = "match")]
     pub r#match: DeviceMatch,
+}
 
-    // ── HID ──────────────────────────────────────────────────────────────
-    #[serde(skip)]
-    pub vid: Option<u16>,
-    #[serde(skip)]
-    pub pid: Option<u16>,
-    /// Match any of several product ids (for device families). Takes precedence
-    /// over `pid` when non-empty.
-    #[serde(skip)]
-    pub pids: Vec<u16>,
-    #[serde(skip)]
-    pub usage_page: Option<u16>,
-    #[serde(skip)]
-    pub usage: Option<u16>,
-    #[serde(skip)]
-    pub interface: Option<i32>,
-    #[serde(skip)]
-    pub generic_hid: bool,
-    /// USB serial the match is restricted to, if declared.
-    #[serde(skip)]
-    pub serial: Option<String>,
-
-    // ── SMBus (match + scan declaration in one) ──────────────────────────
-    /// Bus family to scan/match: "chipset" or "gpu".
-    #[serde(skip)]
-    pub bus: Option<String>,
-    /// Addresses the host may probe on the bus (the security boundary).
-    #[serde(skip)]
-    pub addresses: Option<Vec<u8>>,
-    /// Extra addresses `pre_scan` may write beyond `addresses` (e.g. an ENE
-    /// DRAM broadcast address). Never probed or matched — only in `pre_scan`.
-    #[serde(skip)]
-    pub extra_addresses: Option<Vec<u8>>,
-    /// Bus write-rate ceiling applied before any scan traffic.
-    #[serde(skip)]
-    pub max_bytes_per_sec: Option<u32>,
-    /// Run the plugin's `pre_scan` callback on each matching bus before probing.
-    #[serde(skip)]
-    pub pre_scan: bool,
-    #[serde(skip)]
-    pub probe: ProbeMode,
-    /// PCI-identity gate for GPU buses. Each entry is a `{ vendor, device,
-    /// sub_vendor, sub_device, confirmed }` tuple (unset fields are wildcards).
-    /// A `bus = "gpu"` spec MUST declare at least one; chipset specs leave it
-    /// empty. See [`PciMatch`] and the smbus backend's `validate`.
-    #[serde(skip)]
-    pub pci_match: Vec<PciMatch>,
+#[derive(Debug, Clone, Serialize)]
+pub enum TransportSpec {
+    Hid(HidMatch),
+    Usb(UsbMatch),
+    Smbus(SmbusMatch),
+    Command(CommandMatch),
+    AmdSmn(AmdSmnMatch),
+    Lpcio(LpcioMatch),
 }
 
 /// Device matcher. A device declares exactly one transport key; unknown
@@ -1101,9 +1076,9 @@ pub struct HidMatch {
     pub usage: Option<u16>,
     #[serde(default)]
     pub interface: Option<i32>,
-    /// Per-device HID write ceiling.  This belongs beside the HID identity so
-    /// packages can preserve protocol-specific pacing (for example G560's
-    /// 1500 B/s vendor-report limit) without granting a global transport rate.
+    /// Per-device HID write ceiling. This belongs beside the HID identity so
+    /// packages can preserve protocol-specific pacing without granting a global
+    /// transport rate.
     #[serde(default)]
     pub max_bytes_per_sec: Option<u32>,
 }
@@ -1119,19 +1094,69 @@ impl DeviceMatch {
     }
 }
 
+impl TransportSpec {
+    pub fn kind(&self) -> &'static str {
+        match self {
+            Self::Hid(_) => "hid",
+            Self::Usb(_) => "usb",
+            Self::Smbus(_) => "smbus",
+            Self::Command(_) => "command",
+            Self::AmdSmn(_) => "amd_smn",
+            Self::Lpcio(_) => "lpcio",
+        }
+    }
+}
+
 impl DeviceSpec {
     /// Delegates to `self.transport`'s registered backend (unknown kind → never).
     pub fn matches(&self, handle: &DiscoveryHandle<'_>) -> bool {
-        descriptor_for(&self.transport)
+        descriptor_for(self.transport.kind())
             .and_then(|d| d.matches)
             .is_some_and(|m| m(self, handle))
     }
 
+    pub fn hid(&self) -> Option<&HidMatch> {
+        match &self.transport {
+            TransportSpec::Hid(hid) => Some(hid),
+            _ => None,
+        }
+    }
+
+    pub fn usb(&self) -> Option<&UsbMatch> {
+        match &self.transport {
+            TransportSpec::Usb(usb) => Some(usb),
+            _ => None,
+        }
+    }
+
+    pub fn smbus(&self) -> Option<&SmbusMatch> {
+        match &self.transport {
+            TransportSpec::Smbus(smbus) => Some(smbus),
+            _ => None,
+        }
+    }
+
+    pub fn command(&self) -> Option<&CommandMatch> {
+        match &self.transport {
+            TransportSpec::Command(command) => Some(command),
+            _ => None,
+        }
+    }
+
     /// The SMBus bus family this spec targets, if it is an SMBus spec.
     pub fn bus_kind(&self) -> Option<SmbusBusKind> {
-        match self.bus.as_deref() {
+        match self.smbus().map(|smbus| smbus.bus.as_str()) {
             Some("chipset") => Some(SmbusBusKind::Chipset),
             Some("gpu") => Some(SmbusBusKind::Gpu),
+            _ => None,
+        }
+    }
+
+    pub fn max_bytes_per_sec(&self) -> Option<u32> {
+        match &self.transport {
+            TransportSpec::Hid(hid) => hid.max_bytes_per_sec,
+            TransportSpec::Usb(usb) => usb.max_bytes_per_sec,
+            TransportSpec::Smbus(smbus) => smbus.max_bytes_per_sec,
             _ => None,
         }
     }
@@ -1182,7 +1207,7 @@ pub struct PluginManifest {
     /// Full entry-script text, re-executed by the worker to build its own VM.
     pub script_source: String,
     /// Package-local Lua modules indexed from `lib/**/*.lua`, keyed by dotted
-    /// module name (for example `lib.hidpp.v1`). Sources are read before the VM
+    /// module name (for example `lib.proto.v1`). Sources are read before the VM
     /// starts, so module loading never performs runtime filesystem access.
     pub module_sources: std::collections::BTreeMap<String, String>,
     /// Directory a plugin package was loaded from; empty only for an internal
@@ -1262,7 +1287,7 @@ pub struct PluginMeta {
     #[serde(default)]
     pub consumes: Vec<String>,
     #[serde(default)]
-    pub devices: Vec<DeviceSpec>,
+    pub devices: Vec<RawDeviceSpec>,
     #[serde(default)]
     pub transports: TransportsConfig,
     #[serde(default)]
@@ -1654,6 +1679,31 @@ fn declares_only_platform(platforms: &[String], os: &str) -> bool {
     !platforms.is_empty() && platforms.iter().all(|platform| platform == os)
 }
 
+const TRANSPORT_PERMISSIONS: &[(&str, Permission, &str)] = &[
+    ("hid", Permission::Hid, "hid"),
+    ("usb", Permission::Usb, "usb"),
+    ("smbus", Permission::Smbus, "smbus"),
+    ("command", Permission::Command, "command"),
+    ("amd_smn", Permission::AmdSmn, "amd_smn"),
+    ("lpcio", Permission::Lpcio, "lpcio"),
+    ("tcp", Permission::Network, "network"),
+    ("hwmon", Permission::Hwmon, "hwmon"),
+    ("serial", Permission::Serial, "serial"),
+];
+
+fn require_transport_permission(manifest: &PluginManifest, transport: &str) -> Result<()> {
+    if let Some((permission, label)) = TRANSPORT_PERMISSIONS
+        .iter()
+        .find(|(name, _, _)| *name == transport)
+        .map(|(_, permission, label)| (*permission, *label))
+    {
+        if !manifest.permissions.contains(&permission) {
+            bail!("the {transport} transport requires the `{label}` permission");
+        }
+    }
+    Ok(())
+}
+
 /// Cross-field validation, gated by `plugin_type`.
 pub(super) fn validate_manifest(manifest: &PluginManifest) -> Result<()> {
     check_count("devices", manifest.devices.len(), MAX_PLUGIN_DEVICES)?;
@@ -1667,6 +1717,7 @@ pub(super) fn validate_manifest(manifest: &PluginManifest) -> Result<()> {
     )?;
     validate_identity(&manifest.identity)?;
     validate_catalog(manifest)?;
+    validate_device_capabilities(manifest)?;
     validate_device_identifiers(manifest)?;
     validate_effects(&manifest.effects, "effect")?;
     validate_translations(manifest)?;
@@ -1687,7 +1738,7 @@ pub(super) fn validate_manifest(manifest: &PluginManifest) -> Result<()> {
                     bail!("every device must declare a non-empty vendor and model");
                 }
                 validate_control_layout(spec)?;
-                match descriptor_for(&spec.transport) {
+                match descriptor_for(spec.transport.kind()) {
                     Some(desc) => {
                         if let Some(validate) = desc.validate {
                             validate(spec)?;
@@ -1695,33 +1746,11 @@ pub(super) fn validate_manifest(manifest: &PluginManifest) -> Result<()> {
                     }
                     None => bail!(
                         "unsupported device transport '{}' (known: {})",
-                        spec.transport,
+                        spec.transport.kind(),
                         known_kinds().join(", ")
                     ),
                 }
-                if spec.transport == "smbus" && !manifest.permissions.contains(&Permission::Smbus) {
-                    bail!("a device using the smbus transport must declare the `smbus` permission");
-                }
-                if spec.transport == "hid" && !manifest.permissions.contains(&Permission::Hid) {
-                    bail!("a device using the hid transport must declare the `hid` permission");
-                }
-                if spec.transport == "usb" && !manifest.permissions.contains(&Permission::Usb) {
-                    bail!("a device using the usb transport must declare the `usb` permission");
-                }
-                let required_permission = match spec.transport.as_str() {
-                    "command" => Some(Permission::Command),
-                    "amd_smn" => Some(Permission::AmdSmn),
-                    "lpcio" => Some(Permission::Lpcio),
-                    _ => None,
-                };
-                if let Some(permission) = required_permission {
-                    if !manifest.permissions.contains(&permission) {
-                        bail!(
-                            "a device using the {} transport requires its matching permission",
-                            spec.transport
-                        );
-                    }
-                }
+                require_transport_permission(manifest, spec.transport.kind())?;
             }
         }
         PluginKind::Effect => {
@@ -1776,40 +1805,32 @@ pub(super) fn validate_manifest(manifest: &PluginManifest) -> Result<()> {
     // `network` permission — that's what drives the consent prompt and what the
     // tcp backend gates its connect on. Without this a plugin could ship a tcp
     // integration with an empty permission list and auto-activate silently.
-    if manifest.transports.tcp.is_some() && !manifest.permissions.contains(&Permission::Network) {
-        bail!("a tcp transport requires the 'network' permission to be declared");
+    if manifest.transports.tcp.is_some() {
+        require_transport_permission(manifest, "tcp")?;
     }
     if manifest.transports.hwmon.is_some() {
-        if !manifest.permissions.contains(&Permission::Hwmon) {
-            bail!("an hwmon transport requires the 'hwmon' permission to be declared");
-        }
+        require_transport_permission(manifest, "hwmon")?;
         if !declares_only_platform(&manifest.platforms, "linux") {
             bail!("an hwmon integration must declare platforms: [linux]");
         }
     }
     if manifest.transports.amd_smn.is_some() {
-        if !manifest.permissions.contains(&Permission::AmdSmn) {
-            bail!("an amd_smn transport requires the 'amd_smn' permission to be declared");
-        }
+        require_transport_permission(manifest, "amd_smn")?;
         if !declares_only_platform(&manifest.platforms, "windows") {
             bail!("an amd_smn transport must declare platforms: [windows]");
         }
     }
     if manifest.transports.lpcio.is_some() {
-        if !manifest.permissions.contains(&Permission::Lpcio) {
-            bail!("an lpcio transport requires the 'lpcio' permission to be declared");
-        }
+        require_transport_permission(manifest, "lpcio")?;
         if !declares_only_platform(&manifest.platforms, "windows") {
             bail!("an lpcio transport must declare platforms: [windows]");
         }
     }
-    if manifest.transports.usb.is_some() && !manifest.permissions.contains(&Permission::Usb) {
-        bail!("a usb transport requires the 'usb' permission to be declared");
+    if manifest.transports.usb.is_some() {
+        require_transport_permission(manifest, "usb")?;
     }
     if let Some(serial) = &manifest.transports.serial {
-        if !manifest.permissions.contains(&Permission::Serial) {
-            bail!("a serial transport requires the 'serial' permission to be declared");
-        }
+        require_transport_permission(manifest, "serial")?;
         if serial.port_key.is_empty() {
             bail!("a serial transport requires a non-empty port_key");
         }
@@ -2198,68 +2219,86 @@ pub(super) fn validate_accessories(accessories: &[AccessoryManifest]) -> Result<
     Ok(())
 }
 
-fn normalize_device_matches(manifest: &mut PluginManifest) -> Result<()> {
-    for device in &mut manifest.devices {
-        let count = device.r#match.count();
-        if count == 0 {
-            continue;
+impl RawDeviceSpec {
+    fn resolve(self) -> Result<DeviceSpec> {
+        let RawDeviceSpec {
+            vendor,
+            model,
+            name,
+            device_type,
+            control_layout,
+            capabilities,
+            r#match,
+        } = self;
+        if r#match.count() != 1 {
+            bail!("a device must declare exactly one nested match");
         }
-        if count != 1 || !device.transport.is_empty() {
-            bail!("a device must declare exactly one nested match and no `transport`");
-        }
-        if let Some(hid) = &device.r#match.hid {
+        let transport = if let Some(mut hid) = r#match.hid {
             if hid.any && (hid.vid.is_some() || hid.pid.is_some() || !hid.pids.is_empty()) {
                 bail!("generic hid match cannot also declare identifiers");
             }
             if !hid.any && hid.vid.is_none() {
                 bail!("hid match requires a `vid` or explicit `any`");
             }
-            device.transport = "hid".to_owned();
-            device.vid = hid.vid;
-            device.pid = hid.pid;
-            device.pids = hid.pids.clone();
-            device.usage_page = hid.usage_page;
-            device.usage = hid.usage;
-            device.interface = hid.interface;
-            device.max_bytes_per_sec = hid.max_bytes_per_sec;
-            device.generic_hid = hid.any;
-        } else if let Some(usb) = &device.r#match.usb {
+            if hid.pids.is_empty() {
+                hid.pids.extend(hid.pid);
+            }
+            hid.pid = None;
+            TransportSpec::Hid(hid)
+        } else if let Some(mut usb) = r#match.usb {
             if usb.vid == 0 || (usb.pid == 0 && usb.pids.is_empty()) {
                 bail!("usb match requires a non-zero vid and pid (or pids)");
             }
-            device.transport = "usb".to_owned();
-            device.vid = Some(usb.vid);
-            device.pid = (usb.pid != 0).then_some(usb.pid);
-            device.pids = usb.pids.clone();
-            device.interface = Some(usb.interface.into());
-            device.serial = usb.serial.clone();
-            device.max_bytes_per_sec = usb.max_bytes_per_sec;
-        } else if let Some(smbus) = &device.r#match.smbus {
-            device.transport = "smbus".to_owned();
-            device.bus = Some(smbus.bus.clone());
-            device.addresses = Some(smbus.addresses.clone());
-            device.extra_addresses = Some(smbus.extra_addresses.clone());
-            device.max_bytes_per_sec = smbus.max_bytes_per_sec;
-            device.pre_scan = smbus.pre_scan;
-            device.probe = smbus.probe;
-            device.pci_match = smbus.pci_match.clone();
-        } else if let Some(command) = &device.r#match.command {
+            if usb.pids.is_empty() {
+                usb.pids.push(usb.pid);
+            }
+            usb.pid = 0;
+            TransportSpec::Usb(usb)
+        } else if let Some(smbus) = r#match.smbus {
+            TransportSpec::Smbus(smbus)
+        } else if let Some(command) = r#match.command {
             if command.command().is_empty() {
                 bail!("command match must name an executable");
             }
-            device.transport = "command".to_owned();
-        } else if let Some(amd_smn) = &device.r#match.amd_smn {
+            TransportSpec::Command(command)
+        } else if let Some(amd_smn) = r#match.amd_smn {
             if !amd_smn.any {
                 bail!("amd_smn match must explicitly declare `any: true`");
             }
-            device.transport = "amd_smn".to_owned();
-        } else if let Some(lpcio) = &device.r#match.lpcio {
+            TransportSpec::AmdSmn(amd_smn)
+        } else if let Some(lpcio) = r#match.lpcio {
             if lpcio.any != lpcio.chip_ids.is_empty() {
                 bail!("lpcio match must declare chip_ids or explicit `any: true`");
             }
-            device.transport = "lpcio".to_owned();
+            TransportSpec::Lpcio(lpcio)
         } else {
             bail!("the declared transport match is not implemented by this daemon build");
+        };
+        Ok(DeviceSpec {
+            vendor,
+            model,
+            name,
+            device_type,
+            control_layout,
+            capabilities,
+            transport,
+        })
+    }
+}
+
+fn validate_device_capabilities(manifest: &PluginManifest) -> Result<()> {
+    for device in &manifest.devices {
+        let mut seen = HashSet::new();
+        for capability in &device.capabilities {
+            if !SUPPORTED_CAPABILITIES.contains(&capability.as_str()) {
+                bail!("unknown device capability '{capability}'");
+            }
+            if !manifest.capabilities.contains(capability) {
+                bail!("device capability '{capability}' is not advertised by the plugin");
+            }
+            if !seen.insert(capability) {
+                bail!("device capability '{capability}' is declared more than once");
+            }
         }
     }
     Ok(())
@@ -2268,18 +2307,13 @@ fn normalize_device_matches(manifest: &mut PluginManifest) -> Result<()> {
 fn validate_device_identifiers(manifest: &PluginManifest) -> Result<()> {
     let mut hid_identifiers = HashSet::new();
     for device in &manifest.devices {
-        if device.transport != "hid" || device.generic_hid {
+        let Some(hid) = device.hid() else { continue };
+        if hid.any {
             continue;
         }
-        for pid in device.pids.iter().copied().chain(device.pid) {
-            let Some(vid) = device.vid else { continue };
-            if !hid_identifiers.insert((
-                vid,
-                pid,
-                device.usage_page,
-                device.usage,
-                device.interface,
-            )) {
+        for pid in hid.pids.iter().copied() {
+            let Some(vid) = hid.vid else { continue };
+            if !hid_identifiers.insert((vid, pid, hid.usage_page, hid.usage, hid.interface)) {
                 bail!("duplicate concrete HID match {vid:04x}:{pid:04x}");
             }
         }
@@ -2798,11 +2832,11 @@ fn validate_effect_assets(manifest: &PluginManifest) -> Result<()> {
 }
 
 fn validate_asset_name(what: &str, value: &str) -> Result<()> {
-    if value.is_empty()
-        || value.len() > MAX_TEXT_BYTES
-        || value.contains('\0')
-        || Path::new(value).components().count() != 1
-    {
+    use std::path::Component;
+    let mut components = Path::new(value).components();
+    let single_normal =
+        matches!(components.next(), Some(Component::Normal(_))) && components.next().is_none();
+    if value.is_empty() || value.len() > MAX_TEXT_BYTES || value.contains('\0') || !single_normal {
         bail!("{what} must be a non-empty bare filename no longer than {MAX_TEXT_BYTES} bytes");
     }
     Ok(())
@@ -2827,20 +2861,18 @@ fn validate_transports(manifest: &PluginManifest) -> Result<()> {
         if !(1..=60_000).contains(&tcp.timeout_ms) {
             bail!("tcp timeout_ms must be 1..=60000");
         }
-        if manifest.config.is_some() {
-            let host = manifest
-                .config_fields()
-                .iter()
-                .find(|field| field.key == tcp.host_key);
-            let port = manifest
-                .config_fields()
-                .iter()
-                .find(|field| field.key == tcp.port_key);
-            if !host.is_some_and(|field| field.kind == PluginConfigFieldKind::Host)
-                || !port.is_some_and(|field| field.kind == PluginConfigFieldKind::Port)
-            {
-                bail!("tcp host_key and port_key must name host and port config fields");
-            }
+        let host = manifest
+            .config_fields()
+            .iter()
+            .find(|field| field.key == tcp.host_key);
+        let port = manifest
+            .config_fields()
+            .iter()
+            .find(|field| field.key == tcp.port_key);
+        if !host.is_some_and(|field| field.kind == PluginConfigFieldKind::Host)
+            || !port.is_some_and(|field| field.kind == PluginConfigFieldKind::Port)
+        {
+            bail!("tcp host_key and port_key must name host and port config fields");
         }
     }
     if let Some(usb) = &manifest.transports.usb {
@@ -2913,9 +2945,7 @@ fn validate_transports(manifest: &PluginManifest) -> Result<()> {
         }
     }
     if let Some(command) = &manifest.transports.command {
-        if !manifest.permissions.contains(&Permission::Command) {
-            bail!("a command transport requires the 'command' permission");
-        }
+        require_transport_permission(manifest, "command")?;
         if command.commands.is_empty() {
             bail!("command transport must declare at least one executable");
         }
@@ -2932,7 +2962,7 @@ fn validate_transports(manifest: &PluginManifest) -> Result<()> {
             }
         }
         for device in &manifest.devices {
-            if let Some(command_match) = &device.r#match.command {
+            if let Some(command_match) = device.command() {
                 if !names.contains(command_match.command()) {
                     bail!(
                         "command match '{}' is not declared by transports.command",
@@ -2944,7 +2974,7 @@ fn validate_transports(manifest: &PluginManifest) -> Result<()> {
     } else if manifest
         .devices
         .iter()
-        .any(|device| device.r#match.command.is_some())
+        .any(|device| device.command().is_some())
     {
         bail!("a command match requires a transports.command declaration");
     }
@@ -3295,13 +3325,20 @@ pub(super) fn build_manifest_from_dir(dir: &Path) -> Result<PluginManifest> {
             .is_file()
             .then(|| DEFAULT_LOGO_NAME.to_owned())
     });
-    let mut manifest = PluginManifest {
+    if !(50..=60_000).contains(&meta.poll_interval_ms) {
+        bail!("poll_interval_ms must be between 50 and 60000");
+    }
+    let manifest = PluginManifest {
         plugin_id: meta.id.clone(),
         source_path: entry_path,
         script_source: source,
         module_sources: read_package_modules(dir)?,
         plugin_dir: dir.to_path_buf(),
-        devices: meta.devices,
+        devices: meta
+            .devices
+            .into_iter()
+            .map(RawDeviceSpec::resolve)
+            .collect::<Result<_>>()?,
         identity: Identity {
             name: meta.name.or(meta.identity.name),
             id: meta.identity.id.or(Some(meta.id)),
@@ -3315,7 +3352,7 @@ pub(super) fn build_manifest_from_dir(dir: &Path) -> Result<PluginManifest> {
         plugin_type: meta.plugin_type,
         experimental: meta.experimental,
         dynamic_children: meta.dynamic_children,
-        poll_interval_ms: meta.poll_interval_ms.clamp(50, 60_000),
+        poll_interval_ms: meta.poll_interval_ms,
         effects: meta.effects,
         widgets: meta.widgets,
         translations: meta.translations,
@@ -3330,7 +3367,6 @@ pub(super) fn build_manifest_from_dir(dir: &Path) -> Result<PluginManifest> {
         config: meta.config,
         setup: meta.setup,
     };
-    normalize_device_matches(&mut manifest)?;
 
     Ok(manifest)
 }
@@ -3863,8 +3899,7 @@ mod tests {
         let dir = write_plugin_dir(
             tmp.path(),
             "presence_req",
-            "type: integration\npermissions: [network]\ntransports:\n  tcp: {}\nrequirements:\n  - { kind: command, name: openrgb }
-",
+            "type: integration\npermissions: [network]\ntransports:\n  tcp: {}\nrequirements:\n  - { kind: command, name: openrgb }\nconfig:\n  fields:\n    - { key: host, label: Host, kind: host }\n    - { key: port, label: Port, kind: port }\n",
             ENTRY_LUA,
         );
         let manifest = parse_manifest_from_dir(&dir).unwrap();
@@ -3950,9 +3985,9 @@ mod tests {
         let tmp = tempfile::tempdir().unwrap();
         let integration = "type: integration\nplatforms: [linux]\npermissions: [hwmon]\ntransports:\n  hwmon: {}\n";
         let dir = write_plugin_dir(tmp.path(), "modules", integration, "return {}");
-        std::fs::create_dir_all(dir.join("lib").join("hidpp")).unwrap();
+        std::fs::create_dir_all(dir.join("lib").join("proto")).unwrap();
         std::fs::write(
-            dir.join("lib").join("hidpp").join("v1.lua"),
+            dir.join("lib").join("proto").join("v1.lua"),
             "return { version = 1 }",
         )
         .unwrap();
@@ -3963,7 +3998,7 @@ mod tests {
         let manifest = parse_manifest_from_dir(&dir).unwrap();
         assert_eq!(
             manifest.module_sources.keys().collect::<Vec<_>>(),
-            vec!["lib.hidpp.v1"]
+            vec!["lib.proto.v1"]
         );
         assert!(!manifest.module_sources.contains_key("lib.secret"));
     }
@@ -4326,7 +4361,7 @@ mod tests {
         let dir = write_plugin_dir(
             tmp.path(),
             "multiple_roots",
-            "type: integration\nplatforms: [linux]\npermissions: [hwmon, network]\ntransports:\n  hwmon: {}\n  tcp:\n    host_key: host\n    port_key: port\n",
+            "type: integration\nplatforms: [linux]\npermissions: [hwmon, network]\ntransports:\n  hwmon: {}\n  tcp:\n    host_key: host\n    port_key: port\nconfig:\n  fields:\n    - { key: host, label: Host, kind: host }\n    - { key: port, label: Port, kind: port }\n",
             ENTRY_LUA,
         );
         assert!(parse_manifest_from_dir(&dir)
@@ -4445,9 +4480,11 @@ mod tests {
         std::fs::write(dir.join("main.lua"), ENTRY_LUA).unwrap();
 
         let manifest = parse_manifest_from_dir(&dir).unwrap();
-        assert_eq!(manifest.devices[0].transport, "hid");
-        assert_eq!(manifest.devices[0].vid, Some(0x1234));
-        assert_eq!(manifest.devices[0].pid, Some(0x5678));
+        assert_eq!(manifest.devices[0].transport.kind(), "hid");
+        let hid = manifest.devices[0].hid().unwrap();
+        assert_eq!(hid.vid, Some(0x1234));
+        assert_eq!(hid.pid, None);
+        assert_eq!(hid.pids, vec![0x5678]);
     }
 
     #[test]
@@ -4463,9 +4500,10 @@ mod tests {
         std::fs::write(dir.join("main.lua"), ENTRY_LUA).unwrap();
 
         let manifest = parse_manifest_from_dir(&dir).unwrap();
-        assert_eq!(manifest.devices[0].transport, "smbus");
-        assert_eq!(manifest.devices[0].bus.as_deref(), Some("chipset"));
-        assert_eq!(manifest.devices[0].addresses.as_deref(), Some(&[0x50][..]));
+        assert_eq!(manifest.devices[0].transport.kind(), "smbus");
+        let smbus = manifest.devices[0].smbus().unwrap();
+        assert_eq!(smbus.bus, "chipset");
+        assert_eq!(smbus.addresses, vec![0x50]);
     }
 
     #[test]
@@ -4480,8 +4518,11 @@ mod tests {
         .unwrap();
         std::fs::write(dir.join("main.lua"), ENTRY_LUA).unwrap();
         let manifest = parse_manifest_from_dir(&dir).unwrap();
-        assert_eq!(manifest.devices[0].transport, "usb");
-        assert_eq!(manifest.devices[0].vid, Some(0x1234));
+        assert_eq!(manifest.devices[0].transport.kind(), "usb");
+        let usb = manifest.devices[0].usb().unwrap();
+        assert_eq!(usb.vid, 0x1234);
+        assert_eq!(usb.pid, 0);
+        assert_eq!(usb.pids, vec![0x5678]);
     }
 
     #[test]
@@ -4494,12 +4535,13 @@ mod tests {
             ENTRY_LUA,
         );
         let device = &parse_manifest_from_dir(&dir).unwrap().devices[0];
-        assert_eq!(device.transport, "usb");
-        assert_eq!(device.vid, Some(0x1234));
-        assert_eq!(device.pid, None);
-        assert_eq!(device.pids, vec![0x1, 0x2]);
-        assert_eq!(device.serial.as_deref(), Some("ABC123"));
-        assert_eq!(device.max_bytes_per_sec, Some(1500));
+        assert_eq!(device.transport.kind(), "usb");
+        let usb = device.usb().unwrap();
+        assert_eq!(usb.vid, 0x1234);
+        assert_eq!(usb.pid, 0);
+        assert_eq!(usb.pids, vec![0x1, 0x2]);
+        assert_eq!(usb.serial.as_deref(), Some("ABC123"));
+        assert_eq!(device.max_bytes_per_sec(), Some(1500));
     }
 
     #[test]
@@ -4528,6 +4570,41 @@ mod tests {
         assert!(!spec.matches(&handle(0x9, Some("ABC")))); // undeclared pid
         assert!(!spec.matches(&handle(0x1, Some("XYZ")))); // wrong serial
         assert!(!spec.matches(&handle(0x1, None))); // serial-scoped, none reported
+    }
+
+    #[test]
+    fn device_capabilities_must_be_an_advertised_subset() {
+        let tmp = tempfile::tempdir().unwrap();
+        let ok = write_plugin_dir(
+            tmp.path(),
+            "dev_caps",
+            "permissions: [hid]\ncapabilities: [lighting, pairing]\ndevices:\n  - vendor: A\n    model: B\n    type: mouse\n    capabilities: [pairing]\n    match:\n      hid: { vid: 1, pid: 2 }\n",
+            ENTRY_LUA,
+        );
+        let manifest = parse_manifest_from_dir(&ok).unwrap();
+        assert_eq!(manifest.devices[0].capabilities, vec!["pairing"]);
+
+        let unknown = write_plugin_dir(
+            tmp.path(),
+            "dev_caps_unknown",
+            "permissions: [hid]\ncapabilities: [lighting]\ndevices:\n  - vendor: A\n    model: B\n    type: mouse\n    capabilities: [warp_drive]\n    match:\n      hid: { vid: 1, pid: 2 }\n",
+            ENTRY_LUA,
+        );
+        assert!(parse_manifest_from_dir(&unknown)
+            .unwrap_err()
+            .to_string()
+            .contains("unknown device capability"));
+
+        let unadvertised = write_plugin_dir(
+            tmp.path(),
+            "dev_caps_subset",
+            "permissions: [hid]\ncapabilities: [lighting]\ndevices:\n  - vendor: A\n    model: B\n    type: mouse\n    capabilities: [pairing]\n    match:\n      hid: { vid: 1, pid: 2 }\n",
+            ENTRY_LUA,
+        );
+        assert!(parse_manifest_from_dir(&unadvertised)
+            .unwrap_err()
+            .to_string()
+            .contains("not advertised"));
     }
 
     #[test]
@@ -4593,5 +4670,66 @@ mod tests {
         let descriptor = meta.widgets[0].descriptor("demo", &meta.translations);
         assert_eq!(descriptor.localized_name("it-CH"), "Data");
         assert_eq!(descriptor.localized_name("de"), "Date");
+    }
+
+    #[test]
+    fn tcp_transport_validates_key_fields_without_a_config_block() {
+        let tmp = tempfile::tempdir().unwrap();
+        let dir = write_plugin_dir(
+            tmp.path(),
+            "tcp_no_config",
+            "type: integration\npermissions: [network]\ntransports:\n  tcp: {}\n",
+            ENTRY_LUA,
+        );
+        let manifest = build_manifest_from_dir(&dir).unwrap();
+        let error = validate_transports(&manifest).unwrap_err().to_string();
+        assert!(
+            error.contains("must name host and port config fields"),
+            "{error}"
+        );
+    }
+
+    #[test]
+    fn asset_name_rejects_relative_segments() {
+        assert!(validate_asset_name("plugin logo", "..").is_err());
+        assert!(validate_asset_name("plugin logo", ".").is_err());
+        assert!(validate_asset_name("plugin logo", "a/b").is_err());
+        assert!(validate_asset_name("plugin logo", "logo.png").is_ok());
+    }
+
+    #[test]
+    fn every_gated_transport_requires_its_permission() {
+        let tmp = tempfile::tempdir().unwrap();
+        let dir = write_plugin_dir(tmp.path(), "gated", "", ENTRY_LUA);
+        let base = build_manifest_from_dir(&dir).unwrap();
+        for &(transport, permission, label) in TRANSPORT_PERMISSIONS {
+            let mut missing = base.clone();
+            missing.permissions = Vec::new();
+            assert_eq!(
+                require_transport_permission(&missing, transport)
+                    .unwrap_err()
+                    .to_string(),
+                format!("the {transport} transport requires the `{label}` permission")
+            );
+            let mut granted = base.clone();
+            granted.permissions = vec![permission];
+            assert!(require_transport_permission(&granted, transport).is_ok());
+        }
+    }
+
+    #[test]
+    fn poll_interval_ms_out_of_range_is_rejected() {
+        let tmp = tempfile::tempdir().unwrap();
+        let low = write_plugin_dir(tmp.path(), "poll_low", "poll_interval_ms: 40\n", ENTRY_LUA);
+        assert!(build_manifest_from_dir(&low).is_err());
+        let high = write_plugin_dir(
+            tmp.path(),
+            "poll_high",
+            "poll_interval_ms: 60001\n",
+            ENTRY_LUA,
+        );
+        assert!(build_manifest_from_dir(&high).is_err());
+        let ok = write_plugin_dir(tmp.path(), "poll_ok", "poll_interval_ms: 500\n", ENTRY_LUA);
+        assert!(build_manifest_from_dir(&ok).is_ok());
     }
 }

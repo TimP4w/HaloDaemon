@@ -15,7 +15,10 @@ fn matches(spec: &DeviceSpec, handle: &DiscoveryHandle<'_>) -> bool {
     let DiscoveryHandle::Smbus { addr, bus_kind, .. } = handle else {
         return false;
     };
-    spec.bus_kind() == Some(*bus_kind) && spec.addresses.as_ref().is_some_and(|a| a.contains(addr))
+    spec.bus_kind() == Some(*bus_kind)
+        && spec
+            .smbus()
+            .is_some_and(|smbus| smbus.addresses.contains(addr))
 }
 
 fn open(
@@ -53,13 +56,15 @@ fn validate(spec: &DeviceSpec) -> Result<()> {
     if spec.bus_kind().is_none() {
         bail!("smbus match requires `bus` = \"chipset\" or \"gpu\"");
     }
-    match &spec.addresses {
-        Some(a) if !a.is_empty() => {}
-        _ => bail!("smbus match requires a non-empty `addresses` list"),
+    let Some(smbus) = spec.smbus() else {
+        bail!("smbus transport requires an smbus match");
+    };
+    if smbus.addresses.is_empty() {
+        bail!("smbus match requires a non-empty `addresses` list");
     }
     // A GPU bus is shared with the display's DDC/EDID lines; refuse to scan one
     // without a PCI gate confining the probe to known cards.
-    if spec.bus_kind() == Some(SmbusBusKind::Gpu) && spec.pci_match.is_empty() {
+    if spec.bus_kind() == Some(SmbusBusKind::Gpu) && smbus.pci_match.is_empty() {
         bail!("smbus `bus = \"gpu\"` match requires a non-empty `pci_match` list");
     }
     Ok(())

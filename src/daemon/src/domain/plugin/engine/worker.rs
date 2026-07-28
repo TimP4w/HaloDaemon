@@ -429,6 +429,7 @@ struct WorkerCtx {
     /// Persistent child tables owned by this root VM. Dynamic children route
     /// through the same worker while retaining isolated Lua-side state.
     child_devs: RefCell<HashMap<u32, Table>>,
+    stub_children: RefCell<std::collections::HashSet<u32>>,
     /// The plugin's returned table, holding its callback functions.
     manifest: Table,
     /// Integration-controller index. When present, RGB calls use the
@@ -436,6 +437,16 @@ struct WorkerCtx {
     controller_index: Option<u32>,
     /// Instruction counter for the runaway-guard hook; reset before each job.
     budget: Rc<Cell<u64>>,
+}
+
+impl super::lua_worker::VmCtx for WorkerCtx {
+    fn lua(&self) -> &Lua {
+        &self.lua
+    }
+
+    fn budget(&self) -> &Cell<u64> {
+        &self.budget
+    }
 }
 
 impl WorkerCtx {
@@ -446,7 +457,17 @@ impl WorkerCtx {
         let index = route
             .index
             .ok_or_else(|| anyhow!("dynamic child route has no controller index"))?;
+        self.ensure_child_dev(index, Some(route))
+    }
+
+    fn ensure_child_dev(&self, index: u32, route: Option<&DevMatch>) -> Result<Table> {
         if let Some(dev) = self.child_devs.borrow().get(&index) {
+            if let Some(route) = route {
+                if self.stub_children.borrow_mut().remove(&index) {
+                    dev.set("match", build_match_table(&self.lua, route)?)
+                        .map_err(|e| lua_err("child dev.match", e))?;
+                }
+            }
             return Ok(dev.clone());
         }
 
@@ -460,7 +481,21 @@ impl WorkerCtx {
             .map_err(|e| lua_err("child dev.transport", e))?;
         dev.set("transport", transport)
             .map_err(|e| lua_err("child dev.transport", e))?;
-        dev.set("match", build_match_table(&self.lua, route)?)
+        let match_table = match route {
+            Some(route) => build_match_table(&self.lua, route)?,
+            None => {
+                let table = self
+                    .lua
+                    .create_table()
+                    .map_err(|e| lua_err("child dev.match", e))?;
+                table
+                    .set("index", index)
+                    .map_err(|e| lua_err("child dev.match", e))?;
+                self.stub_children.borrow_mut().insert(index);
+                table
+            }
+        };
+        dev.set("match", match_table)
             .map_err(|e| lua_err("child dev.match", e))?;
         if let Ok(audio) = self.dev.get::<Value>("audio") {
             if !matches!(audio, Value::Nil) {
@@ -629,7 +664,7 @@ impl PluginHandle {
         http: Option<crate::infrastructure::http::HttpRuntime>,
         udp: Option<crate::infrastructure::udp::UdpRuntime>,
     ) -> Self {
-        let worker = LuaWorker::spawn(
+        let worker = LuaWorker::spawn_vm(
             "halod-plugin",
             "plugin",
             // Generous: a capability callback may legitimately do timed transfer
@@ -651,16 +686,8 @@ impl PluginHandle {
                     udp,
                 )
             },
-            |job: Job, ctx: &WorkerCtx| {
-                ctx.budget.set(0);
-                super::sandbox::set_call_deadline(&ctx.lua, std::time::Duration::from_secs(30));
-                job(ctx)
-            },
-        )
-        .unwrap_or_else(|e| {
-            log::error!("plugin worker not started: {e:#}");
-            LuaWorker::dead("plugin")
-        });
+            |job: Job, ctx: &WorkerCtx| job(ctx),
+        );
         Self {
             worker,
             route: None,
@@ -941,10 +968,18 @@ impl PluginHandle {
                 match f.call::<Value>(dev.clone()) {
                     Ok(status) => {
                         let outcome = match &status {
-                            Value::Table(table) => ctx
-                                .lua
-                                .from_value::<PollOutcome>(Value::Table(table.clone()))
-                                .unwrap_or_default(),
+                            Value::Table(table) => {
+                                match ctx.lua.from_value::<PollOutcome>(Value::Table(table.clone()))
+                                {
+                                    Ok(outcome) => outcome,
+                                    Err(error) => {
+                                        log::warn!(
+                                            "plugin read_status returned a malformed result: {error}"
+                                        );
+                                        PollOutcome::default()
+                                    }
+                                }
+                            }
                             _ => PollOutcome::default(),
                         };
                         if let Err(e) = dev.set("status", status) {
@@ -1025,16 +1060,12 @@ impl PluginHandle {
                 log::trace!("[plugin worker] event_source route={route:?}");
                 let targets = match route {
                     Value::Integer(0) => vec![(None, dev.clone())],
-                    Value::Integer(index) if index > 0 => u32::try_from(index)
-                        .ok()
-                        .and_then(|index| {
-                            ctx.child_devs
-                                .borrow()
-                                .get(&index)
-                                .cloned()
-                                .map(|child| vec![(Some(index), child)])
-                        })
-                        .unwrap_or_default(),
+                    Value::Integer(index) if index > 0 => match u32::try_from(index).ok() {
+                        Some(index) => {
+                            vec![(Some(index), ctx.ensure_child_dev(index, None)?)]
+                        }
+                        None => Vec::new(),
+                    },
                     _ => vec![(None, dev.clone())],
                 };
                 if targets.is_empty() {
@@ -1332,13 +1363,17 @@ fn validate_runtime_controls(controls: &InitControls) -> Result<()> {
 /// http transport and holds the network grant. Returns `None` (with a log) when
 /// the transport is absent, ungranted, or its policy fails to build, so a plugin
 /// simply lacks `halod.http` rather than failing to spawn.
+pub(crate) fn network_granted(granted: &[Permission]) -> bool {
+    granted.contains(&Permission::Network)
+}
+
 pub(crate) fn http_runtime_for(
     manifest: &crate::domain::plugin::manifest::PluginManifest,
     granted: &[Permission],
     config: &crate::domain::plugin::ResolvedConfig,
 ) -> Option<crate::infrastructure::http::HttpRuntime> {
     let http = manifest.transports.http.as_ref()?;
-    if !granted.contains(&Permission::Network) {
+    if !network_granted(granted) {
         return None;
     }
     let host = http.host_key.as_ref().and_then(|key| {
@@ -1388,7 +1423,7 @@ pub(crate) fn udp_runtime_for(
     config: &crate::domain::plugin::ResolvedConfig,
 ) -> Option<crate::infrastructure::udp::UdpRuntime> {
     let udp = manifest.transports.udp.as_ref()?;
-    if !granted.contains(&Permission::Network) {
+    if !network_granted(granted) {
         return None;
     }
     let value = |key: &str| {
@@ -1439,16 +1474,8 @@ fn build_ctx(
 ) -> Result<WorkerCtx> {
     debug_assert!(!super::contract::active().tables.is_empty());
     let controller_index = dev_match.index;
-    let (lua, budget) = sandbox::bootstrap_vm(
-        granted,
-        config,
-        PLUGIN_VM_MEMORY_BYTES,
-        PLUGIN_INSTRUCTION_BUDGET,
-    )
-    .map_err(|e| lua_err("sandbox setup", e))?;
-    sandbox::install_package_modules(&lua, module_sources)
-        .map_err(|e| lua_err("package modules", e))?;
-    super::data_api::register(&lua, data).map_err(|e| lua_err("data API", e))?;
+    let (lua, budget) =
+        super::lua_worker::bootstrap_worker_vm(granted, config, module_sources, data)?;
     if let Some(http) = http {
         super::http_api::register(&lua, http).map_err(|e| lua_err("http API", e))?;
     }
@@ -1500,6 +1527,7 @@ fn build_ctx(
         handle,
         dev,
         child_devs: RefCell::new(HashMap::new()),
+        stub_children: RefCell::new(std::collections::HashSet::new()),
         manifest,
         controller_index,
         budget,
@@ -1525,7 +1553,7 @@ fn install_command_api(lua: &Lua, command: CommandExecutor) -> Result<()> {
 
 /// Run a plugin's `pre_scan(dev)` callback against a freshly opened SMBus bus,
 /// before the scanner probes addresses. Used for one-time bus preparation whose
-/// control flow depends on live reads (e.g. the ENE DRAM broadcast remap). The
+/// control flow depends on live reads (e.g. a DRAM broadcast-address remap). The
 /// transport is a register bus scoped to `scope_addrs` (declared + extras), so
 /// pre_scan can never reach an address the plugin didn't declare. Runs on the
 /// calling thread (a `spawn_blocking` worker), so register batches block inline.
@@ -1591,6 +1619,7 @@ fn run_pre_scan_inner(
         PLUGIN_INSTRUCTION_BUDGET,
     )
     .map_err(|e| lua_err("sandbox setup", e))?;
+    sandbox::set_call_deadline(&lua, PRE_SCAN_TIMEOUT);
     sandbox::install_package_modules(&lua, module_sources)
         .map_err(|e| lua_err("package modules", e))?;
     let manifest: Table = lua
@@ -1966,6 +1995,71 @@ mod tests {
         assert_eq!(outcomes[0].child_index, Some(2));
         assert_eq!(outcomes[0].button_events.pressed, vec![7]);
         root.close().await.unwrap();
+    }
+
+    #[tokio::test]
+    async fn transport_events_reach_a_child_never_touched_by_a_routed_call() {
+        let transport = Arc::new(TestEventTransport {
+            events: std::sync::Mutex::new(vec![TransportEvent {
+                endpoint: "primary",
+                data: vec![0x10, 3, 0xaa],
+            }]),
+        });
+        let root = PluginHandle::spawn(
+            r#"
+                return {
+                    initialize = function(_) return true end,
+                    event_source = function(event) return event.report:byte(2) end,
+                    event = function(dev, event)
+                        if dev.match.index == event.report:byte(2) then
+                            return { button_events = { pressed = { 9 }, released = {} } }
+                        end
+                    end,
+                }
+            "#
+            .to_owned(),
+            Default::default(),
+            PluginIo::Stream {
+                transport,
+                usb: None,
+            },
+            DevMatch {
+                transport: "hid".into(),
+                ..Default::default()
+            },
+            vec![],
+            HashMap::new(),
+            Handle::current(),
+            std::sync::Arc::new(std::sync::Mutex::new(Vec::new())),
+        );
+        let outcomes = root.on_transport_events().await.unwrap();
+        assert_eq!(outcomes.len(), 1);
+        assert_eq!(outcomes[0].child_index, Some(3));
+        assert_eq!(outcomes[0].button_events.pressed, vec![9]);
+        root.close().await.unwrap();
+    }
+
+    #[test]
+    fn pre_scan_sleep_past_the_call_deadline_errors() {
+        let (lua, _budget) = sandbox::bootstrap_vm(
+            &[],
+            &HashMap::new(),
+            PLUGIN_VM_MEMORY_BYTES,
+            PLUGIN_INSTRUCTION_BUDGET,
+        )
+        .unwrap();
+        sandbox::set_call_deadline(&lua, std::time::Duration::from_millis(0));
+        std::thread::sleep(std::time::Duration::from_millis(1));
+        let err = lua.load("halod.sleep_ms(1000)").exec().unwrap_err();
+        assert!(err.to_string().contains("deadline"), "{err}");
+    }
+
+    #[test]
+    fn network_granted_matches_the_permission() {
+        assert!(network_granted(&[Permission::Network]));
+        assert!(network_granted(&[Permission::Hid, Permission::Network]));
+        assert!(!network_granted(&[]));
+        assert!(!network_granted(&[Permission::Hid]));
     }
 
     #[tokio::test]

@@ -68,6 +68,35 @@ pub fn verify_repository_signature(dir: &Path, trust: &RepositoryTrust) -> Resul
     }
 }
 
+pub fn prune_revisions(root: &Path, keep: &[&str]) -> std::io::Result<()> {
+    let revisions = root.join("revisions");
+    let entries = match std::fs::read_dir(&revisions) {
+        Ok(entries) => entries,
+        Err(error) if error.kind() == std::io::ErrorKind::NotFound => return Ok(()),
+        Err(error) => return Err(error),
+    };
+    for entry in entries {
+        let entry = entry?;
+        let name = entry.file_name();
+        let name = name.to_string_lossy();
+        let path = entry.path();
+        if name.starts_with('.') {
+            remove_path(&path)?;
+        } else if path.is_dir() && !keep.contains(&name.as_ref()) {
+            std::fs::remove_dir_all(&path)?;
+        }
+    }
+    Ok(())
+}
+
+fn remove_path(path: &Path) -> std::io::Result<()> {
+    if path.is_dir() {
+        std::fs::remove_dir_all(path)
+    } else {
+        std::fs::remove_file(path)
+    }
+}
+
 /// The immutable directory selected for a release source.
 pub fn active_revision_dir(record: &crate::config::PluginRepoRecord) -> PathBuf {
     let root = if record.slug == crate::constants::OFFICIAL_PLUGIN_REPO_SLUG
@@ -84,4 +113,43 @@ pub fn active_revision_dir(record: &crate::config::PluginRepoRecord) -> PathBuf 
             .filter(|revision| !revision.is_empty())
             .unwrap_or("__inactive__"),
     )
+}
+
+#[cfg(test)]
+mod tests {
+    use super::prune_revisions;
+
+    #[test]
+    fn prune_keeps_named_revisions_and_removes_others_and_dot_dirs() {
+        let root = tempfile::tempdir().unwrap();
+        let revisions = root.path().join("revisions");
+        for name in ["v1", "v2", "v3", ".v2.staging-abc", ".v1.corrupt-def"] {
+            std::fs::create_dir_all(revisions.join(name)).unwrap();
+        }
+        std::fs::write(revisions.join(".leftover-file"), b"x").unwrap();
+
+        prune_revisions(root.path(), &["v2", "v3"]).unwrap();
+
+        assert!(!revisions.join("v1").exists(), "unkept revision removed");
+        assert!(revisions.join("v2").exists(), "kept revision retained");
+        assert!(revisions.join("v3").exists(), "kept revision retained");
+        assert!(
+            !revisions.join(".v2.staging-abc").exists(),
+            "dot-prefixed staging leftover removed"
+        );
+        assert!(
+            !revisions.join(".v1.corrupt-def").exists(),
+            "dot-prefixed corrupt leftover removed"
+        );
+        assert!(
+            !revisions.join(".leftover-file").exists(),
+            "dot-prefixed file leftover removed"
+        );
+    }
+
+    #[test]
+    fn prune_is_a_noop_when_the_revisions_dir_is_missing() {
+        let root = tempfile::tempdir().unwrap();
+        prune_revisions(root.path(), &["v1"]).unwrap();
+    }
 }

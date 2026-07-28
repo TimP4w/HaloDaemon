@@ -672,8 +672,8 @@ mod tests {
 
     #[tokio::test]
     async fn scoped_teardown_untracks_a_key_shared_by_a_parent_and_its_children() {
-        // Regression: a plugin controller and its children (e.g. NZXT Control Hub
-        // + fan cores) share one HID key. Only the parent carries the owning
+        // Regression: a plugin controller and its children (e.g. a fan hub and
+        // its fans) share one HID key. Only the parent carries the owning
         // plugin id, but `untrack_devices` prunes a key only once EVERY device it
         // tracks is torn down — so teardown must feed it the whole subtree, not
         // just the owning parents, or the key survives and the re-probe skips the
@@ -684,10 +684,10 @@ mod tests {
 
         crate::test_support::with_tmp_config(|app| async move {
             let parent: Arc<dyn crate::domain::device::Device> =
-                Arc::new(MockDevice::new("nzxt-abc").with_owning_plugin_id("nzxt"));
+                Arc::new(MockDevice::new("hub-abc").with_owning_plugin_id("hub_plugin"));
             // Chain-accessory child: shares the parent key, no owning id of its own.
             let child: Arc<dyn crate::domain::device::Device> =
-                Arc::new(MockDevice::new("nzxt-abc_acc_0_1"));
+                Arc::new(MockDevice::new("hub-abc_acc_0_1"));
             app.device_registry.write().await.push(parent.clone());
             app.device_registry.write().await.push(child.clone());
             app.hid
@@ -697,14 +697,14 @@ mod tests {
                 )
                 .await;
 
-            teardown_owned_devices(&app, &["nzxt".to_string()]).await;
+            teardown_owned_devices(&app, &["hub_plugin".to_string()]).await;
 
             assert!(
                 app.hid.keys().await.is_empty(),
                 "the shared key must be untracked once the whole subtree is torn down"
             );
-            assert!(app.find_device_by_id("nzxt-abc").await.is_none());
-            assert!(app.find_device_by_id("nzxt-abc_acc_0_1").await.is_none());
+            assert!(app.find_device_by_id("hub-abc").await.is_none());
+            assert!(app.find_device_by_id("hub-abc_acc_0_1").await.is_none());
         })
         .await;
     }

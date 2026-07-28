@@ -453,15 +453,7 @@ async fn dispatch(
             crate::application::usecases::plugin::repos::check_repo_updates(app, client).await
         }
         DaemonCommand::UpdatePluginRepo { slug } => {
-            let result =
-                crate::application::usecases::plugin::repos::update_repo(slug.clone(), app.clone())
-                    .await;
-            crate::application::usecases::plugin::repos::broadcast_plugin_updates(
-                &app,
-                Some(&slug),
-            )
-            .await;
-            result
+            crate::application::usecases::plugin::repos::update_repo(slug, app).await
         }
         DaemonCommand::InstallPluginRelease { slug, tag } => {
             crate::application::usecases::plugin::repos::install_release(slug, tag, true, app).await

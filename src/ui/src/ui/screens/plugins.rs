@@ -328,6 +328,7 @@ impl PluginsUi {
             &mut detail,
             state,
             cmd,
+            repo_updates,
             plugin_updates,
             plugin_releases,
             udev_status,
@@ -399,8 +400,8 @@ impl PluginsUi {
         if due > 0 {
             if update_all_banner(ui, due, self.updating_all.is_some()) {
                 self.updating_all = Some(now);
-                for status in plugin_updates.iter().filter(|s| s.update_available) {
-                    self.updating_repos.insert(status.slug.clone(), now);
+                for slug in update_all_seed_slugs(repo_updates, plugin_updates) {
+                    self.updating_repos.insert(slug, now);
                 }
                 crate::runtime::ipc::send(
                     cmd,
@@ -632,6 +633,7 @@ impl PluginsUi {
         ui: &mut egui::Ui,
         state: &TopicStore,
         cmd: &CommandTx,
+        repo_updates: &[RepoUpdateStatus],
         plugin_updates: &[PluginUpdateStatus],
         plugin_releases: &HashMap<String, Vec<halod_shared::types::PluginReleaseInfo>>,
         udev_status: Option<&halod_shared::types::UdevRulesStatus>,
@@ -721,12 +723,10 @@ impl PluginsUi {
 
                 // The whole repo is updatable when any of its plugins report an
                 // upstream update. Progress is reconciled before rendering.
-                let repo_has_updates = state.plugins.repo_updates.iter().any(|status| {
+                let repo_has_updates = repo_updates.iter().any(|status| {
                     status.slug == r.slug && !status.pinned && status.available_tag.is_some()
                 });
-                let pinned_update = state
-                    .plugins
-                    .repo_updates
+                let pinned_update = repo_updates
                     .iter()
                     .find(|status| status.slug == r.slug)
                     .filter(|status| status.pinned)
@@ -1347,6 +1347,26 @@ fn clear_finished_repo_updates(
     });
 }
 
+fn update_all_seed_slugs(
+    repo_updates: &[RepoUpdateStatus],
+    plugin_updates: &[PluginUpdateStatus],
+) -> Vec<String> {
+    let mut slugs: Vec<String> = plugin_updates
+        .iter()
+        .filter(|status| status.update_available)
+        .map(|status| status.slug.clone())
+        .collect();
+    for repo in repo_updates
+        .iter()
+        .filter(|repo| repo.available_tag.is_some() && !repo.pinned)
+    {
+        if !slugs.contains(&repo.slug) {
+            slugs.push(repo.slug.clone());
+        }
+    }
+    slugs
+}
+
 /// Decode any newly-arrived asset bytes into GPU textures, keyed like the
 /// asset cache. Shared by the Plugins and Integrations screens.
 pub(crate) fn decode_new_assets(
@@ -1543,10 +1563,7 @@ pub(crate) enum ConsentReason {
 /// Classify why `p` is asking for consent, from its granted vs declared
 /// permissions and whether its content changed since the last acknowledgment.
 pub(crate) fn consent_reason(p: &PluginInfo) -> ConsentReason {
-    if p.accepted_authority
-        .as_ref()
-        .is_some_and(|accepted| !p.authority.is_subset_of(accepted))
-    {
+    if plugin_requires_regrant(p) {
         ConsentReason::AuthorityExpanded
     } else {
         ConsentReason::New
@@ -3559,6 +3576,47 @@ mod tests {
         }];
 
         assert_eq!(PluginsUi::updates_due_count(&repos, &packages), 2);
+    }
+
+    #[test]
+    fn update_all_seeds_package_updates_and_unpinned_behind_repos() {
+        let repos = [
+            RepoUpdateStatus {
+                slug: "repo-only".into(),
+                installed_tag: "v1".into(),
+                available_tag: Some("v2".into()),
+                pinned: false,
+            },
+            RepoUpdateStatus {
+                slug: "pinned".into(),
+                installed_tag: "v1".into(),
+                available_tag: Some("v2".into()),
+                pinned: true,
+            },
+            RepoUpdateStatus {
+                slug: "with-package".into(),
+                installed_tag: "v1".into(),
+                available_tag: Some("v2".into()),
+                pinned: false,
+            },
+        ];
+        let packages = [PluginUpdateStatus {
+            slug: "with-package".into(),
+            ..status("plugin", true)
+        }];
+
+        let seeded = update_all_seed_slugs(&repos, &packages);
+        assert!(seeded.contains(&"repo-only".to_owned()), "repo-only behind");
+        assert!(
+            seeded.contains(&"with-package".to_owned()),
+            "per-plugin update"
+        );
+        assert!(!seeded.contains(&"pinned".to_owned()), "pins are excluded");
+        assert_eq!(
+            seeded.iter().filter(|s| *s == "with-package").count(),
+            1,
+            "a repo with both a package update and a repo-behind flag seeds once"
+        );
     }
 
     #[test]

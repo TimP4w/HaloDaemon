@@ -26,7 +26,7 @@ fn open(
     // is gated on the explicit Network grant (defence in depth: validate_manifest
     // also forces the manifest to declare it, which is what drives the consent
     // prompt — this rejects the actual connect if the grant is somehow absent).
-    if !granted.contains(&Permission::Network) {
+    if !crate::domain::plugin::engine::worker::network_granted(granted) {
         bail!(
             "plugin '{}': tcp transport requires the 'network' permission",
             manifest.plugin_id

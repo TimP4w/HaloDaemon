@@ -13,13 +13,13 @@ fn declared_write_rate_limit_preserves_manifest_value() {
 #[test]
 fn transport_open_attempt_resets_have_the_right_scope() {
     let registry = super::Registry::default();
-    registry.note_transport_open_failure(("kraken".into(), "kraken-1".into()));
+    registry.note_transport_open_failure(("plug_a".into(), "plug_a-1".into()));
     registry.note_transport_open_failure(("other".into(), "other-1".into()));
 
-    registry.reset_transport_open_failures_for("kraken");
+    registry.reset_transport_open_failures_for("plug_a");
     {
         let failures = registry.transport_open_failures.read().unwrap();
-        assert!(!failures.keys().any(|(plugin_id, _)| plugin_id == "kraken"));
+        assert!(!failures.keys().any(|(plugin_id, _)| plugin_id == "plug_a"));
         assert!(failures.contains_key(&("other".into(), "other-1".into())));
     }
 
@@ -30,7 +30,7 @@ fn transport_open_attempt_resets_have_the_right_scope() {
 #[test]
 fn transport_open_failures_back_off_between_attempts() {
     let registry = super::Registry::default();
-    let key = ("kraken".to_owned(), "kraken-1".to_owned());
+    let key = ("plug_a".to_owned(), "plug_a-1".to_owned());
     assert!(!registry.transport_open_blocked(&key));
 
     // A fresh failure blocks immediate re-offers from polling scanners...
@@ -57,18 +57,18 @@ fn transport_open_failures_back_off_between_attempts() {
 #[test]
 fn init_failure_is_aggregated_and_clears_after_recovery() {
     let registry = super::Registry::default();
-    registry.report_init_error("logitech", "g502", "ROOT timeout".into());
+    registry.report_init_error("plug_b", "plug_b-dev", "ROOT timeout".into());
 
-    let failed = registry.health_for("logitech");
+    let failed = registry.health_for("plug_b");
     assert_eq!(failed.status, halod_shared::types::HealthStatus::Failed);
     assert_eq!(
         failed.issue.unwrap().kind,
         halod_shared::types::PluginIssueKind::InitFailed
     );
 
-    registry.clear_init_error("logitech", "g502");
+    registry.clear_init_error("plug_b", "plug_b-dev");
     assert_eq!(
-        registry.health_for("logitech"),
+        registry.health_for("plug_b"),
         halod_shared::types::HealthState::default()
     );
 }
@@ -302,11 +302,11 @@ fn indexed_repository_with_a_bad_digest_does_not_fall_back_to_loose_scanning() {
 #[test]
 fn indexed_repository_with_a_version_mismatch_is_recoverable_integrity_failure() {
     let root = tempfile::tempdir().unwrap();
-    let package = root.path().join("plugins").join("philips_evnia");
+    let package = root.path().join("plugins").join("monitor_pkg");
     std::fs::create_dir_all(&package).unwrap();
     std::fs::write(
         package.join("plugin.yaml"),
-        "id: philips_evnia\nversion: 1.0.0\ntype: device\n",
+        "id: monitor_pkg\nversion: 1.0.0\ntype: device\n",
     )
     .unwrap();
     std::fs::write(package.join("main.lua"), "return {}\n").unwrap();
@@ -314,7 +314,7 @@ fn indexed_repository_with_a_version_mismatch_is_recoverable_integrity_failure()
     std::fs::write(
         root.path().join("release.yaml"),
         format!(
-            "schema: 1\nid: test-release\nname: Test release\nversion: 1.0.0\npackages:\n  - id: philips_evnia\n    path: plugins/philips_evnia\n    version: 2.0.0\n    sha256: {digest}\n"
+            "schema: 1\nid: test-release\nname: Test release\nversion: 1.0.0\npackages:\n  - id: monitor_pkg\n    path: plugins/monitor_pkg\n    version: 2.0.0\n    sha256: {digest}\n"
         ),
     )
     .unwrap();
@@ -333,7 +333,7 @@ fn indexed_repository_with_a_version_mismatch_is_recoverable_integrity_failure()
                 ref expected,
                 ref actual,
             }
-        ) if package == "philips_evnia"
+        ) if package == "monitor_pkg"
             && field == "version"
             && expected == "2.0.0"
             && actual == "1.0.0"

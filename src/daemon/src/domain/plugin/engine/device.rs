@@ -166,6 +166,22 @@ fn declared_caps(manifest: &PluginManifest) -> Vec<Cap> {
         .collect()
 }
 
+/// The manifest-wide capability set, narrowed to a spec's declared subset when
+/// the matched device scopes one.
+fn device_caps(manifest: &PluginManifest, spec: Option<&DeviceSpec>) -> Vec<Cap> {
+    let declared = declared_caps(manifest);
+    match spec {
+        Some(spec) if !spec.capabilities.is_empty() => {
+            let scoped = caps_named(&spec.capabilities);
+            declared
+                .into_iter()
+                .filter(|cap| scoped.contains(cap))
+                .collect()
+        }
+        _ => declared,
+    }
+}
+
 fn caps_named(names: &[String]) -> Vec<Cap> {
     let mut caps = Vec::new();
     let mut add = |cap| {
@@ -416,9 +432,7 @@ impl Controls {
         })
     }
 
-    /// Validate a choice selection against the declared options and cache it.
-    /// Errors if the key is unknown or the index is out of range.
-    fn record_choice(&self, key: &str, selected: usize) -> Result<()> {
+    fn validate_choice(&self, key: &str, selected: usize) -> Result<()> {
         let choice = self
             .choices
             .iter()
@@ -427,21 +441,16 @@ impl Controls {
         if selected >= choice.options.len() {
             anyhow::bail!("choice '{key}' selection {selected} out of range");
         }
-        self.choice_cache.record(key, selected);
         Ok(())
     }
 
-    /// Clamp a range value to its declared bounds and cache it, returning the
-    /// clamped value to forward to the worker. Errors if the key is unknown.
-    fn record_range(&self, key: &str, value: i32) -> Result<i32> {
+    fn clamp_range(&self, key: &str, value: i32) -> Result<i32> {
         let range = self
             .ranges
             .iter()
             .find(|r| r.key == key)
             .ok_or_else(|| anyhow::anyhow!("unknown range key: {key}"))?;
-        let value = value.clamp(range.min, range.max);
-        self.range_cache.record(key, value);
-        Ok(value)
+        Ok(value.clamp(range.min, range.max))
     }
 
     /// Backfill empty `label`/`category` on live boolean reads from the manifest
@@ -739,8 +748,6 @@ impl LuaDevice {
         if let Some(runtime) = &runtime {
             *runtime.lock_recover() = RuntimeState::Initializing;
         }
-        let receiver_root = manifest.plugin_id == "logitech" && dev_match.pid == Some(0xc547);
-        let nuvoton_sensor_root = manifest.plugin_id == "nuvoton_lpcio" && dev_match.key.is_none();
         let has_controller_identity = dev_match.index.is_some() || dev_match.key.is_some();
         // Keep a handle to the (metered) transport so the device can report
         // write-rate/throughput; the worker owns the one it does I/O through.
@@ -1101,21 +1108,6 @@ impl LuaDevice {
         if manifest.dynamic_children || spec.is_none() {
             dev.root_manifest = Some(Arc::new(manifest.clone()));
         }
-        if receiver_root {
-            dev.caps
-                .write()
-                .unwrap()
-                .retain(|cap| matches!(cap, Cap::Pairing));
-        }
-        if nuvoton_sensor_root {
-            // The matched Super-I/O is the sensor controller. Its dynamic
-            // children own the individual PWM channels; retaining `Cooling`
-            // here makes the controller itself appear in the Cooling UI.
-            dev.caps
-                .write()
-                .unwrap()
-                .retain(|cap| !matches!(cap, Cap::Cooling));
-        }
         dev
     }
 
@@ -1141,7 +1133,7 @@ impl LuaDevice {
             control_layout: spec.map(|s| s.control_layout.clone()).unwrap_or_default(),
             visibility: VisibilitySlot::default(),
             transport_kind: spec
-                .and_then(|s| super::transport::descriptor_for(&s.transport))
+                .and_then(|s| super::transport::descriptor_for(s.transport.kind()))
                 .map(|d| d.kind)
                 .unwrap_or("tcp"),
             dynamic_model: OnceLock::new(),
@@ -1153,8 +1145,8 @@ impl LuaDevice {
             unrecoverable: Arc::new(AtomicBool::new(false)),
             root_manifest: None,
             runtime: None,
-            allowed_caps: declared_caps(manifest),
-            caps: Arc::new(RwLock::new(declared_caps(manifest))),
+            allowed_caps: device_caps(manifest, spec),
+            caps: Arc::new(RwLock::new(device_caps(manifest, spec))),
             lcd_descriptor: OnceLock::new(),
             lcd_slot: LcdStateSlot::default(),
             lcd_needs_rgb_restore: AtomicBool::new(false),
@@ -1862,9 +1854,23 @@ impl Device for LuaDevice {
             // first snapshot (and before transport-conflict checks consult the
             // cached connection type). Later refreshes run on the poll task.
             self.refresh_status_cache().await;
-            if w.supports_events().await? {
-                if let Some(PluginIo::Stream { transport, .. }) = &self.transport {
-                    transport.enable_event_listener()?;
+            match w.supports_events().await {
+                Ok(true) => {
+                    if let Some(PluginIo::Stream { transport, .. }) = &self.transport {
+                        if let Err(error) = transport.enable_event_listener() {
+                            log::warn!(
+                                "[{}] enabling event listener failed; treating as no events: {error:#}",
+                                self.id
+                            );
+                        }
+                    }
+                }
+                Ok(false) => {}
+                Err(error) => {
+                    log::warn!(
+                        "[{}] event support probe failed; treating as no events: {error:#}",
+                        self.id
+                    );
                 }
             }
             self.poll_paused.store(false, Ordering::Relaxed);
@@ -2075,8 +2081,9 @@ impl CoolingCapability for LuaDevice {
         // Otherwise their initialization cache remains frozen forever.
         if self.poll_task.is_none() {
             let worker = self.worker()?;
-            worker.poll().await?;
-            let channel = worker.cooling_status(channel_id).await?;
+            let polled = worker.poll().await;
+            self.track(polled).await?;
+            let channel = self.track(worker.cooling_status(channel_id).await).await?;
             self.cooling_cache
                 .lock_recover()
                 .insert(channel_id.to_owned(), channel.clone());
@@ -2143,8 +2150,9 @@ impl SensorCapability for LuaDevice {
         // from the status table it updates.
         if self.poll_task.is_none() {
             let worker = self.worker()?;
-            worker.poll().await?;
-            let sensors = worker.get_sensors().await?;
+            let polled = worker.poll().await;
+            self.track(polled).await?;
+            let sensors = self.track(worker.get_sensors().await).await?;
             replace_if_changed(&self.sensor_cache, sensors.clone());
             return Ok(sensors);
         }
@@ -2269,7 +2277,7 @@ impl LuaDevice {
             return Vec::new();
         };
         // Accessory detection does exclusive reads; pause the status poll so it
-        // doesn't race the detect reply (mirrors the native Kraken).
+        // doesn't race the detect reply.
         self.set_polling_paused(true);
         let detected = worker.detect_accessories().await;
         self.set_polling_paused(false);
@@ -2538,6 +2546,21 @@ fn build_lcd_descriptor(lcd: &InitLcd) -> LcdDescriptor {
     }
 }
 
+struct PollPause<'a>(&'a LuaDevice);
+
+impl<'a> PollPause<'a> {
+    fn new(device: &'a LuaDevice) -> Self {
+        device.set_polling_paused(true);
+        PollPause(device)
+    }
+}
+
+impl Drop for PollPause<'_> {
+    fn drop(&mut self) {
+        self.0.set_polling_paused(false);
+    }
+}
+
 #[async_trait]
 impl LcdCapability for LuaDevice {
     fn lcd_descriptor(&self) -> LcdDescriptor {
@@ -2566,41 +2589,43 @@ impl LcdCapability for LuaDevice {
         let raw = self.lcd_slot.raw_streaming();
         let brightness = self.lcd_slot.brightness();
         // The bulk transfer owns the transport; silence the status poll meanwhile.
-        self.set_polling_paused(true);
+        let _pause = PollPause::new(self);
         let result = self
             .worker()?
             .lcd_stream_frame(rgba.to_vec(), width, height, rotation, raw, brightness)
             .await;
-        self.set_polling_paused(false);
-        result
+        self.track(result).await
     }
 
     async fn set_image(&self, data: &[u8]) -> Result<()> {
         let rotation = rotation_to_degrees(self.lcd_slot.rotation());
-        self.set_polling_paused(true);
+        let _pause = PollPause::new(self);
         let result = self.worker()?.lcd_set_image(data.to_vec(), rotation).await;
-        self.set_polling_paused(false);
-        result
+        self.track(result).await
     }
 
     async fn set_brightness(&self, brightness: u8) -> Result<()> {
         let rotation = rotation_to_degrees(self.lcd_slot.rotation());
-        self.worker()?
+        let result = self
+            .worker()?
             .lcd_set_brightness(brightness, rotation)
-            .await?;
+            .await;
+        self.track(result).await?;
         self.lcd_slot.set_brightness(brightness);
         Ok(())
     }
 
     async fn set_rotation(&self, degrees: u32) -> Result<()> {
         let brightness = self.lcd_slot.brightness();
-        self.worker()?.lcd_set_rotation(brightness, degrees).await?;
+        let result = self.worker()?.lcd_set_rotation(brightness, degrees).await;
+        self.track(result).await?;
         self.lcd_slot.set_rotation(degrees_to_rotation(degrees));
         Ok(())
     }
 
     async fn reset_to_default(&self) -> Result<()> {
-        self.worker()?.lcd_reset().await
+        let result = self.worker()?.lcd_reset().await;
+        self.track(result).await
     }
 }
 
@@ -2669,7 +2694,8 @@ impl DpiCapability for LuaDevice {
                 );
             }
         }
-        self.worker()?.dpi_set_steps(&steps).await?;
+        let result = self.worker()?.dpi_set_steps(&steps).await;
+        self.track(result).await?;
         let mut dpi = self.dpi_state.lock_recover();
         dpi.steps = steps;
         if dpi.index >= dpi.steps.len() {
@@ -2688,7 +2714,8 @@ impl DpiCapability for LuaDevice {
                 .ok_or_else(|| anyhow::anyhow!("dpi index {index} out of range"))?;
             v
         };
-        self.worker()?.dpi_set(value).await?;
+        let result = self.worker()?.dpi_set(value).await;
+        self.track(result).await?;
         let mut dpi = self.dpi_state.lock_recover();
         dpi.index = index;
         dpi.current = value;
@@ -2697,7 +2724,8 @@ impl DpiCapability for LuaDevice {
 
     async fn set_dpi_direct(&self, dpi: u16) -> Result<()> {
         let value = self.clamp_dpi(dpi);
-        self.worker()?.dpi_set(value).await?;
+        let result = self.worker()?.dpi_set(value).await;
+        self.track(result).await?;
         self.dpi_state.lock_recover().current = value;
         Ok(())
     }
@@ -2714,8 +2742,11 @@ impl ChoiceCapability for LuaDevice {
     }
 
     async fn set_choice(&self, key: &str, selected: usize) -> Result<()> {
-        self.active_controls().record_choice(key, selected)?;
-        self.worker()?.choice_set(key, selected).await
+        self.active_controls().validate_choice(key, selected)?;
+        let result = self.worker()?.choice_set(key, selected).await;
+        self.track(result).await?;
+        self.active_controls().choice_cache.record(key, selected);
+        Ok(())
     }
 }
 
@@ -2730,8 +2761,11 @@ impl RangeCapability for LuaDevice {
     }
 
     async fn set_range(&self, key: &str, value: i32) -> Result<()> {
-        let value = self.active_controls().record_range(key, value)?;
-        self.worker()?.range_set(key, value).await
+        let value = self.active_controls().clamp_range(key, value)?;
+        let result = self.worker()?.range_set(key, value).await;
+        self.track(result).await?;
+        self.active_controls().range_cache.record(key, value);
+        Ok(())
     }
 }
 
@@ -2744,12 +2778,12 @@ impl BooleanCapability for LuaDevice {
     }
 
     async fn set_boolean(&self, key: &str, value: bool) -> Result<()> {
-        self.worker()?.boolean_set(key, value).await?;
+        let result = self.worker()?.boolean_set(key, value).await;
+        self.track(result).await?;
         self.active_controls().bool_cache.record(key, value);
         if let Some(current) = self
             .boolean_cache
-            .lock()
-            .unwrap()
+            .lock_recover()
             .iter_mut()
             .find(|boolean| boolean.key == key)
         {
@@ -2777,7 +2811,8 @@ impl ActionCapability for LuaDevice {
         if !self.active_controls().has_action(key) {
             anyhow::bail!("unknown action key: {key}");
         }
-        self.worker()?.action_trigger(key).await
+        let result = self.worker()?.action_trigger(key).await;
+        self.track(result).await
     }
 
     async fn to_wire(&self) -> Option<DeviceCapability> {
@@ -2803,15 +2838,15 @@ impl ConnectionCapability for LuaDevice {
 impl EqualizerCapability for LuaDevice {
     async fn get_equalizer(&self) -> Result<Equalizer> {
         self.eq_cache
-            .lock()
-            .unwrap()
+            .lock_recover()
             .clone()
             .ok_or_else(|| anyhow::anyhow!("equalizer not sampled yet"))
     }
 
     async fn set_eq_preset(&self, preset_index: usize) -> Result<()> {
         let worker = self.worker()?;
-        worker.equalizer_set_preset(preset_index).await?;
+        let result = worker.equalizer_set_preset(preset_index).await;
+        self.track(result).await?;
         match worker.equalizer_get().await {
             Ok(equalizer) => *self.eq_cache.lock_recover() = Some(equalizer),
             Err(_) => {
@@ -2825,7 +2860,8 @@ impl EqualizerCapability for LuaDevice {
 
     async fn set_eq_bands(&self, values: &[f32]) -> Result<()> {
         let worker = self.worker()?;
-        worker.equalizer_set_bands(values).await?;
+        let result = worker.equalizer_set_bands(values).await;
+        self.track(result).await?;
         if let Ok(equalizer) = worker.equalizer_get().await {
             *self.eq_cache.lock_recover() = Some(equalizer);
         }
@@ -2840,18 +2876,21 @@ impl EqualizerCapability for LuaDevice {
 #[async_trait]
 impl PairingCapability for LuaDevice {
     async fn start_pairing(&self, timeout_secs: u8) -> Result<()> {
-        self.worker()?.pairing_start(timeout_secs).await
+        let result = self.worker()?.pairing_start(timeout_secs).await;
+        self.track(result).await
     }
 
     async fn stop_pairing(&self) -> Result<()> {
-        self.worker()?.pairing_stop().await
+        let result = self.worker()?.pairing_stop().await;
+        self.track(result).await
     }
 
     /// Runs the plugin's hardware-side unpair. The receiver use case follows
     /// this by reconciling the controller's explicitly owned children, which
     /// removes the departed paired slot from the registry.
     async fn unpair(&self, slot: u8) -> Result<Option<Arc<dyn Device>>> {
-        self.worker()?.pairing_unpair(slot).await?;
+        let result = self.worker()?.pairing_unpair(slot).await;
+        self.track(result).await?;
         Ok(None)
     }
 
@@ -2864,17 +2903,21 @@ impl PairingCapability for LuaDevice {
 #[async_trait]
 impl OnboardProfilesCapability for LuaDevice {
     async fn switch_profile(&self, slot: u8) -> Result<()> {
-        self.worker()?.onboard_switch_profile(slot).await
+        let result = self.worker()?.onboard_switch_profile(slot).await;
+        self.track(result).await
     }
 
     async fn restore_profile(&self, slot: u8) -> Result<()> {
-        self.worker()?.onboard_restore_profile(slot).await
+        let result = self.worker()?.onboard_restore_profile(slot).await;
+        self.track(result).await
     }
 
     async fn set_profile_enabled(&self, slot: u8, enabled: bool) -> Result<()> {
-        self.worker()?
+        let result = self
+            .worker()?
             .onboard_set_profile_enabled(slot, enabled)
-            .await
+            .await;
+        self.track(result).await
     }
 
     async fn to_wire(&self) -> Option<DeviceCapability> {
@@ -2889,8 +2932,7 @@ impl KeyRemapCapability for LuaDevice {
         let descriptor = self.key_remap.read().unwrap().clone();
         let mappings: Vec<ButtonMapping> = self
             .key_remap_mappings
-            .lock()
-            .unwrap()
+            .lock_recover()
             .values()
             .cloned()
             .collect();
@@ -2911,9 +2953,8 @@ impl KeyRemapCapability for LuaDevice {
             &self.key_remap.read().unwrap().buttons,
             &mapping,
         )?;
-        self.worker()?
-            .key_remap_set_mapping(mapping.clone())
-            .await?;
+        let result = self.worker()?.key_remap_set_mapping(mapping.clone()).await;
+        self.track(result).await?;
         let mut cache = self.key_remap_mappings.lock_recover();
         if mapping.base == ButtonAction::Native && mapping.shifted == ButtonAction::Native {
             cache.remove(&mapping.cid);
@@ -2924,7 +2965,8 @@ impl KeyRemapCapability for LuaDevice {
     }
 
     async fn reset_button_mapping(&self, cid: u16) -> Result<()> {
-        self.worker()?.key_remap_reset(cid).await?;
+        let result = self.worker()?.key_remap_reset(cid).await;
+        self.track(result).await?;
         let default = self
             .key_remap
             .read()
@@ -2949,7 +2991,8 @@ impl KeyRemapCapability for LuaDevice {
     }
 
     async fn reset_all_button_mappings(&self) -> Result<()> {
-        self.worker()?.key_remap_reset_all().await?;
+        let result = self.worker()?.key_remap_reset_all().await;
+        self.track(result).await?;
         let defaults = self.key_remap.read().unwrap().default_mappings.clone();
         let mut mappings = self.key_remap_mappings.lock_recover();
         mappings.clear();
@@ -3003,7 +3046,8 @@ impl LightingDivisionAdapter for LuaDevice {
             .unwrap_or_default()
     }
     async fn write_divided_frame(&self, channel_id: &str, bytes: &[u8]) -> Result<()> {
-        self.worker()?.write_lighting_frame(channel_id, bytes).await
+        let result = self.worker()?.write_lighting_frame(channel_id, bytes).await;
+        self.track(result).await
     }
 }
 
@@ -3013,10 +3057,12 @@ impl CoolingHub for LuaDevice {
         if let Some(status) = self.cooling_cache.lock_recover().get(channel).cloned() {
             return Ok(status);
         }
-        self.worker()?.cooling_status(channel).await
+        self.track(self.worker()?.cooling_status(channel).await)
+            .await
     }
     async fn set_cooling_duty(&self, channel: &str, duty: u8) -> Result<()> {
-        self.worker()?.cooling_set_duty(channel, duty).await
+        self.track(self.worker()?.cooling_set_duty(channel, duty).await)
+            .await
     }
     fn cached_cooling_status(&self, channel: &str) -> Option<CoolingChannel> {
         self.cooling_cache.lock_recover().get(channel).cloned()
@@ -3127,6 +3173,46 @@ mod tests {
         assert!(device.serialize().await.control_layout.is_empty());
     }
 
+    #[tokio::test(flavor = "multi_thread", worker_threads = 2)]
+    async fn spec_scoped_capabilities_narrow_the_device_surface() {
+        let tmp = tempfile::tempdir().unwrap();
+        let dir = tmp.path().join("scoped_caps");
+        std::fs::create_dir_all(&dir).unwrap();
+        std::fs::write(
+            dir.join("plugin.yaml"),
+            "id: scoped_caps\nversion: 1.0.0\npermissions: [hid]\ncapabilities: [lighting, pairing]\ntransports:\n  hid:\n    report_size: 8\ndevices:\n  - vendor: Test\n    model: Receiver\n    capabilities: [pairing]\n    match:\n      hid: { vid: 1, pid: 2 }\n  - vendor: Test\n    model: Mouse\n    match:\n      hid: { vid: 1, pid: 3 }\n",
+        )
+        .unwrap();
+        std::fs::write(dir.join("main.lua"), "return {}").unwrap();
+        let manifest = crate::domain::plugin::parse_manifest_from_dir(&dir).unwrap();
+
+        let receiver = LuaDevice::new(LuaDeviceParts {
+            id: "scoped_caps_0".into(),
+            manifest: &manifest,
+            spec: Some(&manifest.devices[0]),
+            notify: Weak::new(),
+            runtime: None,
+            worker: LuaDeviceWorker::None,
+        });
+        assert!(matches!(
+            receiver.capabilities().as_slice(),
+            [CapabilityRef::Pairing(_)]
+        ));
+
+        let mouse = LuaDevice::new(LuaDeviceParts {
+            id: "scoped_caps_1".into(),
+            manifest: &manifest,
+            spec: Some(&manifest.devices[1]),
+            notify: Weak::new(),
+            runtime: None,
+            worker: LuaDeviceWorker::None,
+        });
+        assert!(matches!(
+            mouse.capabilities().as_slice(),
+            [CapabilityRef::Lighting(_), CapabilityRef::Pairing(_)]
+        ));
+    }
+
     #[test]
     fn declared_capabilities_expand_controls_and_preserve_order() {
         let (_tmp, manifest) = test_manifest(
@@ -3228,15 +3314,18 @@ mod tests {
         .unwrap();
         let controls = Controls::from_runtime(runtime);
 
-        controls.record_choice("mode", 1).unwrap();
-        assert!(controls.record_choice("mode", 2).is_err());
+        controls.validate_choice("mode", 1).unwrap();
+        controls.choice_cache.record("mode", 1);
+        assert!(controls.validate_choice("mode", 2).is_err());
         let Some(DeviceCapability::Choice(choices)) = controls.choices_wire() else {
             panic!("choice capability missing");
         };
         assert_eq!(choices[0].selected, 1);
 
-        assert_eq!(controls.record_range("hz", 5000).unwrap(), 1000);
-        assert!(controls.record_range("missing", 10).is_err());
+        let hz = controls.clamp_range("hz", 5000).unwrap();
+        assert_eq!(hz, 1000);
+        controls.range_cache.record("hz", hz);
+        assert!(controls.clamp_range("missing", 10).is_err());
         let Some(DeviceCapability::Range(ranges)) = controls.ranges_wire() else {
             panic!("range capability missing");
         };
@@ -3468,9 +3557,9 @@ mod tests {
         dev.close().await;
     }
 
-    /// The `nuvoton_lpcio` / `hwmon` shape: a `dynamic_children` root whose
-    /// manifest advertises cooling, but where only the enumerated `Fan N`
-    /// children own a PWM channel. The root must not present itself as a fan.
+    /// The sensor-hub shape: a `dynamic_children` root whose manifest
+    /// advertises cooling, but where only the enumerated `Fan N` children own
+    /// a PWM channel. The root must not present itself as a fan.
     #[tokio::test(flavor = "multi_thread", worker_threads = 2)]
     async fn a_dynamic_children_root_without_channels_is_not_a_cooling_device() {
         let script = r#"
@@ -3800,5 +3889,142 @@ mod tests {
             -10.0
         );
         dev.close().await;
+    }
+
+    #[tokio::test(flavor = "multi_thread", worker_threads = 2)]
+    async fn initialize_unpauses_polling_and_events_on_the_online_path() {
+        let (_tmp, manifest) = test_manifest(
+            "unpause",
+            &["lighting"],
+            "return { initialize = function() return true end, event = function() end }",
+        );
+        let mut dev = hid_device("unpause-0", &manifest, Arc::new(MockTransport::empty()));
+        dev.runtime = Some(Arc::new(Mutex::new(RuntimeState::OpeningTransport)));
+        dev.poll_paused.store(true, Ordering::Relaxed);
+        dev.event_paused.store(true, Ordering::Relaxed);
+
+        assert!(dev.initialize().await.unwrap());
+        assert!(!dev.poll_paused.load(Ordering::Relaxed));
+        assert!(!dev.event_paused.load(Ordering::Relaxed));
+        dev.close().await;
+    }
+
+    #[tokio::test(flavor = "multi_thread", worker_threads = 2)]
+    async fn lcd_writes_do_not_leave_polling_paused_when_the_worker_is_gone() {
+        let (_tmp, manifest) = test_manifest("lcd_no_worker", &["lighting"], "return {}");
+        let dev = LuaDevice::new(LuaDeviceParts {
+            id: "lcd_no_worker-0".into(),
+            manifest: &manifest,
+            spec: Some(&manifest.devices[0]),
+            notify: Weak::new(),
+            runtime: None,
+            worker: LuaDeviceWorker::None,
+        });
+
+        assert!(dev.stream_frame(&[0; 4], 1, 1).await.is_err());
+        assert!(!dev.poll_paused.load(Ordering::Relaxed));
+        assert!(dev.set_image(&[0; 4]).await.is_err());
+        assert!(!dev.poll_paused.load(Ordering::Relaxed));
+    }
+
+    #[tokio::test(flavor = "multi_thread", worker_threads = 2)]
+    async fn control_caches_record_only_after_the_worker_accepts_the_write() {
+        let script = r#"
+            return {
+              initialize = function()
+                return {
+                  ok = true,
+                  capabilities = { "controls" },
+                  controls = {
+                    choices = { { key = "mode", label = "Mode",
+                      options = { { id = "a", label = "A" }, { id = "b", label = "B" } },
+                      default = 0 } },
+                    ranges = { { key = "hz", label = "Hz", min = 100, max = 1000, default = 500 } },
+                  },
+                }
+              end,
+              set_choice = function() error("choice rejected") end,
+              set_range = function() end,
+            }
+        "#;
+        let (_tmp, manifest) = test_manifest("record_after", &["controls"], script);
+        let dev = hid_device(
+            "record_after-0",
+            &manifest,
+            Arc::new(MockTransport::empty()),
+        );
+        assert!(dev.initialize().await.unwrap());
+
+        assert!(dev.set_choice("mode", 1).await.is_err());
+        assert_eq!(dev.active_controls().choice_cache.get("mode"), None);
+
+        assert!(dev.set_range("hz", 5000).await.is_ok());
+        assert_eq!(dev.active_controls().range_cache.get("hz"), Some(1000));
+        dev.close().await;
+    }
+
+    #[tokio::test(flavor = "multi_thread", worker_threads = 2)]
+    async fn a_failed_control_write_degrades_and_a_success_restores_online() {
+        let script = r#"
+            return {
+              initialize = function()
+                return {
+                  ok = true,
+                  capabilities = { "controls" },
+                  controls = {
+                    choices = { { key = "mode", label = "Mode",
+                      options = { { id = "a", label = "A" }, { id = "b", label = "B" } },
+                      default = 0 } },
+                    ranges = { { key = "hz", label = "Hz", min = 100, max = 1000, default = 500 } },
+                  },
+                }
+              end,
+              set_choice = function() error("choice rejected") end,
+              set_range = function() end,
+            }
+        "#;
+        let (_tmp, manifest) = test_manifest("tracked_controls", &["controls"], script);
+        let dev = hid_device(
+            "tracked_controls-0",
+            &manifest,
+            Arc::new(MockTransport::empty()),
+        );
+        assert!(dev.initialize().await.unwrap());
+
+        assert!(dev.set_choice("mode", 1).await.is_err());
+        assert!(matches!(
+            *dev.runtime.as_ref().unwrap().lock_recover(),
+            RuntimeState::Degraded(DegradeReason::CallFailed)
+        ));
+        assert!(!dev.is_live());
+
+        assert!(dev.set_range("hz", 500).await.is_ok());
+        assert!(matches!(
+            *dev.runtime.as_ref().unwrap().lock_recover(),
+            RuntimeState::Online
+        ));
+        assert!(dev.is_live());
+        dev.close().await;
+    }
+
+    #[tokio::test(flavor = "multi_thread", worker_threads = 2)]
+    async fn key_remap_status_survives_a_poisoned_mappings_lock() {
+        let (_tmp, manifest) = test_manifest("poisoned_remap", &["lighting"], "return {}");
+        let dev = LuaDevice::new(LuaDeviceParts {
+            id: "poisoned_remap-0".into(),
+            manifest: &manifest,
+            spec: Some(&manifest.devices[0]),
+            notify: Weak::new(),
+            runtime: None,
+            worker: LuaDeviceWorker::None,
+        });
+
+        let _ = std::panic::catch_unwind(std::panic::AssertUnwindSafe(|| {
+            let _guard = dev.key_remap_mappings.lock().unwrap();
+            panic!("poison the mappings lock");
+        }));
+
+        let status = dev.get_key_remap_status().await;
+        assert!(status.mappings.is_empty());
     }
 }

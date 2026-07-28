@@ -345,10 +345,10 @@ impl UserData for TransportApi {
         methods.add_method("lpcio_find_bars", |_, this, ()| {
             this.lpcio()?.find_bars().map_err(to_lua_err)
         });
-        // Reopen the Nuvoton HWM I/O window through a single trusted operation.
-        // Packages may request this at poll boundaries, but cannot enter
-        // extended-function mode or touch Super-I/O config registers directly.
-        // Modern NCT679x firmware can reassert CR 0x28 bit 4 after discovery.
+        // Reopen the Super-I/O HWM I/O window through a single trusted
+        // operation. Packages may request this at poll boundaries, but cannot
+        // enter extended-function mode or touch Super-I/O config registers
+        // directly. Firmware can re-lock the window after discovery.
         #[cfg(target_os = "windows")]
         methods.add_method(
             "lpcio_prepare_hwm",
@@ -397,7 +397,7 @@ impl UserData for TransportApi {
         // ── Register (SMBus) ─────────────────────────────────────────────
         // One atomic batch: the callback receives a scoped `ops` object and
         // runs entirely under one bus-lock hold. Read results drive its control
-        // flow (probing, the ENE broadcast remap). Returns the callback's value.
+        // flow (probing, broadcast remaps). Returns the callback's value.
         methods.add_method("batch", |lua, this, func: Function| {
             let reg = this.register()?;
             reg.run_local(|ops, scope| {

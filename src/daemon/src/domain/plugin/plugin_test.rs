@@ -33,7 +33,7 @@ use super::engine::device::{LuaDevice, LuaDeviceParts, LuaDeviceSpawnParts, LuaD
 use super::engine::transport::{AddrScope, RegisterBus};
 use super::engine::transport::{CommandExecutor, CommandRunResult, PluginIo};
 use super::engine::worker::{DevMatch, PluginHandle};
-use super::manifest::{parse_manifest_from_dir, PluginManifest, UsbConfig};
+use super::manifest::{parse_manifest_from_dir, PluginManifest, TransportSpec, UsbConfig};
 
 /// `mlua::Error` isn't reliably `Send + Sync` (an `ExternalError` may box a
 /// non-Send/Sync inner error), so it can't flow through `anyhow::Result` via
@@ -1379,12 +1379,12 @@ fn open_device(
         .first()
         .context("plugin declares no devices")?;
     if !matches!(
-        spec.transport.as_str(),
+        spec.transport.kind(),
         "hid" | "tcp" | "usb" | "command" | "smbus"
     ) {
         anyhow::bail!(
             "plugin-test harness only supports hid/tcp/usb/command/smbus transports today (got '{}')",
-            spec.transport
+            spec.transport.kind()
         );
     }
 
@@ -1406,30 +1406,34 @@ fn open_device(
         .usb
         .clone()
         .map(|config| Arc::new(RecordingUsb::new(config, reads_from_spec(&spec_table))));
+    let (spec_vid, spec_pid) = match &spec.transport {
+        TransportSpec::Hid(hid) => (hid.vid, hid.pids.first().copied()),
+        TransportSpec::Usb(usb) => (Some(usb.vid), usb.pids.first().copied()),
+        _ => (None, None),
+    };
     let pid = spec_table
         .as_ref()
         .and_then(|table| table.get::<Option<u16>>("pid").ok().flatten())
-        .or(spec.pid);
+        .or(spec_pid);
     let key = spec_table
         .as_ref()
         .and_then(|table| table.get::<Option<String>>("key").ok().flatten());
     let smbus_addr = spec
-        .addresses
-        .as_ref()
-        .and_then(|addresses| addresses.first())
+        .smbus()
+        .and_then(|smbus| smbus.addresses.first())
         .copied();
     let dev_match = DevMatch {
-        transport: spec.transport.clone(),
-        bus: spec.bus.clone(),
+        transport: spec.transport.kind().to_owned(),
+        bus: spec.smbus().map(|smbus| smbus.bus.clone()),
         addr: smbus_addr,
-        vid: spec.vid,
+        vid: spec_vid,
         pid,
         index: None,
         key,
         name: None,
         extra: Default::default(),
     };
-    let transport = match spec.transport.as_str() {
+    let transport = match spec.transport.kind() {
         "usb" => PluginIo::Usb(usb_recording.clone().expect("USB manifest config")),
         "command" => {
             let command = manifest

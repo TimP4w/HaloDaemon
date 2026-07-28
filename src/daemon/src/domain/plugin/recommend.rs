@@ -73,8 +73,7 @@ fn hid_match_concrete(m: &HidMatch, e: &HidEntryDebugInfo) -> bool {
     if vid != e.vid {
         return false;
     }
-    let pid_ok = m.pid == Some(e.pid) || m.pids.contains(&e.pid);
-    if !pid_ok {
+    if !m.pids.contains(&e.pid) {
         return false;
     }
     if m.usage_page.is_some_and(|up| up != e.usage_page) {
@@ -117,7 +116,7 @@ pub fn recommendations(
             });
         }
         for spec in &m.devices {
-            if let Some(command) = &spec.r#match.command {
+            if let Some(command) = spec.command() {
                 let executable = command.command();
                 let hardware = PluginRecommendationMatch::Command {
                     executable: executable.to_owned(),
@@ -133,7 +132,7 @@ pub fn recommendations(
                     });
                 }
             }
-            if let Some(hm) = &spec.r#match.hid {
+            if let Some(hm) = spec.hid() {
                 for e in hid {
                     let hardware = PluginRecommendationMatch::Hid {
                         vid: e.vid,
@@ -152,10 +151,10 @@ pub fn recommendations(
                 }
             }
 
-            if let Some(wanted) = &spec.r#match.usb {
+            if let Some(wanted) = spec.usb() {
                 for entry in usb.iter().filter(|entry| {
                     entry.vid == wanted.vid
-                        && entry.pid == wanted.pid
+                        && wanted.pids.contains(&entry.pid)
                         && entry.interfaces.contains(&wanted.interface)
                 }) {
                     let hardware = PluginRecommendationMatch::Usb {
@@ -179,10 +178,10 @@ pub fn recommendations(
             if spec.bus_kind()
                 == Some(crate::infrastructure::drivers::transports::smbus::SmbusBusKind::Gpu)
             {
-                for bus in gpu_smbus
-                    .iter()
-                    .filter(|bus| spec.pci_match.iter().any(|pci| pci.accepts(bus)))
-                {
+                for bus in gpu_smbus.iter().filter(|bus| {
+                    spec.smbus()
+                        .is_some_and(|smbus| smbus.pci_match.iter().any(|pci| pci.accepts(bus)))
+                }) {
                     let hardware = PluginRecommendationMatch::SmbusGpu {
                         pci_vendor: bus.pci_vendor,
                         pci_device: bus.pci_device,
@@ -238,11 +237,11 @@ mod tests {
         }
     }
 
-    const KRAKEN: &str = "permissions: [hid]\ncapabilities: [lighting]\ndevices:\n  - vendor: NZXT\n    model: Kraken\n    type: led_strip\n    match:\n      hid: { vid: 0x1e71, pid: 0x2007 }\n";
+    const COOLER: &str = "permissions: [hid]\ncapabilities: [lighting]\ndevices:\n  - vendor: Acme\n    model: Cooler\n    type: led_strip\n    match:\n      hid: { vid: 0x1e71, pid: 0x2007 }\n";
 
     #[test]
     fn concrete_match_recommends_a_disabled_plugin() {
-        let m = manifest("nzxt_kraken", KRAKEN);
+        let m = manifest("acme_cooler", COOLER);
         let recs = recommendations(
             &[m],
             &|_| false,
@@ -252,7 +251,7 @@ mod tests {
             &|_| false,
         );
         assert_eq!(recs.len(), 1);
-        assert_eq!(recs[0].plugin_id, "nzxt_kraken");
+        assert_eq!(recs[0].plugin_id, "acme_cooler");
         assert_eq!(
             recs[0].hardware,
             PluginRecommendationMatch::Hid {
@@ -264,11 +263,11 @@ mod tests {
 
     #[test]
     fn enabled_plugin_and_mismatched_device_are_excluded() {
-        let m = manifest("nzxt_kraken", KRAKEN);
+        let m = manifest("acme_cooler", COOLER);
         // Already enabled → not a recommendation.
         assert!(recommendations(
             std::slice::from_ref(&m),
-            &|id| id == "nzxt_kraken",
+            &|id| id == "acme_cooler",
             &[hid_entry(0x1e71, 0x2007)],
             &[],
             &[],
@@ -358,6 +357,41 @@ mod tests {
     }
 
     #[test]
+    fn usb_family_pids_recommend_each_declared_pid() {
+        let m = manifest(
+            "usb_family",
+            "permissions: [usb]\ncapabilities: [controls]\ndevices:\n  - vendor: X\n    model: Y\n    type: monitor\n    match:\n      usb: { vid: 0x1234, pids: [0x1, 0x2], interface: 0 }\ntransports:\n  usb:\n    devices:\n      - id: primary\n        interface: 0\n        control: { max_transfer_size: 64, max_timeout_ms: 1000 }\n",
+        );
+        let family_member = UsbEntry {
+            vid: 0x1234,
+            pid: 0x2,
+            interfaces: vec![0],
+        };
+        let recs = recommendations(
+            std::slice::from_ref(&m),
+            &|_| false,
+            &[],
+            &[family_member],
+            &[],
+            &|_| false,
+        );
+        assert_eq!(recs.len(), 1);
+        assert_eq!(
+            recs[0].hardware,
+            PluginRecommendationMatch::Usb {
+                vid: 0x1234,
+                pid: 0x2
+            }
+        );
+        let stranger = UsbEntry {
+            vid: 0x1234,
+            pid: 0x9,
+            interfaces: vec![0],
+        };
+        assert!(recommendations(&[m], &|_| false, &[], &[stranger], &[], &|_| false).is_empty());
+    }
+
+    #[test]
     fn gpu_smbus_match_is_passive_and_pci_gated() {
         let m = manifest(
             "gpu_smbus",
@@ -365,7 +399,7 @@ mod tests {
         );
         let bus = BusInfo {
             bus_number: 1,
-            adapter_name: "NVIDIA i2c".into(),
+            adapter_name: "GPU i2c".into(),
             pci_vendor: 0x10de,
             pci_device: 0x2684,
             pci_sub_vendor: 0x1043,
@@ -383,7 +417,7 @@ mod tests {
     fn stock_effects_are_always_recommended_when_disabled() {
         let m = manifest(
             "halo_effects",
-            "type: integration\npermissions: [network]\ntransports:\n  tcp: {}\n",
+            "type: integration\npermissions: [network]\ntransports:\n  tcp: {}\nconfig:\n  fields:\n    - { key: host, label: Host, kind: host }\n    - { key: port, label: Port, kind: port }\n",
         );
         let recs = recommendations(&[m], &|_| false, &[], &[], &[], &|_| false);
         assert!(matches!(
@@ -396,7 +430,7 @@ mod tests {
     fn stock_lcd_is_always_recommended_when_disabled() {
         let m = manifest(
             "halo_lcd",
-            "type: integration\npermissions: [network]\ntransports:\n  tcp: {}\n",
+            "type: integration\npermissions: [network]\ntransports:\n  tcp: {}\nconfig:\n  fields:\n    - { key: host, label: Host, kind: host }\n    - { key: port, label: Port, kind: port }\n",
         );
         let recs = recommendations(&[m], &|_| false, &[], &[], &[], &|_| false);
         assert!(matches!(
@@ -408,8 +442,8 @@ mod tests {
     #[test]
     fn command_device_is_recommended_when_executable_resolves() {
         let m = manifest(
-            "nvidia",
-            "permissions: [command]\ndevices:\n  - vendor: NVIDIA\n    model: any\n    match:\n      command: nvidia-smi\ntransports:\n  command:\n    commands: [nvidia-smi]\n",
+            "gpu_tool",
+            "permissions: [command]\ndevices:\n  - vendor: Acme\n    model: any\n    match:\n      command: nvidia-smi\ntransports:\n  command:\n    commands: [nvidia-smi]\n",
         );
         let recs = recommendations(&[m], &|_| false, &[], &[], &[], &|name| {
             name == "nvidia-smi"

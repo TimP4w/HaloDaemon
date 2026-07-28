@@ -271,7 +271,7 @@ pub fn rgba_to_bgr888(rgba: &[u8]) -> Vec<u8> {
 
 /// Encode a raw RGBA8 frame as a complete Q565 file (QOI-style RGB565 codec):
 /// `b"q565"` magic, LE u16 width/height, encoded stream, `OP_END`. This is the
-/// compressed LCD stream format some panels (e.g. NZXT Kraken type-0x08) expect.
+/// compressed LCD stream format some panels expect.
 pub fn rgba_to_q565(rgba: &[u8], width: u32, height: u32) -> Result<Vec<u8>> {
     use q565::{
         encode::Q565EncodeContext,

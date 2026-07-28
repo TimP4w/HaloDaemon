@@ -89,7 +89,7 @@ pub fn derive_for(manifest: &PluginManifest, os: &str) -> Vec<DerivedRequirement
     let uses_smbus = manifest
         .devices
         .iter()
-        .any(|device| device.transport == "smbus");
+        .any(|device| device.smbus().is_some());
     if os == "windows"
         && (uses_smbus
             || manifest.transports.amd_smn.is_some()
@@ -218,7 +218,7 @@ mod tests {
         ));
 
         let integration = manifest(
-            "type: integration\npermissions: [network]\ntransports:\n  tcp: {}\nrequirements:\n  - { kind: command, name: openrgb }\n",
+            "type: integration\npermissions: [network]\ntransports:\n  tcp: {}\nconfig:\n  fields:\n    - { key: host, label: Host, kind: host }\n    - { key: port, label: Port, kind: port }\nrequirements:\n  - { kind: command, name: openrgb }\n",
         );
         assert!(matches!(
             &derive_for(&integration, "linux")[0].requirement,
@@ -229,7 +229,7 @@ mod tests {
     #[test]
     fn explicit_kernel_module_is_retained() {
         let integration = manifest(
-            "type: integration\nplatforms: [linux]\npermissions: [network]\ntransports:\n  tcp: {}\nrequirements:\n  - { kind: kernel_module, name: v4l2loopback, platforms: [linux] }\n",
+            "type: integration\nplatforms: [linux]\npermissions: [network]\ntransports:\n  tcp: {}\nconfig:\n  fields:\n    - { key: host, label: Host, kind: host }\n    - { key: port, label: Port, kind: port }\nrequirements:\n  - { kind: kernel_module, name: v4l2loopback, platforms: [linux] }\n",
         );
         assert!(matches!(
             &derive_for(&integration, "linux")[0].requirement,

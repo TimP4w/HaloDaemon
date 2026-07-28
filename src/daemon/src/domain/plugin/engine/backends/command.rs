@@ -10,7 +10,7 @@ use super::super::manifest::{DeviceSpec, PluginManifest};
 use super::super::transport::{CommandExecutor, PluginIo, PluginTransportDescriptor};
 
 fn matches(spec: &DeviceSpec, handle: &DiscoveryHandle<'_>) -> bool {
-    matches!(handle, DiscoveryHandle::Command { executable } if spec.r#match.command.as_ref().is_some_and(|m| m.command() == *executable))
+    matches!(handle, DiscoveryHandle::Command { executable } if spec.command().is_some_and(|m| m.command() == *executable))
 }
 
 fn open(
@@ -37,12 +37,5 @@ pub(super) const DESCRIPTOR: PluginTransportDescriptor = PluginTransportDescript
     matches: Some(matches),
     open,
     id_suffix: None,
-    validate: Some(validate),
+    validate: None,
 };
-
-fn validate(spec: &DeviceSpec) -> Result<()> {
-    if spec.r#match.command.is_none() {
-        bail!("command transport requires a command match");
-    }
-    Ok(())
-}

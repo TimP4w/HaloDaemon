@@ -45,16 +45,10 @@ fn open(
         bail!("amd_smn is only available on Windows");
     }
 }
-fn validate(spec: &DeviceSpec) -> Result<()> {
-    if !spec.r#match.amd_smn.as_ref().is_some_and(|m| m.any) {
-        bail!("amd_smn match requires explicit any: true");
-    }
-    Ok(())
-}
 pub(super) const DESCRIPTOR: PluginTransportDescriptor = PluginTransportDescriptor {
     kind: "amd_smn",
     matches: Some(matches),
     open,
     id_suffix: Some(suffix),
-    validate: Some(validate),
+    validate: None,
 };

@@ -19,8 +19,6 @@ use halod_shared::types::{EffectParamValue, Permission};
 
 use super::bytebuf::ByteBuf;
 use super::lua_worker::LuaWorker;
-use super::sandbox;
-use super::{PLUGIN_INSTRUCTION_BUDGET, PLUGIN_VM_MEMORY_BYTES};
 
 pub const CANVAS_W: u32 = 400;
 pub const CANVAS_H: u32 = 300;
@@ -79,11 +77,36 @@ pub struct PluginLedColor {
 impl PluginLedColor {
     fn clamp(self) -> Self {
         Self {
-            r: self.r.clamp(0.0, 1.0),
-            g: self.g.clamp(0.0, 1.0),
-            b: self.b.clamp(0.0, 1.0),
+            r: clamp_unit(self.r),
+            g: clamp_unit(self.g),
+            b: clamp_unit(self.b),
         }
     }
+}
+
+fn clamp_unit(value: f32) -> f32 {
+    if value.is_finite() {
+        value.clamp(0.0, 1.0)
+    } else {
+        0.0
+    }
+}
+
+pub(super) fn build_audio_table(
+    lua: &Lua,
+    level: f32,
+    flux: f32,
+    beat: bool,
+    seq: u64,
+    bands: &[f32],
+) -> mlua::Result<Table> {
+    let table = lua.create_table()?;
+    table.set("level", level)?;
+    table.set("flux", flux)?;
+    table.set("beat", beat)?;
+    table.set("seq", seq)?;
+    table.set("bands", lua.create_sequence_from(bands.iter().copied())?)?;
+    Ok(table)
 }
 
 enum EffectCall {
@@ -110,6 +133,16 @@ struct EffectCtx {
     /// Instruction counter for the runaway-guard hook; reset before each call.
     budget: Rc<Cell<u64>>,
     data: super::data_api::DataRuntime,
+}
+
+impl super::lua_worker::VmCtx for EffectCtx {
+    fn lua(&self) -> &Lua {
+        &self.lua
+    }
+
+    fn budget(&self) -> &Cell<u64> {
+        &self.budget
+    }
 }
 
 /// Handle a live effect instance's engine passes hold. The inner [`LuaWorker`]
@@ -151,7 +184,7 @@ impl PluginEffectHandle {
         config: crate::domain::plugin::ResolvedConfig,
         data: super::data_api::DataRuntime,
     ) -> Self {
-        let worker = LuaWorker::spawn(
+        let worker = LuaWorker::spawn_vm(
             "halod-effect",
             "effect",
             // An effect render must finish well inside a frame; a wedged one is
@@ -169,8 +202,6 @@ impl PluginEffectHandle {
                 )
             },
             |call, ctx: &EffectCtx| {
-                ctx.budget.set(0);
-                super::sandbox::set_call_deadline(&ctx.lua, std::time::Duration::from_secs(2));
                 match call {
                     EffectCall::RenderPixmap { frame, reply } => {
                         let _ = reply.send(run_render_pixmap(
@@ -202,12 +233,12 @@ impl PluginEffectHandle {
                 }
                 ControlFlow::Continue(())
             },
-        )
-        .unwrap_or_else(|e| {
-            log::error!("effect worker not started: {e:#}");
-            LuaWorker::dead("effect")
-        });
+        );
         Self(worker)
+    }
+
+    pub fn is_usable(&self) -> bool {
+        self.0.is_usable()
     }
 
     /// Fill a `CANVAS_W * CANVAS_H * 4` linear-RGBA buffer.
@@ -402,13 +433,14 @@ fn effect_context_table(
         })?,
     )?;
 
-    let bands = lua.create_sequence_from(frame.audio.bands.iter().copied())?;
-    let audio = lua.create_table()?;
-    audio.set("level", frame.audio.level)?;
-    audio.set("flux", frame.audio.flux)?;
-    audio.set("beat", frame.audio.beat)?;
-    audio.set("seq", frame.audio.seq)?;
-    audio.set("bands", bands)?;
+    let audio = build_audio_table(
+        lua,
+        frame.audio.level,
+        frame.audio.flux,
+        frame.audio.beat,
+        frame.audio.seq,
+        &frame.audio.bands,
+    )?;
     context.set("audio", audio)?;
 
     context.set(
@@ -530,17 +562,9 @@ fn build_ctx(
     config: &crate::domain::plugin::ResolvedConfig,
     data: super::data_api::DataRuntime,
 ) -> Result<EffectCtx> {
-    let (lua, budget) = sandbox::bootstrap_vm(
-        granted,
-        config,
-        PLUGIN_VM_MEMORY_BYTES,
-        PLUGIN_INSTRUCTION_BUDGET,
-    )
-    .map_err(|e| lua_err("sandbox setup", e))?;
-    sandbox::install_package_modules(&lua, module_sources)
-        .map_err(|e| lua_err("package modules", e))?;
+    let (lua, budget) =
+        super::lua_worker::bootstrap_worker_vm(granted, config, module_sources, data.clone())?;
     register_effect_helpers(&lua).map_err(|e| lua_err("effect helpers", e))?;
-    super::data_api::register(&lua, data.clone()).map_err(|e| lua_err("data API", e))?;
 
     let manifest: Table = lua
         .load(source)
@@ -619,6 +643,36 @@ fn run_led_colors(
 #[cfg(test)]
 mod tests {
     use super::*;
+
+    #[test]
+    fn led_color_clamp_maps_every_input_into_the_unit_range() {
+        for &v in &[
+            f32::NAN,
+            f32::INFINITY,
+            f32::NEG_INFINITY,
+            -1.0,
+            2.0,
+            -0.0,
+            0.5,
+            1.0,
+            0.0,
+        ] {
+            let clamped = PluginLedColor { r: v, g: v, b: v }.clamp();
+            for channel in [clamped.r, clamped.g, clamped.b] {
+                assert!(
+                    channel.is_finite() && (0.0..=1.0).contains(&channel),
+                    "input {v} produced out-of-range channel {channel}"
+                );
+            }
+        }
+        let nan = PluginLedColor {
+            r: f32::NAN,
+            g: f32::INFINITY,
+            b: f32::NEG_INFINITY,
+        }
+        .clamp();
+        assert_eq!((nan.r, nan.g, nan.b), (0.0, 0.0, 0.0));
+    }
 
     fn params() -> HashMap<String, EffectParamValue> {
         HashMap::new()

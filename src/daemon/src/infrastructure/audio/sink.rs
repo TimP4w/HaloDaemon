@@ -97,7 +97,7 @@ mod linux {
 
     /// Sanitize a display name into a PulseAudio sink name, stamped with
     /// [`SINK_PREFIX`] so the sink is recognizable as halod-managed:
-    /// "SteelSeries Arctis Nova Pro Wireless Media" → "halod_steelseries_arctis_nova_pro_wireless_media".
+    /// "Acme Headset Pro Wireless Media" → "halod_acme_headset_pro_wireless_media".
     /// Only `[a-z0-9_-]` characters are kept; anything else becomes `_`.
     fn sanitize(name: &str) -> String {
         let sanitized: String = name
@@ -309,14 +309,14 @@ mod linux {
         #[test]
         fn finds_sink_matching_vid_and_pid() {
             let json = serde_json::json!([make_sink(
-                "alsa_output.usb-SteelSeries_Arctis_Nova_Pro-00.analog-stereo",
+                "alsa_output.usb-Acme_Headset_Pro-00.analog-stereo",
                 "0x1038",
                 "0x12e0"
             )])
             .to_string();
             assert_eq!(
                 parse_physical_sink(&json, 0x1038, 0x12e0),
-                Some("alsa_output.usb-SteelSeries_Arctis_Nova_Pro-00.analog-stereo".to_string())
+                Some("alsa_output.usb-Acme_Headset_Pro-00.analog-stereo".to_string())
             );
         }
 
@@ -364,7 +364,7 @@ mod linux {
         #[test]
         fn vendor_and_product_match_is_case_insensitive() {
             let json = serde_json::json!([make_sink(
-                "alsa_output.usb-SteelSeries_Arctis-00.analog-stereo",
+                "alsa_output.usb-Acme_Headset-00.analog-stereo",
                 "0X1038",
                 "0X12E0"
             )])
@@ -375,8 +375,8 @@ mod linux {
         #[test]
         fn sanitize_standard() {
             assert_eq!(
-                sanitize("SteelSeries Arctis Nova Pro Wireless Media"),
-                "halod_steelseries_arctis_nova_pro_wireless_media"
+                sanitize("Acme Headset Pro Wireless Media"),
+                "halod_acme_headset_pro_wireless_media"
             );
         }
 
@@ -390,7 +390,7 @@ mod linux {
 
         #[test]
         fn sanitize_preserves_hyphens() {
-            assert_eq!(sanitize("Arctis Nova Pro-X"), "halod_arctis_nova_pro-x");
+            assert_eq!(sanitize("Headset Nova Pro-X"), "halod_headset_nova_pro-x");
         }
 
         #[test]
@@ -403,8 +403,8 @@ mod linux {
         #[test]
         fn parses_managed_null_sink_and_loopback_ids() {
             let short = "\
-536870939\tmodule-null-sink\tsink_name=halod_arctis_media sink_properties=node.description='Arctis Media'\t
-536870940\tmodule-loopback\tsource=halod_arctis_media.monitor sink=alsa_output.usb-real latency_msec=0\t";
+536870939\tmodule-null-sink\tsink_name=halod_headset_media sink_properties=node.description='Headset Media'\t
+536870940\tmodule-loopback\tsource=halod_headset_media.monitor sink=alsa_output.usb-real latency_msec=0\t";
             assert_eq!(parse_orphan_module_ids(short), vec![536870939, 536870940]);
         }
 

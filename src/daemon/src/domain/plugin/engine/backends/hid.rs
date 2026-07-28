@@ -13,6 +13,9 @@ use crate::infrastructure::drivers::transports::hid::HidTransport;
 use crate::infrastructure::drivers::transports::usb::UsbSelector;
 
 fn matches(spec: &DeviceSpec, handle: &DiscoveryHandle<'_>) -> bool {
+    let Some(spec) = spec.hid() else {
+        return false;
+    };
     let DiscoveryHandle::Hid {
         vid,
         pid,
@@ -24,12 +27,8 @@ fn matches(spec: &DeviceSpec, handle: &DiscoveryHandle<'_>) -> bool {
     else {
         return false;
     };
-    let pid_ok = if spec.pids.is_empty() {
-        spec.pid.is_none_or(|p| p == *pid)
-    } else {
-        spec.pids.contains(pid)
-    };
-    (spec.generic_hid || spec.vid == Some(*vid))
+    let pid_ok = spec.pids.is_empty() || spec.pids.contains(pid);
+    (spec.any || spec.vid == Some(*vid))
         && pid_ok
         // Linux hidraw does not expose collection usages (both are zero), so
         // usage selectors only narrow the split collections on platforms that
@@ -64,7 +63,7 @@ fn open(
     };
     let hid = manifest.transports.hid.clone().unwrap_or_default();
     // `report_size = 0` means raw passthrough (no report-id prepend, no padding):
-    // the plugin builds the exact wire buffer itself (e.g. the Razer 90-byte report).
+    // the plugin builds the exact wire buffer itself.
     let report_size = (hid.report_size != 0).then_some(hid.report_size);
     let transport = if let Some(companion) = &hid.companion {
         let api = hidapi::HidApi::new()?;
@@ -130,18 +129,11 @@ fn id_suffix(handle: &DiscoveryHandle<'_>) -> String {
             serial: Some(s), ..
         } => (*s).to_owned(),
         // `idx` counts within one (vid, pid), so it alone collides across two
-        // serial-less models of the same plugin (e.g. a Logitech receiver and a
+        // serial-less models of the same plugin (e.g. a wireless receiver and a
         // direct-USB headset both landing on 0).
         DiscoveryHandle::Hid { pid, idx, .. } => format!("{pid:04x}-{idx}"),
         _ => "0".to_owned(),
     }
-}
-
-fn validate(spec: &DeviceSpec) -> Result<()> {
-    if !spec.generic_hid && spec.vid.is_none() {
-        bail!("hid match requires a `vid`");
-    }
-    Ok(())
 }
 
 pub(super) const DESCRIPTOR: PluginTransportDescriptor = PluginTransportDescriptor {
@@ -149,7 +141,7 @@ pub(super) const DESCRIPTOR: PluginTransportDescriptor = PluginTransportDescript
     matches: Some(matches),
     open,
     id_suffix: Some(id_suffix),
-    validate: Some(validate),
+    validate: None,
 };
 
 #[cfg(test)]
@@ -158,7 +150,7 @@ mod tests {
 
     fn hid(pid: u16, serial: Option<&'static str>, idx: usize) -> DiscoveryHandle<'static> {
         DiscoveryHandle::Hid {
-            vid: 0x046d,
+            vid: 0x1234,
             pid,
             path: "",
             serial,
@@ -171,27 +163,26 @@ mod tests {
 
     #[test]
     fn serial_less_models_of_one_plugin_get_distinct_ids() {
-        // Logitech LIGHTSPEED receiver and PRO X Wireless headset: both report no
-        // serial, so both are idx 0 within their own (vid, pid).
+        // Two serial-less models: both are idx 0 within their own (vid, pid).
         assert_ne!(
-            id_suffix(&hid(0xc547, None, 0)),
-            id_suffix(&hid(0x0aba, None, 0))
+            id_suffix(&hid(0x1111, None, 0)),
+            id_suffix(&hid(0x2222, None, 0))
         );
     }
 
     #[test]
     fn same_model_instances_stay_distinct() {
         assert_ne!(
-            id_suffix(&hid(0x0aba, None, 0)),
-            id_suffix(&hid(0x0aba, None, 1))
+            id_suffix(&hid(0x1111, None, 0)),
+            id_suffix(&hid(0x1111, None, 1))
         );
     }
 
     #[test]
     fn serial_identifies_the_device_across_reenumeration() {
         assert_eq!(
-            id_suffix(&hid(0x0aba, Some("ABC123"), 0)),
-            id_suffix(&hid(0x0aba, Some("ABC123"), 3))
+            id_suffix(&hid(0x1111, Some("ABC123"), 0)),
+            id_suffix(&hid(0x1111, Some("ABC123"), 3))
         );
     }
 }

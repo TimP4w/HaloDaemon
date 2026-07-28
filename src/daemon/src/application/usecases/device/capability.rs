@@ -471,12 +471,12 @@ mod tests {
 
     #[tokio::test]
     async fn set_eq_preset_publishes_updated_device_record() {
-        let dev = eq_dev("arctis");
+        let dev = eq_dev("headset");
         let app = make_app(vec![dev as Arc<dyn Device>]);
         let mut transactions = app.data_bus.subscribe_transactions();
 
         set_capability_param(
-            "arctis".into(),
+            "headset".into(),
             CapabilityParam::EqPreset { preset_index: 2 },
             app,
         )

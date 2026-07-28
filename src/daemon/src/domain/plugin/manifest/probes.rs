@@ -173,16 +173,16 @@ fn probe_linux_hwmon_at(
 
     if access == "read" {
         let readable = entries.iter().any(|dir| {
-            std::fs::read_dir(dir).is_ok()
-                && (accessible(&dir.join("name"), libc::R_OK)
-                    || std::fs::read_dir(dir).is_ok_and(|files| {
-                        files.flatten().any(|file| {
-                            file.file_name()
-                                .to_str()
-                                .is_some_and(|name| name.ends_with("_input"))
-                                && accessible(&file.path(), libc::R_OK)
-                        })
-                    }))
+            let Ok(files) = std::fs::read_dir(dir) else {
+                return false;
+            };
+            accessible(&dir.join("name"), libc::R_OK)
+                || files.flatten().any(|file| {
+                    file.file_name()
+                        .to_str()
+                        .is_some_and(|name| name.ends_with("_input"))
+                        && accessible(&file.path(), libc::R_OK)
+                })
         });
         return if readable {
             (true, None)
@@ -325,6 +325,10 @@ mod tests {
         assert_eq!(
             probe_linux_hwmon_at(root.path(), "read", &|path, _| path
                 .ends_with("temp1_input")),
+            (true, None)
+        );
+        assert_eq!(
+            probe_linux_hwmon_at(root.path(), "read", &|path, _| path.ends_with("name")),
             (true, None)
         );
         assert_eq!(

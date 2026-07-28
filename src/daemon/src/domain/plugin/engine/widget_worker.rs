@@ -21,8 +21,6 @@ use halod_shared::types::{EffectParamValue, Permission, RgbColor};
 use super::bytebuf::{alloc_zeroed, ByteBuf};
 use super::lua_worker::LuaWorker;
 use super::raster;
-use super::sandbox;
-use super::{PLUGIN_INSTRUCTION_BUDGET, PLUGIN_VM_MEMORY_BYTES};
 
 const MAX_WIDGET_SIDE: u32 = 1024;
 const MAX_DRAW_TEXT_BYTES: usize = halod_shared::lcd_custom::MAX_WIDGET_TEXT_BYTES;
@@ -30,6 +28,7 @@ const MAX_COMPOSITION_DEPTH: usize = 8;
 const MAX_DRAW_POINTS: usize = 64;
 const MAX_RENDER_WORK_PIXELS: usize = 32 * 1024 * 1024;
 const CALL_TIMEOUT: std::time::Duration = std::time::Duration::from_millis(250);
+const WARMUP_TIMEOUT: std::time::Duration = std::time::Duration::from_secs(5);
 
 #[derive(Clone)]
 pub struct WidgetRenderInput {
@@ -73,12 +72,22 @@ enum WidgetCall {
     },
 }
 
-struct WorkerCtx {
+struct WidgetCtx {
     lua: Lua,
     live: HashMap<String, Function>,
     preview: HashMap<String, Function>,
     budget: Rc<Cell<u64>>,
     data: super::data_api::DataRuntime,
+}
+
+impl super::lua_worker::VmCtx for WidgetCtx {
+    fn lua(&self) -> &Lua {
+        &self.lua
+    }
+
+    fn budget(&self) -> &Cell<u64> {
+        &self.budget
+    }
 }
 
 #[derive(Clone)]
@@ -111,23 +120,24 @@ impl PluginWidgetHandle {
         config: crate::domain::plugin::ResolvedConfig,
         data: super::data_api::DataRuntime,
     ) -> Self {
-        let worker = LuaWorker::spawn(
+        let (ready_tx, ready_rx) = std::sync::mpsc::channel::<()>();
+        let worker = LuaWorker::spawn_vm(
             "halod-lcd-widget",
             "LCD widget",
             CALL_TIMEOUT,
             move || {
-                build_ctx(
+                let ctx = build_ctx(
                     &source,
                     &modules,
                     &widget_ids,
                     &granted,
                     &config,
                     data.clone(),
-                )
+                );
+                let _ = ready_tx.send(());
+                ctx
             },
-            |call, ctx: &WorkerCtx| {
-                ctx.budget.set(0);
-                sandbox::set_call_deadline(&ctx.lua, CALL_TIMEOUT);
+            |call, ctx: &WidgetCtx| {
                 match call {
                     WidgetCall::Render { input, reply } => {
                         let _ = reply.send(render_one(ctx, input));
@@ -135,11 +145,8 @@ impl PluginWidgetHandle {
                 }
                 ControlFlow::Continue(())
             },
-        )
-        .unwrap_or_else(|error| {
-            log::error!("LCD widget worker not started: {error:#}");
-            LuaWorker::dead("LCD widget")
-        });
+        );
+        let _ = ready_rx.recv_timeout(WARMUP_TIMEOUT);
         Self(worker)
     }
 
@@ -161,18 +168,9 @@ fn build_ctx(
     granted: &[Permission],
     config: &crate::domain::plugin::ResolvedConfig,
     data: super::data_api::DataRuntime,
-) -> Result<WorkerCtx> {
-    let (lua, budget) = sandbox::bootstrap_vm(
-        granted,
-        config,
-        PLUGIN_VM_MEMORY_BYTES,
-        PLUGIN_INSTRUCTION_BUDGET,
-    )
-    .map_err(|error| anyhow!("widget sandbox setup: {error}"))?;
-    sandbox::install_package_modules(&lua, modules)
-        .map_err(|error| anyhow!("widget package modules: {error}"))?;
-    super::data_api::register(&lua, data.clone())
-        .map_err(|error| anyhow!("widget data API: {error}"))?;
+) -> Result<WidgetCtx> {
+    let (lua, budget) =
+        super::lua_worker::bootstrap_worker_vm(granted, config, modules, data.clone())?;
     let manifest: Table = lua
         .load(source)
         .eval()
@@ -189,7 +187,7 @@ fn build_ctx(
         live.insert(id.clone(), live_fn);
         preview.insert(id.clone(), preview_fn);
     }
-    Ok(WorkerCtx {
+    Ok(WidgetCtx {
         lua,
         live,
         preview,
@@ -213,7 +211,7 @@ fn checked_len(width: u32, height: u32) -> Result<usize> {
         .map_err(|error| anyhow!("widget allocation: {error}"))
 }
 
-fn render_one(ctx: &WorkerCtx, input: WidgetRenderInput) -> Result<Vec<u8>> {
+fn render_one(ctx: &WidgetCtx, input: WidgetRenderInput) -> Result<Vec<u8>> {
     let len = checked_len(input.width, input.height)?;
     let callback = if input.preview {
         ctx.preview.get(&input.widget_id)
@@ -578,14 +576,13 @@ impl UserData for RenderCtx {
             let Some(audio) = &this.audio else {
                 return Ok(None);
             };
-            let table = lua.create_table()?;
-            table.set("level", audio.level)?;
-            table.set("flux", audio.flux)?;
-            table.set("beat", audio.beat)?;
-            table.set("seq", audio.seq)?;
-            table.set(
-                "bands",
-                lua.create_sequence_from(audio.bands.iter().copied())?,
+            let table = super::effect_worker::build_audio_table(
+                lua,
+                audio.level,
+                audio.flux,
+                audio.beat,
+                audio.seq,
+                &audio.bands,
             )?;
             Ok(Some(table))
         });

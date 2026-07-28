@@ -50,19 +50,10 @@ fn open(
         bail!("lpcio is only available on Windows");
     }
 }
-fn validate(spec: &DeviceSpec) -> Result<()> {
-    let Some(m) = &spec.r#match.lpcio else {
-        bail!("lpcio transport requires an lpcio match");
-    };
-    if m.any != m.chip_ids.is_empty() {
-        bail!("lpcio match requires chip_ids or explicit any: true");
-    }
-    Ok(())
-}
 pub(super) const DESCRIPTOR: PluginTransportDescriptor = PluginTransportDescriptor {
     kind: "lpcio",
     matches: Some(matches),
     open,
     id_suffix: Some(suffix),
-    validate: Some(validate),
+    validate: None,
 };
