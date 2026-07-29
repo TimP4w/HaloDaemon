@@ -2472,9 +2472,10 @@ impl LuaDevice {
             serial: crate::domain::registry::identity::normalize_serial(
                 controller.serial.as_deref(),
             ),
-            location: crate::domain::registry::identity::location_from_openrgb(
-                controller.location.as_deref(),
-            ),
+            location: controller
+                .location
+                .clone()
+                .and_then(super::worker::ControllerLocation::into_key),
             usb: None,
             usb_address: None,
         };

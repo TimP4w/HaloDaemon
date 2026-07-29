@@ -131,33 +131,25 @@ pub fn normalize_serial(value: Option<&str>) -> Option<String> {
         .filter(|v| !v.is_empty())
 }
 
-pub fn location_from_openrgb(value: Option<&str>) -> Option<LocationKey> {
-    let value = value?.trim_matches(|c: char| c.is_whitespace() || c == '\0');
-    if value.is_empty() {
-        return None;
-    }
-    let path = value
-        .strip_prefix("HID:")
-        .or_else(|| value.strip_prefix("hid:"))
-        .map(str::trim)
-        .unwrap_or(value);
-    if path.starts_with("/dev/hidraw")
-        || path.starts_with("\\\\?\\hid#")
-        || path.starts_with("\\\\?\\HID#")
-    {
-        return Some(LocationKey::HidPath(normalize_hid_path(path)));
-    }
-    Some(LocationKey::Opaque(value.to_owned()))
+pub fn hid_path_location(path: &str) -> Option<LocationKey> {
+    let path = normalize_hid_path(path);
+    (!path.is_empty()).then_some(LocationKey::HidPath(path))
+}
+
+pub fn opaque_location(value: &str) -> Option<LocationKey> {
+    let value = value.trim_matches(|c: char| c.is_whitespace() || c == '\0');
+    (!value.is_empty()).then(|| LocationKey::Opaque(value.to_owned()))
 }
 
 fn normalize_hid_path(path: &str) -> String {
+    let path = path.trim_matches(|c: char| c.is_whitespace() || c == '\0');
     #[cfg(windows)]
     {
-        path.trim().to_ascii_lowercase()
+        path.to_ascii_lowercase()
     }
     #[cfg(not(windows))]
     {
-        path.trim().to_owned()
+        path.to_owned()
     }
 }
 
@@ -598,7 +590,7 @@ mod tests {
             identity: DeviceIdentity {
                 scope: Some(IdentityScope::Local),
                 serial: normalize_serial(serial),
-                location: location_from_openrgb(location),
+                location: location.and_then(opaque_location),
                 usb: None,
                 usb_address: None,
             },
@@ -615,9 +607,14 @@ mod tests {
     #[test]
     fn hid_location_is_normalized() {
         assert_eq!(
-            location_from_openrgb(Some("HID: /dev/hidraw6\0")),
+            hid_path_location(" /dev/hidraw6\0"),
             Some(LocationKey::HidPath("/dev/hidraw6".into()))
         );
+    }
+    #[test]
+    fn blank_locations_are_dropped() {
+        assert_eq!(hid_path_location(" \0 "), None);
+        assert_eq!(opaque_location("\0"), None);
     }
     #[tokio::test]
     async fn wrapper_forwards_chain_host_to_inner() {

@@ -4,6 +4,7 @@
 use std::collections::HashMap;
 use std::io::{Read as _, Write as _};
 use std::path::{Path, PathBuf};
+use std::time::Duration;
 
 use anyhow::{anyhow, bail, Context as _, Result};
 use serde::Deserialize;
@@ -16,6 +17,10 @@ const MANIFEST_ASSET: &str = "release.yaml";
 const SIGNATURE_ASSET: &str = "release.sig";
 const MAX_MANIFEST_BYTES: usize = 2 * 1024 * 1024;
 const MAX_ARCHIVE_BYTES: usize = 512 * 1024 * 1024;
+const CONNECT_TIMEOUT: Duration = Duration::from_secs(15);
+const RESPONSE_TIMEOUT: Duration = Duration::from_secs(30);
+const METADATA_BODY_TIMEOUT: Duration = Duration::from_secs(60);
+const ARCHIVE_BODY_TIMEOUT: Duration = Duration::from_secs(15 * 60);
 
 #[derive(Debug, Clone, PartialEq, Eq)]
 pub struct PublishedRelease {
@@ -67,10 +72,16 @@ fn github_name_byte(byte: u8) -> bool {
     byte.is_ascii_alphanumeric() || matches!(byte, b'-' | b'_' | b'.')
 }
 
-fn http_get(url: &str, limit: usize) -> Result<Vec<u8>> {
+/// Every timeout is explicit: ureq defaults them all to `None`, and an
+/// unbounded read here stalls the caller (and, at boot, the whole daemon).
+fn http_get(url: &str, limit: usize, body_timeout: Duration) -> Result<Vec<u8>> {
     let agent = ureq::Agent::config_builder()
         .max_redirects(5)
         .http_status_as_error(true)
+        .timeout_connect(Some(CONNECT_TIMEOUT))
+        .timeout_send_request(Some(RESPONSE_TIMEOUT))
+        .timeout_recv_response(Some(RESPONSE_TIMEOUT))
+        .timeout_recv_body(Some(body_timeout))
         .build()
         .into();
     let request = ureq::http::Request::builder()
@@ -98,9 +109,12 @@ fn http_get(url: &str, limit: usize) -> Result<Vec<u8>> {
 pub fn list(source: &str) -> Result<Vec<PublishedRelease>> {
     let (owner, project) = github_project(source)?;
     let endpoint = format!("https://api.github.com/repos/{owner}/{project}/releases?per_page=100");
-    let releases: Vec<GithubRelease> =
-        serde_json::from_slice(&http_get(&endpoint, MAX_MANIFEST_BYTES)?)
-            .context("parsing GitHub releases response")?;
+    let releases: Vec<GithubRelease> = serde_json::from_slice(&http_get(
+        &endpoint,
+        MAX_MANIFEST_BYTES,
+        METADATA_BODY_TIMEOUT,
+    )?)
+    .context("parsing GitHub releases response")?;
     Ok(releases
         .into_iter()
         .filter(|release| !release.draft)
@@ -132,6 +146,7 @@ pub fn inspect(
             .get(MANIFEST_ASSET)
             .context("release.yaml asset is missing")?,
         MAX_MANIFEST_BYTES,
+        METADATA_BODY_TIMEOUT,
     )?;
     let signature_bytes = http_get(
         release
@@ -139,6 +154,7 @@ pub fn inspect(
             .get(SIGNATURE_ASSET)
             .context("release.sig asset is missing")?,
         MAX_MANIFEST_BYTES,
+        METADATA_BODY_TIMEOUT,
     )?;
     let manifest: RepositoryManifest =
         serde_yaml::from_slice(&manifest_bytes).context("parsing release.yaml")?;
@@ -174,7 +190,7 @@ pub fn download(
         .assets
         .get(&archive.name)
         .with_context(|| format!("release asset '{}' is missing", archive.name))?;
-    let bytes = http_get(url, MAX_ARCHIVE_BYTES)?;
+    let bytes = http_get(url, MAX_ARCHIVE_BYTES, ARCHIVE_BODY_TIMEOUT)?;
     if bytes.len() as u64 != archive.size {
         bail!("release archive size mismatch");
     }

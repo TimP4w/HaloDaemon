@@ -14,11 +14,12 @@ use std::sync::Arc;
 
 use anyhow::{anyhow, bail, Result};
 use mlua::{Function, Lua, LuaSerdeExt, Table, Value};
-use serde::Deserialize;
+use serde::{Deserialize, Serialize};
 use tokio::runtime::Handle;
 use tokio::sync::oneshot;
 
 use super::lua_worker::LuaWorker;
+use crate::domain::registry::identity::{self, LocationKey};
 use halod_shared::keyboard::{KeyId, StandardLayout};
 use halod_shared::types::{
     Battery, Boolean, ButtonDescriptor, ButtonMapping, ConnectionStatus, DeviceType, Equalizer,
@@ -114,7 +115,7 @@ pub struct DetectedController {
     #[serde(default)]
     pub serial: Option<String>,
     #[serde(default)]
-    pub location: Option<String>,
+    pub location: Option<ControllerLocation>,
     /// Transport-specific match fields inherited by a dynamic child (for
     /// example an LPCIO chip id/revision and HWM base).
     #[serde(default)]
@@ -123,6 +124,48 @@ pub struct DetectedController {
     /// controller output. Runtime descriptors come from `initialize`.
     #[serde(default)]
     pub channels: Vec<DetectedControllerZone>,
+}
+
+/// Where a dynamic child is physically attached, in the daemon's vocabulary.
+/// Plugins translate their protocol's own encoding into one of these; the
+/// daemon never parses vendor location strings.
+#[derive(Debug, Clone, PartialEq, Eq, Serialize, Deserialize)]
+#[serde(tag = "kind", rename_all = "snake_case")]
+pub enum ControllerLocation {
+    HidPath {
+        path: String,
+    },
+    UsbPort {
+        bus: u8,
+        port_path: Vec<u8>,
+        interface: u8,
+    },
+    Smbus {
+        bus: u8,
+        address: u8,
+    },
+    Opaque {
+        value: String,
+    },
+}
+
+impl ControllerLocation {
+    pub fn into_key(self) -> Option<LocationKey> {
+        match self {
+            Self::HidPath { path } => identity::hid_path_location(&path),
+            Self::UsbPort {
+                bus,
+                port_path,
+                interface,
+            } => Some(LocationKey::UsbPort {
+                bus,
+                port_path,
+                interface,
+            }),
+            Self::Smbus { bus, address } => Some(LocationKey::Smbus { bus, address }),
+            Self::Opaque { value } => identity::opaque_location(&value),
+        }
+    }
 }
 
 /// Identifying context injected into the plugin's `dev.match` table, so a

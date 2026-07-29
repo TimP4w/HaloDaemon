@@ -1075,7 +1075,7 @@ fn open_integration(
                     item.set("key", controller.key.clone())?;
                     item.set("name", controller.name.clone())?;
                     item.set("serial", controller.serial.clone())?;
-                    item.set("location", controller.location.clone())?;
+                    item.set("location", lua.to_value(&controller.location)?)?;
                     item.set("extra", lua.to_value(&controller.extra)?)?;
                     let channels = lua.create_table()?;
                     for (z, zone) in controller.channels.iter().enumerate() {
