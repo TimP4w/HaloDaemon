@@ -27,11 +27,18 @@
           src = ./.;
         };
 
-      mkHalod =
+      mkHalodSource =
         pkgs:
         import ./packaging/nix/package.nix {
           inherit pkgs lib version;
           buildHash = self.shortRev or self.dirtyShortRev or "unknown";
+          src = ./.;
+        };
+
+      mkHalodPrebuilt =
+        pkgs:
+        import ./packaging/nix/prebuilt.nix {
+          inherit pkgs lib;
           src = ./.;
         };
     in
@@ -42,7 +49,8 @@
           pkgs = import nixpkgs { inherit system; };
         in
         rec {
-          halod = mkHalod pkgs;
+          halod-source = mkHalodSource pkgs;
+          halod = if system == "x86_64-linux" then mkHalodPrebuilt pkgs else halod-source;
           gnome-extension = mkHalodExtension pkgs;
           default = halod;
         }

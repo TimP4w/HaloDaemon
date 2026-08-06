@@ -749,3 +749,35 @@ jobs:
             artifacts/official-plugin-bundle/official-plugins-licenses.txt
             release/SHA256SUMS
             release/SHA256SUMS.asc
+
+      # Lands after the tag: a release commit cannot contain the hash of its
+      # own artifact.
+      - name: Pin the Nix prebuilt package to the published tarball
+        run: |
+          set -euo pipefail
+          v="${{ needs.prepare.outputs.new_version }}"
+          hex=$(sha256sum release/halod-linux-x64.tar.gz | cut -d' ' -f1)
+          sri="sha256-$(printf %s "$hex" | xxd -r -p | base64 -w0)"
+          git config user.name "github-actions[bot]"
+          git config user.email "41898282+github-actions[bot]@users.noreply.github.com"
+          git fetch origin main
+          git checkout -B main origin/main
+          python3 - "$v" "$sri" <<'PY'
+          import pathlib, re, sys
+          version, sri = sys.argv[1:]
+
+          nix = pathlib.Path("packaging/nix/prebuilt.nix")
+          text = nix.read_text()
+          replacements = (
+              (r'(release = ")[^"]+(";)', rf'\g<1>v{version}\2'),
+              (r'(tarballHash = ")[^"]+(";)', rf'\g<1>{sri}\2'),
+          )
+          for pattern, replacement in replacements:
+              text, count = re.subn(pattern, replacement, text, count=1)
+              if count != 1:
+                  sys.exit(f"Failed to update prebuilt.nix pattern: {pattern}")
+          nix.write_text(text)
+          PY
+          git add packaging/nix/prebuilt.nix
+          git commit -m "chore: pin Nix prebuilt package to v${v}"
+          git push origin HEAD:main

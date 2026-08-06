@@ -42,6 +42,12 @@ This installs the binaries and base udev rules and runs `halod` as a per-user se
 | `enableNuvotonFanControl` | Loads `nct6775` for NCT677x SuperIO temperature sensors and PWM fan headers (no-op if the chip is absent) |
 | `enableGnomeExtension` | Installs the GNOME Shell extension system-wide (each user still runs `gnome-extensions enable halod@halod`) |
 
+On `x86_64-linux` the default package is the tested binary release, so updating the input does not trigger a Rust rebuild. To compile the workspace yourself instead (required on `aarch64-linux`, which has no release tarball):
+
+```nix
+programs.halod.package = inputs.halod.packages.${pkgs.system}.halod-source;
+```
+
 To try without installing: `nix run github:TimP4w/HaloDaemon`.
 
 ## Ubuntu / Debian

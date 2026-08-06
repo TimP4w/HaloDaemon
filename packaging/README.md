@@ -17,10 +17,17 @@ detect their runtime library dependencies automatically (`dpkg-shlibdeps` /
 rpm `find-requires`). The Arch package is source-built and is intentionally not
 produced in CI.
 
-The Nix package, GNOME-extension derivation, and NixOS module live in
-`packaging/nix/` (`package.nix`, `gnome-extension.nix`, `module.nix`); the
-repo-root `flake.nix` wires them into `packages`/`nixosModules` and keeps only
-the dev shell inline. Build with `nix build .#halod`.
+The Nix packages, GNOME-extension derivation, and NixOS module live in
+`packaging/nix/` (`prebuilt.nix`, `package.nix`, `gnome-extension.nix`,
+`module.nix`); the repo-root `flake.nix` wires them into
+`packages`/`nixosModules` and keeps only the dev shell inline.
+
+`nix build .#halod` is the default and, on `x86_64-linux`, unpacks the released
+`halod-linux-x64.tar.gz` (`prebuilt.nix`) so consumers never rebuild the
+workspace — the publish job rewrites its pinned release tag and tarball hash
+after each release. `nix build .#halod-source` compiles from source
+(`package.nix`); it is also the default on `aarch64-linux`, which has no
+release tarball.
 
 ## Build locally
 
