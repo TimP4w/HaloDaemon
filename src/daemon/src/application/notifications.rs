@@ -43,7 +43,7 @@ mod tests {
         send(
             &app,
             NotificationCode::DeviceInitFailed {
-                device: "Kraken".into(),
+                device: "Cooler".into(),
                 detail: "thing exploded".into(),
             },
         )
@@ -57,7 +57,7 @@ mod tests {
         assert!(matches!(
             &notification.code,
             NotificationCode::DeviceInitFailed { device, detail }
-                if device == "Kraken" && detail == "thing exploded"
+                if device == "Cooler" && detail == "thing exploded"
         ));
     }
 

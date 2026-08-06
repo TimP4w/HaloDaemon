@@ -395,14 +395,21 @@ mod tests {
 
     #[test]
     fn discovery_filter_matches_only_declared_specs() {
-        let mut spec: DeviceSpec = serde_json::from_value(serde_json::json!({
-            "vendor": "x", "model": "y",
-            "match": { "hid": { "vid": 0x1234, "pid": 0x5678 } }
-        }))
-        .unwrap();
-        spec.transport = "hid".to_owned();
-        spec.vid = Some(0x1234);
-        spec.pid = Some(0x5678);
+        let spec = DeviceSpec {
+            vendor: "x".into(),
+            model: "y".into(),
+            name: None,
+            device_type: None,
+            control_layout: Vec::new(),
+            capabilities: Vec::new(),
+            transport: crate::domain::plugin::manifest::TransportSpec::Hid(
+                crate::domain::plugin::manifest::HidMatch {
+                    vid: Some(0x1234),
+                    pids: vec![0x5678],
+                    ..Default::default()
+                },
+            ),
+        };
         let filter = DiscoveryFilter { specs: vec![spec] };
 
         assert!(filter.matches(&hid_handle(0x1234, 0x5678)));

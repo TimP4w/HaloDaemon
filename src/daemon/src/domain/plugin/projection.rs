@@ -30,8 +30,40 @@ fn active_signature_status(record: &PluginRepoRecord) -> RepoSignatureStatus {
         })
 }
 
+async fn cached_signature_status(app: &AppState, record: &PluginRepoRecord) -> RepoSignatureStatus {
+    let Some(revision) = record
+        .active_revision
+        .clone()
+        .filter(|revision| !revision.is_empty())
+    else {
+        return active_signature_status(record);
+    };
+    let key = (record.slug.clone(), revision);
+    if let Some(status) = app.signature_status_cache.lock().await.get(&key) {
+        return status.clone();
+    }
+    let status = active_signature_status(record);
+    app.signature_status_cache
+        .lock()
+        .await
+        .insert(key, status.clone());
+    status
+}
+
 pub async fn project(app: &AppState, cfg: &Config, devices: &[WireDevice]) -> PluginsState {
     let observed_signatures = app.repo_signature_status.lock().await.clone();
+    let mut signatures: std::collections::HashMap<String, RepoSignatureStatus> =
+        std::collections::HashMap::new();
+    for record in &cfg.plugins.repos {
+        let status = match observed_signatures
+            .get(&record.slug)
+            .filter(|(tag, _)| Some(tag.as_str()) != record.release_tag.as_deref())
+        {
+            Some((_, status)) => status.clone(),
+            None => cached_signature_status(app, record).await,
+        };
+        signatures.insert(record.slug.clone(), status);
+    }
     let mut plugins = app.registry.list(app.secret_store.as_ref());
     for plugin in &mut plugins {
         if plugin.plugin_type == halod_shared::types::PluginKind::Integration
@@ -63,6 +95,10 @@ pub async fn project(app: &AppState, cfg: &Config, devices: &[WireDevice]) -> Pl
             )
             .collect();
     }
+    let (updates, repo_updates) = {
+        let plan = app.plugin_update_plan.lock().await;
+        (plan.packages(), plan.repos())
+    };
     PluginsState {
         plugins,
         repos: cfg
@@ -94,11 +130,10 @@ pub async fn project(app: &AppState, cfg: &Config, devices: &[WireDevice]) -> Pl
                         halod_shared::types::PluginRepoLocation::RemoteRelease
                     }
                 },
-                signature: observed_signatures
+                signature: signatures
                     .get(&record.slug)
-                    .filter(|(tag, _)| Some(tag.as_str()) != record.release_tag.as_deref())
-                    .map(|(_, status)| status.clone())
-                    .unwrap_or_else(|| active_signature_status(record)),
+                    .cloned()
+                    .unwrap_or(RepoSignatureStatus::Unsigned),
                 signing_key_fingerprint: record
                     .trusted_key
                     .as_ref()
@@ -107,8 +142,8 @@ pub async fn project(app: &AppState, cfg: &Config, devices: &[WireDevice]) -> Pl
             .collect(),
         skipped: app.registry.skipped(),
         recommendations: app.registry.recommendations(),
-        updates: app.plugin_update_status.lock().await.clone(),
-        repo_updates: app.plugin_repo_update_status.lock().await.clone(),
+        updates,
+        repo_updates,
     }
 }
 
@@ -146,6 +181,44 @@ mod tests {
         let status =
             active_signature_status(&repo_record(crate::constants::OFFICIAL_PLUGIN_REPO_SLUG));
         assert!(matches!(status, RepoSignatureStatus::Invalid { .. }));
+    }
+
+    #[tokio::test]
+    async fn signature_status_is_served_from_the_cache_on_a_hit() {
+        let app = Arc::new(AppState::new(Config::default()));
+        let mut record = repo_record(crate::constants::OFFICIAL_PLUGIN_REPO_SLUG);
+        record.active_revision = Some("rev1".to_owned());
+        app.signature_status_cache.lock().await.insert(
+            (record.slug.clone(), "rev1".to_owned()),
+            RepoSignatureStatus::Verified,
+        );
+
+        assert_eq!(
+            cached_signature_status(&app, &record).await,
+            RepoSignatureStatus::Verified
+        );
+    }
+
+    #[tokio::test]
+    async fn invalidation_drops_only_the_repositorys_cached_signatures() {
+        let app = Arc::new(AppState::new(Config::default()));
+        {
+            let mut cache = app.signature_status_cache.lock().await;
+            cache.insert(
+                ("repo-a".to_owned(), "rev".to_owned()),
+                RepoSignatureStatus::Verified,
+            );
+            cache.insert(
+                ("repo-b".to_owned(), "rev".to_owned()),
+                RepoSignatureStatus::Verified,
+            );
+        }
+
+        app.invalidate_signature_status("repo-a").await;
+
+        let cache = app.signature_status_cache.lock().await;
+        assert!(!cache.contains_key(&("repo-a".to_owned(), "rev".to_owned())));
+        assert!(cache.contains_key(&("repo-b".to_owned(), "rev".to_owned())));
     }
 
     #[tokio::test]

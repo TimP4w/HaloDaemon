@@ -80,6 +80,7 @@ pub struct CustomTemplate {
     /// renders the "no player" dimmed placeholder.
     media: Option<Arc<MediaHandle>>,
     plugin_handles: HashMap<String, crate::domain::plugin::PluginWidgetHandle>,
+    plugin_backoff: HashMap<String, crate::util::backoff::FailureStreak>,
     plugin_sprites: HashMap<String, PluginSprite>,
     composite_cache: RefCell<HashMap<String, CachedComposite>>,
     system_fonts: HashMap<String, ab_glyph::FontArc>,
@@ -172,6 +173,7 @@ impl CustomTemplate {
             audio: None,
             media: None,
             plugin_handles: HashMap::new(),
+            plugin_backoff: HashMap::new(),
             plugin_sprites: HashMap::new(),
             composite_cache: RefCell::new(HashMap::new()),
             system_fonts: HashMap::new(),
@@ -195,6 +197,7 @@ impl CustomTemplate {
         let revision = app.registry.content_revision();
         if revision != self.plugin_revision {
             self.plugin_handles.clear();
+            self.plugin_backoff.clear();
             self.plugin_sprites.clear();
             self.composite_cache.borrow_mut().clear();
             self.system_fonts.clear();
@@ -294,6 +297,11 @@ impl CustomTemplate {
             let handle = match self.plugin_handles.get(&entry.plugin_id) {
                 Some(handle) => handle.clone(),
                 None => {
+                    if let Some(backoff) = self.plugin_backoff.get(&entry.plugin_id) {
+                        if !crate::util::backoff::respawn_due(backoff, std::time::Instant::now()) {
+                            continue;
+                        }
+                    }
                     let Some(handle) = app.registry.build_widget_handle(
                         app.secret_store.as_ref(),
                         app.data_bus.clone(),
@@ -416,6 +424,7 @@ impl CustomTemplate {
             };
             match handle.render(input).await {
                 Ok(bytes) => {
+                    self.plugin_backoff.remove(&entry.plugin_id);
                     if let Some(image) = RgbaImage::from_raw(width, height, bytes) {
                         let composite = CachedComposite::from_image(signature, 0, u8::MAX, &image);
                         self.plugin_sprites.insert(
@@ -432,8 +441,12 @@ impl CustomTemplate {
                     log::warn!("LCD widget '{catalog_id}' render failed: {error:#}");
                     if !handle.is_usable() {
                         // A timeout poisons one plugin VM, not the layout. Drop
-                        // the cached handle so the next frame starts a clean VM.
                         self.plugin_handles.remove(&entry.plugin_id);
+                        let now = std::time::Instant::now();
+                        self.plugin_backoff
+                            .entry(entry.plugin_id.clone())
+                            .and_modify(|backoff| backoff.record(now))
+                            .or_insert_with(|| crate::util::backoff::FailureStreak::first(now));
                     }
                 }
             }

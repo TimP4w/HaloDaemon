@@ -56,6 +56,7 @@ struct LivePixmap {
     signature: EffectSignature,
     pixmap: Pixmap,
     runtime: PixmapRuntime,
+    respawn: Option<crate::util::backoff::FailureStreak>,
 }
 
 enum PixmapRuntime {
@@ -67,6 +68,7 @@ enum PixmapRuntime {
 struct LiveDirect {
     signature: EffectSignature,
     runtime: DirectRuntime,
+    respawn: Option<crate::util::backoff::FailureStreak>,
 }
 
 enum DirectRuntime {
@@ -130,6 +132,36 @@ impl WriteGuard {
             }
             _ => false,
         }
+    }
+}
+
+/// A live instance is rebuilt when its effect definition changed, or — after
+/// its plugin worker died — once the respawn backoff for the unchanged
+/// definition has elapsed.
+fn effect_rebuild_due(
+    existing: Option<(
+        &EffectSignature,
+        Option<&crate::util::backoff::FailureStreak>,
+    )>,
+    want: &EffectSignature,
+    now: std::time::Instant,
+) -> bool {
+    match existing {
+        None => true,
+        Some((signature, _)) if signature != want => true,
+        Some((_, respawn)) => {
+            respawn.is_some_and(|streak| crate::util::backoff::respawn_due(streak, now))
+        }
+    }
+}
+
+fn record_respawn(
+    respawn: &mut Option<crate::util::backoff::FailureStreak>,
+    now: std::time::Instant,
+) {
+    match respawn {
+        Some(streak) => streak.record(now),
+        None => *respawn = Some(crate::util::backoff::FailureStreak::first(now)),
     }
 }
 
@@ -473,15 +505,20 @@ impl RgbEngine {
         let mut live = self.live_pixmap.lock().await;
         live.retain(|k, _| pixmap_keys.contains(k));
         let mut built: Vec<String> = Vec::with_capacity(pixmap_keys.len());
+        let now = std::time::Instant::now();
         for key in &pixmap_keys {
             let def = &defs[key];
             let want = effect_signature(def.as_ref());
-            let stale = live.get(key).map(|lp| lp.signature != want).unwrap_or(true);
-            if stale {
+            let existing = live.get(key).map(|lp| (&lp.signature, lp.respawn.as_ref()));
+            if effect_rebuild_due(existing, &want, now) {
                 let Some(pixmap) = Pixmap::new(CANVAS_W, CANVAS_H) else {
                     log::error!("canvas: failed to allocate pixmap for '{key}', skipping");
                     continue;
                 };
+                let respawn = live
+                    .get(key)
+                    .and_then(|lp| (lp.signature == want).then_some(lp.respawn))
+                    .flatten();
                 let runtime = build_pixmap_effect(&self.app_state, def.as_ref());
                 live.insert(
                     key.clone(),
@@ -489,6 +526,7 @@ impl RgbEngine {
                         signature: want,
                         pixmap,
                         runtime,
+                        respawn,
                     },
                 );
             }
@@ -501,6 +539,7 @@ impl RgbEngine {
                     match handle.render_pixmap(effect_frame.clone()).await {
                         Ok(bytes) if bytes.len() == lp.pixmap.data().len() => {
                             lp.pixmap.data_mut().copy_from_slice(&bytes);
+                            lp.respawn = None;
                             false
                         }
                         Ok(bytes) => {
@@ -509,6 +548,13 @@ impl RgbEngine {
                             bytes.len(),
                             lp.pixmap.data().len()
                         );
+                            true
+                        }
+                        Err(e) if !handle.is_usable() => {
+                            log::warn!(
+                            "plugin pixmap effect '{key}' worker died: {e:#}; respawning with backoff"
+                        );
+                            record_respawn(&mut lp.respawn, std::time::Instant::now());
                             true
                         }
                         Err(e) => {
@@ -596,11 +642,11 @@ impl RgbEngine {
                 effect_id: id.clone(),
                 params: params.clone(),
             };
-            let stale = live
+            let now = std::time::Instant::now();
+            let existing = live
                 .get(dev.id())
-                .map(|ld| ld.signature != want)
-                .unwrap_or(true);
-            if stale {
+                .map(|ld| (&ld.signature, ld.respawn.as_ref()));
+            if effect_rebuild_due(existing, &want, now) {
                 let runtime = match direct::build_builtin(id, params) {
                     Some(fx) => DirectRuntime::BuiltIn(fx),
                     None => match self.app_state.registry.build_direct_effect(
@@ -616,11 +662,16 @@ impl RgbEngine {
                         }
                     },
                 };
+                let respawn = live
+                    .get(dev.id())
+                    .and_then(|ld| (ld.signature == want).then_some(ld.respawn))
+                    .flatten();
                 live.insert(
                     dev.id().to_string(),
                     LiveDirect {
                         signature: want.clone(),
                         runtime,
+                        respawn,
                     },
                 );
             }
@@ -672,6 +723,15 @@ impl RgbEngine {
                             ld.runtime = DirectRuntime::Off;
                             break;
                         }
+                        Err(e) if !handle.is_usable() => {
+                            log::warn!(
+                                "plugin direct effect '{id}' worker died on {}: {e:#}; respawning with backoff",
+                                dev.id()
+                            );
+                            record_respawn(&mut ld.respawn, std::time::Instant::now());
+                            ld.runtime = DirectRuntime::Off;
+                            break;
+                        }
                         Err(e) => {
                             log::warn!(
                                 "plugin direct effect '{id}' failed on {}: {e:#}; disabling for this session",
@@ -697,6 +757,7 @@ impl RgbEngine {
                     }
                 }
                 if matches!(ld.runtime, DirectRuntime::Plugin(_)) {
+                    ld.respawn = None;
                     continue;
                 }
             }
@@ -1218,6 +1279,47 @@ mod tests {
 
         z.effect = Some("missing".into());
         assert_eq!(resolve_instance(&z, &cs).0, DEFAULT_KEY);
+    }
+
+    #[test]
+    fn effect_rebuild_waits_out_the_respawn_backoff() {
+        use crate::util::backoff::FailureStreak;
+        let now = std::time::Instant::now();
+        let want = EffectSignature {
+            effect_id: "plugin_fx".into(),
+            params: HashMap::new(),
+        };
+        let changed = EffectSignature {
+            effect_id: "other_fx".into(),
+            params: HashMap::new(),
+        };
+        assert!(effect_rebuild_due(None, &want, now));
+        assert!(!effect_rebuild_due(Some((&want, None)), &want, now));
+        assert!(effect_rebuild_due(Some((&changed, None)), &want, now));
+
+        let streak = FailureStreak::first(now);
+        assert!(!effect_rebuild_due(
+            Some((&want, Some(&streak))),
+            &want,
+            now
+        ));
+        assert!(effect_rebuild_due(
+            Some((&want, Some(&streak))),
+            &want,
+            now + std::time::Duration::from_secs(1)
+        ));
+        let mut escalated = streak;
+        escalated.record(now);
+        assert!(!effect_rebuild_due(
+            Some((&want, Some(&escalated))),
+            &want,
+            now + std::time::Duration::from_secs(4)
+        ));
+        assert!(effect_rebuild_due(
+            Some((&want, Some(&escalated))),
+            &want,
+            now + std::time::Duration::from_secs(5)
+        ));
     }
 
     #[test]

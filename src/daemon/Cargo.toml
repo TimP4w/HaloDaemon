@@ -54,8 +54,8 @@ uuid       = { version = "1.24.0", features = ["v4"] }
 base64     = "0.22.1"
 image      = { version = "0.25.10", default-features = false, features = ["png", "jpeg", "gif"] }
 gif        = "0.14.2"
-# Q565 — QOI-derived RGB565 codec. The NZXT Kraken type-0x08 LCD streaming path
-# expects frames in this format (verified against NZXT CAM USB captures).
+# Q565 — QOI-derived RGB565 codec, exposed to plugins as `halod.image.rgba_to_q565`
+# for LCD panels whose firmware streams frames in this format.
 q565       = { git = "https://github.com/seritools/q565", rev = "aeb432dc7d73757b20cd45b71755e8573a978541" }
 ab_glyph   = "0.2.32"
 unicode-segmentation = "1.13.3"

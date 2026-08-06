@@ -236,6 +236,10 @@ pub struct Registry {
     /// failing RGB frame can fan out across several device calls, so recovery
     /// must be coalesced per plugin.
     runtime_recovery_pending: RwLock<HashSet<String>>,
+    /// Recovery attempts spent in the current failure episode, per plugin. A
+    /// reconcile that re-registers a device also re-applies its state, so a
+    /// failure that survives the reconcile would otherwise queue the next one.
+    runtime_recovery_attempts: RwLock<HashMap<String, u8>>,
     /// Failed transport opens in the current plugin-load episode, keyed by the
     /// stable plugin device id. A successful open, plugin reload, or a USB
     /// replug resets it.
@@ -356,7 +360,7 @@ fn authority_for_manifest(manifest: &PluginManifest) -> halod_shared::types::Plu
     let mut scopes: Vec<String> = manifest
         .devices
         .iter()
-        .map(|device| device.transport.clone())
+        .map(|device| device.transport.kind().to_owned())
         .collect();
     if manifest.transports.hid.is_some() {
         scopes.push("hid".to_owned());
@@ -2191,7 +2195,7 @@ fn device_id(
     if matches!(handle, DiscoveryHandle::AmdSmn { .. }) && manifest.identity.id.is_some() {
         return manifest.id_prefix().to_owned();
     }
-    let suffix = transport::descriptor_for(&spec.transport)
+    let suffix = transport::descriptor_for(spec.transport.kind())
         .and_then(|d| d.id_suffix)
         .map(|f| f(handle))
         .unwrap_or_else(|| "0".to_owned());
@@ -2251,11 +2255,11 @@ impl Registry {
         // The grants + resolved config were validated by `activation_status` when it
         // produced this `ReadyPlugin` — reuse them rather than re-resolving.
         let ReadyPlugin { granted, config } = ready;
-        let write_rate_limit = declared_write_rate_limit(spec.max_bytes_per_sec);
+        let write_rate_limit = declared_write_rate_limit(spec.max_bytes_per_sec());
         let runtime_state = Arc::new(std::sync::Mutex::new(
             device::RuntimeState::OpeningTransport,
         ));
-        let transport = match transport::descriptor_for(&spec.transport)
+        let transport = match transport::descriptor_for(spec.transport.kind())
             .map(|d| (d.open)(manifest, handle, &config, &granted, write_rate_limit))
         {
             Some(Ok(t)) => t,
@@ -2280,8 +2284,8 @@ impl Registry {
         write_recover(&self.transport_open_failures).remove(&failure_key);
 
         let dev_match = worker::DevMatch {
-            transport: spec.transport.clone(),
-            bus: spec.bus.clone(),
+            transport: spec.transport.kind().to_owned(),
+            bus: spec.smbus().map(|smbus| smbus.bus.clone()),
             addr: match handle {
                 DiscoveryHandle::Smbus { addr, .. } => Some(*addr),
                 _ => None,
@@ -2322,7 +2326,7 @@ impl Registry {
         };
 
         // `new_cyclic` so the device can hand its children a `FanHub` back-reference
-        // for the chain machinery (e.g. an NZXT Kraken/Control Hub accessory fan).
+        // for the chain machinery (e.g. a hub's accessory fan).
         let device = Arc::new_cyclic(|weak| {
             let mut dev = LuaDevice::new(LuaDeviceParts {
                 id,

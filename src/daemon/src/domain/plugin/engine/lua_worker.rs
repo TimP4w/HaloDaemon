@@ -8,22 +8,42 @@
 //!
 //! Known bound: a [`request`](LuaWorker::request) timeout *abandons* the
 //! worker (transitions it to [`WorkerState::Wedged`] so later requests fail fast)
-//! but cannot *terminate* its OS thread — mlua exposes no safe preemptive kill, so
-//! a `pcall`-catching pure-compute runaway keeps one CPU-burning zombie thread
-//! alive per malicious plugin. There is also no ceiling on concurrent worker
-//! threads. Bounding this honestly is architectural, not in-VM: run plugins in a
-//! separate process that can be `SIGKILL`'d (the existing broker/hwaccess
-//! privilege split is the natural seam), and/or cap concurrent spawns. Tracked as
-//! a deliberate follow-up.
 
+use std::cell::Cell;
 use std::ops::ControlFlow;
 use std::panic::{self, AssertUnwindSafe};
+use std::rc::Rc;
 use std::sync::atomic::{AtomicU64, AtomicUsize, Ordering};
 use std::sync::{Arc, Mutex};
 use std::time::Duration;
 
 use anyhow::{anyhow, Result};
+use mlua::Lua;
 use tokio::sync::{mpsc, oneshot};
+
+pub(super) trait VmCtx {
+    fn lua(&self) -> &Lua;
+    fn budget(&self) -> &Cell<u64>;
+}
+
+pub(super) fn bootstrap_worker_vm(
+    granted: &[halod_shared::types::Permission],
+    config: &crate::domain::plugin::ResolvedConfig,
+    modules: &std::collections::BTreeMap<String, String>,
+    data: super::data_api::DataRuntime,
+) -> Result<(Lua, Rc<Cell<u64>>)> {
+    let (lua, budget) = super::sandbox::bootstrap_vm(
+        granted,
+        config,
+        super::PLUGIN_VM_MEMORY_BYTES,
+        super::PLUGIN_INSTRUCTION_BUDGET,
+    )
+    .map_err(|e| anyhow!("sandbox setup: {e}"))?;
+    super::sandbox::install_package_modules(&lua, modules)
+        .map_err(|e| anyhow!("package modules: {e}"))?;
+    super::data_api::register(&lua, data).map_err(|e| anyhow!("data API: {e}"))?;
+    Ok((lua, budget))
+}
 
 /// Why a worker is [`WorkerState::Wedged`] — presumed alive but unresponsive
 /// (or never alive at all).
@@ -183,6 +203,24 @@ impl<Cmd: Send + 'static> LuaWorker<Cmd> {
             call_timeout,
             state,
             next_req_id: Arc::new(AtomicU64::new(0)),
+        })
+    }
+
+    pub(super) fn spawn_vm<Ctx: VmCtx>(
+        name: &'static str,
+        label: &'static str,
+        call_timeout: Duration,
+        build: impl FnOnce() -> Result<Ctx> + Send + 'static,
+        handle: impl Fn(Cmd, &Ctx) -> ControlFlow<()> + Send + 'static,
+    ) -> Self {
+        Self::spawn(name, label, call_timeout, build, move |cmd, ctx: &Ctx| {
+            ctx.budget().set(0);
+            super::sandbox::set_call_deadline(ctx.lua(), call_timeout);
+            handle(cmd, ctx)
+        })
+        .unwrap_or_else(|e| {
+            log::error!("{label} worker not started: {e:#}");
+            Self::dead(label)
         })
     }
 

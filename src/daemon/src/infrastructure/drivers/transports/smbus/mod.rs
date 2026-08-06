@@ -643,11 +643,11 @@ mod tests {
 
     // ── PCI gate ─────────────────────────────────────────────────────────────
 
-    /// An ASUS ROG STRIX RTX 4090's bus IDs.
-    fn asus_4090() -> BusInfo {
+    /// A discrete GPU's bus IDs.
+    fn gpu_card() -> BusInfo {
         BusInfo {
             bus_number: 7,
-            adapter_name: "NVIDIA i2c".to_string(),
+            adapter_name: "GPU i2c".to_string(),
             pci_vendor: 0x10DE,
             pci_device: 0x2684,
             pci_sub_vendor: 0x1043,
@@ -667,7 +667,7 @@ mod tests {
 
     #[test]
     fn accepts_matches_only_when_all_set_fields_equal() {
-        let card = asus_4090();
+        let card = gpu_card();
         // Fully-specified exact match.
         assert!(m(Some(0x88BF), true).accepts(&card));
         // Wildcard sub_device still matches.
@@ -686,7 +686,7 @@ mod tests {
         // No gate ⇒ keep the job's probe (chipset behaviour; GPU jobs are
         // rejected before reaching gate_bus).
         assert!(matches!(
-            gate_bus(&[], &asus_4090(), Probe::Quick),
+            gate_bus(&[], &gpu_card(), Probe::Quick),
             Some(Probe::Quick)
         ));
     }
@@ -695,14 +695,14 @@ mod tests {
     fn gate_skips_unlisted_card() {
         // Gate lists a different sub_device only ⇒ this card is not covered.
         let gate = [m(Some(0x0000), false)];
-        assert!(gate_bus(&gate, &asus_4090(), Probe::ReadByte).is_none());
+        assert!(gate_bus(&gate, &gpu_card(), Probe::ReadByte).is_none());
     }
 
     #[test]
     fn gate_confirmed_match_skips_the_probe() {
         let gate = [m(Some(0x88BF), true)];
         assert!(matches!(
-            gate_bus(&gate, &asus_4090(), Probe::ReadByte),
+            gate_bus(&gate, &gpu_card(), Probe::ReadByte),
             Some(Probe::Always)
         ));
     }
@@ -711,14 +711,14 @@ mod tests {
     fn gate_unconfirmed_match_keeps_job_probe() {
         let gate = [m(Some(0x88BF), false)];
         assert!(matches!(
-            gate_bus(&gate, &asus_4090(), Probe::ReadByte),
+            gate_bus(&gate, &gpu_card(), Probe::ReadByte),
             Some(Probe::ReadByte)
         ));
     }
 
     #[test]
     fn gate_confirmed_wins_over_unconfirmed_regardless_of_order() {
-        let card = asus_4090();
+        let card = gpu_card();
         // unconfirmed (wildcard) before confirmed (exact)
         let a = [m(None, false), m(Some(0x88BF), true)];
         assert!(matches!(

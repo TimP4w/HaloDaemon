@@ -557,7 +557,7 @@ mod liveness_tests {
     fn present_device_is_not_stale() {
         let l = loc(0x2109, 0x8884, 1, 5, &[3]);
         let present = HashSet::from([l.clone()]);
-        assert!(stale_usb_ids(&[("evnia".into(), l)], &present).is_empty());
+        assert!(stale_usb_ids(&[("monitor".into(), l)], &present).is_empty());
     }
 
     #[test]
@@ -565,8 +565,8 @@ mod liveness_tests {
         let l = loc(0x2109, 0x8884, 1, 5, &[3]);
         let present = HashSet::new();
         assert_eq!(
-            stale_usb_ids(&[("evnia".into(), l)], &present),
-            vec!["evnia".to_owned()]
+            stale_usb_ids(&[("monitor".into(), l)], &present),
+            vec!["monitor".to_owned()]
         );
     }
 
@@ -576,10 +576,10 @@ mod liveness_tests {
         let old = loc(0x2109, 0x8884, 1, 5, &[3]);
         let new = loc(0x2109, 0x8884, 1, 9, &[3]);
         let present = HashSet::from([new.clone()]);
-        let registered = vec![("evnia".to_owned(), old.clone())];
+        let registered = vec![("monitor".to_owned(), old.clone())];
         assert_eq!(
             stale_usb_ids(&registered, &present),
-            vec!["evnia".to_owned()],
+            vec!["monitor".to_owned()],
             "the old-address handle is stale"
         );
         // The re-add scan is keyed on the bus set changing since the last tick.
@@ -593,7 +593,7 @@ mod liveness_tests {
         // An unrelated device sharing the bus must not perturb either decision.
         let mouse = loc(0x046d, 0xc08b, 1, 7, &[2]);
         let present = HashSet::from([l.clone(), mouse.clone()]);
-        assert!(stale_usb_ids(&[("evnia".into(), l)], &present).is_empty());
+        assert!(stale_usb_ids(&[("monitor".into(), l)], &present).is_empty());
         let last_present = HashSet::from([mouse, loc(0x2109, 0x8884, 1, 5, &[3])]);
         assert_eq!(present, last_present, "no topology change → no rescan");
     }

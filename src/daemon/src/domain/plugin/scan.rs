@@ -52,7 +52,7 @@ impl super::Registry {
                 continue;
             }
             for spec in m.smbus_devices() {
-                let Some(bus_kind) = spec.bus_kind() else {
+                let (Some(bus_kind), Some(smbus)) = (spec.bus_kind(), spec.smbus()) else {
                     continue;
                 };
                 out.push(PluginScanEntry {
@@ -60,12 +60,12 @@ impl super::Registry {
                     script_source: m.script_source.clone(),
                     module_sources: m.module_sources.clone(),
                     bus_kind,
-                    addresses: spec.addresses.clone().unwrap_or_default(),
-                    extra_addresses: spec.extra_addresses.clone().unwrap_or_default(),
-                    write_rate_limit: super::declared_write_rate_limit(spec.max_bytes_per_sec),
-                    pre_scan: spec.pre_scan,
-                    probe: spec.probe,
-                    pci_match: spec.pci_match.clone(),
+                    addresses: smbus.addresses.clone(),
+                    extra_addresses: smbus.extra_addresses.clone(),
+                    write_rate_limit: super::declared_write_rate_limit(smbus.max_bytes_per_sec),
+                    pre_scan: smbus.pre_scan,
+                    probe: smbus.probe,
+                    pci_match: smbus.pci_match.clone(),
                 });
             }
         }

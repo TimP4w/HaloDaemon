@@ -41,9 +41,9 @@ pub fn assemble(manifests: &[PluginManifest]) -> String {
         let raw_usb = manifest.transports.usb.is_some();
 
         for device in &manifest.devices {
-            if let Some(hid) = &device.r#match.hid {
+            if let Some(hid) = device.hid() {
                 if let Some(vid) = hid.vid {
-                    for pid in hid.pids.iter().copied().chain(hid.pid) {
+                    for pid in hid.pids.iter().copied() {
                         insert(&mut rules, (NodeKind::Hidraw, vid, pid), &label);
                         if raw_usb {
                             insert(&mut rules, (NodeKind::Usb, vid, pid), &label);
@@ -51,10 +51,12 @@ pub fn assemble(manifests: &[PluginManifest]) -> String {
                     }
                 }
             }
-            if let Some(usb) = &device.r#match.usb {
-                insert(&mut rules, (NodeKind::Usb, usb.vid, usb.pid), &label);
+            if let Some(usb) = device.usb() {
+                for &pid in &usb.pids {
+                    insert(&mut rules, (NodeKind::Usb, usb.vid, pid), &label);
+                }
             }
-            if let Some(smbus) = &device.r#match.smbus {
+            if let Some(smbus) = device.smbus() {
                 match smbus.bus.as_str() {
                     "chipset" => {
                         chipset_i2c.insert(label.clone());
@@ -241,6 +243,23 @@ mod tests {
             .contains("SUBSYSTEM==\"usb\", ATTRS{idVendor}==\"1234\", ATTRS{idProduct}==\"0002\""));
         assert!(output
             .contains("SUBSYSTEM==\"usb\", ATTRS{idVendor}==\"abcd\", ATTRS{idProduct}==\"0102\""));
+    }
+
+    #[test]
+    fn usb_match_family_emits_a_rule_per_pid_and_no_placeholder() {
+        let temp = tempfile::tempdir().unwrap();
+        let manifest = plugin(
+            temp.path(),
+            "usb_family",
+            "permissions: [usb]\ndevices:\n  - vendor: Acme\n    model: Family\n    match: { usb: { vid: 0x1234, pids: [0xAAAA, 0xBBBB] } }\n",
+        );
+
+        let output = assemble(&[manifest]);
+        assert!(output
+            .contains("SUBSYSTEM==\"usb\", ATTRS{idVendor}==\"1234\", ATTRS{idProduct}==\"aaaa\""));
+        assert!(output
+            .contains("SUBSYSTEM==\"usb\", ATTRS{idVendor}==\"1234\", ATTRS{idProduct}==\"bbbb\""));
+        assert!(!output.contains("ATTRS{idProduct}==\"0000\""));
     }
 
     #[test]

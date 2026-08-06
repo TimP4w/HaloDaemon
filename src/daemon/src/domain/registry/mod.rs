@@ -107,12 +107,11 @@ pub async fn initialize_app_state(
     crate::application::usecases::profiles::lifecycle::load_active_profile(app.clone()).await;
 }
 
-/// Seed the non-removable official plugin repo record if absent, and clone it
-/// if its clone directory is missing. Official plugins still go through the
-/// normal consent/permission flow — only the repo *record* is protected from
-/// removal (see `usecases::repos::remove_repo`). A clone failure (e.g. no
-/// network on first launch) is logged and must never fail boot: the daemon
-/// simply has no official plugins until a later successful clone.
+/// Seed the non-removable official plugin repo record if absent and unpack the
+/// embedded bundle. Official plugins still go through the normal
+/// consent/permission flow — only the repo *record* is protected from removal
+/// (see `usecases::repos::remove_repo`). Purely local: the network download of
+/// the latest release runs later, in [`start_update_check`]'s background job.
 pub(crate) async fn ensure_official_repo(app: &Arc<AppState>) {
     ensure_official_repo_from(app, crate::constants::OFFICIAL_PLUGIN_REPO_URL).await;
 }
@@ -158,15 +157,12 @@ async fn ensure_official_repo_from(app: &Arc<AppState>, url: &str) {
     }
 
     install_embedded_official_bundle(app).await;
+}
 
-    // Contacting GitHub requires the user's consent (asked once on first run).
-    // Until granted, keep the record but download nothing.
-    if app.config.read().await.gui.plugin_downloads
-        != halod_shared::types::PluginDownloadConsent::Allowed
-    {
-        return;
-    }
-
+/// Download the latest official release when no managed revision is active yet.
+/// Runs off the boot path; a failure (offline first launch, GitHub down) leaves
+/// the daemon on the embedded bundle and is reported to the user.
+async fn download_official_release(app: &Arc<AppState>) {
     let has_active_revision = app
         .config
         .read()
@@ -187,7 +183,15 @@ async fn ensure_official_repo_from(app: &Arc<AppState>, url: &str) {
     )
     .await
     {
-        log::warn!("official plugin release download failed (continuing with embedded): {error:#}");
+        crate::application::notifications::send(
+            app,
+            halod_shared::types::NotificationCode::Generic {
+                message: format!(
+                    "Official plugin download failed (continuing with the bundled plugins): {error:#}"
+                ),
+            },
+        )
+        .await;
     }
 }
 
@@ -241,10 +245,11 @@ async fn install_embedded_official_bundle(app: &Arc<AppState>) {
     }
 }
 
-/// Kick off a background plugin-update check (repo- and per-plugin), flagging
-/// the discovery status so the radar can show a "checking for updates" step.
-/// A no-op unless the user has allowed GitHub access; spawned so it never
-/// blocks device discovery or boot.
+/// Kick off the background network job — first-run official release download
+/// followed by the plugin-update check (repo- and per-plugin) — flagging the
+/// discovery status so the radar can show a "checking for updates" step.
+/// A no-op unless the user has allowed GitHub access; spawned so no network
+/// stall can delay boot or hold the process past a shutdown request.
 pub(crate) async fn start_update_check(app: Arc<AppState>) {
     if app.config.read().await.gui.plugin_downloads
         != halod_shared::types::PluginDownloadConsent::Allowed
@@ -254,6 +259,7 @@ pub(crate) async fn start_update_check(app: Arc<AppState>) {
     app.discovery.lock().await.checking_updates = true;
     crate::application::usecases::registry::runtime::topology_changed(&app).await;
     tokio::spawn(async move {
+        download_official_release(&app).await;
         crate::application::usecases::plugin::repos::check_updates_broadcast(app.clone()).await;
         app.discovery.lock().await.checking_updates = false;
         crate::application::usecases::registry::runtime::topology_changed(&app).await;
@@ -362,14 +368,14 @@ mod official_repo_tests {
     use crate::constants::OFFICIAL_PLUGIN_REPO_SLUG as OFFICIAL_SLUG;
 
     #[tokio::test]
-    async fn seeds_the_record_even_when_the_clone_url_is_unreachable() {
+    async fn seeds_the_record_even_when_the_download_url_is_unreachable() {
         crate::test_support::with_tmp_config(|app| async move {
-            // Cloning only happens once the user has allowed downloads.
             app.config.write().await.gui.plugin_downloads =
                 halod_shared::types::PluginDownloadConsent::Allowed;
             // A local nonexistent path fails fast (no network hang) while still
-            // exercising the exact "clone failed" path a bad/offline URL hits.
+            // exercising the exact failure path a bad/offline URL hits.
             ensure_official_repo_from(&app, "/nonexistent/not-a-git-repo").await;
+            download_official_release(&app).await;
 
             let cfg = app.config.read().await;
             let record = cfg
@@ -377,7 +383,7 @@ mod official_repo_tests {
                 .repos
                 .iter()
                 .find(|r| r.slug == OFFICIAL_SLUG)
-                .expect("official repo record must be seeded even if the clone fails");
+                .expect("official repo record must be seeded even if the download fails");
             assert!(
                 record.release_tag.is_none(),
                 "a failed download must not fabricate a release tag"
@@ -387,11 +393,32 @@ mod official_repo_tests {
     }
 
     #[tokio::test]
+    async fn a_failed_download_notifies_the_user() {
+        crate::test_support::with_tmp_config(|app| async move {
+            ensure_official_repo_from(&app, "/nonexistent/not-a-git-repo").await;
+            download_official_release(&app).await;
+
+            let replay = app.data_bus.replay_events(None);
+            let halod_shared::bus::BusEventPayload::Notification(notification) = &replay
+                .events
+                .last()
+                .expect("the failure is reported to the user")
+                .payload;
+            assert!(matches!(
+                &notification.code,
+                halod_shared::types::NotificationCode::Generic { .. }
+            ));
+        })
+        .await;
+    }
+
+    #[tokio::test]
     async fn seeds_the_record_but_downloads_nothing_without_consent() {
         crate::test_support::with_tmp_config(|app| async move {
-            // Default consent is `Unset`: the record is seeded but no clone is
-            // attempted, so the clone directory must never appear.
+            // Default consent is `Unset`: the record is seeded but nothing is
+            // downloaded, so the repo directory must never appear.
             ensure_official_repo_from(&app, "/nonexistent/not-a-git-repo").await;
+            start_update_check(app.clone()).await;
 
             let cfg = app.config.read().await;
             assert!(

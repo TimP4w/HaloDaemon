@@ -9,7 +9,6 @@ use std::time::Duration;
 
 use mlua::{Lua, Table, Value};
 
-use super::bytebuf::check_alloc;
 use super::ffi::{bytes_from, to_lua_err};
 use crate::infrastructure::udp::UdpRuntime;
 
@@ -35,8 +34,6 @@ pub fn register(lua: &Lua, runtime: UdpRuntime) -> mlua::Result<()> {
                 .get::<Option<u64>>("timeout_ms")?
                 .filter(|ms| *ms > 0)
                 .map(Duration::from_millis);
-            // Bound the buffer we're about to allocate on receipt.
-            check_alloc(0)?;
             match runtime.receive(timeout).map_err(to_lua_err)? {
                 Some(datagram) => Ok(Value::String(lua.create_string(&datagram)?)),
                 None => Ok(Value::Nil),

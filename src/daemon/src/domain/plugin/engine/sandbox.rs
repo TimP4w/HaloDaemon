@@ -8,6 +8,7 @@ use std::cell::Cell;
 use std::rc::Rc;
 use std::time::{Duration, Instant};
 
+use mlua::debug::DebugEvent;
 use mlua::{HookTriggers, Lua, LuaOptions, StdLib, Table, VmState};
 
 use halod_shared::types::Permission;
@@ -159,23 +160,33 @@ pub(super) fn bootstrap_vm(
 const BUDGET_HOOK_STEP: u32 = 10_000;
 
 /// Install an instruction-count hook that errors once the VM burns through
-/// `budget` instructions, and return the shared counter so a caller can reset it
-/// (`counter.set(0)`) to make the budget per-call rather than per-VM-lifetime.
-/// The counter is a single-threaded `Rc<Cell>` — every plugin VM lives on its
-/// own worker thread and never crosses threads. Shared by the manifest parser,
-/// the effect worker, and the device worker so a runaway `while true do end`
-/// can't hang any of them.
 pub(super) fn install_instruction_budget_hook(lua: &Lua, budget: u64) -> Rc<Cell<u64>> {
     let counter = Rc::new(Cell::new(0u64));
     let hook_counter = counter.clone();
-    lua.set_hook(
-        HookTriggers::new().every_nth_instruction(BUDGET_HOOK_STEP),
-        move |_, _| {
-            let n = hook_counter.get().saturating_add(BUDGET_HOOK_STEP as u64);
-            hook_counter.set(n);
-            if n > budget {
+    lua.set_global_hook(
+        HookTriggers::new()
+            .every_nth_instruction(BUDGET_HOOK_STEP)
+            .on_returns(),
+        move |lua, debug| {
+            let over_budget = if debug.event() == DebugEvent::Ret {
+                hook_counter.get() > budget
+            } else {
+                let n = hook_counter.get().saturating_add(BUDGET_HOOK_STEP as u64);
+                hook_counter.set(n);
+                n > budget
+            };
+            let past_deadline = lua
+                .app_data_ref::<CallDeadline>()
+                .and_then(|d| d.0.get())
+                .is_some_and(|dl| Instant::now() >= dl);
+            if over_budget {
                 return Err(mlua::Error::RuntimeError(
                     "plugin script exceeded its instruction budget".into(),
+                ));
+            }
+            if past_deadline {
+                return Err(mlua::Error::RuntimeError(
+                    "plugin callback deadline exceeded".into(),
                 ));
             }
             Ok(VmState::Continue)
@@ -186,11 +197,6 @@ pub(super) fn install_instruction_budget_hook(lua: &Lua, budget: u64) -> Rc<Cell
 }
 
 /// Longest a single `halod.sleep_ms` call may block the worker thread. The
-/// runtime instruction budget kills an *uncaught* runaway, but a `pcall`-catching
-/// loop stays on the worker until the caller's per-request deadline fires
-/// (see `LuaWorker`), so this only bounds a single call from pathologically
-/// stalling the device's command queue — protocol inter-transfer gaps are
-/// milliseconds, not seconds.
 const MAX_SLEEP_MS: u64 = 5_000;
 
 /// Absolute wall-clock deadline for the current callback, stored as VM app-data
@@ -546,6 +552,52 @@ mod tests {
             .eval()
             .unwrap();
         assert_eq!(sum, 5050);
+    }
+
+    fn eval_err_within(
+        src: &'static str,
+        deadline: Option<Duration>,
+        limit: Duration,
+    ) -> Option<bool> {
+        let (tx, rx) = std::sync::mpsc::channel();
+        std::thread::spawn(move || {
+            let (lua, _budget) =
+                bootstrap_vm(&[], &HashMap::new(), 8 * 1024 * 1024, 5_000_000).unwrap();
+            if let Some(d) = deadline {
+                set_call_deadline(&lua, d);
+            }
+            let is_err = lua.load(src).exec().is_err();
+            let _ = tx.send(is_err);
+        });
+        rx.recv_timeout(limit).ok()
+    }
+
+    #[test]
+    fn budget_hook_kills_a_runaway_inside_a_coroutine() {
+        let outcome = eval_err_within(
+            "coroutine.resume(coroutine.create(function() while true do end end))",
+            None,
+            Duration::from_secs(5),
+        );
+        assert_eq!(
+            outcome,
+            Some(true),
+            "coroutine runaway must surface an error, not hang or be swallowed"
+        );
+    }
+
+    #[test]
+    fn pcall_catching_runaway_still_terminates_with_an_error() {
+        let outcome = eval_err_within(
+            "local ok = true while ok do pcall(function() while true do end end) end",
+            Some(Duration::from_millis(200)),
+            Duration::from_secs(5),
+        );
+        assert_eq!(
+            outcome,
+            Some(true),
+            "pcall-catching runaway must terminate with an error, not hang"
+        );
     }
 
     #[test]

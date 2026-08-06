@@ -11,6 +11,9 @@ use crate::domain::registry::observers::discovery::DiscoveryHandle;
 use crate::infrastructure::drivers::transports::usb::{UsbDevices, UsbSelector};
 
 fn matches(spec: &DeviceSpec, handle: &DiscoveryHandle<'_>) -> bool {
+    let Some(spec) = spec.usb() else {
+        return false;
+    };
     let DiscoveryHandle::UsbNonHid {
         vid,
         pid,
@@ -21,9 +24,9 @@ fn matches(spec: &DeviceSpec, handle: &DiscoveryHandle<'_>) -> bool {
     else {
         return false;
     };
-    spec.vid == Some(*vid)
-        && (spec.pid == Some(*pid) || (!spec.pids.is_empty() && spec.pids.contains(pid)))
-        && spec.interface == Some((*interface_number).into())
+    spec.vid == *vid
+        && spec.pids.contains(pid)
+        && spec.interface == *interface_number
         && spec
             .serial
             .as_deref()
@@ -116,17 +119,10 @@ fn id_suffix(handle: &DiscoveryHandle<'_>) -> String {
     }
 }
 
-fn validate(spec: &DeviceSpec) -> Result<()> {
-    if spec.vid.is_none() || (spec.pid.is_none() && spec.pids.is_empty()) {
-        bail!("usb match requires vid and pid (or pids)");
-    }
-    Ok(())
-}
-
 pub(super) const DESCRIPTOR: PluginTransportDescriptor = PluginTransportDescriptor {
     kind: "usb",
     matches: Some(matches),
     open,
     id_suffix: Some(id_suffix),
-    validate: Some(validate),
+    validate: None,
 };

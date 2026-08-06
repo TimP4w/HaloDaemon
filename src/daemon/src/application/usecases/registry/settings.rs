@@ -159,8 +159,7 @@ pub async fn set_plugin_download_consent(allowed: bool, app: Arc<AppState>) -> R
     app.request_config_save();
     app.record_change(crate::domain::events::Change::Gui).await;
     if !allowed {
-        app.plugin_repo_update_status.lock().await.clear();
-        app.plugin_update_status.lock().await.clear();
+        app.plugin_update_plan.lock().await.clear();
         app.record_change(crate::domain::events::Change::PluginData)
             .await;
     } else {
@@ -292,6 +291,41 @@ mod tests {
         with_tmp_config(|app| async move {
             set_log_level("debug".into(), app.clone()).await.unwrap();
             assert_eq!(app.config.read().await.gui.log_level, "debug");
+        })
+        .await;
+    }
+
+    #[tokio::test]
+    async fn revoking_download_consent_clears_retained_update_state() {
+        with_tmp_config(|app| async move {
+            {
+                let mut plan = app.plugin_update_plan.lock().await;
+                plan.apply_repo_check(vec![halod_shared::types::RepoUpdateStatus {
+                    slug: "repo".to_owned(),
+                    installed_tag: "v1".to_owned(),
+                    available_tag: Some("v2".to_owned()),
+                    pinned: false,
+                }]);
+                plan.apply_package_check(
+                    vec![halod_shared::types::PluginUpdateStatus {
+                        plugin_id: "repo-plugin".to_owned(),
+                        slug: "repo".to_owned(),
+                        update_available: true,
+                        on_disk_changed: false,
+                        current_version: "1".to_owned(),
+                        available_version: "2".to_owned(),
+                    }],
+                    Vec::new(),
+                );
+            }
+
+            set_plugin_download_consent(false, app.clone())
+                .await
+                .unwrap();
+
+            let plan = app.plugin_update_plan.lock().await;
+            assert!(plan.packages().is_empty());
+            assert!(plan.repos().is_empty());
         })
         .await;
     }

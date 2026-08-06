@@ -21,7 +21,7 @@ async fn scan(app: Arc<AppState>) {
 
     let commands: std::collections::BTreeSet<String> = specs
         .iter()
-        .filter_map(|spec| spec.r#match.command.as_ref())
+        .filter_map(|spec| spec.command())
         .map(|command| command.command().to_owned())
         .collect();
     for executable in commands {
@@ -35,7 +35,7 @@ async fn scan(app: Arc<AppState>) {
     }
 
     #[cfg(target_os = "windows")]
-    if specs.iter().any(|spec| spec.r#match.amd_smn.is_some()) {
+    if specs.iter().any(|spec| spec.transport.kind() == "amd_smn") {
         if let Some((family, model)) = amd_signature() {
             discovery::discover_handle(&app, DiscoveryHandle::AmdSmn { family, model }).await;
         }
@@ -44,7 +44,7 @@ async fn scan(app: Arc<AppState>) {
     #[cfg(target_os = "windows")]
     match specs
         .iter()
-        .any(|spec| spec.r#match.lpcio.is_some())
+        .any(|spec| spec.transport.kind() == "lpcio")
         .then(|| tokio::task::spawn_blocking(lpcio_chips))
     {
         None => {}
@@ -97,7 +97,7 @@ fn amd_signature() -> Option<(u8, u8)> {
 
 /// The host owns only the small, safety-critical probe needed to create a
 /// typed transport root.  Chip-specific registers, labels, sensors, PWM and
-/// restoration all belong to the Nuvoton Lua package.
+/// restoration all belong to the owning Lua package.
 #[cfg(target_os = "windows")]
 fn lpcio_chips() -> Vec<(u8, u16, u8, u16)> {
     use crate::infrastructure::drivers::transports::lpcio::LpcIoBus;
@@ -107,7 +107,7 @@ fn lpcio_chips() -> Vec<(u8, u16, u8, u16)> {
         if bus.select_slot(slot).is_err() {
             continue;
         }
-        // Winbond/Nuvoton extended-function mode.
+        // Super-I/O extended-function mode.
         if bus.write_port(port, 0x87).is_err() || bus.write_port(port, 0x87).is_err() {
             continue;
         }

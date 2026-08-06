@@ -208,7 +208,7 @@ pub trait Device: Send + Sync {
         self.name().to_string()
     }
 
-    /// Transport-independent hardware serial (e.g. Logitech unit ID).
+    /// Transport-independent hardware serial.
     /// Used to detect the same physical device appearing on a different transport.
     fn hardware_serial(&self) -> Option<String> {
         None
@@ -319,8 +319,8 @@ pub trait Device: Send + Sync {
 
     /// Transport label for the debug UI. `None` lets the daemon fall back to
     /// HID-tracking + id-prefix heuristics; drivers whose transport can't be
-    /// inferred from those (e.g. ENE GPU lives on a `SmbusBusKind::Gpu` bus
-    /// served by NvAPI, not the chipset SMBus) should override this.
+    /// inferred from those (e.g. a `SmbusBusKind::Gpu` bus served by a GPU
+    /// driver API, not the chipset SMBus) should override this.
     fn debug_transport(&self) -> Option<&'static str> {
         None
     }

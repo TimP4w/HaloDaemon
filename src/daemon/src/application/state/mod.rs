@@ -66,14 +66,16 @@ pub struct AppState {
     /// Elects one drain loop. Callers may merge work while another drain runs,
     /// then wait on this gate until their request has been consumed.
     pub rediscovery_runner: Mutex<()>,
-    /// Latest plugin update/on-disk status, retained in the plugins bus record.
-    pub plugin_update_status: Mutex<Vec<halod_shared::types::PluginUpdateStatus>>,
-    /// Latest repository update status, retained in the plugins bus record.
-    pub plugin_repo_update_status: Mutex<Vec<halod_shared::types::RepoUpdateStatus>>,
+    /// Latest plugin/repository update availability, retained in the plugins
+    /// bus record.
+    pub plugin_update_plan: Mutex<crate::application::usecases::plugin::repos::UpdatePlan>,
     /// Latest signature result observed for a fetched repository commit, keyed
     /// by slug. The SHA distinguishes a rejected remote tip from the active revision.
     pub repo_signature_status: Mutex<
         std::collections::HashMap<String, (String, halod_shared::types::RepoSignatureStatus)>,
+    >,
+    pub signature_status_cache: Mutex<
+        std::collections::HashMap<(String, String), halod_shared::types::RepoSignatureStatus>,
     >,
     /// The device-plugin registry (loaded manifests, consent/config, notice
     /// dedup, load warnings).
@@ -109,15 +111,22 @@ impl AppState {
             discovery_scope: RwLock::new(DiscoveryScope::Clean),
             pending_rediscovery: Mutex::new(PendingRediscovery::Clean),
             rediscovery_runner: Mutex::new(()),
-            plugin_update_status: Mutex::new(Vec::new()),
-            plugin_repo_update_status: Mutex::new(Vec::new()),
+            plugin_update_plan: Mutex::default(),
             repo_signature_status: Mutex::new(std::collections::HashMap::new()),
+            signature_status_cache: Mutex::new(std::collections::HashMap::new()),
             registry: crate::domain::plugin::Registry::default(),
             data_bus: Arc::new(crate::application::bus::data_bus::DataBus::default()),
             #[cfg(feature = "dev-plugin-repo")]
             development_plugin_repo: RwLock::new(None),
             secret_store: Arc::new(crate::infrastructure::secrets::FileKeyStore::new()),
         }
+    }
+
+    pub async fn invalidate_signature_status(&self, slug: &str) {
+        self.signature_status_cache
+            .lock()
+            .await
+            .retain(|(cached, _), _| cached != slug);
     }
 
     /// The serialization lock for one device id, created on first use. Held for
@@ -531,15 +540,21 @@ mod tests {
         // Clean — every handle passes.
         assert!(app.handle_in_scope(&handle).await);
 
-        let mut spec: crate::domain::plugin::DeviceSpec =
-            serde_json::from_value(serde_json::json!({
-            "vendor": "x", "model": "y",
-            "match": { "hid": { "vid": 9, "pid": 9 } }
-            }))
-            .unwrap();
-        spec.transport = "hid".to_owned();
-        spec.vid = Some(9);
-        spec.pid = Some(9);
+        let spec = crate::domain::plugin::DeviceSpec {
+            vendor: "x".into(),
+            model: "y".into(),
+            name: None,
+            device_type: None,
+            control_layout: Vec::new(),
+            capabilities: Vec::new(),
+            transport: crate::domain::plugin::manifest::TransportSpec::Hid(
+                crate::domain::plugin::manifest::HidMatch {
+                    vid: Some(9),
+                    pids: vec![9],
+                    ..Default::default()
+                },
+            ),
+        };
         app.set_discovery_scope(DiscoveryScope::PluginSet {
             plugin_ids: ["p".to_string()].into_iter().collect(),
             filter: Arc::new(DiscoveryFilter { specs: vec![spec] }),

@@ -1,5 +1,5 @@
 // SPDX-License-Identifier: GPL-3.0-or-later
-//! Generic chain-leaf child device — the de-vendored `NZXTFFan`. A plugin's
+//! Generic chain-leaf child device. A plugin's
 //! parent produces these from `discover_children`; each delegates RGB to the
 //! parent's `LightingDivisionHub` (composited into one channel frame) and, if it has a
 //! fan, delegates cooling to the parent's `CoolingHub`. It holds no transport

@@ -10,7 +10,8 @@ use halod_shared::types::{Permission, WriteRateLimit};
 
 #[cfg(target_os = "windows")]
 fn matches(spec: &DeviceSpec, handle: &DiscoveryHandle<'_>) -> bool {
-    spec.r#match.amd_smn.as_ref().is_some_and(|m| m.any)
+    use super::super::manifest::TransportSpec;
+    matches!(&spec.transport, TransportSpec::AmdSmn(m) if m.any)
         && matches!(handle, DiscoveryHandle::AmdSmn { .. })
 }
 #[cfg(not(target_os = "windows"))]
@@ -45,16 +46,10 @@ fn open(
         bail!("amd_smn is only available on Windows");
     }
 }
-fn validate(spec: &DeviceSpec) -> Result<()> {
-    if !spec.r#match.amd_smn.as_ref().is_some_and(|m| m.any) {
-        bail!("amd_smn match requires explicit any: true");
-    }
-    Ok(())
-}
 pub(super) const DESCRIPTOR: PluginTransportDescriptor = PluginTransportDescriptor {
     kind: "amd_smn",
     matches: Some(matches),
     open,
     id_suffix: Some(suffix),
-    validate: Some(validate),
+    validate: None,
 };

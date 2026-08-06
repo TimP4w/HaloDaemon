@@ -197,8 +197,8 @@ pub async fn register_device(app: &Arc<AppState>, device: Arc<dyn Device>) -> bo
 }
 
 /// Keep one plugin-owned representation of a physical device when its wired
-/// HID interface and receiver child are both visible. Native Logitech devices
-/// switch transports in-place; Lua plugin devices cannot, so the wired instance
+/// HID interface and receiver child are both visible. Native drivers switch
+/// transports in-place; Lua plugin devices cannot, so the wired instance
 /// displaces the same-plugin wireless instance until receiver reconciliation
 /// creates it again after the cable is removed.
 async fn prefer_wired_transport(app: &Arc<AppState>, device: &Arc<dyn Device>) -> bool {
@@ -467,7 +467,7 @@ mod tests {
             &self.id
         }
         fn vendor(&self) -> &str {
-            "Logitech"
+            "Acme"
         }
         fn model(&self) -> &str {
             "Test"
@@ -479,7 +479,7 @@ mod tests {
             self.closed.store(true, Ordering::SeqCst);
         }
         fn owning_plugin_id(&self) -> Option<String> {
-            Some("logitech".into())
+            Some("acme_wireless".into())
         }
         fn identity(&self) -> DeviceIdentity {
             DeviceIdentity::serial(Some("AABB1122".into()))
@@ -500,7 +500,7 @@ mod tests {
     async fn wired_plugin_device_replaces_same_serial_wireless_child() {
         let app = make_app();
         let wireless = Arc::new(PluginTransportDevice::new(
-            "logitech_AABB1122",
+            "acme_wireless_AABB1122",
             ConnectionType::Wireless,
         ));
         assert!(register_device(&app, wireless.clone()).await);
@@ -508,12 +508,12 @@ mod tests {
             .children
             .lock()
             .await
-            .entry("logitech-receiver".into())
+            .entry("acme_wireless-receiver".into())
             .or_default()
             .insert(wireless.id().into());
 
         let wired = Arc::new(PluginTransportDevice::new(
-            "logitech-046d-c095-0",
+            "acme_wireless-1234-c095-0",
             ConnectionType::Wired,
         ));
         assert!(register_device(&app, wired.clone()).await);
@@ -528,7 +528,7 @@ mod tests {
             .children
             .lock()
             .await
-            .get("logitech-receiver")
+            .get("acme_wireless-receiver")
             .unwrap()
             .contains(wireless.id()));
     }
@@ -537,13 +537,13 @@ mod tests {
     async fn wireless_plugin_child_does_not_displace_same_serial_wired_device() {
         let app = make_app();
         let wired = Arc::new(PluginTransportDevice::new(
-            "logitech-046d-c095-0",
+            "acme_wireless-1234-c095-0",
             ConnectionType::Wired,
         ));
         assert!(register_device(&app, wired.clone()).await);
 
         let wireless = Arc::new(PluginTransportDevice::new(
-            "logitech_AABB1122",
+            "acme_wireless_AABB1122",
             ConnectionType::Wireless,
         ));
         assert!(!register_device(&app, wireless.clone()).await);
@@ -617,13 +617,13 @@ mod tests {
     async fn concurrent_registration_claims_allow_only_one_owner() {
         let app = make_app();
         let (a, b) = tokio::join!(
-            claim_registration(&app, "steelseries-1"),
-            claim_registration(&app, "steelseries-1")
+            claim_registration(&app, "headset-1"),
+            claim_registration(&app, "headset-1")
         );
 
         assert_ne!(a, b, "exactly one concurrent scanner must own the id");
         assert_eq!(app.device_registry.registrations.lock().await.len(), 1);
-        finish_registration(&app, "steelseries-1").await;
+        finish_registration(&app, "headset-1").await;
     }
 
     #[tokio::test]
@@ -976,11 +976,11 @@ mod tests {
         // otherwise they linger after a disable and collide with freshly-built
         // children on re-enable, leaving the plugin in a broken state.
         let app = make_app();
-        let root = Arc::new(MockDevice::new("kraken-0"));
-        let accessory = Arc::new(MockDevice::new("kraken-0_acc_0_19"));
-        let link = Arc::new(MockDevice::new("kraken-0_chain_0_abcd"));
+        let root = Arc::new(MockDevice::new("hub-0"));
+        let accessory = Arc::new(MockDevice::new("hub-0_acc_0_19"));
+        let link = Arc::new(MockDevice::new("hub-0_chain_0_abcd"));
         // A sibling whose id merely shares a leading substring must survive.
-        let sibling = Arc::new(MockDevice::new("kraken-0b"));
+        let sibling = Arc::new(MockDevice::new("hub-0b"));
         {
             let mut devices = app.device_registry.write().await;
             devices.push(root.clone());
@@ -989,11 +989,11 @@ mod tests {
             devices.push(sibling.clone());
         }
 
-        unregister_device_and_children(&app, "kraken-0").await;
+        unregister_device_and_children(&app, "hub-0").await;
 
         let remaining = app.device_registry.read().await;
         assert_eq!(remaining.len(), 1);
-        assert_eq!(remaining[0].id(), "kraken-0b");
+        assert_eq!(remaining[0].id(), "hub-0b");
         drop(remaining);
 
         assert!(root.closed.load(Ordering::SeqCst));
