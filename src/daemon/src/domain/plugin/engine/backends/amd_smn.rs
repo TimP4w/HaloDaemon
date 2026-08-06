@@ -10,7 +10,8 @@ use halod_shared::types::{Permission, WriteRateLimit};
 
 #[cfg(target_os = "windows")]
 fn matches(spec: &DeviceSpec, handle: &DiscoveryHandle<'_>) -> bool {
-    spec.r#match.amd_smn.as_ref().is_some_and(|m| m.any)
+    use super::super::manifest::TransportSpec;
+    matches!(&spec.transport, TransportSpec::AmdSmn(m) if m.any)
         && matches!(handle, DiscoveryHandle::AmdSmn { .. })
 }
 #[cfg(not(target_os = "windows"))]

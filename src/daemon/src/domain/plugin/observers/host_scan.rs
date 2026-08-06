@@ -35,7 +35,7 @@ async fn scan(app: Arc<AppState>) {
     }
 
     #[cfg(target_os = "windows")]
-    if specs.iter().any(|spec| spec.r#match.amd_smn.is_some()) {
+    if specs.iter().any(|spec| spec.transport.kind() == "amd_smn") {
         if let Some((family, model)) = amd_signature() {
             discovery::discover_handle(&app, DiscoveryHandle::AmdSmn { family, model }).await;
         }
@@ -44,7 +44,7 @@ async fn scan(app: Arc<AppState>) {
     #[cfg(target_os = "windows")]
     match specs
         .iter()
-        .any(|spec| spec.r#match.lpcio.is_some())
+        .any(|spec| spec.transport.kind() == "lpcio")
         .then(|| tokio::task::spawn_blocking(lpcio_chips))
     {
         None => {}

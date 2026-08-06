@@ -236,6 +236,10 @@ pub struct Registry {
     /// failing RGB frame can fan out across several device calls, so recovery
     /// must be coalesced per plugin.
     runtime_recovery_pending: RwLock<HashSet<String>>,
+    /// Recovery attempts spent in the current failure episode, per plugin. A
+    /// reconcile that re-registers a device also re-applies its state, so a
+    /// failure that survives the reconcile would otherwise queue the next one.
+    runtime_recovery_attempts: RwLock<HashMap<String, u8>>,
     /// Failed transport opens in the current plugin-load episode, keyed by the
     /// stable plugin device id. A successful open, plugin reload, or a USB
     /// replug resets it.

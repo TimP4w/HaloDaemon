@@ -534,6 +534,9 @@ pub struct LuaDevice {
     /// Terminal transport failure for every plugin kind, including plain
     /// device plugins that do not have an integration runtime.
     unrecoverable: Arc<AtomicBool>,
+    /// A child's own call failures, kept off the `runtime` it shares with the
+    /// root so one unreachable slot cannot disconnect the root and its siblings.
+    child_degraded: AtomicBool,
     /// For integration roots only: the manifest each controller child is
     /// reported by the child's own `initialize` callback.
     root_manifest: Option<Arc<PluginManifest>>,
@@ -675,10 +678,43 @@ impl LuaDevice {
             .is_some()
     }
 
+    fn is_dynamic_child(&self) -> bool {
+        self.worker.as_ref().is_some_and(|worker| worker.is_child())
+    }
+
+    /// Record a call outcome against the device that made it: only a root
+    /// writes the shared runtime state.
+    fn record_call_outcome(&self, failed: bool, reason: DegradeReason) {
+        if self.is_dynamic_child() {
+            self.child_degraded.store(failed, Ordering::Release);
+            if failed && self.transport_is_unrecoverable() {
+                self.unrecoverable.store(true, Ordering::Release);
+            }
+            return;
+        }
+        if !failed {
+            if let Some(runtime) = &self.runtime {
+                let mut state = runtime.lock_recover();
+                if !matches!(
+                    *state,
+                    RuntimeState::Unrecoverable | RuntimeState::Closing | RuntimeState::Closed
+                ) {
+                    *state = RuntimeState::Online;
+                }
+            }
+            return;
+        }
+        self.set_call_failure_state(reason);
+    }
+
     fn set_call_failure_state(&self, reason: DegradeReason) {
         let unrecoverable = self.transport_is_unrecoverable();
         if unrecoverable {
             self.unrecoverable.store(true, Ordering::Release);
+        }
+        if self.is_dynamic_child() {
+            self.child_degraded.store(true, Ordering::Release);
+            return;
         }
         if let Some(runtime) = &self.runtime {
             let mut state = runtime.lock_recover();
@@ -865,6 +901,12 @@ impl LuaDevice {
                                     }
                                     tokio::time::sleep(Duration::from_millis(500)).await;
                                 }
+                                // An already-registered slot is neither added
+                                // nor gone, so the diff above skips it.
+                                crate::application::usecases::registry::receiver::revive_owned_children(
+                                    &root, &app,
+                                )
+                                .await;
                             }
                             crate::application::usecases::plugin::runtime::topology_changed(&app).await;
                         }
@@ -1143,6 +1185,7 @@ impl LuaDevice {
             closed: Arc::new(AtomicBool::new(false)),
             call_failed: Arc::new(AtomicBool::new(false)),
             unrecoverable: Arc::new(AtomicBool::new(false)),
+            child_degraded: AtomicBool::new(false),
             root_manifest: None,
             runtime: None,
             allowed_caps: device_caps(manifest, spec),
@@ -1236,23 +1279,7 @@ impl LuaDevice {
         }
         // Restore once when an error episode begins. Repeated engine calls can
         // race with the state broadcast, so `call_failed` is the latch.
-        if let Some(r) = &self.runtime {
-            let mut state = r.lock_recover();
-            if !matches!(
-                *state,
-                RuntimeState::Unrecoverable | RuntimeState::Closing | RuntimeState::Closed
-            ) {
-                if result.is_ok() {
-                    *state = RuntimeState::Online;
-                } else {
-                    *state = if unrecoverable {
-                        RuntimeState::Unrecoverable
-                    } else {
-                        RuntimeState::Degraded(DegradeReason::CallFailed)
-                    };
-                }
-            }
-        }
+        self.record_call_outcome(result.is_err(), DegradeReason::CallFailed);
         if first_failure {
             if let Some(transport) = &self.transport {
                 transport.restore_safety_state();
@@ -1646,7 +1673,10 @@ impl Device for LuaDevice {
     }
 
     fn is_live(&self) -> bool {
-        if self.closed.load(Ordering::Acquire) || self.unrecoverable.load(Ordering::Acquire) {
+        if self.closed.load(Ordering::Acquire)
+            || self.unrecoverable.load(Ordering::Acquire)
+            || self.child_degraded.load(Ordering::Acquire)
+        {
             return false;
         }
         self.runtime
@@ -1847,9 +1877,7 @@ impl Device for LuaDevice {
             anyhow::bail!("unrecoverable plugin transport error: {detail}");
         }
         if outcome.ok {
-            if let Some(runtime) = &self.runtime {
-                *runtime.lock_recover() = RuntimeState::Online;
-            }
+            self.record_call_outcome(false, DegradeReason::CallFailed);
             // Seed every wire-status cache before registration publishes the
             // first snapshot (and before transport-conflict checks consult the
             // cached connection type). Later refreshes run on the poll task.
@@ -1876,8 +1904,8 @@ impl Device for LuaDevice {
             self.poll_paused.store(false, Ordering::Relaxed);
             self.event_paused.store(false, Ordering::Relaxed);
             self.event_resume.notify_one();
-        } else if let Some(runtime) = &self.runtime {
-            *runtime.lock_recover() = RuntimeState::Degraded(DegradeReason::CallFailed);
+        } else {
+            self.record_call_outcome(true, DegradeReason::CallFailed);
         }
         Ok(outcome.ok)
     }
@@ -2757,6 +2785,14 @@ impl RangeCapability for LuaDevice {
         &self.active_controls().range_cache
     }
 
+    fn range_is_writable(&self, key: &str) -> bool {
+        !self
+            .active_controls()
+            .ranges
+            .iter()
+            .any(|range| range.key == key && range.read_only)
+    }
+
     async fn to_wire(&self) -> Option<DeviceCapability> {
         self.active_controls().ranges_wire()
     }
@@ -2772,6 +2808,14 @@ impl RangeCapability for LuaDevice {
 
 #[async_trait]
 impl BooleanCapability for LuaDevice {
+    fn boolean_is_writable(&self, key: &str) -> bool {
+        !self
+            .active_controls()
+            .booleans
+            .iter()
+            .any(|boolean| boolean.key == key && boolean.read_only)
+    }
+
     async fn get_booleans(&self) -> Result<Vec<Boolean>> {
         let mut live = self.boolean_cache.lock_recover().clone();
         self.active_controls().backfill_booleans(&mut live);
@@ -3605,6 +3649,65 @@ mod tests {
             .iter()
             .any(|cap| matches!(cap, CapabilityRef::Controller(_))));
         dev.close().await;
+    }
+
+    #[tokio::test(flavor = "multi_thread", worker_threads = 2)]
+    async fn an_unreachable_child_degrades_alone() {
+        let script = r#"
+            local asleep = true
+            return {
+              initialize = function(dev)
+                if dev.match.key then
+                  return { ok = true, capabilities = { "lighting" },
+                    channels = { { id = "zone_0", name = "Zone", led_count = 1 } } }
+                end
+                return { ok = true }
+              end,
+              enumerate_controllers = function(dev)
+                if dev.match.key then return {} end
+                return {
+                  { index = 0, key = "0", id = "slot_one", name = "Slot One" },
+                  { index = 1, key = "1", id = "slot_two", name = "Slot Two" },
+                }
+              end,
+              apply = function(dev)
+                if dev.match.key == "0" and asleep then
+                  asleep = false
+                  error("device is asleep")
+                end
+              end,
+            }
+        "#;
+        let (_tmp, mut manifest) = test_manifest("receiver_root", &["lighting"], script);
+        manifest.dynamic_children = true;
+        let runtime = Arc::new(Mutex::new(RuntimeState::OpeningTransport));
+        let mut root = hid_device(
+            "receiver_root-0",
+            &manifest,
+            Arc::new(MockTransport::empty()),
+        );
+        root.runtime = Some(runtime.clone());
+        assert!(root.initialize().await.unwrap());
+
+        let children = Controller::discover_children(&root).await;
+        assert_eq!(children.len(), 2);
+        for child in &children {
+            assert!(child.initialize().await.unwrap());
+        }
+        let color = LightingState::Static {
+            color: halod_shared::types::RgbColor { r: 1, g: 2, b: 3 },
+        };
+        let unreachable = children[0].as_lighting().unwrap();
+        assert!(unreachable.apply(color.clone()).await.is_err());
+
+        assert!(!children[0].is_live(), "the failing child is degraded");
+        assert!(children[1].is_live(), "its sibling is untouched");
+        assert!(root.is_live(), "the receiver is untouched");
+        assert_eq!(*runtime.lock_recover(), RuntimeState::Online);
+
+        assert!(unreachable.apply(color).await.is_ok());
+        assert!(children[0].is_live(), "a successful call revives the child");
+        root.close().await;
     }
 
     #[tokio::test(flavor = "multi_thread", worker_threads = 2)]

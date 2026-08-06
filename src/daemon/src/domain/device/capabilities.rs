@@ -257,6 +257,12 @@ pub trait RangeCapability: Send + Sync {
     async fn set_range(&self, key: &str, value: i32) -> Result<()>;
     fn range_cache(&self) -> &RangeStateCache;
 
+    /// A read-only range is a readback, not a setting: writing one back is a
+    /// guaranteed error, and a guaranteed error on every restore is a loop.
+    fn range_is_writable(&self, _key: &str) -> bool {
+        true
+    }
+
     async fn to_wire(&self) -> Option<DeviceCapability> {
         None
     }
@@ -269,6 +275,9 @@ pub trait RangeCapability: Send + Sync {
     }
     async fn restore_state(&self, v: &serde_json::Value) {
         for (key, value) in self.range_cache().load_pairs(v) {
+            if !self.range_is_writable(&key) {
+                continue;
+            }
             if let Err(e) = self.set_range(&key, value).await {
                 log::warn!("[range restore_state] set_range({key}) failed: {e:#}");
             }
@@ -309,6 +318,11 @@ pub trait BooleanCapability: Send + Sync {
         None
     }
 
+    /// See [`RangeCapability::range_is_writable`].
+    fn boolean_is_writable(&self, _key: &str) -> bool {
+        true
+    }
+
     async fn to_wire(&self) -> Option<DeviceCapability> {
         let booleans = self.get_booleans().await.unwrap_or_else(|e| {
             log::trace!("[BooleanCapability::to_wire] {e}");
@@ -332,6 +346,9 @@ pub trait BooleanCapability: Send + Sync {
     async fn restore_state(&self, v: &serde_json::Value) {
         if let Some(cache) = self.bool_cache() {
             for (key, value) in cache.load_pairs(v) {
+                if !self.boolean_is_writable(&key) {
+                    continue;
+                }
                 if let Err(e) = self.set_boolean(&key, value).await {
                     log::warn!("[boolean restore_state] set_boolean({key}) failed: {e:#}");
                 }

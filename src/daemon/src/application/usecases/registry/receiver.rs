@@ -70,6 +70,45 @@ pub(crate) async fn reconcile_owned_children(
     changed
 }
 
+/// Re-initialize the registered children that are no longer live: a paired slot
+/// survives its device sleeping, so the diff above never revisits one. Each
+/// unreachable child costs a full HID++ timeout — run this per connection event,
+/// never on a poll.
+pub(crate) async fn revive_owned_children(
+    device: &Arc<dyn crate::domain::device::Device>,
+    app: &Arc<AppState>,
+) -> bool {
+    let children = app
+        .device_registry
+        .children
+        .lock()
+        .await
+        .get(device.id())
+        .cloned()
+        .unwrap_or_default();
+    let mut revived = false;
+    for child_id in children {
+        let Some(child) = app.find_device_by_id(&child_id).await else {
+            continue;
+        };
+        if child.is_live()
+            || child.is_unrecoverable()
+            || child.active_state() == halod_shared::types::VisibilityState::Disabled
+        {
+            continue;
+        }
+        match super::registration::init_device(app, &child).await {
+            Ok(true) => {
+                super::registration::restore_saved_state(app, &child).await;
+                log::info!("[receiver] Reinitialized {} after it came back", child.id());
+                revived = true;
+            }
+            _ => log::debug!("[receiver] {} is still unreachable", child.id()),
+        }
+    }
+    revived
+}
+
 pub async fn start_pairing(id: String, timeout_secs: u8, app: Arc<AppState>) -> Result<()> {
     let device = require_device_owned_id(&id, &app).await?;
     let cap = device
@@ -200,6 +239,80 @@ mod tests {
         let app = app_with(Arc::clone(&mock) as Arc<dyn Device>).await;
         unpair("mock_receiver".into(), 3, app).await.unwrap();
         assert_eq!(mock.unpaired_slot.load(Ordering::SeqCst), 3);
+    }
+
+    #[derive(Default)]
+    struct MockController;
+
+    impl crate::domain::device::Controller for MockController {}
+
+    #[async_trait]
+    impl Device for MockController {
+        fn id(&self) -> &str {
+            "mock_controller"
+        }
+        fn name(&self) -> &str {
+            "Mock Controller"
+        }
+        fn vendor(&self) -> &str {
+            "Mock"
+        }
+        fn model(&self) -> &str {
+            "Controller"
+        }
+        async fn initialize(&self) -> Result<bool> {
+            Ok(true)
+        }
+        async fn close(&self) {}
+        fn capabilities(&self) -> Vec<CapabilityRef<'_>> {
+            vec![CapabilityRef::Controller(self)]
+        }
+    }
+
+    #[tokio::test]
+    async fn revive_reinitializes_only_the_children_that_came_back() {
+        use crate::test_support::MockDevice;
+        let app = Arc::new(AppState::new(Config::default()));
+        let root = Arc::new(MockController) as Arc<dyn Device>;
+        let asleep = Arc::new(MockDevice::new("child-asleep").offline());
+        let awake = Arc::new(MockDevice::new("child-awake"));
+        {
+            let mut cfg = app.config.write().await;
+            for id in ["child-asleep", "child-awake"] {
+                cfg.active_profile_data_mut()
+                    .device_states
+                    .insert(id.into(), serde_json::json!({ "x": 1 }));
+            }
+        }
+        {
+            let mut devices = app.device_registry.write().await;
+            devices.push(root.clone());
+            devices.push(asleep.clone() as Arc<dyn Device>);
+            devices.push(awake.clone() as Arc<dyn Device>);
+        }
+        app.device_registry
+            .children
+            .lock()
+            .await
+            .entry("mock_controller".into())
+            .or_default()
+            .extend(["child-asleep".to_string(), "child-awake".to_string()]);
+
+        assert!(revive_owned_children(&root, &app).await);
+        assert!(
+            !reconcile_owned_children(&root, &app).await,
+            "reviving a child is not a pairing-table change, so the caller that \
+             waits for the table to catch up must keep waiting"
+        );
+
+        assert!(
+            asleep.load_called.load(Ordering::SeqCst),
+            "an unreachable child is re-initialized and its saved state restored"
+        );
+        assert!(
+            !awake.load_called.load(Ordering::SeqCst),
+            "a live child is left alone"
+        );
     }
 
     #[tokio::test]

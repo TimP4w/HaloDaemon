@@ -9,13 +9,11 @@ use halod_shared::types::{Permission, WriteRateLimit};
 
 #[cfg(target_os = "windows")]
 fn matches(spec: &DeviceSpec, handle: &DiscoveryHandle<'_>) -> bool {
+    use super::super::manifest::TransportSpec;
     let DiscoveryHandle::Lpcio { chip_id, .. } = handle else {
         return false;
     };
-    spec.r#match
-        .lpcio
-        .as_ref()
-        .is_some_and(|m| m.any || m.chip_ids.contains(chip_id))
+    matches!(&spec.transport, TransportSpec::Lpcio(m) if m.any || m.chip_ids.contains(chip_id))
 }
 #[cfg(not(target_os = "windows"))]
 fn matches(_spec: &DeviceSpec, _handle: &DiscoveryHandle<'_>) -> bool {
