@@ -10,11 +10,13 @@ fn declared_write_rate_limit_preserves_manifest_value() {
     assert!(super::declared_write_rate_limit(None).is_none());
 }
 
-#[test]
-fn transport_open_attempt_resets_have_the_right_scope() {
+#[tokio::test(start_paused = true)]
+async fn transport_open_attempt_resets_have_the_right_scope() {
     let registry = super::Registry::default();
     registry.note_transport_open_failure(("plug_a".into(), "plug_a-1".into()));
     registry.note_transport_open_failure(("other".into(), "other-1".into()));
+    assert!(queue_recovery(&registry, "plug_a"));
+    assert!(queue_recovery(&registry, "other"));
 
     registry.reset_transport_open_failures_for("plug_a");
     {
@@ -22,9 +24,18 @@ fn transport_open_attempt_resets_have_the_right_scope() {
         assert!(!failures.keys().any(|(plugin_id, _)| plugin_id == "plug_a"));
         assert!(failures.contains_key(&("other".into(), "other-1".into())));
     }
+    assert!(
+        queue_recovery(&registry, "plug_a"),
+        "the reset cancelled plug_a's queued recovery"
+    );
+    assert!(
+        !queue_recovery(&registry, "other"),
+        "an unrelated plugin keeps waiting on its own"
+    );
 
     registry.reset_transport_open_failures();
     assert!(registry.transport_open_failures.read().unwrap().is_empty());
+    assert!(queue_recovery(&registry, "other"));
 }
 
 #[test]
@@ -54,19 +65,30 @@ fn transport_open_failures_back_off_between_attempts() {
     assert!(registry.transport_open_blocked(&key));
 }
 
-#[test]
-fn runtime_recovery_budget_is_spent_once_and_refunded_by_a_real_recovery() {
+/// Queue a recovery for `plugin_id` the way a runtime error would, standing in
+/// for the reconcile the daemon would run.
+fn queue_recovery(registry: &super::Registry, plugin_id: &str) -> bool {
+    crate::util::backoff::schedule(
+        &registry.runtime_recovery,
+        plugin_id,
+        super::RUNTIME_RECOVERY_ATTEMPTS,
+        |_| async { crate::util::backoff::Retry::Stop },
+    )
+}
+
+#[tokio::test(start_paused = true)]
+async fn runtime_recovery_budget_is_spent_once_and_refunded_by_a_real_recovery() {
     let registry = super::Registry::default();
-    for attempt in 1..=super::RUNTIME_RECOVERY_ATTEMPTS {
-        assert!(!registry.runtime_recovery_exhausted("plug_a"));
-        assert_eq!(registry.note_runtime_recovery_attempt("plug_a"), attempt);
+    for _ in 0..super::RUNTIME_RECOVERY_ATTEMPTS {
+        assert!(queue_recovery(&registry, "plug_a"));
+        tokio::time::sleep(std::time::Duration::from_secs(300)).await;
     }
-    assert!(registry.runtime_recovery_exhausted("plug_a"));
+    assert!(!queue_recovery(&registry, "plug_a"), "the budget is spent");
 
     // A sibling device that was never failing succeeds on every frame; that
-    // must not refill the budget of the one that keeps failing.
+    // must not refund the budget of the one that keeps failing.
     registry.clear_runtime_error("plug_a", "healthy-dev");
-    assert!(registry.runtime_recovery_exhausted("plug_a"));
+    assert!(!queue_recovery(&registry, "plug_a"));
 
     registry.set_health(
         "plug_a::sick-dev",
@@ -74,21 +96,10 @@ fn runtime_recovery_budget_is_spent_once_and_refunded_by_a_real_recovery() {
         "connection reset".into(),
     );
     registry.clear_runtime_error("plug_a", "sick-dev");
-    assert!(!registry.runtime_recovery_exhausted("plug_a"));
-
-    // Enable/disable and a user-requested rescan are retry boundaries too.
-    for plugin_id in ["plug_a", "other"] {
-        for _ in 1..=super::RUNTIME_RECOVERY_ATTEMPTS {
-            registry.note_runtime_recovery_attempt(plugin_id);
-        }
-        assert!(registry.runtime_recovery_exhausted(plugin_id));
-    }
-    registry.reset_transport_open_failures_for("plug_a");
-    assert!(!registry.runtime_recovery_exhausted("plug_a"));
-    assert!(registry.runtime_recovery_exhausted("other"));
-
-    registry.reset_transport_open_failures();
-    assert!(!registry.runtime_recovery_exhausted("other"));
+    assert!(
+        queue_recovery(&registry, "plug_a"),
+        "a recovered device starts a fresh episode"
+    );
 }
 
 #[test]

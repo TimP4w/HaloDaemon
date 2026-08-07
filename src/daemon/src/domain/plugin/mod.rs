@@ -208,7 +208,7 @@ const TRANSPORT_OPEN_BACKOFF: std::time::Duration = std::time::Duration::from_se
 /// Bound automatic recovery for a plugin whose failure survives the reconcile.
 /// Each retry re-applies device state, so the failure it provokes would
 /// otherwise queue the next retry forever.
-const RUNTIME_RECOVERY_ATTEMPTS: u8 = 3;
+const RUNTIME_RECOVERY_ATTEMPTS: u32 = 3;
 
 struct TransportOpenEpisode {
     attempts: u8,
@@ -237,14 +237,11 @@ pub struct Registry {
     /// processes or open device nodes — never run on every state poll.
     requirement_cache: RwLock<HashMap<String, Vec<halod_shared::types::PluginRequirementStatus>>>,
     integration_setups: RwLock<HashMap<String, halod_shared::types::IntegrationSetupStatus>>,
-    /// Plugin ids with a delayed runtime-error reprobe already queued. A single
-    /// failing RGB frame can fan out across several device calls, so recovery
-    /// must be coalesced per plugin.
-    runtime_recovery_pending: RwLock<HashSet<String>>,
-    /// Recovery attempts spent in the current failure episode, per plugin. A
-    /// reconcile that re-registers a device also re-applies its state, so a
-    /// failure that survives the reconcile would otherwise queue the next one.
-    runtime_recovery_attempts: RwLock<HashMap<String, u8>>,
+    /// Delayed runtime-error reprobes, keyed by plugin id. A single failing RGB
+    /// frame fans out across device calls, so recovery is coalesced per plugin,
+    /// and a reconcile re-applies device state — so a failure that survives one
+    /// would otherwise queue the next retry forever.
+    runtime_recovery: Arc<crate::util::backoff::RetryQueue>,
     /// Failed transport opens in the current plugin-load episode, keyed by the
     /// stable plugin device id. A successful open, plugin reload, or a USB
     /// replug resets it.
@@ -700,13 +697,13 @@ impl Registry {
     fn reset_transport_open_failures_for(&self, plugin_id: &str) {
         write_recover(&self.transport_open_failures)
             .retain(|(failed_plugin_id, _), _| failed_plugin_id != plugin_id);
-        write_recover(&self.runtime_recovery_attempts).remove(plugin_id);
+        self.runtime_recovery.clear(plugin_id);
     }
 
     /// A user-requested full discovery is another explicit retry boundary.
     pub(crate) fn reset_transport_open_failures(&self) {
         write_recover(&self.transport_open_failures).clear();
-        write_recover(&self.runtime_recovery_attempts).clear();
+        self.runtime_recovery.clear_all();
     }
 
     fn transport_open_blocked(&self, key: &(String, String)) -> bool {
@@ -899,19 +896,6 @@ impl Registry {
         write_recover(&self.health).remove(scope).is_some()
     }
 
-    fn runtime_recovery_exhausted(&self, plugin_id: &str) -> bool {
-        read_recover(&self.runtime_recovery_attempts)
-            .get(plugin_id)
-            .is_some_and(|spent| *spent >= RUNTIME_RECOVERY_ATTEMPTS)
-    }
-
-    fn note_runtime_recovery_attempt(&self, plugin_id: &str) -> u8 {
-        let mut attempts = write_recover(&self.runtime_recovery_attempts);
-        let spent = attempts.entry(plugin_id.to_owned()).or_insert(0);
-        *spent = spent.saturating_add(1);
-        *spent
-    }
-
     /// Aggregate direct plugin and per-device health records. Failed wins over
     /// degraded; the newest issue at that severity is retained for display.
     fn health_for(&self, plugin_id: &str) -> HealthState {
@@ -983,36 +967,48 @@ impl Registry {
         )
         .await;
 
-        if self.runtime_recovery_exhausted(plugin_id) {
-            return;
-        }
-
-        if write_recover(&self.runtime_recovery_pending).insert(plugin_id.to_owned()) {
-            let attempt = self.note_runtime_recovery_attempt(plugin_id);
-            if attempt == RUNTIME_RECOVERY_ATTEMPTS {
-                log::warn!(
-                    "plugin '{plugin_id}' keeps failing after recovery; giving up after this attempt until a replug, rescan, or plugin reload"
-                );
-            }
-            let app = Arc::clone(app);
-            let plugin_id = plugin_id.to_owned();
-            tokio::spawn(async move {
-                tokio::time::sleep(std::time::Duration::from_secs(3)).await;
-                // Clear before probing: if initialization/profile application
-                // fails again, that new episode is allowed to queue another try.
-                write_recover(&app.registry.runtime_recovery_pending).remove(&plugin_id);
-                if app.registry.is_disabled(&plugin_id) {
-                    return;
+        let app = Arc::clone(app);
+        let queued = crate::util::backoff::schedule(
+            &self.runtime_recovery,
+            plugin_id,
+            RUNTIME_RECOVERY_ATTEMPTS,
+            {
+                let plugin_id = plugin_id.to_owned();
+                move |attempt| {
+                    let app = Arc::clone(&app);
+                    let plugin_id = plugin_id.clone();
+                    Self::retry_after_runtime_error(app, plugin_id, attempt)
                 }
-                log::info!(
-                    "retrying plugin '{plugin_id}' after a runtime failure (attempt {attempt}/{RUNTIME_RECOVERY_ATTEMPTS})"
-                );
-                crate::application::usecases::plugin::plugins::reconcile_plugins(
-                    &app,
-                    std::slice::from_ref(&plugin_id),
-                )
-                .await;
-            });
+            },
+        );
+        if !queued {
+            log::debug!("plugin '{plugin_id}' already has a retry queued or has spent its budget");
+        }
+    }
+
+    async fn retry_after_runtime_error(
+        app: Arc<crate::application::state::AppState>,
+        plugin_id: String,
+        attempt: u32,
+    ) -> crate::util::backoff::Retry {
+        if app.registry.is_disabled(&plugin_id) {
+            return crate::util::backoff::Retry::Stop;
+        }
+        log::info!(
+            "retrying plugin '{plugin_id}' after a runtime failure (attempt {attempt}/{RUNTIME_RECOVERY_ATTEMPTS})"
+        );
+        crate::application::usecases::plugin::plugins::reconcile_plugins(
+            &app,
+            std::slice::from_ref(&plugin_id),
+        )
+        .await;
+        // Initialization and profile application record their own failures, so
+        // a plugin still marked failed asks for the next attempt instead of
+        // waiting for the next frame to report the same fault.
+        if app.registry.health_for(&plugin_id).status == HealthStatus::Failed {
+            crate::util::backoff::Retry::Again
+        } else {
+            crate::util::backoff::Retry::Stop
         }
     }
 
@@ -1020,7 +1016,7 @@ impl Registry {
     /// failing→ok transition the plugin's persisted runtime issue is cleared too.
     pub(super) fn clear_runtime_error(&self, plugin_id: &str, device_id: &str) {
         if self.clear_health(&Self::device_health_scope(plugin_id, device_id)) {
-            write_recover(&self.runtime_recovery_attempts).remove(plugin_id);
+            self.runtime_recovery.clear(plugin_id);
         }
     }
 
