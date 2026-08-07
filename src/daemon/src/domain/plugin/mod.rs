@@ -205,6 +205,11 @@ const TRANSPORT_OPEN_ATTEMPTS: u8 = 3;
 /// transient owner (e.g. a previous halod instance shutting down) lets go.
 const TRANSPORT_OPEN_BACKOFF: std::time::Duration = std::time::Duration::from_secs(10);
 
+/// Bound automatic recovery for a plugin whose failure survives the reconcile.
+/// Each retry re-applies device state, so the failure it provokes would
+/// otherwise queue the next retry forever.
+const RUNTIME_RECOVERY_ATTEMPTS: u8 = 3;
+
 struct TransportOpenEpisode {
     attempts: u8,
     last_attempt: std::time::Instant,
@@ -695,11 +700,13 @@ impl Registry {
     fn reset_transport_open_failures_for(&self, plugin_id: &str) {
         write_recover(&self.transport_open_failures)
             .retain(|(failed_plugin_id, _), _| failed_plugin_id != plugin_id);
+        write_recover(&self.runtime_recovery_attempts).remove(plugin_id);
     }
 
     /// A user-requested full discovery is another explicit retry boundary.
     pub(crate) fn reset_transport_open_failures(&self) {
         write_recover(&self.transport_open_failures).clear();
+        write_recover(&self.runtime_recovery_attempts).clear();
     }
 
     fn transport_open_blocked(&self, key: &(String, String)) -> bool {
@@ -888,8 +895,21 @@ impl Registry {
         !notification_sent
     }
 
-    fn clear_health(&self, scope: &str) {
-        write_recover(&self.health).remove(scope);
+    fn clear_health(&self, scope: &str) -> bool {
+        write_recover(&self.health).remove(scope).is_some()
+    }
+
+    fn runtime_recovery_exhausted(&self, plugin_id: &str) -> bool {
+        read_recover(&self.runtime_recovery_attempts)
+            .get(plugin_id)
+            .is_some_and(|spent| *spent >= RUNTIME_RECOVERY_ATTEMPTS)
+    }
+
+    fn note_runtime_recovery_attempt(&self, plugin_id: &str) -> u8 {
+        let mut attempts = write_recover(&self.runtime_recovery_attempts);
+        let spent = attempts.entry(plugin_id.to_owned()).or_insert(0);
+        *spent = spent.saturating_add(1);
+        *spent
     }
 
     /// Aggregate direct plugin and per-device health records. Failed wins over
@@ -963,7 +983,17 @@ impl Registry {
         )
         .await;
 
+        if self.runtime_recovery_exhausted(plugin_id) {
+            return;
+        }
+
         if write_recover(&self.runtime_recovery_pending).insert(plugin_id.to_owned()) {
+            let attempt = self.note_runtime_recovery_attempt(plugin_id);
+            if attempt == RUNTIME_RECOVERY_ATTEMPTS {
+                log::warn!(
+                    "plugin '{plugin_id}' keeps failing after recovery; giving up after this attempt until a replug, rescan, or plugin reload"
+                );
+            }
             let app = Arc::clone(app);
             let plugin_id = plugin_id.to_owned();
             tokio::spawn(async move {
@@ -974,7 +1004,9 @@ impl Registry {
                 if app.registry.is_disabled(&plugin_id) {
                     return;
                 }
-                log::info!("retrying plugin '{plugin_id}' after a runtime failure");
+                log::info!(
+                    "retrying plugin '{plugin_id}' after a runtime failure (attempt {attempt}/{RUNTIME_RECOVERY_ATTEMPTS})"
+                );
                 crate::application::usecases::plugin::plugins::reconcile_plugins(
                     &app,
                     std::slice::from_ref(&plugin_id),
@@ -987,7 +1019,9 @@ impl Registry {
     /// Clear a device's outstanding-error flag after a successful call. On the
     /// failing→ok transition the plugin's persisted runtime issue is cleared too.
     pub(super) fn clear_runtime_error(&self, plugin_id: &str, device_id: &str) {
-        self.clear_health(&Self::device_health_scope(plugin_id, device_id));
+        if self.clear_health(&Self::device_health_scope(plugin_id, device_id)) {
+            write_recover(&self.runtime_recovery_attempts).remove(plugin_id);
+        }
     }
 
     /// Persist a physical plugin device's initialize failure on the owning

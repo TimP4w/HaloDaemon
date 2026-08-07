@@ -55,6 +55,43 @@ fn transport_open_failures_back_off_between_attempts() {
 }
 
 #[test]
+fn runtime_recovery_budget_is_spent_once_and_refunded_by_a_real_recovery() {
+    let registry = super::Registry::default();
+    for attempt in 1..=super::RUNTIME_RECOVERY_ATTEMPTS {
+        assert!(!registry.runtime_recovery_exhausted("plug_a"));
+        assert_eq!(registry.note_runtime_recovery_attempt("plug_a"), attempt);
+    }
+    assert!(registry.runtime_recovery_exhausted("plug_a"));
+
+    // A sibling device that was never failing succeeds on every frame; that
+    // must not refill the budget of the one that keeps failing.
+    registry.clear_runtime_error("plug_a", "healthy-dev");
+    assert!(registry.runtime_recovery_exhausted("plug_a"));
+
+    registry.set_health(
+        "plug_a::sick-dev",
+        halod_shared::types::PluginIssueKind::RuntimeError,
+        "connection reset".into(),
+    );
+    registry.clear_runtime_error("plug_a", "sick-dev");
+    assert!(!registry.runtime_recovery_exhausted("plug_a"));
+
+    // Enable/disable and a user-requested rescan are retry boundaries too.
+    for plugin_id in ["plug_a", "other"] {
+        for _ in 1..=super::RUNTIME_RECOVERY_ATTEMPTS {
+            registry.note_runtime_recovery_attempt(plugin_id);
+        }
+        assert!(registry.runtime_recovery_exhausted(plugin_id));
+    }
+    registry.reset_transport_open_failures_for("plug_a");
+    assert!(!registry.runtime_recovery_exhausted("plug_a"));
+    assert!(registry.runtime_recovery_exhausted("other"));
+
+    registry.reset_transport_open_failures();
+    assert!(!registry.runtime_recovery_exhausted("other"));
+}
+
+#[test]
 fn init_failure_is_aggregated_and_clears_after_recovery() {
     let registry = super::Registry::default();
     registry.report_init_error("plug_b", "plug_b-dev", "ROOT timeout".into());
