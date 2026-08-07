@@ -4,8 +4,8 @@
   src,
 }:
 let
-  release = "v0.11.1";
-  tarballHash = "sha256-s/tJCbUIxKmkd9yyZyv0xPJIO9gW0qUJ7YJCIfhDlgA=";
+  release = "v0.11.2";
+  tarballHash = "sha256-pDwmwtknsVtXO1fGwzw4rdKDoPE2OOvQfOsctf9izno=";
 
   assets = builtins.path {
     path = src + "/assets";
