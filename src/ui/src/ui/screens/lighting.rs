@@ -496,7 +496,6 @@ fn global_effect_card(
                             widgets::CellPreview::Spectrum
                         };
                         if widgets::effect_cell(ui, name, active, preview, cell_w, 66.0, 34.0, true)
-                            && !active
                         {
                             st.effect = id.clone();
                             changed = true;

@@ -527,7 +527,7 @@ fn right_panel(
                             Some(c) => widgets::CellPreview::Solid(*c),
                             None => widgets::CellPreview::Spectrum,
                         };
-                        if widgets::effect_cell(
+                        let clicked = widgets::effect_cell(
                             ui,
                             label,
                             active,
@@ -536,35 +536,17 @@ fn right_panel(
                             56.0,
                             18.0,
                             false,
-                        ) && !active
-                        {
-                            let built = match pick {
-                                EffectPick::Solid => Some(solid_cmd(ctx, st)),
-                                EffectPick::Paint => Some(paint_cmd(ctx, st)),
-                                EffectPick::Effect(id) => rgb
-                                    .descriptor
-                                    .native_effects
-                                    .iter()
-                                    .find(|e| &e.id == id)
-                                    .map(|eff| effect_cmd(ctx, st, rgb, eff)),
-                                EffectPick::Direct(id) => ctx
-                                    .state
-                                    .lighting
-                                    .canvas
-                                    .available_direct_effects
-                                    .iter()
-                                    .find(|a| &a.id == id)
-                                    .map(|anim| direct_cmd(ctx, st, rgb, anim)),
-                            };
-                            if let Some(cmd) = built {
-                                // On-canvas devices are mutually exclusive with
-                                // per-device effects: confirm before yanking one off the canvas.
-                                if matches!(mode, Mode::Engine) {
-                                    st.lighting.confirm_leave_canvas = Some(cmd);
-                                } else {
-                                    crate::runtime::ipc::send(ctx.cmd, cmd);
-                                }
-                            }
+                        );
+                        let Some(cmd) = clicked.then(|| pick_cmd(ctx, st, rgb, pick)).flatten()
+                        else {
+                            continue;
+                        };
+                        // On-canvas devices are mutually exclusive with
+                        // per-device effects: confirm before yanking one off the canvas.
+                        if matches!(mode, Mode::Engine) {
+                            st.lighting.confirm_leave_canvas = Some(cmd);
+                        } else {
+                            crate::runtime::ipc::send(ctx.cmd, cmd);
                         }
                     }
                 });
@@ -1207,6 +1189,35 @@ fn current_color(rgb: &LightingStatus) -> Option<RgbColor> {
 
 // ── Command builders ────────────────────────────────────────────────────────────
 
+/// The apply command for an effect-grid pick. Built even when the pick is
+/// already the active mode: the daemon's cached state can drift from what the
+/// hardware actually shows, and re-picking is the user's only way back.
+fn pick_cmd(
+    ctx: &TabCtx,
+    st: &DeviceUi,
+    rgb: &LightingStatus,
+    pick: &EffectPick,
+) -> Option<DaemonCommand> {
+    match pick {
+        EffectPick::Solid => Some(solid_cmd(ctx, st)),
+        EffectPick::Paint => Some(paint_cmd(ctx, st)),
+        EffectPick::Effect(id) => rgb
+            .descriptor
+            .native_effects
+            .iter()
+            .find(|e| &e.id == id)
+            .map(|eff| effect_cmd(ctx, st, rgb, eff)),
+        EffectPick::Direct(id) => ctx
+            .state
+            .lighting
+            .canvas
+            .available_direct_effects
+            .iter()
+            .find(|a| &a.id == id)
+            .map(|anim| direct_cmd(ctx, st, rgb, anim)),
+    }
+}
+
 fn solid_cmd(ctx: &TabCtx, st: &DeviceUi) -> DaemonCommand {
     DaemonCommand::LightingApply {
         id: ctx.dev.id.clone(),
@@ -1487,6 +1498,51 @@ mod tests {
             },
             state: None,
             channel_transforms: Default::default(),
+        }
+    }
+
+    #[test]
+    fn re_picking_the_active_effect_still_builds_an_apply() {
+        let violet = RgbColor {
+            r: 167,
+            g: 139,
+            b: 250,
+        };
+        let mut rgb = empty_rgb_status();
+        rgb.state = Some(LightingState::Static { color: violet });
+        let mode = current_mode(&rgb.state);
+        assert!(EffectPick::Solid.is_active(&mode), "Solid is the live mode");
+
+        let state = crate::ui::screens::device::TopicStore::default();
+        let dev = halod_shared::types::WireDevice::default();
+        let (tx, _rx) = tokio::sync::mpsc::unbounded_channel();
+        let ctx = TabCtx {
+            state: &state,
+            dev: &dev,
+            cmd: &tx,
+            time: 0.0,
+            debug: None,
+            lcd_images: &[],
+            lcd_preview: None,
+            lcd_upload: None,
+            lcd_upload_terminal: None,
+            lcd_template: None,
+            lcd_editor_render: None,
+            led_colors: crate::ui::screens::device::empty_led_colors(),
+            write_rate_history: None,
+            plugin_assets: crate::ui::screens::device::empty_plugin_assets(),
+        };
+        let mut st = DeviceUi::new("dev1".into());
+        st.lighting.paint_color = Some(violet);
+
+        let cmd = pick_cmd(&ctx, &st, &rgb, &EffectPick::Solid)
+            .expect("an active pick must still produce an apply");
+        match cmd {
+            DaemonCommand::LightingApply {
+                state: LightingState::Static { color },
+                ..
+            } => assert_eq!(color, violet),
+            other => panic!("unexpected command: {other:?}"),
         }
     }
 
