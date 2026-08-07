@@ -114,8 +114,12 @@ pub struct MockDevice {
     /// Number of `LightingCapability::apply` calls, for tests asserting a specific
     /// call count (e.g. the leaving-engine-mode drain re-apply).
     pub rgb_apply_count: Arc<AtomicUsize>,
+    /// Capability write order, appended by the hardware-writing entry points, so
+    /// tests can assert the sequence a state restore drives.
+    pub write_order: Arc<Mutex<Vec<&'static str>>>,
     pub lcd: Option<LcdStateSlot>,
     pub lcd_stream_ok: bool,
+    pub onboard_active_slot: Option<Mutex<Option<u8>>>,
     pub choice: Option<ChoiceStateCache>,
     pub range: Option<RangeStateCache>,
     pub booleans: Option<Vec<Boolean>>,
@@ -162,8 +166,10 @@ impl MockDevice {
             fan_rpm: None,
             rgb: None,
             rgb_apply_count: Arc::new(AtomicUsize::new(0)),
+            write_order: Arc::new(Mutex::new(Vec::new())),
             lcd: None,
             lcd_stream_ok: false,
+            onboard_active_slot: None,
             choice: None,
             range: None,
             booleans: None,
@@ -274,6 +280,13 @@ impl MockDevice {
         self
     }
 
+    /// Onboard profiles with a persisted `active_slot`, so restore ordering
+    /// against other capabilities is observable via `write_order`.
+    pub fn with_onboard(mut self) -> Self {
+        self.onboard_active_slot = Some(Mutex::new(None));
+        self
+    }
+
     pub fn with_range(mut self) -> Self {
         self.range = Some(RangeStateCache::default());
         self.range_last_set = Some(Mutex::new(None));
@@ -381,16 +394,7 @@ impl Device for MockDevice {
 
     async fn load_state(&self, state: &serde_json::Value) {
         self.load_called.store(true, Ordering::SeqCst);
-        // Delegate to the default capability-based restore for any real slots.
-        for cap in self.capabilities() {
-            let key = cap.state_key();
-            if key.is_empty() {
-                continue;
-            }
-            if let Some(v) = state.get(key) {
-                cap.restore_state(v).await;
-            }
-        }
+        crate::domain::device::restore_capabilities(self.capabilities(), state).await;
     }
 
     fn capabilities(&self) -> Vec<CapabilityRef<'_>> {
@@ -430,6 +434,10 @@ impl Device for MockDevice {
         }
         if self.keyboard_layout.is_some() {
             caps.push(CapabilityRef::KeyboardLayout(self));
+        }
+        // Deliberately last: restore ordering must not depend on declared order.
+        if self.onboard_active_slot.is_some() {
+            caps.push(CapabilityRef::OnboardProfiles(self));
         }
         caps
     }
@@ -519,6 +527,7 @@ impl LightingCapability for MockDevice {
     }
     async fn apply(&self, state: LightingState) -> Result<()> {
         self.rgb_apply_count.fetch_add(1, Ordering::SeqCst);
+        self.write_order.lock().unwrap().push("lighting");
         self.lighting_state().set_state(Some(state));
         Ok(())
     }
@@ -587,6 +596,7 @@ impl ChoiceCapability for MockDevice {
     }
     async fn set_choice(&self, key: &str, selected: usize) -> Result<()> {
         self.choice_cache().record(key, selected);
+        self.write_order.lock().unwrap().push("choice");
         *self
             .choice_last_set
             .as_ref()
@@ -594,6 +604,34 @@ impl ChoiceCapability for MockDevice {
             .lock()
             .unwrap() = Some((key.to_string(), selected));
         Ok(())
+    }
+}
+
+#[async_trait]
+impl crate::domain::device::OnboardProfilesCapability for MockDevice {
+    async fn switch_profile(&self, _slot: u8) -> Result<()> {
+        Ok(())
+    }
+    async fn restore_profile(&self, _slot: u8) -> Result<()> {
+        Ok(())
+    }
+    async fn set_profile_enabled(&self, _slot: u8, _enabled: bool) -> Result<()> {
+        Ok(())
+    }
+    fn state_key(&self) -> &'static str {
+        "onboard"
+    }
+    async fn restore_state(&self, v: &serde_json::Value) {
+        self.write_order.lock().unwrap().push("onboard");
+        *self
+            .onboard_active_slot
+            .as_ref()
+            .expect("MockDevice: onboard slot not present — call .with_onboard()")
+            .lock()
+            .unwrap() = v
+            .get("active_slot")
+            .and_then(|s| s.as_u64())
+            .map(|s| s as u8);
     }
 }
 

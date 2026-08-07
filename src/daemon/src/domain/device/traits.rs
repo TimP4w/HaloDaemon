@@ -299,15 +299,7 @@ pub trait Device: Send + Sync {
     }
 
     async fn load_state(&self, state: &serde_json::Value) {
-        for cap in self.capabilities() {
-            let key = cap.state_key();
-            if key.is_empty() {
-                continue;
-            }
-            if let Some(v) = state.get(key) {
-                cap.restore_state(v).await;
-            }
-        }
+        restore_capabilities(self.capabilities(), state).await;
     }
 
     /// Driver-specific diagnostic key/value pairs surfaced to the debug UI.
@@ -332,9 +324,63 @@ pub trait Device: Send + Sync {
     }
 }
 
+/// Restore saved state capability by capability, onboard memory first. Onboard
+/// profiles are the device's own copy of its settings, so restoring them
+/// rewrites live state; every other capability has to land on top of that.
+pub(crate) async fn restore_capabilities(caps: Vec<CapabilityRef<'_>>, state: &serde_json::Value) {
+    let (onboard, rest): (Vec<_>, Vec<_>) = caps
+        .into_iter()
+        .partition(|cap| matches!(cap, CapabilityRef::OnboardProfiles(_)));
+    for cap in onboard.into_iter().chain(rest) {
+        let key = cap.state_key();
+        if key.is_empty() {
+            continue;
+        }
+        if let Some(v) = state.get(key) {
+            cap.restore_state(v).await;
+        }
+    }
+}
+
 #[cfg(test)]
 mod tests {
     use super::*;
+
+    #[tokio::test]
+    async fn load_state_restores_onboard_memory_before_every_other_capability() {
+        // The mock declares onboard last, so passing means the order came from
+        // the restore policy rather than from the device's declaration order.
+        let dev = crate::test_support::MockDevice::new("kb")
+            .with_rgb()
+            .with_choice()
+            .with_onboard();
+        dev.load_state(&serde_json::json!({
+            "onboard": { "active_slot": 1 },
+            "rgb": { "state": { "mode": "static", "color": { "r": 167, "g": 139, "b": 250 } } },
+            "choice": { "report_rate": 0 },
+        }))
+        .await;
+
+        assert_eq!(
+            *dev.write_order.lock().unwrap(),
+            vec!["onboard", "lighting", "choice"],
+            "onboard memory rewrites live device state, so it must restore first"
+        );
+    }
+
+    #[tokio::test]
+    async fn load_state_keeps_declared_order_when_there_is_no_onboard_memory() {
+        let dev = crate::test_support::MockDevice::new("kb")
+            .with_rgb()
+            .with_choice();
+        dev.load_state(&serde_json::json!({
+            "rgb": { "state": { "mode": "static", "color": { "r": 1, "g": 2, "b": 3 } } },
+            "choice": { "report_rate": 0 },
+        }))
+        .await;
+
+        assert_eq!(*dev.write_order.lock().unwrap(), vec!["lighting", "choice"]);
+    }
 
     #[test]
     fn cooling_state_slot_round_trip() {
