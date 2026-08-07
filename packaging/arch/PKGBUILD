@@ -1,8 +1,8 @@
 # Maintainer: Timucin Besken <beskent@gmail.com>
 pkgname=halod
-pkgver=0.11.1
+pkgver=0.11.2
 pkgrel=1
-plugin_release=v0.11.1
+plugin_release=v0.11.2
 pkgdesc="Peripheral control daemon (fan curves, RGB, LCD, audio EQ, DPI)"
 arch=('x86_64')
 url="https://github.com/TimP4w/HaloDaemon"
@@ -20,7 +20,7 @@ source=("$pkgname-$pkgver::git+https://github.com/TimP4w/HaloDaemon.git#commit=0
         "official-plugins.bundle::https://github.com/TimP4w/HaloDaemon/releases/download/$plugin_release/official-plugins.bundle"
         "official-plugins-licenses.txt::https://github.com/TimP4w/HaloDaemon/releases/download/$plugin_release/official-plugins-licenses.txt")
 sha256sums=('SKIP'
-            '7da723a6b58e22c4e057fdcd7ffbd685f789cbb5fd1cb6631924a82c6447e61d'
+            '93ebcd79118114c2d7aeae6b69c33bc4425529d7d56cd18eca7b84d9dda3d05d'
             'ae48c219254e00147b95f2db73102bded1050016bbc0758f71eddff7eb786d8f')
 
 prepare() {
