@@ -16,7 +16,7 @@ optdepends=('ffmpeg: LCD video playback'
 install="$pkgname.install"
 # The daemon source is pinned to its immutable release commit. Plugin content is
 # the exact prebuilt bundle produced from the selected signed plugin release.
-source=("$pkgname-$pkgver::git+https://github.com/TimP4w/HaloDaemon.git#commit=2bed057d21994567ca2e165ffec7f71416104bd5"
+source=("$pkgname-$pkgver::git+https://github.com/TimP4w/HaloDaemon.git#commit=5c665406160d17efd1f1ab6a35b59a6659fc00c3"
         "official-plugins.bundle::https://github.com/TimP4w/HaloDaemon/releases/download/$plugin_release/official-plugins.bundle"
         "official-plugins-licenses.txt::https://github.com/TimP4w/HaloDaemon/releases/download/$plugin_release/official-plugins-licenses.txt")
 sha256sums=('SKIP'
