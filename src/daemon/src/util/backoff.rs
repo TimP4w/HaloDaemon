@@ -8,6 +8,7 @@
 
 use std::collections::HashMap;
 use std::future::Future;
+use std::sync::atomic::{AtomicBool, Ordering};
 use std::sync::{Arc, Mutex, MutexGuard};
 use std::time::{Duration, Instant};
 
@@ -71,21 +72,21 @@ pub struct RetryQueue {
 
 struct RetryState {
     streak: FailureStreak,
-    running: Option<tokio::task::AbortHandle>,
+    running: Option<Arc<AtomicBool>>,
 }
 
 impl RetryQueue {
     /// End the episode: drop a queued attempt and forget the streak.
     pub fn clear(&self, key: &str) {
-        if let Some(running) = lock(self).remove(key).and_then(|state| state.running) {
-            running.abort();
+        if let Some(cancelled) = lock(self).remove(key).and_then(|state| state.running) {
+            cancelled.store(true, Ordering::Release);
         }
     }
 
     pub fn clear_all(&self) {
         for (_, state) in lock(self).drain() {
-            if let Some(running) = state.running {
-                running.abort();
+            if let Some(cancelled) = state.running {
+                cancelled.store(true, Ordering::Release);
             }
         }
     }
@@ -107,16 +108,18 @@ where
     let Some((attempt, wait)) = note_failure(&mut keys, key, max_attempts) else {
         return false;
     };
-    let running = tokio::spawn(retry_loop(
+    let cancelled = Arc::new(AtomicBool::new(false));
+    tokio::spawn(retry_loop(
         Arc::clone(queue),
         key.to_owned(),
         max_attempts,
         action,
         attempt,
         wait,
+        Arc::clone(&cancelled),
     ));
     if let Some(state) = keys.get_mut(key) {
-        state.running = Some(running.abort_handle());
+        state.running = Some(cancelled);
     }
     true
 }
@@ -128,23 +131,52 @@ async fn retry_loop<F, Fut>(
     action: F,
     mut attempt: u32,
     mut wait: Duration,
+    cancelled: Arc<AtomicBool>,
 ) where
     F: Fn(u32) -> Fut + Send,
     Fut: Future<Output = Retry> + Send,
 {
     loop {
         tokio::time::sleep(wait).await;
+        if cancelled.load(Ordering::Acquire) {
+            break;
+        }
         if matches!(action(attempt).await, Retry::Stop) {
             break;
         }
-        let Some(next) = note_failure(&mut lock(&queue), &key, max_attempts) else {
+        if cancelled.load(Ordering::Acquire) {
+            break;
+        }
+        let Some(next) = note_retry(&mut lock(&queue), &key, max_attempts, &cancelled) else {
             break;
         };
         (attempt, wait) = next;
     }
-    if let Some(state) = lock(&queue).get_mut(&key) {
+    if let Some(state) = lock(&queue).get_mut(&key).filter(|state| {
+        state
+            .running
+            .as_ref()
+            .is_some_and(|running| Arc::ptr_eq(running, &cancelled))
+    }) {
         state.running = None;
     }
+}
+
+fn note_retry(
+    keys: &mut HashMap<String, RetryState>,
+    key: &str,
+    max_attempts: u32,
+    cancelled: &Arc<AtomicBool>,
+) -> Option<(u32, Duration)> {
+    if !keys
+        .get(key)?
+        .running
+        .as_ref()
+        .is_some_and(|running| Arc::ptr_eq(running, cancelled))
+    {
+        return None;
+    }
+    note_failure(keys, key, max_attempts)
 }
 
 fn lock(queue: &RetryQueue) -> MutexGuard<'_, HashMap<String, RetryState>> {
@@ -263,6 +295,31 @@ mod tests {
         drain().await;
 
         assert!(seen.lock().unwrap().is_empty());
+    }
+
+    #[tokio::test(start_paused = true)]
+    async fn clearing_from_an_action_does_not_abort_the_action() {
+        let queue = Arc::new(RetryQueue::default());
+        let completed = Arc::new(AtomicBool::new(false));
+        assert!(schedule(&queue, "plug", 3, {
+            let queue = Arc::clone(&queue);
+            let completed = Arc::clone(&completed);
+            move |_| {
+                let queue = Arc::clone(&queue);
+                let completed = Arc::clone(&completed);
+                async move {
+                    queue.clear("plug");
+                    tokio::task::yield_now().await;
+                    completed.store(true, Ordering::Release);
+                    Retry::Again
+                }
+            }
+        }));
+
+        drain().await;
+
+        assert!(completed.load(Ordering::Acquire));
+        assert!(schedule(&queue, "plug", 3, |_| async { Retry::Stop }));
     }
 
     #[test]
