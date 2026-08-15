@@ -70,10 +70,16 @@ pub(crate) async fn reconcile_owned_children(
     changed
 }
 
-/// Re-initialize the registered children that are no longer live: a paired slot
+/// Re-establish the registered children after a connection event: a paired slot
 /// survives its device sleeping, so the diff above never revisits one. Each
 /// unreachable child costs a full HID++ timeout — run this per connection event,
 /// never on a poll.
+///
+/// A child that still looks live is restored but not re-initialized. Liveness
+/// only tracks calls the daemon has made, so a device that slept and woke
+/// without one failing in between never stopped looking live even though its
+/// firmware dropped back to its own defaults. Returns whether anything was
+/// re-initialized.
 pub(crate) async fn revive_owned_children(
     device: &Arc<dyn crate::domain::device::Device>,
     app: &Arc<AppState>,
@@ -91,10 +97,13 @@ pub(crate) async fn revive_owned_children(
         let Some(child) = app.find_device_by_id(&child_id).await else {
             continue;
         };
-        if child.is_live()
-            || child.is_unrecoverable()
+        if child.is_unrecoverable()
             || child.active_state() == halod_shared::types::VisibilityState::Disabled
         {
+            continue;
+        }
+        if child.is_live() {
+            super::registration::restore_saved_state(app, &child).await;
             continue;
         }
         match super::registration::init_device(app, &child).await {
@@ -310,8 +319,13 @@ mod tests {
             "an unreachable child is re-initialized and its saved state restored"
         );
         assert!(
-            !awake.load_called.load(Ordering::SeqCst),
-            "a live child is left alone"
+            awake.load_called.load(Ordering::SeqCst),
+            "a connection event means stale firmware even for a child that never \
+             stopped looking live, so its state is restored too"
+        );
+        assert!(
+            !awake.init_called.load(Ordering::SeqCst),
+            "but a working child is not re-initialized"
         );
     }
 

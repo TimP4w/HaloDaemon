@@ -2149,11 +2149,12 @@ impl CoolingCapability for LuaDevice {
         }
     }
 
-    async fn restore_state(&self, value: &serde_json::Value) {
+    async fn restore_state(&self, value: &serde_json::Value) -> bool {
         self.cooling_slot.load(value);
         for channel_id in self.claimed_cooling_channels() {
             self.cooling_slot.clear_curve(&channel_id);
         }
+        true
     }
 
     fn cached_cooling_status(&self) -> Vec<CoolingChannel> {

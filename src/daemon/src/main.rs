@@ -322,6 +322,23 @@ async fn run_daemon(
         || {},
     );
 
+    // Devices that stay enumerated across a host suspend are invisible to both
+    // hotplug observers, but their firmware still forgets everything.
+    let power_app = Arc::clone(&app);
+    supervisor.register(
+        "Resume watcher",
+        "",
+        move || {
+            let app = Arc::clone(&power_app);
+            Box::pin(async move {
+                task_supervisor::TaskHandle(tokio::spawn(
+                    crate::application::observers::power::run(app),
+                ))
+            })
+        },
+        || {},
+    );
+
     // Reconnect/liveness watcher for config-instantiated integration plugins
     // (offline-at-startup, mid-run drops, controller add/remove). Runs beside
     // the HID hotplug monitor.

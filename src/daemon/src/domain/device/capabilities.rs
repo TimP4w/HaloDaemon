@@ -131,8 +131,9 @@ pub trait CoolingCapability: Send + Sync {
     fn save_state(&self) -> serde_json::Value {
         self.cooling_state().save()
     }
-    async fn restore_state(&self, v: &serde_json::Value) {
+    async fn restore_state(&self, v: &serde_json::Value) -> bool {
         self.cooling_state().load(v);
+        true
     }
 }
 
@@ -231,7 +232,7 @@ pub trait LightingCapability: Send + Sync {
             obj.into()
         }
     }
-    async fn restore_state(&self, v: &serde_json::Value) {
+    async fn restore_state(&self, v: &serde_json::Value) -> bool {
         if let Some(z) = v.get("placed_channels") {
             if let Ok(channels) = serde_json::from_value(z.clone()) {
                 self.lighting_state().set_canvas_zones(channels);
@@ -242,13 +243,16 @@ pub trait LightingCapability: Send + Sync {
                 self.lighting_state().set_zone_transforms(transforms);
             }
         }
+        let mut ok = true;
         if let Some(s) = v.get("state") {
             if let Ok(state) = serde_json::from_value(s.clone()) {
                 if let Err(e) = self.apply(state).await {
                     log::warn!("[rgb restore_state] apply failed: {e:#}");
+                    ok = false;
                 }
             }
         }
+        ok
     }
 }
 
@@ -273,15 +277,18 @@ pub trait RangeCapability: Send + Sync {
     fn save_state(&self) -> serde_json::Value {
         self.range_cache().save()
     }
-    async fn restore_state(&self, v: &serde_json::Value) {
+    async fn restore_state(&self, v: &serde_json::Value) -> bool {
+        let mut ok = true;
         for (key, value) in self.range_cache().load_pairs(v) {
             if !self.range_is_writable(&key) {
                 continue;
             }
             if let Err(e) = self.set_range(&key, value).await {
                 log::warn!("[range restore_state] set_range({key}) failed: {e:#}");
+                ok = false;
             }
         }
+        ok
     }
 }
 
@@ -300,12 +307,15 @@ pub trait ChoiceCapability: Send + Sync {
     fn save_state(&self) -> serde_json::Value {
         self.choice_cache().save()
     }
-    async fn restore_state(&self, v: &serde_json::Value) {
+    async fn restore_state(&self, v: &serde_json::Value) -> bool {
+        let mut ok = true;
         for (key, selected) in self.choice_cache().load_pairs(v) {
             if let Err(e) = self.set_choice(&key, selected).await {
                 log::warn!("[choice restore_state] set_choice({key}) failed: {e:#}");
+                ok = false;
             }
         }
+        ok
     }
 }
 
@@ -343,7 +353,8 @@ pub trait BooleanCapability: Send + Sync {
             .map(|c| c.save())
             .unwrap_or(serde_json::Value::Null)
     }
-    async fn restore_state(&self, v: &serde_json::Value) {
+    async fn restore_state(&self, v: &serde_json::Value) -> bool {
+        let mut ok = true;
         if let Some(cache) = self.bool_cache() {
             for (key, value) in cache.load_pairs(v) {
                 if !self.boolean_is_writable(&key) {
@@ -351,9 +362,11 @@ pub trait BooleanCapability: Send + Sync {
                 }
                 if let Err(e) = self.set_boolean(&key, value).await {
                     log::warn!("[boolean restore_state] set_boolean({key}) failed: {e:#}");
+                    ok = false;
                 }
             }
         }
+        ok
     }
 }
 
@@ -425,10 +438,12 @@ pub trait EqualizerCapability: Send + Sync {
             }),
         }
     }
-    async fn restore_state(&self, v: &serde_json::Value) {
+    async fn restore_state(&self, v: &serde_json::Value) -> bool {
+        let mut ok = true;
         if let Some(preset) = v["preset"].as_u64() {
             if let Err(e) = self.set_eq_preset(preset as usize).await {
                 log::warn!("[eq restore_state] set_eq_preset failed: {e:#}");
+                ok = false;
             }
         }
         if let Some(arr) = v["bands"].as_array() {
@@ -439,9 +454,11 @@ pub trait EqualizerCapability: Send + Sync {
             if values.len() == 10 {
                 if let Err(e) = self.set_eq_bands(&values).await {
                     log::warn!("[eq restore_state] set_eq_bands failed: {e:#}");
+                    ok = false;
                 }
             }
         }
+        ok
     }
 }
 
@@ -518,7 +535,9 @@ pub trait DpiCapability: Send + Sync {
     fn save_state(&self) -> serde_json::Value {
         serde_json::Value::Null
     }
-    async fn restore_state(&self, _: &serde_json::Value) {}
+    async fn restore_state(&self, _: &serde_json::Value) -> bool {
+        true
+    }
 }
 
 #[async_trait]
@@ -540,7 +559,9 @@ pub trait OnboardProfilesCapability: Send + Sync {
     fn save_state(&self) -> serde_json::Value {
         serde_json::Value::Null
     }
-    async fn restore_state(&self, _: &serde_json::Value) {}
+    async fn restore_state(&self, _: &serde_json::Value) -> bool {
+        true
+    }
 }
 
 #[async_trait]
@@ -636,7 +657,7 @@ pub trait LcdCapability: Send + Sync {
             "video_path": slot.video_path(),
         })
     }
-    async fn restore_state(&self, v: &serde_json::Value) {
+    async fn restore_state(&self, v: &serde_json::Value) -> bool {
         use halod_shared::types::LcdHealth;
         self.lcd_state().set_health(LcdHealth::Starting);
         let mut failure = None;
@@ -728,10 +749,12 @@ pub trait LcdCapability: Send + Sync {
             }
             _ => self.lcd_state().set_mode(LcdMode::Default),
         }
+        let ok = failure.is_none();
         self.lcd_state().set_health(match failure {
             Some(error) => LcdHealth::Failed(error),
             None => LcdHealth::Stable,
         });
+        ok
     }
 }
 
@@ -757,7 +780,9 @@ pub trait KeyRemapCapability: Send + Sync {
     fn save_state(&self) -> serde_json::Value {
         serde_json::Value::Null
     }
-    async fn restore_state(&self, _: &serde_json::Value) {}
+    async fn restore_state(&self, _: &serde_json::Value) -> bool {
+        true
+    }
 }
 
 /// Resolve a user selection, firmware-detected language, and the profile's

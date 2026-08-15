@@ -88,6 +88,10 @@ pub struct AppState {
     pub development_plugin_repo: RwLock<Option<PathBuf>>,
     /// Backing store for plugin-declared secret config values.
     pub secret_store: Arc<dyn crate::infrastructure::secrets::SecretStore>,
+    /// Pending state-restore retries, keyed by device id. A device that is
+    /// still waking (wireless link not up, firmware not answering) drops the
+    /// writes it is sent, so a one-shot restore silently loses the user's state.
+    pub restore_retry: Arc<crate::util::backoff::RetryQueue>,
 }
 
 impl AppState {
@@ -119,6 +123,7 @@ impl AppState {
             #[cfg(feature = "dev-plugin-repo")]
             development_plugin_repo: RwLock::new(None),
             secret_store: Arc::new(crate::infrastructure::secrets::FileKeyStore::new()),
+            restore_retry: Arc::default(),
         }
     }
 

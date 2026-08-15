@@ -11,20 +11,67 @@ use halod_shared::types::{ConnectionType, VisibilityState, DEFAULT_PROFILE_NAME}
 /// directly so a disconnected layer-shift key cannot remain latched.
 pub async fn close_device(app: &Arc<AppState>, device: &Arc<dyn Device>) {
     app.input.layer_shift_clear_device(device.id());
+    app.restore_retry.clear(device.id());
     device.close().await;
 }
+
+/// How many times a restore that the hardware refused is retried before the
+/// device is left alone until something else touches it.
+const RESTORE_ATTEMPTS: u32 = 4;
 
 /// Load the device's effective saved state, then re-apply its per-zone RGB
 /// transforms (which `load_state` does not cover). Active devices only: state
 /// restoration may perform hardware I/O and must never run for a disabled one.
-pub(super) async fn restore_saved_state(app: &Arc<AppState>, device: &Arc<dyn Device>) {
+///
+/// A restore the hardware refused is retried on the shared backoff: a device
+/// that is still waking answers nothing, and losing its state until the next
+/// manual change is indistinguishable from the daemon never having tried.
+pub(crate) async fn restore_saved_state(app: &Arc<AppState>, device: &Arc<dyn Device>) {
+    // Every caller is a fresh trigger — registration, a connection event, a
+    // profile load, a resume — so an earlier episode's spent attempt budget
+    // must not deny this one its retries.
+    app.restore_retry.clear(device.id());
+    if restore_once(app, device).await {
+        return;
+    }
+    let queue = Arc::clone(&app.restore_retry);
+    let weak = Arc::downgrade(app);
+    let id = device.id().to_owned();
+    crate::util::backoff::schedule(&queue, device.id(), RESTORE_ATTEMPTS, move |attempt| {
+        let weak = weak.clone();
+        let id = id.clone();
+        async move {
+            use crate::util::backoff::Retry;
+            let Some(app) = weak.upgrade() else {
+                return Retry::Stop;
+            };
+            // A device that left the registry between attempts is gone, not slow.
+            let Some(device) = app.find_device_by_id(&id).await else {
+                return Retry::Stop;
+            };
+            if restore_once(&app, &device).await {
+                log::info!(
+                    "[{}] saved state restored on retry {attempt}",
+                    device.name()
+                );
+                return Retry::Stop;
+            }
+            Retry::Again
+        }
+    });
+}
+
+/// One restore pass. Returns whether every capability's state reached the
+/// hardware.
+async fn restore_once(app: &Arc<AppState>, device: &Arc<dyn Device>) -> bool {
     let saved = {
         let cfg = app.config.read().await;
         Some(cfg.effective_device_state(device.id())).filter(|v| !v.is_null())
     };
+    let mut ok = true;
     if let Some(state) = saved {
         log::debug!("[{}] restoring saved state", device.name());
-        device.load_state(&state).await;
+        ok = device.load_state(&state).await;
     }
     if let Some(rgb) = device.as_lighting() {
         let transforms = {
@@ -38,6 +85,7 @@ pub(super) async fn restore_saved_state(app: &Arc<AppState>, device: &Arc<dyn De
             rgb.set_zone_transforms(transforms);
         }
     }
+    ok
 }
 
 /// Empty every engine-participation slot so engines treat the device as
@@ -1003,6 +1051,112 @@ mod tests {
         );
         assert!(link.closed.load(Ordering::SeqCst), "_chain_ child removed");
         assert!(!sibling.closed.load(Ordering::SeqCst), "sibling survives");
+    }
+
+    /// A device asleep at restore time and awake a few seconds later must end
+    /// up holding its saved state, not the state the hardware refused.
+    #[tokio::test(start_paused = true)]
+    async fn a_restore_the_hardware_refused_is_retried_until_it_lands() {
+        let app = Arc::new(AppState::new(Config::default()));
+        let device = Arc::new(MockDevice::new("mouse").with_choice().refusing_writes(2));
+        app.config
+            .write()
+            .await
+            .active_profile_data_mut()
+            .device_states
+            .insert(
+                "mouse".into(),
+                serde_json::json!({ "choice": { "dpi": 3 } }),
+            );
+        app.device_registry
+            .write()
+            .await
+            .push(device.clone() as Arc<dyn Device>);
+
+        restore_saved_state(&app, &(device.clone() as Arc<dyn Device>)).await;
+        assert_eq!(
+            *device.choice_last_set.as_ref().unwrap().lock().unwrap(),
+            None,
+            "the sleeping device acknowledged nothing"
+        );
+
+        tokio::time::sleep(std::time::Duration::from_secs(300)).await;
+
+        assert_eq!(
+            *device.choice_last_set.as_ref().unwrap().lock().unwrap(),
+            Some(("dpi".to_string(), 3)),
+            "the retry must land the state once the device answers"
+        );
+    }
+
+    #[tokio::test(start_paused = true)]
+    async fn a_device_that_never_answers_stops_after_its_attempt_budget() {
+        let app = Arc::new(AppState::new(Config::default()));
+        let device = Arc::new(
+            MockDevice::new("mouse")
+                .with_choice()
+                .refusing_writes(usize::MAX),
+        );
+        app.config
+            .write()
+            .await
+            .active_profile_data_mut()
+            .device_states
+            .insert(
+                "mouse".into(),
+                serde_json::json!({ "choice": { "dpi": 3 } }),
+            );
+        app.device_registry
+            .write()
+            .await
+            .push(device.clone() as Arc<dyn Device>);
+
+        restore_saved_state(&app, &(device.clone() as Arc<dyn Device>)).await;
+        tokio::time::sleep(std::time::Duration::from_secs(600)).await;
+
+        assert_eq!(
+            usize::MAX - device.refusals.load(Ordering::SeqCst),
+            1 + RESTORE_ATTEMPTS as usize,
+            "the first pass plus its bounded retries, then silence"
+        );
+    }
+
+    /// The retry budget is per episode. A resume hours after a device gave up
+    /// has to get a full set of attempts, not the exhausted tail of the old one.
+    #[tokio::test(start_paused = true)]
+    async fn a_later_trigger_gets_a_fresh_attempt_budget() {
+        let app = Arc::new(AppState::new(Config::default()));
+        let device = Arc::new(
+            MockDevice::new("mouse")
+                .with_choice()
+                .refusing_writes(usize::MAX),
+        );
+        app.config
+            .write()
+            .await
+            .active_profile_data_mut()
+            .device_states
+            .insert(
+                "mouse".into(),
+                serde_json::json!({ "choice": { "dpi": 3 } }),
+            );
+        app.device_registry
+            .write()
+            .await
+            .push(device.clone() as Arc<dyn Device>);
+
+        let device_ref = device.clone() as Arc<dyn Device>;
+        restore_saved_state(&app, &device_ref).await;
+        tokio::time::sleep(std::time::Duration::from_secs(600)).await;
+        let spent = usize::MAX - device.refusals.load(Ordering::SeqCst);
+
+        restore_saved_state(&app, &device_ref).await;
+        tokio::time::sleep(std::time::Duration::from_secs(600)).await;
+
+        assert_eq!(
+            usize::MAX - device.refusals.load(Ordering::SeqCst),
+            spent * 2
+        );
     }
 
     #[test]

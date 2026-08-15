@@ -37,17 +37,8 @@ pub async fn load_active_profile(app: Arc<AppState>) {
         devices.len()
     );
     for device in &devices {
-        let effective = {
-            let cfg = app.config.read().await;
-            cfg.effective_device_state(device.id())
-        };
-        if !effective.is_null() {
-            log::debug!(
-                "[Profile] Restoring effective state for '{}'",
-                device.name()
-            );
-            device.load_state(&effective).await;
-        }
+        crate::application::usecases::registry::registration::restore_saved_state(&app, device)
+            .await;
         if let Some(record) = known_devices.get(device.id()) {
             device.set_active_state(record.active_state.clone());
         }

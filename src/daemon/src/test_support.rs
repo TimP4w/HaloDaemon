@@ -95,6 +95,9 @@ pub struct MockDevice {
     init_behavior: InitBehavior,
     /// Set to `true` by the default `load_state()` override when tracking is enabled.
     pub load_called: Arc<AtomicBool>,
+    /// Set to `true` by `initialize()`, for tests distinguishing a re-init from
+    /// a plain state restore.
+    pub init_called: Arc<AtomicBool>,
     /// Set to `true` by `close()`, for tests asserting a device was torn down.
     pub closed: Arc<AtomicBool>,
     /// Backs `Device::is_live`. Defaults to live; flip via `.offline()` or the
@@ -106,6 +109,8 @@ pub struct MockDevice {
     /// Owning plugin id for scoped teardown (see `Device::owning_plugin_id`).
     /// `None` for a normal built-in host device.
     pub owning_plugin_id: Option<String>,
+    /// Remaining capability writes to refuse; see `refusing_writes`.
+    pub refusals: Arc<AtomicUsize>,
     // Capability slots — `None` means the capability is absent.
     pub fan: Option<CoolingStateSlot>,
     /// RPM reported by the cooling channel; `None` (the default) means "no tachometer".
@@ -158,10 +163,12 @@ impl MockDevice {
             keyboard_layout: None,
             init_behavior: InitBehavior::OkTrue,
             load_called: Arc::new(AtomicBool::new(false)),
+            init_called: Arc::new(AtomicBool::new(false)),
             closed: Arc::new(AtomicBool::new(false)),
             live: Arc::new(AtomicBool::new(true)),
             integration_id: None,
             owning_plugin_id: None,
+            refusals: Arc::new(AtomicUsize::new(0)),
             fan: None,
             fan_rpm: None,
             rgb: None,
@@ -187,6 +194,13 @@ impl MockDevice {
             eq_last_preset: None,
             eq_last_bands: None,
         }
+    }
+
+    /// Refuse the next `n` capability writes, standing in for a device whose
+    /// link is not awake yet: it acknowledges nothing and the write times out.
+    pub fn refusing_writes(self, n: usize) -> Self {
+        self.refusals.store(n, Ordering::SeqCst);
+        self
     }
 
     pub fn ok_false(mut self) -> Self {
@@ -369,6 +383,7 @@ impl Device for MockDevice {
         &self.model
     }
     async fn initialize(&self) -> Result<bool> {
+        self.init_called.store(true, Ordering::SeqCst);
         match self.init_behavior {
             InitBehavior::OkTrue => Ok(true),
             InitBehavior::OkFalse => Ok(false),
@@ -392,9 +407,9 @@ impl Device for MockDevice {
         self.live.load(Ordering::SeqCst)
     }
 
-    async fn load_state(&self, state: &serde_json::Value) {
+    async fn load_state(&self, state: &serde_json::Value) -> bool {
         self.load_called.store(true, Ordering::SeqCst);
-        crate::domain::device::restore_capabilities(self.capabilities(), state).await;
+        crate::domain::device::restore_capabilities(self.capabilities(), state).await
     }
 
     fn capabilities(&self) -> Vec<CapabilityRef<'_>> {
@@ -595,6 +610,13 @@ impl ChoiceCapability for MockDevice {
             .expect("MockDevice: ChoiceStateCache not present — call .with_choice()")
     }
     async fn set_choice(&self, key: &str, selected: usize) -> Result<()> {
+        if self
+            .refusals
+            .fetch_update(Ordering::SeqCst, Ordering::SeqCst, |n| n.checked_sub(1))
+            .is_ok()
+        {
+            anyhow::bail!("device did not answer");
+        }
         self.choice_cache().record(key, selected);
         self.write_order.lock().unwrap().push("choice");
         *self
@@ -621,7 +643,7 @@ impl crate::domain::device::OnboardProfilesCapability for MockDevice {
     fn state_key(&self) -> &'static str {
         "onboard"
     }
-    async fn restore_state(&self, v: &serde_json::Value) {
+    async fn restore_state(&self, v: &serde_json::Value) -> bool {
         self.write_order.lock().unwrap().push("onboard");
         *self
             .onboard_active_slot
@@ -632,6 +654,7 @@ impl crate::domain::device::OnboardProfilesCapability for MockDevice {
             .get("active_slot")
             .and_then(|s| s.as_u64())
             .map(|s| s as u8);
+        true
     }
 }
 

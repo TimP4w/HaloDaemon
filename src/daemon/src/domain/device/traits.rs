@@ -62,10 +62,10 @@ macro_rules! capability_dispatch {
                 }
             }
 
-            pub async fn restore_state(&self, v: &serde_json::Value) {
+            pub async fn restore_state(&self, v: &serde_json::Value) -> bool {
                 match self {
                     $( CapabilityRef::$P(c) => c.restore_state(v).await, )*
-                    $( CapabilityRef::$W(_) => {} )*
+                    $( CapabilityRef::$W(_) => true, )*
                 }
             }
 
@@ -298,8 +298,10 @@ pub trait Device: Send + Sync {
         }
     }
 
-    async fn load_state(&self, state: &serde_json::Value) {
-        restore_capabilities(self.capabilities(), state).await;
+    /// Returns whether every capability's saved state actually landed on the
+    /// hardware, so a caller can retry a device that was still waking up.
+    async fn load_state(&self, state: &serde_json::Value) -> bool {
+        restore_capabilities(self.capabilities(), state).await
     }
 
     /// Driver-specific diagnostic key/value pairs surfaced to the debug UI.
@@ -327,19 +329,24 @@ pub trait Device: Send + Sync {
 /// Restore saved state capability by capability, onboard memory first. Onboard
 /// profiles are the device's own copy of its settings, so restoring them
 /// rewrites live state; every other capability has to land on top of that.
-pub(crate) async fn restore_capabilities(caps: Vec<CapabilityRef<'_>>, state: &serde_json::Value) {
+pub(crate) async fn restore_capabilities(
+    caps: Vec<CapabilityRef<'_>>,
+    state: &serde_json::Value,
+) -> bool {
     let (onboard, rest): (Vec<_>, Vec<_>) = caps
         .into_iter()
         .partition(|cap| matches!(cap, CapabilityRef::OnboardProfiles(_)));
+    let mut ok = true;
     for cap in onboard.into_iter().chain(rest) {
         let key = cap.state_key();
         if key.is_empty() {
             continue;
         }
         if let Some(v) = state.get(key) {
-            cap.restore_state(v).await;
+            ok &= cap.restore_state(v).await;
         }
     }
+    ok
 }
 
 #[cfg(test)]
@@ -365,6 +372,21 @@ mod tests {
             *dev.write_order.lock().unwrap(),
             vec!["onboard", "lighting", "choice"],
             "onboard memory rewrites live device state, so it must restore first"
+        );
+    }
+
+    #[tokio::test]
+    async fn load_state_reports_a_capability_the_hardware_refused() {
+        let state = serde_json::json!({ "choice": { "report_rate": 0 } });
+        let dev = crate::test_support::MockDevice::new("kb").with_choice();
+        assert!(dev.load_state(&state).await);
+
+        let refusing = crate::test_support::MockDevice::new("kb")
+            .with_choice()
+            .refusing_writes(1);
+        assert!(
+            !refusing.load_state(&state).await,
+            "a caller cannot retry a restore it was told nothing about"
         );
     }
 

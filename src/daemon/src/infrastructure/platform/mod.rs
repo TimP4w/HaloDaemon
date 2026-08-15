@@ -2,5 +2,6 @@
 pub mod elevation;
 #[cfg(target_os = "linux")]
 pub mod env;
+pub mod power;
 #[cfg(windows)]
 pub mod win32;

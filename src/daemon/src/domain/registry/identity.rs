@@ -512,7 +512,7 @@ impl Device for IdentifiedDevice {
     async fn save_state(&self) -> serde_json::Value {
         self.inner.save_state().await
     }
-    async fn load_state(&self, state: &serde_json::Value) {
+    async fn load_state(&self, state: &serde_json::Value) -> bool {
         self.inner.load_state(state).await
     }
     fn debug_info_extra(&self) -> Vec<(String, String)> {

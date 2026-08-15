@@ -3,4 +3,5 @@
 
 pub mod computer;
 pub mod hid;
+pub mod power;
 pub mod usb_hotplug;
