@@ -326,9 +326,9 @@ pub trait Device: Send + Sync {
     }
 }
 
-/// Restore saved state capability by capability, onboard memory first. Onboard
-/// profiles are the device's own copy of its settings, so restoring them
-/// rewrites live state; every other capability has to land on top of that.
+/// Restore saved state capability by capability: onboard memory first, lighting
+/// last. Onboard profiles rewrite live state, so everything lands on top of them;
+/// a control write can hand the LEDs back to firmware, so lighting settles last.
 pub(crate) async fn restore_capabilities(
     caps: Vec<CapabilityRef<'_>>,
     state: &serde_json::Value,
@@ -336,8 +336,11 @@ pub(crate) async fn restore_capabilities(
     let (onboard, rest): (Vec<_>, Vec<_>) = caps
         .into_iter()
         .partition(|cap| matches!(cap, CapabilityRef::OnboardProfiles(_)));
+    let (lighting, rest): (Vec<_>, Vec<_>) = rest
+        .into_iter()
+        .partition(|cap| matches!(cap, CapabilityRef::Lighting(_)));
     let mut ok = true;
-    for cap in onboard.into_iter().chain(rest) {
+    for cap in onboard.into_iter().chain(rest).chain(lighting) {
         let key = cap.state_key();
         if key.is_empty() {
             continue;
@@ -354,9 +357,9 @@ mod tests {
     use super::*;
 
     #[tokio::test]
-    async fn load_state_restores_onboard_memory_before_every_other_capability() {
-        // The mock declares onboard last, so passing means the order came from
-        // the restore policy rather than from the device's declaration order.
+    async fn load_state_restores_onboard_memory_first_and_lighting_last() {
+        // The mock declares onboard last and lighting first, so passing means the
+        // order came from the restore policy, not the device's declaration order.
         let dev = crate::test_support::MockDevice::new("kb")
             .with_rgb()
             .with_choice()
@@ -370,8 +373,9 @@ mod tests {
 
         assert_eq!(
             *dev.write_order.lock().unwrap(),
-            vec!["onboard", "lighting", "choice"],
-            "onboard memory rewrites live device state, so it must restore first"
+            vec!["onboard", "choice", "lighting"],
+            "a control write can hand the LEDs back to firmware, so the restored \
+             colour has to be the last thing that reaches the device"
         );
     }
 
@@ -391,7 +395,7 @@ mod tests {
     }
 
     #[tokio::test]
-    async fn load_state_keeps_declared_order_when_there_is_no_onboard_memory() {
+    async fn load_state_restores_lighting_last_without_onboard_memory() {
         let dev = crate::test_support::MockDevice::new("kb")
             .with_rgb()
             .with_choice();
@@ -401,7 +405,7 @@ mod tests {
         }))
         .await;
 
-        assert_eq!(*dev.write_order.lock().unwrap(), vec!["lighting", "choice"]);
+        assert_eq!(*dev.write_order.lock().unwrap(), vec!["choice", "lighting"]);
     }
 
     #[test]

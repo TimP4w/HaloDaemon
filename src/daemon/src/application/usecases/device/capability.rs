@@ -35,12 +35,26 @@ pub async fn set_capability_param(
 ) -> Result<()> {
     let dev = require_device_owned_id(&id, &app).await?;
     let effects = apply(dev.as_ref(), &param).await?;
+    repaint_lighting(dev.as_ref()).await;
     if effects.persist {
         persist_device_state(&app, dev.as_ref()).await;
     }
     app.record_change(crate::domain::events::Change::Device(id))
         .await;
     Ok(())
+}
+
+/// Lighting lands after the write that may have taken the LEDs back, the same
+/// order [`crate::domain::device::restore_capabilities`] uses. Best-effort: the
+/// write already succeeded, so a failed repaint must not report it as an error.
+async fn repaint_lighting(dev: &dyn Device) {
+    let Some(rgb) = dev.as_lighting() else { return };
+    let Some(state) = rgb.current_state() else {
+        return;
+    };
+    if let Err(e) = rgb.apply(state).await {
+        log::warn!("[{}] lighting repaint failed: {e:#}", dev.name());
+    }
 }
 
 async fn apply(dev: &dyn Device, param: &CapabilityParam) -> Result<Effects> {
@@ -125,8 +139,10 @@ async fn apply(dev: &dyn Device, param: &CapabilityParam) -> Result<Effects> {
 mod tests {
     use super::*;
     use crate::config::Config;
+    use crate::domain::device::LightingCapability;
     use crate::test_support::MockDevice;
-    use halod_shared::types::{Boolean, EqBand, Equalizer};
+    use halod_shared::types::{Boolean, EqBand, Equalizer, LightingState, RgbColor};
+    use std::sync::atomic::Ordering;
 
     fn make_app(devices: Vec<Arc<dyn Device>>) -> Arc<AppState> {
         let app = Arc::new(AppState::new(Config::default()));
@@ -166,6 +182,56 @@ mod tests {
             .clone()
             .unwrap();
         assert_eq!(last, ("sidetone".to_string(), true));
+    }
+
+    /// The repaint writes `current_state` back, so a device with none is a no-op.
+    fn lit(dev: &MockDevice) {
+        dev.lighting_state().set_state(Some(LightingState::Static {
+            color: RgbColor { r: 1, g: 2, b: 3 },
+        }));
+    }
+
+    async fn toggle_host_mode(dev: Arc<MockDevice>) {
+        let app = make_app(vec![dev as Arc<dyn Device>]);
+        set_capability_param(
+            "dev1".into(),
+            CapabilityParam::Boolean {
+                key: "host_mode".into(),
+                value: false,
+            },
+            app,
+        )
+        .await
+        .unwrap();
+    }
+
+    fn host_mode_boolean() -> Boolean {
+        Boolean {
+            key: "host_mode".into(),
+            label: "Host mode".into(),
+            value: true,
+            read_only: false,
+            category: String::new(),
+            visible_when: None,
+        }
+    }
+
+    #[tokio::test]
+    async fn a_control_write_is_followed_by_a_lighting_repaint() {
+        let dev = Arc::new(
+            MockDevice::new("dev1")
+                .with_rgb()
+                .with_booleans(vec![host_mode_boolean()]),
+        );
+        lit(&dev);
+        toggle_host_mode(dev.clone()).await;
+
+        assert_eq!(
+            dev.rgb_apply_count.load(Ordering::SeqCst),
+            1,
+            "switching to onboard mode hands the LEDs to firmware, so the daemon's \
+             lighting state has to be written again"
+        );
     }
 
     #[tokio::test]
