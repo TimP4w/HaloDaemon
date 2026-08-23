@@ -38,7 +38,7 @@ mod linux {
     /// at 30 s.
     const READY_POLL: Duration = Duration::from_millis(250);
     const SINK_BUDGET: Duration = Duration::from_secs(5);
-    const MONITOR_BUDGET: Duration = Duration::from_secs(3);
+    const MONITOR_BUDGET: Duration = Duration::from_secs(10);
     const STRAY_BUDGET: Duration = Duration::from_secs(1);
 
     /// Module ids held by live sinks. Sink names are not unique across devices,

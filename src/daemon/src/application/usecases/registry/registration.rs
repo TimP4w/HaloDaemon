@@ -64,6 +64,10 @@ pub(crate) async fn restore_saved_state(app: &Arc<AppState>, device: &Arc<dyn De
 /// One restore pass. Returns whether every capability's state reached the
 /// hardware.
 async fn restore_once(app: &Arc<AppState>, device: &Arc<dyn Device>) -> bool {
+    crate::domain::plugin::as_restore(restore_pass(app, device)).await
+}
+
+async fn restore_pass(app: &Arc<AppState>, device: &Arc<dyn Device>) -> bool {
     let saved = {
         let cfg = app.config.read().await;
         Some(cfg.effective_device_state(device.id())).filter(|v| !v.is_null())
@@ -1051,6 +1055,32 @@ mod tests {
         );
         assert!(link.closed.load(Ordering::SeqCst), "_chain_ child removed");
         assert!(!sibling.closed.load(Ordering::SeqCst), "sibling survives");
+    }
+
+    /// An unscoped restore write turns a refusal the device was always going
+    /// to give into a user-facing plugin error and a plugin-wide reload.
+    #[tokio::test]
+    async fn a_restore_pass_scopes_the_writes_it_makes() {
+        let app = Arc::new(AppState::new(Config::default()));
+        let device = Arc::new(MockDevice::new("mouse").with_choice());
+        app.config
+            .write()
+            .await
+            .active_profile_data_mut()
+            .device_states
+            .insert(
+                "mouse".into(),
+                serde_json::json!({ "choice": { "dpi": 3 } }),
+            );
+        app.device_registry
+            .write()
+            .await
+            .push(device.clone() as Arc<dyn Device>);
+
+        restore_saved_state(&app, &(device.clone() as Arc<dyn Device>)).await;
+
+        let scoped = device.restore_scoped.lock().unwrap().clone();
+        assert_eq!(scoped, vec![true], "the restore write was not scoped");
     }
 
     /// A device asleep at restore time and awake a few seconds later must end

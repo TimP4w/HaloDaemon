@@ -137,6 +137,8 @@ pub struct MockDevice {
     /// Initial `current_dpi` returned by `dpi_status()` before any `set_dpi_direct` call.
     pub dpi_initial: Option<u16>,
     pub choice_last_set: Option<Mutex<Option<(String, usize)>>>,
+    /// Whether each capability write saw a speculative-restore scope.
+    pub restore_scoped: Arc<Mutex<Vec<bool>>>,
     pub range_last_set: Option<Mutex<Option<(String, i32)>>>,
     /// Tracks the last `set_button_mapping` call when key_remap is enabled.
     pub key_remap_last_mapping: Option<Mutex<Option<ButtonMapping>>>,
@@ -186,6 +188,7 @@ impl MockDevice {
             dpi_direct_last: None,
             dpi_initial: None,
             choice_last_set: None,
+            restore_scoped: Arc::default(),
             range_last_set: None,
             key_remap_last_mapping: None,
             key_remap_mappings: Vec::new(),
@@ -619,6 +622,10 @@ impl ChoiceCapability for MockDevice {
         }
         self.choice_cache().record(key, selected);
         self.write_order.lock().unwrap().push("choice");
+        self.restore_scoped
+            .lock()
+            .unwrap()
+            .push(crate::domain::plugin::restore_in_flight());
         *self
             .choice_last_set
             .as_ref()

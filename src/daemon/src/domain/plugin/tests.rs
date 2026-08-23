@@ -523,3 +523,21 @@ fn dev_repo_is_additive_and_wins_id_collisions() {
         "the dev tree must win the collision over the configured repo"
     );
 }
+
+#[tokio::test]
+async fn the_restore_scope_covers_its_own_task_only() {
+    assert!(!super::restore_in_flight());
+
+    let seen = super::as_restore(async {
+        // A concurrently spawned task is a separate activation: a user-driven
+        // call must keep reporting while a restore is in flight.
+        let sibling = tokio::spawn(async { super::restore_in_flight() })
+            .await
+            .expect("sibling task");
+        (super::restore_in_flight(), sibling)
+    })
+    .await;
+
+    assert_eq!(seen, (true, false));
+    assert!(!super::restore_in_flight(), "the scope ends with the pass");
+}

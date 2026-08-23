@@ -1295,9 +1295,13 @@ impl LuaDevice {
             }
             Err(e) => {
                 let detail = format!("{e:#}");
-                app.registry
-                    .report_runtime_error(&app, &self.plugin_id, &self.id, detail.clone())
-                    .await;
+                if crate::domain::plugin::restore_in_flight() {
+                    log::debug!("[{}] restore call failed: {detail}", self.id);
+                } else {
+                    app.registry
+                        .report_runtime_error(&app, &self.plugin_id, &self.id, detail.clone())
+                        .await;
+                }
                 Err(crate::domain::plugin::SurfacedPluginError {
                     plugin: self.plugin_id.clone(),
                     detail,

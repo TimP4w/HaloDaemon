@@ -10,6 +10,7 @@
 Description=HaloDaemon device daemon
 PartOf=graphical-session.target
 After=graphical-session.target
+After=pipewire.service pipewire-pulse.service pipewire-pulse.socket wireplumber.service
 
 [Service]
 ExecStart=/usr/bin/halod

@@ -61,6 +61,24 @@ pub(crate) const PLUGIN_VM_MEMORY_BYTES: usize = 64 * 1024 * 1024;
 /// Instruction budget per plugin callback / effect render, reset per call.
 pub(crate) const PLUGIN_INSTRUCTION_BUDGET: u64 = 50_000_000;
 
+tokio::task_local! {
+    static RESTORING: ();
+}
+
+/// Run `f` as a speculative state restore.
+///
+/// A restore the hardware refuses is expected — the device may be asleep, or a
+/// receiver slot may have just lost its device to a cable — and it already
+/// retries on its own backoff, so it must not escalate into a user-facing
+/// plugin error and the plugin-wide reload that one triggers.
+pub(crate) async fn as_restore<F: std::future::Future>(f: F) -> F::Output {
+    RESTORING.scope((), f).await
+}
+
+pub(crate) fn restore_in_flight() -> bool {
+    RESTORING.try_with(|_| ()).is_ok()
+}
+
 /// A callback failure already reported through `PluginRuntimeError`. The IPC
 /// layer uses this marker to avoid a second generic stack-trace toast.
 #[derive(Debug)]

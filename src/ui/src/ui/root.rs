@@ -73,6 +73,17 @@ impl App {
         // applied by each backend after `draw` — not here, so it isn't run twice.
         if let Some(debug) = crate::runtime::ipc::take_changed(&mut self.ui.debug, "debug") {
             self.debug_cache = debug;
+            let failing: Vec<_> = self
+                .debug_cache
+                .as_ref()
+                .map(|i| {
+                    crate::ui::screens::depcheck::failing(i)
+                        .iter()
+                        .map(|d| d.id)
+                        .collect()
+                })
+                .unwrap_or_default();
+            self.depcheck_grace.observe(&failing);
         }
         if let Some(status) =
             crate::runtime::ipc::take_changed(&mut self.ui.udev_rules, "udev_rules")

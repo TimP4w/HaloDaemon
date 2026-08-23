@@ -129,7 +129,13 @@ in
       description = "HaloDaemon device daemon";
       wantedBy = [ "graphical-session.target" ];
       partOf = [ "graphical-session.target" ];
-      after = [ "graphical-session.target" ];
+      after = [
+        "graphical-session.target"
+        "pipewire.service"
+        "pipewire-pulse.service"
+        "pipewire-pulse.socket"
+        "wireplumber.service"
+      ];
       serviceConfig = {
         ExecStart = "${cfg.package}/bin/halod";
         Restart = "on-failure";

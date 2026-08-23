@@ -4,7 +4,7 @@
 use crate::domain::topic_store::TopicStore;
 use crate::ui::components as widgets;
 use egui::RichText;
-use halod_shared::debug_info::{DebugInfo, DependencyStatus};
+use halod_shared::debug_info::{DebugInfo, DependencyRule, DependencyStatus};
 
 use crate::runtime::ipc::CommandTx;
 use crate::ui::theme;
@@ -31,18 +31,32 @@ pub enum GraceAction {
 pub struct GraceState {
     connected_at: Option<f64>,
     recheck_sent: bool,
+    last_failing: Option<Vec<DependencyRule>>,
+    confirmed: bool,
 }
 
 impl GraceState {
+    /// A snapshot taken while the session is still coming up can report a
+    /// dependency that settles moments later, so the dialog gates on a failing
+    /// set two consecutive snapshots agree on.
+    pub fn observe(&mut self, failing: &[DependencyRule]) {
+        self.confirmed = self.last_failing.as_deref() == Some(failing);
+        self.last_failing = Some(failing.to_vec());
+    }
+
     pub fn advance(&mut self, connected: bool, time: f64, grace_secs: f64) -> (bool, GraceAction) {
         match (connected, self.connected_at) {
             (true, None) => {
                 self.connected_at = Some(time);
                 self.recheck_sent = false;
+                self.last_failing = None;
+                self.confirmed = false;
             }
             (false, _) => {
                 self.connected_at = None;
                 self.recheck_sent = false;
+                self.last_failing = None;
+                self.confirmed = false;
             }
             _ => {}
         }
@@ -57,7 +71,7 @@ impl GraceState {
             }
             _ => GraceAction::None,
         };
-        (within_grace, action)
+        (within_grace || !self.confirmed, action)
     }
 }
 
@@ -262,24 +276,31 @@ mod tests {
         }
     }
 
+    /// Confirms `failing` so only the grace window still gates the dialog.
+    fn confirm(g: &mut GraceState, failing: &[DependencyRule]) {
+        g.observe(failing);
+        g.observe(failing);
+    }
+
     #[test]
     fn grace_suppresses_dialog_until_it_elapses() {
         let mut g = GraceState::default();
-        let (within_grace, action) = g.advance(true, 0.0, 4.0);
-        assert!(within_grace);
+        let (suppressed, action) = g.advance(true, 0.0, 4.0);
+        assert!(suppressed);
         assert!(matches!(action, GraceAction::RepaintAfter(secs) if secs == 4.0));
+        confirm(&mut g, &[DependencyRule::Ffmpeg]);
 
-        let (within_grace, action) = g.advance(true, 3.9, 4.0);
-        assert!(within_grace);
+        let (suppressed, action) = g.advance(true, 3.9, 4.0);
+        assert!(suppressed);
         assert!(matches!(action, GraceAction::RepaintAfter(_)));
 
-        let (within_grace, action) = g.advance(true, 4.1, 4.0);
-        assert!(!within_grace);
+        let (suppressed, action) = g.advance(true, 4.1, 4.0);
+        assert!(!suppressed);
         assert!(matches!(action, GraceAction::Recheck));
 
         // The recheck only fires once per grace window.
-        let (within_grace, action) = g.advance(true, 5.0, 4.0);
-        assert!(!within_grace);
+        let (suppressed, action) = g.advance(true, 5.0, 4.0);
+        assert!(!suppressed);
         assert!(matches!(action, GraceAction::None));
     }
 
@@ -287,14 +308,45 @@ mod tests {
     fn grace_resets_on_disconnect_and_reconnect() {
         let mut g = GraceState::default();
         g.advance(true, 10.0, 4.0);
+        confirm(&mut g, &[DependencyRule::Ffmpeg]);
         g.advance(true, 15.0, 4.0); // past grace, recheck already sent
-        let (within_grace, _) = g.advance(false, 15.5, 4.0);
-        assert!(!within_grace);
+        g.advance(false, 15.5, 4.0);
 
         // Reconnecting restarts the grace window from the new timestamp.
-        let (within_grace, action) = g.advance(true, 20.0, 4.0);
-        assert!(within_grace);
+        let (suppressed, action) = g.advance(true, 20.0, 4.0);
+        assert!(suppressed);
         assert!(matches!(action, GraceAction::RepaintAfter(secs) if secs == 4.0));
+    }
+
+    #[test]
+    fn a_lone_snapshot_never_releases_the_dialog() {
+        let mut g = GraceState::default();
+        g.advance(true, 0.0, 4.0);
+        g.observe(&[DependencyRule::GnomeExtension]);
+        assert!(g.advance(true, 4.1, 4.0).0);
+    }
+
+    #[test]
+    fn a_dependency_that_settles_never_releases_the_dialog() {
+        let mut g = GraceState::default();
+        g.advance(true, 0.0, 4.0);
+        // The startup snapshot catches the shell mid-launch; the recheck is clean.
+        g.observe(&[DependencyRule::GnomeExtension]);
+        g.observe(&[]);
+        assert!(g.advance(true, 4.1, 4.0).0);
+    }
+
+    #[test]
+    fn reconnecting_discards_the_previous_confirmation() {
+        let mut g = GraceState::default();
+        g.advance(true, 0.0, 4.0);
+        confirm(&mut g, &[DependencyRule::UdevRules]);
+        assert!(!g.advance(true, 4.1, 4.0).0);
+
+        g.advance(false, 5.0, 4.0);
+        g.advance(true, 6.0, 4.0);
+        g.observe(&[DependencyRule::UdevRules]);
+        assert!(g.advance(true, 10.1, 4.0).0);
     }
 
     fn info(dependencies: Vec<DependencyStatus>) -> DebugInfo {
