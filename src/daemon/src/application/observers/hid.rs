@@ -275,14 +275,31 @@ fn devices_to_register<'a>(
 pub(crate) async fn handle_hid_key_removed(app: Arc<AppState>, key: String) {
     let entry = app.hid.untrack(&key).await;
     if let Some(HidTrackingEntry::Primary(arcs)) = entry {
+        // Children a receiver registered after it was tracked (a paired device
+        // that woke later) share its worker and die with it.
+        let owned_children = {
+            let tracked: HashSet<&str> = arcs.iter().map(|d| d.id()).collect();
+            let mut owners = app.device_registry.children.lock().await;
+            let owned: HashSet<String> = tracked
+                .iter()
+                .filter_map(|id| owners.remove(*id))
+                .flatten()
+                .collect();
+            for children in owners.values_mut() {
+                children.retain(|id| !tracked.contains(id.as_str()) && !owned.contains(id));
+            }
+            owned
+        };
         let to_close: Vec<Arc<dyn Device>> = {
             let mut devs = app.device_registry.write().await;
             let closing: Vec<_> = devs
                 .iter()
-                .filter(|d| arcs.iter().any(|a| Arc::ptr_eq(a, d)))
+                .filter(|d| {
+                    arcs.iter().any(|a| Arc::ptr_eq(a, d)) || owned_children.contains(d.id())
+                })
                 .cloned()
                 .collect();
-            devs.retain(|d| !arcs.iter().any(|a| Arc::ptr_eq(a, d)));
+            devs.retain(|d| !closing.iter().any(|c| Arc::ptr_eq(c, d)));
             closing
         };
         let mut should_rescan_controllers = false;
@@ -294,7 +311,8 @@ pub(crate) async fn handle_hid_key_removed(app: Arc<AppState>, key: String) {
                 break;
             }
         }
-        for d in &to_close {
+        // Children register after their root, so reverse order closes them first.
+        for d in to_close.iter().rev() {
             crate::application::usecases::registry::registration::close_device(&app, d).await;
         }
         log::info!("Hotplug: removed device(s) for key {key}");
@@ -419,4 +437,60 @@ async fn add_hid_device(
         }
     };
     app.hid.track(key, HidTrackingEntry::Primary(arcs)).await;
+}
+
+#[cfg(test)]
+mod tests {
+    use super::*;
+    use crate::config::Config;
+    use crate::test_support::MockDevice;
+    use std::sync::atomic::Ordering;
+
+    #[tokio::test]
+    async fn removing_a_hid_key_closes_children_registered_after_tracking() {
+        let app = Arc::new(AppState::new(Config::default()));
+        let root = Arc::new(MockDevice::new("logitech-c547"));
+        let late_child = Arc::new(MockDevice::new("logitech_6B3DD4CD"));
+        let unrelated = Arc::new(MockDevice::new("other"));
+        app.device_registry.write().await.push(root.clone());
+        app.hid
+            .track(
+                "046d:c547:".into(),
+                HidTrackingEntry::Primary(vec![root.clone()]),
+            )
+            .await;
+        {
+            let mut devices = app.device_registry.write().await;
+            devices.push(late_child.clone());
+            devices.push(unrelated.clone());
+        }
+        app.device_registry
+            .children
+            .lock()
+            .await
+            .entry("logitech-c547".into())
+            .or_default()
+            .insert("logitech_6B3DD4CD".into());
+
+        handle_hid_key_removed(Arc::clone(&app), "046d:c547:".into()).await;
+
+        let remaining: Vec<String> = app
+            .device_registry
+            .read()
+            .await
+            .iter()
+            .map(|d| d.id().to_owned())
+            .collect();
+        assert_eq!(remaining, vec!["other".to_owned()]);
+        assert!(root.closed.load(Ordering::SeqCst));
+        assert!(late_child.closed.load(Ordering::SeqCst));
+        assert!(!unrelated.closed.load(Ordering::SeqCst));
+        assert!(app
+            .device_registry
+            .children
+            .lock()
+            .await
+            .get("logitech-c547")
+            .is_none());
+    }
 }
