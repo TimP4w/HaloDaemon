@@ -2256,12 +2256,7 @@ mod tests {
             r#"
                 return {
                   render_effect_solid = function(buf, ctx)
-                    for i = 0, #buf - 1, 4 do
-                      buf:set_u8(i, 9)
-                      buf:set_u8(i + 1, 8)
-                      buf:set_u8(i + 2, 7)
-                      buf:set_u8(i + 3, 255)
-                    end
+                    buf:set_bytes(0, string.rep(string.char(9, 8, 7, 255), #buf // 4))
                   end,
                   led_effect_ramp = function(leds, ctx)
                     local out = {}
