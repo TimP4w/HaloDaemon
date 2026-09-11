@@ -212,16 +212,15 @@ impl HwmonTransport {
         }
         match chip.read(attribute) {
             Ok(value) => Ok(Some(value)),
-            Err(error) if error.kind() == std::io::ErrorKind::NotFound => Ok(None),
-            Err(error) => {
+            Err(error) if error.kind() == std::io::ErrorKind::PermissionDenied => {
                 let detail = format!("reading hwmon attribute {attribute}: {error}");
-                if error.kind() == std::io::ErrorKind::PermissionDenied {
-                    self.unrecoverable
-                        .lock()
-                        .unwrap()
-                        .get_or_insert(detail.clone());
-                }
+                self.unrecoverable.lock().unwrap().get_or_insert(detail);
                 Err(error).with_context(|| format!("reading hwmon attribute {attribute}"))
+            }
+            // ENODATA from a sleeping sensor, ELOOP from a removed device's stale sysfs link.
+            Err(error) => {
+                log::debug!("hwmon attribute {attribute} unavailable: {error}");
+                Ok(None)
             }
         }
     }
@@ -407,6 +406,20 @@ mod tests {
         assert_eq!(
             stable_id(path),
             "pci0000_00_0000_00_01_2_0000_02_00_0_nvme_nvme0"
+        );
+    }
+
+    #[test]
+    fn unreadable_sensor_is_unavailable_rather_than_an_error() {
+        let (root, _) = fixture();
+        let chip = root.path().join("hwmon0");
+        std::os::unix::fs::symlink("temp2_label", chip.join("temp2_label")).unwrap();
+        let transport = HwmonTransport::discover_at(root.path(), None).unwrap();
+        assert_eq!(transport.read("0", "temp2_label").unwrap(), None);
+        assert_eq!(transport.unrecoverable_error(), None);
+        assert_eq!(
+            transport.read("0", "temp1_input").unwrap().as_deref(),
+            Some("42000\n")
         );
     }
 
