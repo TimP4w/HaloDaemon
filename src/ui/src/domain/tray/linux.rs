@@ -163,7 +163,9 @@ impl HalodTray {
 fn load_icon() -> Vec<ksni::Icon> {
     let (rgba, width, height) = render_icon_rgba();
     let data = rgba
-        .chunks_exact(4)
+        .as_chunks::<4>()
+        .0
+        .iter()
         .flat_map(|p| [p[3], p[0], p[1], p[2]])
         .collect();
     vec![ksni::Icon {

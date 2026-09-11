@@ -133,7 +133,9 @@ pub fn pack(sizes: &[widget_view::Size]) -> Vec<Cell> {
     let mut cells = Vec::with_capacity(sizes.len());
     for &size in sizes {
         let (col, row) = 'placed: {
-            for row in 0.. {
+            // A fresh row always fits, so the scan ends at the first empty one.
+            let first_empty_row = grid.len();
+            for row in 0..=first_empty_row {
                 while grid.len() < row + size.rows {
                     grid.push([false; UNITS]);
                 }

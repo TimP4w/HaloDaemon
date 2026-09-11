@@ -302,7 +302,10 @@ mod tests {
             fill_circle(image, (500.0, 500.0), 20.0, RED);
             stroke_polyline(image, &[(-100.0, -100.0), (900.0, 900.0)], 4.0, false, RED);
         });
-        assert!(bytes.chunks_exact(4).any(|px| px[3] > 0), "diagonal drawn");
+        assert!(
+            bytes.as_chunks::<4>().0.iter().any(|px| px[3] > 0),
+            "diagonal drawn"
+        );
     }
 
     #[test]
@@ -325,7 +328,9 @@ mod tests {
             )
         });
         let max_alpha = half
-            .chunks_exact(4)
+            .as_chunks::<4>()
+            .0
+            .iter()
             .map(|px| px[3])
             .max()
             .expect("non-empty");

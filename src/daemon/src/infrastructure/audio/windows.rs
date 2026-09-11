@@ -67,19 +67,25 @@ fn buffer_to_f32(bytes: &[u8], format: &WAVEFORMATEX) -> Vec<f32> {
     } else {
         match format.wBitsPerSample {
             16 => bytes
-                .chunks_exact(2)
-                .map(|c| i16::from_le_bytes([c[0], c[1]]) as f32 / 32768.0)
+                .as_chunks::<2>()
+                .0
+                .iter()
+                .map(|c| i16::from_le_bytes(*c) as f32 / 32768.0)
                 .collect(),
             24 => bytes
-                .chunks_exact(3)
+                .as_chunks::<3>()
+                .0
+                .iter()
                 .map(|c| {
                     let sample = i32::from_le_bytes([c[0], c[1], c[2], 0]) << 8 >> 8;
                     sample as f32 / 8_388_608.0
                 })
                 .collect(),
             32 => bytes
-                .chunks_exact(4)
-                .map(|c| i32::from_le_bytes(c.try_into().unwrap()) as f32 / 2_147_483_648.0)
+                .as_chunks::<4>()
+                .0
+                .iter()
+                .map(|c| i32::from_le_bytes(*c) as f32 / 2_147_483_648.0)
                 .collect(),
             _ => Vec::new(),
         }

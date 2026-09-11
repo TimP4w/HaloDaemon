@@ -263,7 +263,7 @@ pub fn rotate_rgba_square(rgba: &[u8], size: u32, degrees: u32) -> Vec<u8> {
 /// stream format.
 pub fn rgba_to_bgr888(rgba: &[u8]) -> Vec<u8> {
     let mut out = Vec::with_capacity(rgba.len() / 4 * 3);
-    for px in rgba.chunks_exact(4) {
+    for px in rgba.as_chunks::<4>().0 {
         out.extend_from_slice(&[px[2], px[1], px[0]]);
     }
     out
@@ -289,7 +289,9 @@ pub fn rgba_to_q565(rgba: &[u8], width: u32, height: u32) -> Result<Vec<u8>> {
         anyhow::bail!("frame {width}x{height} exceeds Q565 u16 dimension limit");
     }
     let rgb565: Vec<u16> = rgba
-        .chunks_exact(4)
+        .as_chunks::<4>()
+        .0
+        .iter()
         .map(|p| encode_rgb565_unchecked(rgb888_to_rgb565([p[0], p[1], p[2]])))
         .collect();
     let mut out = Vec::with_capacity(8 + pixels);
@@ -541,7 +543,11 @@ mod tests {
             .unwrap();
         let rgba = decode_static_image_rgba(&png, 4, 4).unwrap();
         assert_eq!(rgba.len(), 4 * 4 * 4);
-        assert!(rgba.chunks_exact(4).all(|px| px == [255, 0, 0, 255]));
+        assert!(rgba
+            .as_chunks::<4>()
+            .0
+            .iter()
+            .all(|px| *px == [255, 0, 0, 255]));
     }
 
     proptest::proptest! {

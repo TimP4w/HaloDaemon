@@ -2130,7 +2130,7 @@ mod tests {
             HashMap::new(),
         );
         let pixels = worker.render(input(true)).await.unwrap();
-        assert!(pixels.chunks_exact(4).any(|pixel| pixel[3] != 0));
+        assert!(pixels.as_chunks::<4>().0.iter().any(|pixel| pixel[3] != 0));
     }
 
     #[tokio::test]
@@ -2170,10 +2170,14 @@ mod tests {
         assert_eq!(pixel(10, 5), [255, 0, 0, 128]);
         assert_eq!(pixel(4, 6), [0, 0, 0, 0]);
         assert!(pixels
-            .chunks_exact(4)
+            .as_chunks::<4>()
+            .0
+            .iter()
             .any(|pixel| pixel[1] != 0 && pixel[3] == 255));
         assert!(pixels
-            .chunks_exact(4)
+            .as_chunks::<4>()
+            .0
+            .iter()
             .any(|pixel| pixel[2] != 0 && pixel[3] == 255));
     }
 
@@ -2246,7 +2250,9 @@ mod tests {
         );
         let pixels = worker.render(input(true)).await.unwrap();
         let visible: Vec<_> = pixels
-            .chunks_exact(4)
+            .as_chunks::<4>()
+            .0
+            .iter()
             .enumerate()
             .filter(|(_, pixel)| pixel[3] != 0)
             .map(|(index, _)| (index % 32, index / 32))
@@ -2357,7 +2363,14 @@ mod tests {
             EffectParamValue::Bool(true),
         );
         let styled = worker.render(styled_input).await.unwrap();
-        let visible = |bytes: &[u8]| bytes.chunks_exact(4).filter(|pixel| pixel[3] != 0).count();
+        let visible = |bytes: &[u8]| {
+            bytes
+                .as_chunks::<4>()
+                .0
+                .iter()
+                .filter(|pixel| pixel[3] != 0)
+                .count()
+        };
 
         assert_ne!(styled, normal);
         assert!(visible(&styled) > visible(&normal));
@@ -2470,12 +2483,8 @@ mod tests {
         render.images.insert("photo.png".to_owned(), red);
         render.assets.insert("logo.svg".to_owned(), green);
         let pixels = worker.render(render).await.unwrap();
-        assert!(pixels
-            .chunks_exact(4)
-            .any(|pixel| pixel == [255, 0, 0, 255]));
-        assert!(pixels
-            .chunks_exact(4)
-            .any(|pixel| pixel == [0, 255, 0, 255]));
+        assert!(pixels.as_chunks::<4>().0.contains(&[255, 0, 0, 255]));
+        assert!(pixels.as_chunks::<4>().0.contains(&[0, 255, 0, 255]));
     }
 
     #[tokio::test]
@@ -2508,7 +2517,7 @@ mod tests {
             },
         );
         let pixels = worker.render(render).await.unwrap();
-        assert!(pixels.chunks_exact(4).any(|pixel| pixel == [0, 255, 0, 64]));
+        assert!(pixels.as_chunks::<4>().0.contains(&[0, 255, 0, 64]));
     }
 
     #[tokio::test]

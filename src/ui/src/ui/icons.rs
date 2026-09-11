@@ -139,7 +139,9 @@ fn rasterize_mask(bytes: &[u8], target: u32) -> Option<egui::ColorImage> {
     let pixmap = crate::svg::rasterize(bytes, Some(target))?;
     let rgba: Vec<u8> = pixmap
         .data()
-        .chunks_exact(4)
+        .as_chunks::<4>()
+        .0
+        .iter()
         .flat_map(|px| [255, 255, 255, px[3]])
         .collect();
     Some(egui::ColorImage::from_rgba_unmultiplied(

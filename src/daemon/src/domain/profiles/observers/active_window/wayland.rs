@@ -102,10 +102,11 @@ impl Dispatch<ZwlrForeignToplevelHandleV1, ()> for AppData {
             }
             zwlr_foreign_toplevel_handle_v1::Event::State { state: raw_state } => {
                 use zwlr_foreign_toplevel_handle_v1::State as TState;
-                let is_activated = raw_state.chunks_exact(4).any(|b| {
-                    u32::from_ne_bytes(b.try_into().expect("chunks_exact(4) guarantees 4 bytes"))
-                        == TState::Activated as u32
-                });
+                let is_activated = raw_state
+                    .as_chunks::<4>()
+                    .0
+                    .iter()
+                    .any(|b| u32::from_ne_bytes(*b) == TState::Activated as u32);
                 state.toplevels.entry(id).or_default().activated = is_activated;
             }
             zwlr_foreign_toplevel_handle_v1::Event::Done => {

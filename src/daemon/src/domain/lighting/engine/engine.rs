@@ -1201,7 +1201,9 @@ mod tests {
         }
         async fn write_frame(&self, _zone_id: &str, bytes: &[u8]) -> Result<()> {
             let colors: Vec<RgbColor> = bytes
-                .chunks_exact(3)
+                .as_chunks::<3>()
+                .0
+                .iter()
                 .map(|chunk| RgbColor {
                     r: chunk[0],
                     g: chunk[1],

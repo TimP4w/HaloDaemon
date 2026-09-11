@@ -283,7 +283,7 @@ unsafe fn encode_hicon_png(icon: HICON) -> Option<Vec<u8>> {
     }
 
     // GDI gives us BGRA; image crate needs RGBA.
-    for chunk in pixels.chunks_exact_mut(4) {
+    for chunk in pixels.as_chunks_mut::<4>().0 {
         chunk.swap(0, 2);
     }
 

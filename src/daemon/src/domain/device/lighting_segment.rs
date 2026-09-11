@@ -280,7 +280,9 @@ impl LightingCapability for LightingSegmentDevice {
             "invalid lighting frame length"
         );
         let colors: Vec<_> = bytes
-            .chunks_exact(3)
+            .as_chunks::<3>()
+            .0
+            .iter()
             .map(|chunk| RgbColor {
                 r: chunk[0],
                 g: chunk[1],

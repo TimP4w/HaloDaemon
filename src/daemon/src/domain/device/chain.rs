@@ -922,7 +922,11 @@ mod tests {
             assert_eq!(colors.len(), 360);
             if i % 2 == 0 {
                 assert!(
-                    colors.chunks_exact(3).all(|pixel| pixel == [255, 0, 0]),
+                    colors
+                        .as_chunks::<3>()
+                        .0
+                        .iter()
+                        .all(|pixel| *pixel == [255, 0, 0]),
                     "write {i} should be red"
                 );
             } else {

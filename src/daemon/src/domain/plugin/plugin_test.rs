@@ -814,7 +814,7 @@ fn validate_lcd_widgets(runtime: &tokio::runtime::Handle, manifest: &PluginManif
             },
         ))?;
         anyhow::ensure!(
-            pixels.chunks_exact(4).any(|pixel| pixel[3] != 0),
+            pixels.as_chunks::<4>().0.iter().any(|pixel| pixel[3] != 0),
             "widget '{}' preview is completely transparent",
             widget.id
         );
