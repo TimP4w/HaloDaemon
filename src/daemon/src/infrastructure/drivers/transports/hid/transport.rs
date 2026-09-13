@@ -126,6 +126,25 @@ async fn write_batch(
 const EVENT_QUEUE_CAPACITY: usize = 256;
 const INPUT_REPORT_MAX: usize = 4096;
 
+/// Above the Linux hidraw ring (64 reports), which drops new arrivals once
+/// full: a request handle left unread across fire-and-forget writes would
+/// otherwise lose the reply to the next request.
+const STALE_DRAIN_LIMIT: usize = 256;
+
+fn drain_stale_reports(
+    mut read: impl FnMut() -> Result<Vec<u8>>,
+    mut sink: impl FnMut(Vec<u8>),
+) -> Result<usize> {
+    for drained in 0..STALE_DRAIN_LIMIT {
+        let report = read()?;
+        if report.is_empty() {
+            return Ok(drained);
+        }
+        sink(report);
+    }
+    Ok(STALE_DRAIN_LIMIT)
+}
+
 /// Endpoint label carried by an event report the protocol layer deferred: the
 /// original short/long collection is not recoverable once the bytes crossed the
 /// `read_any` boundary, and the label is informational only.
@@ -413,6 +432,48 @@ impl HidTransport {
         build_frame(data, self.report_size)
     }
 
+    async fn begin_write(&self, len: usize) -> Result<&HidState> {
+        let state = self.io.write_access(len).await?;
+        let handles: Vec<_> = std::iter::once(&state.primary)
+            .chain(state.companion.iter())
+            .map(|io| Arc::clone(&io.read_dev))
+            .collect();
+        let listener_started = *self.event_listener_started.lock().unwrap();
+        let events = (!listener_started).then(|| Arc::clone(&self.events));
+        let drained = tokio::task::spawn_blocking(move || -> Result<usize> {
+            let mut buf = vec![0u8; INPUT_REPORT_MAX];
+            let mut total = 0;
+            for dev in handles {
+                let Ok(guard) = dev.try_lock() else {
+                    continue;
+                };
+                total += drain_stale_reports(
+                    || {
+                        let n = guard
+                            .read_timeout(&mut buf, 0)
+                            .map_err(|e| anyhow::anyhow!("HID read error: {e}"))?;
+                        Ok(buf[..n].to_vec())
+                    },
+                    |report| {
+                        if let Some(events) = &events {
+                            events.defer(report);
+                        }
+                    },
+                )?;
+            }
+            Ok(total)
+        })
+        .await
+        .context("spawn_blocking panicked")??;
+        if drained > 0 {
+            log::trace!(
+                "[HidTransport] dropped {drained} stale input reports before a write on {}",
+                self.primary_path
+            );
+        }
+        Ok(state)
+    }
+
     fn start_event_listener(&self) -> Result<()> {
         let mut started = self.event_listener_started.lock().unwrap();
         if *started {
@@ -450,7 +511,7 @@ impl HidTransport {
 impl Transport for HidTransport {
     async fn write(&self, data: &[u8]) -> Result<()> {
         let framed = self.frame(data);
-        let state = self.io.write_access(framed.len()).await?;
+        let state = self.begin_write(framed.len()).await?;
         let dev = Arc::clone(&state.primary.write_dev);
         let use_feature_report = self.use_feature_report;
         tokio::task::spawn_blocking(move || {
@@ -471,7 +532,7 @@ impl Transport for HidTransport {
 
     async fn write_then_read(&self, data: &[u8], size: usize) -> Result<Vec<u8>> {
         let framed = self.frame(data);
-        let state = self.io.write_access(framed.len()).await?;
+        let state = self.begin_write(framed.len()).await?;
         let use_feature_report = self.use_feature_report;
         let write_dev = Arc::clone(&state.primary.write_dev);
         tokio::task::spawn_blocking(move || {
@@ -485,7 +546,7 @@ impl Transport for HidTransport {
 
     async fn write_many(&self, packets: &[Vec<u8>]) -> Result<()> {
         let total_len: usize = packets.iter().map(Vec::len).sum();
-        let state = self.io.write_access(total_len).await?;
+        let state = self.begin_write(total_len).await?;
 
         let framed = packets.iter().map(|packet| self.frame(packet)).collect();
         write_batch(
@@ -525,7 +586,7 @@ impl Transport for HidTransport {
 impl HidTransportTrait for HidTransport {
     async fn write_companion(&self, data: &[u8]) -> Result<()> {
         let framed = self.frame(data);
-        let state = self.io.write_access(framed.len()).await?;
+        let state = self.begin_write(framed.len()).await?;
         let companion = state
             .companion
             .as_ref()
@@ -552,7 +613,7 @@ impl HidTransportTrait for HidTransport {
 
     async fn write_then_read_companion(&self, data: &[u8], size: usize) -> Result<Vec<u8>> {
         let framed = self.frame(data);
-        let state = self.io.write_access(framed.len()).await?;
+        let state = self.begin_write(framed.len()).await?;
         let companion = state
             .companion
             .as_ref()
@@ -570,7 +631,7 @@ impl HidTransportTrait for HidTransport {
 
     async fn write_many_companion(&self, packets: &[Vec<u8>]) -> Result<()> {
         let total_len: usize = packets.iter().map(Vec::len).sum();
-        let state = self.io.write_access(total_len).await?;
+        let state = self.begin_write(total_len).await?;
         let companion = state
             .companion
             .as_ref()
@@ -592,7 +653,7 @@ impl HidTransportTrait for HidTransport {
     /// hung device.
     async fn feature_exchange(&self, data: &[u8], response_size: usize) -> Result<Vec<u8>> {
         let framed = self.frame(data);
-        let state = self.io.write_access(framed.len()).await?;
+        let state = self.begin_write(framed.len()).await?;
         let dev = Arc::clone(&state.primary.write_dev);
         timeout(Duration::from_millis(500), async {
             tokio::task::spawn_blocking(move || {
@@ -618,7 +679,7 @@ impl HidTransportTrait for HidTransport {
 
     async fn send_feature_report(&self, data: &[u8]) -> Result<()> {
         let framed = self.frame(data);
-        let state = self.io.write_access(framed.len()).await?;
+        let state = self.begin_write(framed.len()).await?;
         let dev = Arc::clone(&state.primary.write_dev);
         timeout(Duration::from_millis(500), async {
             tokio::task::spawn_blocking(move || {
@@ -696,6 +757,44 @@ mod tests {
         assert_eq!(drained.len(), 1);
         assert_eq!(drained[0].endpoint, DEFERRED_ENDPOINT);
         assert_eq!(drained[0].data, vec![0xde, 0xad]);
+    }
+
+    #[test]
+    fn stale_drain_forwards_every_queued_report_in_order_and_stops_at_the_first_empty_read() {
+        let mut source = VecDeque::from(vec![vec![1], vec![2], vec![3], vec![], vec![4]]);
+        let mut sink = Vec::new();
+        let drained = drain_stale_reports(
+            || Ok(source.pop_front().unwrap_or_default()),
+            |report| sink.push(report),
+        )
+        .unwrap();
+        assert_eq!(drained, 3);
+        assert_eq!(sink, vec![vec![1], vec![2], vec![3]]);
+        assert_eq!(source, VecDeque::from(vec![vec![4]]));
+    }
+
+    #[test]
+    fn stale_drain_terminates_on_an_endless_source_after_clearing_a_full_hidraw_ring() {
+        let mut reads = 0;
+        let drained = drain_stale_reports(
+            || {
+                reads += 1;
+                Ok(vec![0xaa])
+            },
+            |_| {},
+        )
+        .unwrap();
+        assert_eq!(drained, reads);
+        assert!(drained >= 64);
+    }
+
+    #[test]
+    fn stale_drain_propagates_a_read_error_without_forwarding_partial_input() {
+        let mut sink = Vec::new();
+        let result =
+            drain_stale_reports(|| Err(anyhow::anyhow!("gone")), |report| sink.push(report));
+        assert!(result.is_err());
+        assert!(sink.is_empty());
     }
 
     #[test]
