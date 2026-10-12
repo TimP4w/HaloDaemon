@@ -446,6 +446,10 @@ fn run_pipewire(
             }
         })
         .process(move |s, ()| {
+            // Every ready buffer must go back to the producer, or it runs dry and stalls.
+            let Some(mut buf) = std::iter::from_fn(|| s.dequeue_buffer()).last() else {
+                return;
+            };
             let now = std::time::Instant::now();
             if last_copied_frame
                 .is_some_and(|last| now.duration_since(last) < std::time::Duration::from_millis(33))
@@ -453,9 +457,6 @@ fn run_pipewire(
                 return;
             }
             last_copied_frame = Some(now);
-            let Some(mut buf) = s.dequeue_buffer() else {
-                return;
-            };
             let datas = buf.datas_mut();
             let Some(d) = datas.first_mut() else { return };
 
