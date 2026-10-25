@@ -613,11 +613,8 @@ impl ChoiceCapability for MockDevice {
             .expect("MockDevice: ChoiceStateCache not present — call .with_choice()")
     }
     async fn set_choice(&self, key: &str, selected: usize) -> Result<()> {
-        if self
-            .refusals
-            .fetch_update(Ordering::SeqCst, Ordering::SeqCst, |n| n.checked_sub(1))
-            .is_ok()
-        {
+        if self.refusals.load(Ordering::SeqCst) > 0 {
+            self.refusals.fetch_sub(1, Ordering::SeqCst);
             anyhow::bail!("device did not answer");
         }
         self.choice_cache().record(key, selected);
