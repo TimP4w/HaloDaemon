@@ -228,7 +228,7 @@ mod tests {
         let dir = tempfile::tempdir().unwrap();
         let p = dir.path().join("cfg.yaml");
         for i in 0..25 {
-            atomic_write(&p, &format!("gen {i}")).unwrap();
+            atomic_write(&p, format!("gen {i}")).unwrap();
             assert_eq!(std::fs::read_to_string(&p).unwrap(), format!("gen {i}"));
         }
         let leftovers = std::fs::read_dir(dir.path())
