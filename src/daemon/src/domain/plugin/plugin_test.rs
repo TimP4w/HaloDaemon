@@ -855,6 +855,21 @@ fn build_harness(
     )
     .anyhow()?;
 
+    h.set(
+        "sleep_ms",
+        lua.create_function(|_, (_self, ms): (Table, u64)| {
+            if ms > 5000 {
+                return Err(mlua::Error::RuntimeError(
+                    "test sleep exceeds 5000 ms".into(),
+                ));
+            }
+            std::thread::sleep(std::time::Duration::from_millis(ms));
+            Ok(())
+        })
+        .anyhow()?,
+    )
+    .anyhow()?;
+
     let eq_report = report.clone();
     h.set(
         "assert_eq",
@@ -1019,7 +1034,19 @@ fn open_integration(
         .udp
         .as_ref()
         .map(|_| Arc::new(RecordingUdp::default()));
-    let resolved_config = default_resolved_config(manifest);
+    let mut resolved_config = default_resolved_config(manifest);
+    if let Some(config) = spec_table
+        .as_ref()
+        .and_then(|spec| spec.get::<Table>("config").ok())
+    {
+        for field in manifest.config_fields() {
+            if let Ok(value) = config.get::<String>(field.key.as_str()) {
+                if let Some(value) = super::resolved_config_value(field.kind, &value) {
+                    resolved_config.insert(field.key.clone(), value);
+                }
+            }
+        }
+    }
     let http = recording_http_runtime(manifest, &resolved_config, &http_recording);
     let udp = recording_udp_runtime(manifest, &udp_recording);
     let worker = PluginHandle::spawn_with_data(
@@ -1846,7 +1873,7 @@ fn open_device(
         dev_table
             .set(
                 "set_profile_enabled",
-                lua.create_function(move |_, (_self, slot, enabled): (Table, u8, bool)| {
+                lua.create_function(move |_, (_self, slot, enabled): (Table, u16, bool)| {
                     handle
                         .block_on(
                             crate::domain::device::OnboardProfilesCapability::set_profile_enabled(

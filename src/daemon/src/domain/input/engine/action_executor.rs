@@ -53,7 +53,7 @@ async fn profile_cycle(direction: &CycleDir, device_id: &str, app: Arc<AppState>
     let wire = device.serialize().await;
     let info = wire.capabilities.iter().find_map(|c| {
         if let halod_shared::types::DeviceCapability::OnboardProfiles(p) = c {
-            let enabled: Vec<u8> = p
+            let enabled: Vec<u16> = p
                 .slots
                 .iter()
                 .filter(|s| s.enabled)

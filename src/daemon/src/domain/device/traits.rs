@@ -342,8 +342,17 @@ pub(crate) async fn restore_capabilities(
     let (dpi, rest): (Vec<_>, Vec<_>) = rest
         .into_iter()
         .partition(|cap| matches!(cap, CapabilityRef::Dpi(_)));
+    let (remap, rest): (Vec<_>, Vec<_>) = rest
+        .into_iter()
+        .partition(|cap| matches!(cap, CapabilityRef::KeyRemap(_)));
     let mut ok = true;
-    for cap in onboard.into_iter().chain(rest).chain(dpi).chain(lighting) {
+    for cap in onboard
+        .into_iter()
+        .chain(rest)
+        .chain(dpi)
+        .chain(remap)
+        .chain(lighting)
+    {
         let key = cap.state_key();
         if key.is_empty() {
             continue;

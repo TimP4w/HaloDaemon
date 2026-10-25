@@ -1802,7 +1802,9 @@ pub struct DpiStatus {
 #[derive(Debug, Clone, Serialize, Deserialize, PartialEq)]
 pub struct OnboardProfileSlot {
     /// 1-based; matches the writable RAM sector address.
-    pub index: u8,
+    pub index: u16,
+    #[serde(default)]
+    pub read_only: bool,
     pub enabled: bool,
     pub active: bool,
     pub has_rom_default: bool,
@@ -1811,7 +1813,7 @@ pub struct OnboardProfileSlot {
 #[derive(Debug, Clone, Serialize, Deserialize, PartialEq)]
 pub struct OnboardProfiles {
     /// 1-based; 0 when no profile is active (host mode).
-    pub active_slot: u8,
+    pub active_slot: u16,
     pub slots: Vec<OnboardProfileSlot>,
 }
 
@@ -2435,7 +2437,7 @@ pub struct ButtonMapping {
 pub struct KeyRemapStatus {
     /// Order from getCidInfo.
     pub buttons: Vec<ButtonDescriptor>,
-    /// Only entries that differ from Native.
+    /// Configured mappings, including explicit Native overrides of plugin defaults.
     pub mappings: Vec<ButtonMapping>,
     pub requires_host_mode: bool,
     pub host_mode_active: bool,

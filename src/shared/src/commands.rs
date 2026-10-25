@@ -397,15 +397,15 @@ pub enum DaemonCommand {
     // Onboard profiles
     OnboardProfileSwitch {
         id: String,
-        slot: u8,
+        slot: u16,
     },
     OnboardProfileRestore {
         id: String,
-        slot: u8,
+        slot: u16,
     },
     OnboardProfileSetEnabled {
         id: String,
-        slot: u8,
+        slot: u16,
         enabled: bool,
     },
 

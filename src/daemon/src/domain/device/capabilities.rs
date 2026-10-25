@@ -543,11 +543,11 @@ pub trait DpiCapability: Send + Sync {
 #[async_trait]
 pub trait OnboardProfilesCapability: Send + Sync {
     /// Make slot `slot` (1-based) the device's active profile.
-    async fn switch_profile(&self, slot: u8) -> Result<()>;
+    async fn switch_profile(&self, slot: u16) -> Result<()>;
     /// Overwrite slot `slot` with the device's built-in ROM factory defaults.
-    async fn restore_profile(&self, slot: u8) -> Result<()>;
+    async fn restore_profile(&self, slot: u16) -> Result<()>;
     /// Enable (add) or disable (remove) slot `slot` in the profile directory.
-    async fn set_profile_enabled(&self, slot: u8, enabled: bool) -> Result<()>;
+    async fn set_profile_enabled(&self, slot: u16, enabled: bool) -> Result<()>;
 
     async fn to_wire(&self) -> Option<DeviceCapability> {
         None

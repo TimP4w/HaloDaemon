@@ -1294,15 +1294,15 @@ impl PluginHandle {
         self.call_ret("pairing_status", ()).await
     }
 
-    pub async fn onboard_switch_profile(&self, slot: u8) -> Result<()> {
+    pub async fn onboard_switch_profile(&self, slot: u16) -> Result<()> {
         self.call("switch_profile", slot).await
     }
 
-    pub async fn onboard_restore_profile(&self, slot: u8) -> Result<()> {
+    pub async fn onboard_restore_profile(&self, slot: u16) -> Result<()> {
         self.call("restore_profile", slot).await
     }
 
-    pub async fn onboard_set_profile_enabled(&self, slot: u8, enabled: bool) -> Result<()> {
+    pub async fn onboard_set_profile_enabled(&self, slot: u16, enabled: bool) -> Result<()> {
         self.call("set_profile_enabled", (slot, enabled)).await
     }
 

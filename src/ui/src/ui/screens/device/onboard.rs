@@ -27,6 +27,14 @@ fn switch_disabled(host_mode: bool, active: bool) -> bool {
     host_mode || active
 }
 
+fn slot_can_toggle(slot: &OnboardProfileSlot) -> bool {
+    slot.index != 1 && !slot.read_only
+}
+
+fn slot_can_restore(slot: &OnboardProfileSlot) -> bool {
+    !slot.read_only && slot.has_rom_default && slot.enabled
+}
+
 pub fn show(ui: &mut egui::Ui, ctx: &TabCtx) {
     crate::domain::tour::anchor(
         ui.ctx(),
@@ -125,7 +133,15 @@ fn slot_row(
     p.text(
         Pos2::new(row.left() + 38.0, cy),
         Align2::LEFT_CENTER,
-        t!("devtabs.slot_n", n = slot.index),
+        if slot.read_only {
+            format!(
+                "{} ({})",
+                t!("devtabs.slot_n", n = slot.index),
+                t!("devtabs.read_only")
+            )
+        } else {
+            t!("devtabs.slot_n", n = slot.index).to_string()
+        },
         theme::body_lg(),
         if active { theme::TEXT } else { theme::TEXT_DIM },
     );
@@ -167,7 +183,7 @@ fn slot_row(
                     );
                 }
             }
-            if slot.index != 1 {
+            if slot_can_toggle(slot) {
                 let (label, enabled_after) = if slot.enabled {
                     (t!("devtabs.remove"), false)
                 } else {
@@ -191,8 +207,7 @@ fn slot_row(
                     );
                 }
             }
-            if slot.has_rom_default
-                && slot.enabled
+            if slot_can_restore(slot)
                 && widgets::button(
                     ui,
                     &t!("devtabs.restore_to_rom"),
@@ -216,6 +231,28 @@ fn slot_row(
 #[cfg(test)]
 mod tests {
     use super::*;
+
+    #[test]
+    fn rom_slots_are_selectable_but_never_mutable() {
+        let mut slot = OnboardProfileSlot {
+            index: 0x101,
+            read_only: true,
+            enabled: true,
+            active: false,
+            has_rom_default: true,
+        };
+        assert!(!switch_disabled(false, false));
+        assert!(!slot_can_toggle(&slot));
+        assert!(!slot_can_restore(&slot));
+        slot.index = 1;
+        slot.read_only = false;
+        assert!(!slot_can_toggle(&slot));
+        assert!(slot_can_restore(&slot));
+        slot.index = 2;
+        assert!(slot_can_toggle(&slot));
+        slot.enabled = false;
+        assert!(!slot_can_restore(&slot));
+    }
 
     fn boolean(key: &str) -> Boolean {
         Boolean {

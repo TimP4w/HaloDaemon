@@ -468,37 +468,17 @@ async fn run_daemon(
         || {},
     );
 
-    // Action executor may fail to init on headless Linux.
-    match input::engine::action_executor::ActionExecutor::new() {
-        Ok(executor) => {
-            let executor = Arc::new(executor);
-            app.input.set_executor(Arc::clone(&executor));
-            let remap_engine = Arc::new(input::engine::key_remap::KeyRemapEngine::new(
-                executor,
-                app.clone(),
-            ));
-            let remap_start = Arc::clone(&remap_engine);
-            let remap_app = Arc::clone(&app);
-            supervisor.register(
-                "Key remap engine",
-                "Key remapping stopped unexpectedly.",
-                move || {
-                    let engine = Arc::clone(&remap_start);
-                    Box::pin(async move { task_supervisor::TaskHandle(engine.start()) })
-                },
-                move || remap_app.input.shutdown(),
-            );
-        }
-        Err(e) => {
-            application::notifications::send(
-                &app,
-                halod_shared::types::NotificationCode::KeyRemapUnavailable {
-                    detail: e.to_string(),
-                },
-            )
-            .await;
-        }
-    }
+    let remap_app = Arc::clone(&app);
+    let remap_shutdown = Arc::clone(&app);
+    supervisor.register(
+        "Key remap engine",
+        "Key remapping stopped unexpectedly.",
+        move || {
+            let app = Arc::clone(&remap_app);
+            Box::pin(async move { task_supervisor::TaskHandle(input::engine::startup::start(app)) })
+        },
+        move || remap_shutdown.input.shutdown(),
+    );
 
     // Handle SIGTERM so state::shutdown runs before exit (resource cleanup)
     #[cfg(unix)]

@@ -1,4 +1,5 @@
 devtabs:
+  read_only: Read-only
   tab_devices: Devices
   tab_lighting: Lighting
   tab_chains: Chains

@@ -554,6 +554,7 @@ pub struct LuaDevice {
 
     dpi_state: Mutex<DpiState>,
     dpi_config: Mutex<DpiConfig>,
+    host_dpi_steps: Mutex<Option<Vec<u16>>>,
 
     /// Declared choice/range/boolean/action controls + their value caches.
     controls: Controls,
@@ -1196,6 +1197,7 @@ impl LuaDevice {
             lcd_descriptor: OnceLock::new(),
             lcd_slot: LcdStateSlot::default(),
             lcd_needs_rgb_restore: AtomicBool::new(false),
+            host_dpi_steps: Mutex::new(None),
             dpi_state: Mutex::new(DpiState {
                 steps: Vec::new(),
                 available_dpis: Vec::new(),
@@ -1821,6 +1823,9 @@ impl Device for LuaDevice {
             let _ = self.dynamic_controls.set(Controls::from_runtime(controls));
         }
         if let Some(dpi) = outcome.dpi {
+            if !dpi.onboard && self.host_dpi_steps.lock_recover().is_none() {
+                *self.host_dpi_steps.lock_recover() = Some(dpi.steps.clone());
+            }
             *self.dpi_config.lock_recover() = DpiConfig {
                 min: dpi.min,
                 max: dpi.max,
@@ -2687,6 +2692,9 @@ impl LuaDevice {
             return Ok(());
         }
         if let Some(dpi) = self.worker()?.dpi_status().await? {
+            if !dpi.onboard {
+                *self.host_dpi_steps.lock_recover() = Some(dpi.steps.clone());
+            }
             *self.dpi_state.lock_recover() = dpi_state_from_runtime(&dpi);
             *self.dpi_config.lock_recover() = DpiConfig {
                 min: dpi.min,
@@ -2698,6 +2706,30 @@ impl LuaDevice {
                 },
                 mode_control: dpi.mode_control,
             };
+        }
+        Ok(())
+    }
+
+    fn validate_dpi_steps(&self, steps: &[u16]) -> Result<()> {
+        if steps.is_empty() {
+            anyhow::bail!("DPI steps list cannot be empty");
+        }
+        let (min, max) = {
+            let config = self.dpi_config.lock_recover();
+            (config.min, config.max)
+        };
+        let available = self.dpi_state.lock_recover().available_dpis.clone();
+        for &step in steps {
+            anyhow::ensure!(
+                step >= min && step <= max,
+                "DPI {step} is outside {min}..={max}"
+            );
+            if !available.is_empty() {
+                anyhow::ensure!(
+                    available.contains(&step),
+                    "DPI {step} is not supported by this device"
+                );
+            }
         }
         Ok(())
     }
@@ -2715,26 +2747,33 @@ impl DpiCapability for LuaDevice {
     }
 
     fn save_state(&self) -> serde_json::Value {
-        if self.dpi_config.lock_recover().mode != DpiMode::Host {
-            return serde_json::Value::Null;
-        }
-        serde_json::json!({ "steps": self.dpi_state.lock_recover().steps })
+        self.host_dpi_steps.lock_recover().as_ref().map_or(
+            serde_json::Value::Null,
+            |steps| serde_json::json!({ "steps": steps }),
+        )
     }
 
     async fn restore_state(&self, value: &serde_json::Value) -> bool {
-        if self.dpi_config.lock_recover().mode != DpiMode::Host {
-            return true;
-        }
         let Some(steps) = value.get("steps") else {
             return true;
         };
         let Ok(steps) = serde_json::from_value::<Vec<u16>>(steps.clone()) else {
             return false;
         };
+        if self.validate_dpi_steps(&steps).is_err() {
+            return false;
+        }
+        if self.dpi_config.lock_recover().mode == DpiMode::Onboard {
+            *self.host_dpi_steps.lock_recover() = Some(steps);
+            return true;
+        }
         self.set_dpi_steps(steps).await.is_ok()
     }
 
     async fn dpi_status(&self) -> DpiStatus {
+        if let Err(error) = self.refresh_dpi_status().await {
+            log::debug!("[{}] refreshing DPI state: {error:#}", self.id);
+        }
         let dpi = self.dpi_state.lock_recover();
         let config = self.dpi_config.lock_recover().clone();
         DpiStatus {
@@ -2751,35 +2790,22 @@ impl DpiCapability for LuaDevice {
     }
 
     async fn set_dpi_steps(&self, steps: Vec<u16>) -> Result<()> {
-        if steps.is_empty() {
-            anyhow::bail!("DPI steps list cannot be empty");
-        }
-        let (min, max) = {
-            let config = self.dpi_config.lock_recover();
-            (config.min, config.max)
-        };
-        let available = self.dpi_state.lock_recover().available_dpis.clone();
-        for &step in &steps {
-            anyhow::ensure!(
-                step >= min && step <= max,
-                "DPI {step} is outside {min}..={max}"
-            );
-            if !available.is_empty() {
-                anyhow::ensure!(
-                    available.contains(&step),
-                    "DPI {step} is not supported by this device"
-                );
-            }
-        }
+        self.validate_dpi_steps(&steps)?;
         let result = self.worker()?.dpi_set_steps(&steps).await;
         self.track(result).await?;
-        let mut dpi = self.dpi_state.lock_recover();
-        dpi.steps = steps;
-        if dpi.index >= dpi.steps.len() {
-            dpi.index = dpi.steps.len() - 1;
+        if self.dpi_config.lock_recover().mode == DpiMode::Host {
+            *self.host_dpi_steps.lock_recover() = Some(steps.clone());
         }
-        dpi.current = dpi.steps[dpi.index];
-        Ok(())
+        {
+            let mut dpi = self.dpi_state.lock_recover();
+            dpi.steps = steps;
+            dpi.index = dpi
+                .steps
+                .iter()
+                .position(|step| *step == dpi.current)
+                .unwrap_or(dpi.index.min(dpi.steps.len() - 1));
+        }
+        self.refresh_dpi_status().await
     }
 
     async fn set_dpi_index(&self, index: usize) -> Result<()> {
@@ -2803,7 +2829,11 @@ impl DpiCapability for LuaDevice {
         let value = self.clamp_dpi(dpi);
         let result = self.worker()?.dpi_set(value).await;
         self.track(result).await?;
-        self.dpi_state.lock_recover().current = value;
+        let mut dpi = self.dpi_state.lock_recover();
+        dpi.current = value;
+        if let Some(index) = dpi.steps.iter().position(|step| *step == value) {
+            dpi.index = index;
+        }
         Ok(())
     }
 }
@@ -2895,6 +2925,12 @@ impl BooleanCapability for LuaDevice {
             changes
         };
         if changes_dpi_mode {
+            let host_steps = self.host_dpi_steps.lock_recover().clone();
+            if value {
+                if let Some(steps) = host_steps {
+                    self.set_dpi_steps(steps).await?;
+                }
+            }
             self.refresh_dpi_status().await?;
         }
         Ok(())
@@ -3002,19 +3038,19 @@ impl PairingCapability for LuaDevice {
 
 #[async_trait]
 impl OnboardProfilesCapability for LuaDevice {
-    async fn switch_profile(&self, slot: u8) -> Result<()> {
+    async fn switch_profile(&self, slot: u16) -> Result<()> {
         let result = self.worker()?.onboard_switch_profile(slot).await;
         self.track(result).await?;
         self.refresh_dpi_status().await
     }
 
-    async fn restore_profile(&self, slot: u8) -> Result<()> {
+    async fn restore_profile(&self, slot: u16) -> Result<()> {
         let result = self.worker()?.onboard_restore_profile(slot).await;
         self.track(result).await?;
         self.refresh_dpi_status().await
     }
 
-    async fn set_profile_enabled(&self, slot: u8, enabled: bool) -> Result<()> {
+    async fn set_profile_enabled(&self, slot: u16, enabled: bool) -> Result<()> {
         let result = self
             .worker()?
             .onboard_set_profile_enabled(slot, enabled)
@@ -3031,6 +3067,54 @@ impl OnboardProfilesCapability for LuaDevice {
 
 #[async_trait]
 impl KeyRemapCapability for LuaDevice {
+    fn state_key(&self) -> &'static str {
+        "key_remap"
+    }
+
+    fn save_state(&self) -> serde_json::Value {
+        let mut mappings: Vec<_> = self
+            .key_remap_mappings
+            .lock_recover()
+            .values()
+            .cloned()
+            .collect();
+        mappings.sort_by_key(|mapping| mapping.cid);
+        serde_json::json!({ "mappings": mappings })
+    }
+
+    async fn restore_state(&self, value: &serde_json::Value) -> bool {
+        let Some(value) = value.get("mappings") else {
+            return true;
+        };
+        let Ok(mappings) = serde_json::from_value::<Vec<ButtonMapping>>(value.clone()) else {
+            return false;
+        };
+        let buttons = self.key_remap.read().unwrap().buttons.clone();
+        if mappings
+            .iter()
+            .any(|mapping| crate::domain::input::validate::validate_cid(&buttons, mapping).is_err())
+        {
+            return false;
+        }
+        let Ok(worker) = self.worker() else {
+            return false;
+        };
+        if self
+            .track(worker.key_remap_reset_all().await)
+            .await
+            .is_err()
+        {
+            return false;
+        }
+        self.key_remap_mappings.lock_recover().clear();
+        for mapping in mappings {
+            if self.set_button_mapping(mapping).await.is_err() {
+                return false;
+            }
+        }
+        true
+    }
+
     async fn get_key_remap_status(&self) -> KeyRemapStatus {
         let descriptor = self.key_remap.read().unwrap().clone();
         let mappings: Vec<ButtonMapping> = self
@@ -3058,18 +3142,13 @@ impl KeyRemapCapability for LuaDevice {
         )?;
         let result = self.worker()?.key_remap_set_mapping(mapping.clone()).await;
         self.track(result).await?;
-        let mut cache = self.key_remap_mappings.lock_recover();
-        if mapping.base == ButtonAction::Native && mapping.shifted == ButtonAction::Native {
-            cache.remove(&mapping.cid);
-        } else {
-            cache.insert(mapping.cid, mapping);
-        }
+        self.key_remap_mappings
+            .lock_recover()
+            .insert(mapping.cid, mapping);
         Ok(())
     }
 
     async fn reset_button_mapping(&self, cid: u16) -> Result<()> {
-        let result = self.worker()?.key_remap_reset(cid).await;
-        self.track(result).await?;
         let default = self
             .key_remap
             .read()
@@ -3078,31 +3157,24 @@ impl KeyRemapCapability for LuaDevice {
             .iter()
             .find(|mapping| mapping.cid == cid)
             .cloned();
-        let mut mappings = self.key_remap_mappings.lock_recover();
-        match default {
-            Some(mapping)
-                if mapping.base != ButtonAction::Native
-                    || mapping.shifted != ButtonAction::Native =>
-            {
-                mappings.insert(cid, mapping);
-            }
-            _ => {
-                mappings.remove(&cid);
-            }
+        if let Some(mapping) = default {
+            self.set_button_mapping(mapping).await
+        } else {
+            let result = self.worker()?.key_remap_reset(cid).await;
+            self.track(result).await?;
+            self.key_remap_mappings.lock_recover().remove(&cid);
+            Ok(())
         }
-        Ok(())
     }
 
     async fn reset_all_button_mappings(&self) -> Result<()> {
         let result = self.worker()?.key_remap_reset_all().await;
         self.track(result).await?;
         let defaults = self.key_remap.read().unwrap().default_mappings.clone();
-        let mut mappings = self.key_remap_mappings.lock_recover();
-        mappings.clear();
-        mappings.extend(defaults.into_iter().filter_map(|mapping| {
-            (mapping.base != ButtonAction::Native || mapping.shifted != ButtonAction::Native)
-                .then_some((mapping.cid, mapping))
-        }));
+        self.key_remap_mappings.lock_recover().clear();
+        for mapping in defaults {
+            self.set_button_mapping(mapping).await?;
+        }
         Ok(())
     }
 }
@@ -3461,11 +3533,103 @@ mod tests {
                 .await
         );
         restarted.dpi_config.lock_recover().mode = DpiMode::Onboard;
-        assert!(DpiCapability::save_state(&restarted).is_null());
+        assert_eq!(
+            DpiCapability::save_state(&restarted),
+            serde_json::json!({"steps": steps})
+        );
         assert!(
             DpiCapability::restore_state(&restarted, &serde_json::json!({ "steps": [1600] })).await
         );
         assert_eq!(restarted.dpi_status().await.steps, steps);
+        restarted.close().await;
+    }
+
+    #[tokio::test]
+    async fn remap_native_override_survives_restart_and_reset_rearms_default() {
+        let script = r#"
+            return {
+                initialize = function(dev)
+                    return { key_remap = {
+                        buttons = {{cid=5,label="DPI",divertable=true,group=0}},
+                        default_mappings = {{cid=5,base={type="dpi_cycle",direction="up"}}},
+                    } }
+                end,
+                set_button_mapping = function(dev,mapping)
+                    dev.transport:write(string.char(mapping.base.type=="native" and 0 or 1))
+                end,
+                reset_all_button_mappings = function(dev) dev.transport:write(string.char(2)) end,
+            }
+        "#;
+        let (_tmp, manifest) = test_manifest("remap_saved", &["key_remap"], script);
+        let first = hid_device("mouse", &manifest, Arc::new(MockTransport::empty()));
+        assert!(first.initialize().await.unwrap());
+        first
+            .set_button_mapping(ButtonMapping {
+                cid: 5,
+                base: ButtonAction::Native,
+                shifted: ButtonAction::Native,
+            })
+            .await
+            .unwrap();
+        let saved = Device::save_state(&first).await;
+        first.close().await;
+        let mock = Arc::new(MockTransport::empty());
+        let restarted = hid_device("mouse", &manifest, mock.clone());
+        assert!(restarted.initialize().await.unwrap());
+        assert!(Device::load_state(&restarted, &saved).await);
+        assert!(matches!(
+            restarted.get_key_remap_status().await.mappings[0].base,
+            ButtonAction::Native
+        ));
+        assert_eq!(*mock.written.lock().await, vec![vec![1], vec![2], vec![0]]);
+        restarted.reset_button_mapping(5).await.unwrap();
+        assert!(matches!(
+            restarted.get_key_remap_status().await.mappings[0].base,
+            ButtonAction::DpiCycle { .. }
+        ));
+        assert_eq!(mock.written.lock().await.last(), Some(&vec![1]));
+        restarted.reset_all_button_mappings().await.unwrap();
+        assert_eq!(&mock.written.lock().await[4..], &[vec![2], vec![1]]);
+        restarted.close().await;
+    }
+
+    #[tokio::test]
+    async fn saved_host_steps_survive_onboard_restart_and_mode_switch() {
+        let script = r#"
+            local host=false
+            local steps={400,800}
+            return {
+                initialize=function() return {
+                    dpi={min=100,max=3200,steps={400,800},current=800,onboard=true,mode_control="host_mode"},
+                    controls={booleans={{key="host_mode",label="Host mode"}}},booleans={host_mode=false}}
+                end,
+                set_boolean=function(dev,key,value) host=value end,
+                set_dpi_steps=function(dev,value) assert(host); steps=value end,
+                dpi_status=function() return {min=100,max=3200,steps=host and steps or {400,800},current=800,onboard=not host,mode_control="host_mode"} end,
+            }
+        "#;
+        let (_tmp, manifest) = test_manifest("dpi_modes", &["dpi", "controls"], script);
+        let dev = hid_device("mouse", &manifest, Arc::new(MockTransport::empty()));
+        assert!(dev.initialize().await.unwrap());
+        assert!(
+            DpiCapability::restore_state(&dev, &serde_json::json!({"steps":[1200,400,800]})).await
+        );
+        let saved = Device::save_state(&dev).await;
+        dev.close().await;
+        let restarted = hid_device("mouse", &manifest, Arc::new(MockTransport::empty()));
+        assert!(restarted.initialize().await.unwrap());
+        assert!(Device::load_state(&restarted, &saved).await);
+        assert_eq!(restarted.dpi_status().await.steps, vec![400, 800]);
+        restarted.set_boolean("host_mode", true).await.unwrap();
+        let status = restarted.dpi_status().await;
+        assert_eq!(status.steps, vec![1200, 400, 800]);
+        assert_eq!(status.current_dpi, 800);
+        assert_eq!(status.current_index, 2);
+        restarted.set_boolean("host_mode", false).await.unwrap();
+        assert_eq!(
+            DpiCapability::save_state(&restarted),
+            serde_json::json!({"steps":[1200,400,800]})
+        );
         restarted.close().await;
     }
 

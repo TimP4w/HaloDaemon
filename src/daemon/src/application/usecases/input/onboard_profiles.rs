@@ -7,14 +7,32 @@ use std::sync::Arc;
 use crate::application::state::AppState;
 use crate::domain::registry::require_device_owned_id;
 
-fn validate_slot(slot: u8) -> Result<()> {
+fn validate_slot(slot: u16) -> Result<()> {
     if slot == 0 {
-        anyhow::bail!("profile slot must be 1..=255");
+        anyhow::bail!("profile slot must be nonzero");
     }
     Ok(())
 }
 
-pub async fn switch_onboard_profile(id: String, slot: u8, app: Arc<AppState>) -> Result<()> {
+async fn ensure_writable(
+    cap: &dyn crate::domain::device::OnboardProfilesCapability,
+    slot: u16,
+) -> Result<()> {
+    if let Some(halod_shared::types::DeviceCapability::OnboardProfiles(profiles)) =
+        cap.to_wire().await
+    {
+        anyhow::ensure!(
+            !profiles
+                .slots
+                .iter()
+                .any(|profile| profile.index == slot && profile.read_only),
+            "profile is read-only"
+        );
+    }
+    Ok(())
+}
+
+pub async fn switch_onboard_profile(id: String, slot: u16, app: Arc<AppState>) -> Result<()> {
     let device = require_device_owned_id(&id, &app).await?;
     validate_slot(slot)?;
     let cap = device
@@ -30,12 +48,13 @@ pub async fn switch_onboard_profile(id: String, slot: u8, app: Arc<AppState>) ->
     Ok(())
 }
 
-pub async fn restore_onboard_profile(id: String, slot: u8, app: Arc<AppState>) -> Result<()> {
+pub async fn restore_onboard_profile(id: String, slot: u16, app: Arc<AppState>) -> Result<()> {
     let device = require_device_owned_id(&id, &app).await?;
     validate_slot(slot)?;
     let cap = device
         .as_onboard_profiles()
         .context("device does not support onboard profiles")?;
+    ensure_writable(cap, slot).await?;
     log::info!("[OnboardProfile] Restoring '{}' slot {slot}", device.name());
     cap.restore_profile(slot).await?;
     app.record_change(crate::domain::events::Change::Device(id))
@@ -45,7 +64,7 @@ pub async fn restore_onboard_profile(id: String, slot: u8, app: Arc<AppState>) -
 
 pub async fn set_onboard_profile_enabled(
     id: String,
-    slot: u8,
+    slot: u16,
     enabled: bool,
     app: Arc<AppState>,
 ) -> Result<()> {
@@ -54,6 +73,7 @@ pub async fn set_onboard_profile_enabled(
     let cap = device
         .as_onboard_profiles()
         .context("device does not support onboard profiles")?;
+    ensure_writable(cap, slot).await?;
     log::info!(
         "[OnboardProfile] '{}' slot {slot} enabled={enabled}",
         device.name()
@@ -83,6 +103,27 @@ mod tests {
     fn setup() -> (Arc<MockDevice>, Arc<AppState>) {
         let dev = Arc::new(MockDevice::new("mouse0").with_onboard());
         (dev.clone(), app_with(vec![dev]))
+    }
+
+    #[tokio::test]
+    async fn rom_profiles_can_be_selected_but_not_modified() {
+        let mut mock = MockDevice::new("mouse0").with_onboard();
+        mock.onboard_read_only_slots = vec![0x101];
+        let dev = Arc::new(mock);
+        let app = app_with(vec![dev.clone()]);
+        switch_onboard_profile("mouse0".into(), 0x101, app.clone())
+            .await
+            .unwrap();
+        assert_eq!(dev.calls(), ["switch 257"]);
+        assert!(restore_onboard_profile("mouse0".into(), 0x101, app.clone())
+            .await
+            .is_err());
+        assert!(
+            set_onboard_profile_enabled("mouse0".into(), 0x101, false, app)
+                .await
+                .is_err()
+        );
+        assert_eq!(dev.calls(), ["switch 257"]);
     }
 
     // -- handler tests --

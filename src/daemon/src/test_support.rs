@@ -169,7 +169,8 @@ pub struct MockDevice {
     pub write_order: Arc<Mutex<Vec<&'static str>>>,
     pub lcd: Option<LcdStateSlot>,
     pub lcd_stream_ok: bool,
-    pub onboard_active_slot: Option<Mutex<Option<u8>>>,
+    pub onboard_read_only_slots: Vec<u16>,
+    pub onboard_active_slot: Option<Mutex<Option<u16>>>,
     pub choice: Option<ChoiceStateCache>,
     pub range: Option<RangeStateCache>,
     pub booleans: Option<Vec<Boolean>>,
@@ -235,6 +236,7 @@ impl MockDevice {
             write_order: Arc::new(Mutex::new(Vec::new())),
             lcd: None,
             lcd_stream_ok: false,
+            onboard_read_only_slots: vec![],
             onboard_active_slot: None,
             choice: None,
             range: None,
@@ -827,17 +829,38 @@ impl ChoiceCapability for MockDevice {
 
 #[async_trait]
 impl crate::domain::device::OnboardProfilesCapability for MockDevice {
-    async fn switch_profile(&self, slot: u8) -> Result<()> {
+    async fn switch_profile(&self, slot: u16) -> Result<()> {
         self.record_call(format!("switch {slot}"));
         Ok(())
     }
-    async fn restore_profile(&self, slot: u8) -> Result<()> {
+    async fn restore_profile(&self, slot: u16) -> Result<()> {
         self.record_call(format!("restore {slot}"));
         Ok(())
     }
-    async fn set_profile_enabled(&self, slot: u8, enabled: bool) -> Result<()> {
+    async fn set_profile_enabled(&self, slot: u16, enabled: bool) -> Result<()> {
         self.record_call(format!("enable {slot} {enabled}"));
         Ok(())
+    }
+    async fn to_wire(&self) -> Option<halod_shared::types::DeviceCapability> {
+        if self.onboard_read_only_slots.is_empty() {
+            return None;
+        }
+        Some(halod_shared::types::DeviceCapability::OnboardProfiles(
+            halod_shared::types::OnboardProfiles {
+                active_slot: 0,
+                slots: self
+                    .onboard_read_only_slots
+                    .iter()
+                    .map(|&index| halod_shared::types::OnboardProfileSlot {
+                        index,
+                        read_only: true,
+                        active: false,
+                        enabled: true,
+                        has_rom_default: false,
+                    })
+                    .collect(),
+            },
+        ))
     }
     fn state_key(&self) -> &'static str {
         "onboard"
@@ -852,7 +875,7 @@ impl crate::domain::device::OnboardProfilesCapability for MockDevice {
             .unwrap() = v
             .get("active_slot")
             .and_then(|s| s.as_u64())
-            .map(|s| s as u8);
+            .and_then(|s| u16::try_from(s).ok());
         true
     }
 }
