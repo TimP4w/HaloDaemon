@@ -122,11 +122,9 @@ async fn rename_normal_device(
 mod tests {
     use super::*;
     use crate::config::Config;
-    use crate::domain::device::chain::{
-        ChannelDescriptor, LightingDivisionAdapter, LightingDivisionHost,
-    };
-    use crate::domain::device::{CapabilityRef, ChainLinkSpec, Device};
-    use async_trait::async_trait;
+    use crate::domain::device::chain::ChannelDescriptor;
+    use crate::domain::device::ChainLinkSpec;
+    use crate::test_support::{app_with, MockDevice};
     use halod_shared::types::ZoneTopology;
 
     #[tokio::test]
@@ -186,42 +184,11 @@ mod tests {
         );
     }
 
-    struct NameOnlyDevice {
-        id: &'static str,
-        name: &'static str,
-    }
-
-    #[async_trait]
-    impl Device for NameOnlyDevice {
-        fn id(&self) -> &str {
-            self.id
-        }
-        fn name(&self) -> &str {
-            self.name
-        }
-        fn vendor(&self) -> &str {
-            "Acme"
-        }
-        fn model(&self) -> &str {
-            "Stub"
-        }
-        async fn initialize(&self) -> Result<bool> {
-            Ok(true)
-        }
-        async fn close(&self) {}
-        fn capabilities(&self) -> Vec<crate::domain::device::CapabilityRef<'_>> {
-            vec![]
-        }
-    }
-
     #[tokio::test]
     async fn blank_name_resets_to_device_name_when_device_present() {
-        let app = Arc::new(AppState::new(Config::default()));
-        let dev: Arc<dyn Device> = Arc::new(NameOnlyDevice {
-            id: "dev_a",
-            name: "Stock Name",
-        });
-        app.device_registry.write().await.push(dev);
+        let app = app_with(vec![Arc::new(
+            MockDevice::new("dev_a").with_name("Stock Name"),
+        )]);
 
         // First override, then clear.
         set_device_name("dev_a".into(), "Custom".into(), app.clone())
@@ -238,65 +205,16 @@ mod tests {
         );
     }
 
-    struct StubAdapter {
-        parent_id: String,
-    }
-
-    #[async_trait]
-    impl LightingDivisionAdapter for StubAdapter {
-        fn parent_id(&self) -> String {
-            self.parent_id.clone()
-        }
-        fn channels(&self) -> Vec<ChannelDescriptor> {
-            vec![ChannelDescriptor {
-                channel_id: "ch0".into(),
-                display_name: "Channel".into(),
-                max_leds: 120,
-                color_order: Default::default(),
-                cooling_channel: None,
-            }]
-        }
-        async fn write_divided_frame(&self, _channel_id: &str, _composed: &[u8]) -> Result<()> {
-            Ok(())
-        }
-    }
-
-    struct ChainParent {
-        host: Arc<LightingDivisionHost>,
-    }
-
-    #[async_trait]
-    impl Device for ChainParent {
-        fn id(&self) -> &str {
-            "parent_x"
-        }
-        fn name(&self) -> &str {
-            "Parent"
-        }
-        fn vendor(&self) -> &str {
-            "Acme"
-        }
-        fn model(&self) -> &str {
-            "Hub"
-        }
-        async fn initialize(&self) -> Result<bool> {
-            Ok(true)
-        }
-        async fn close(&self) {}
-        fn capabilities(&self) -> Vec<CapabilityRef<'_>> {
-            vec![]
-        }
-        fn chain_host(&self) -> Option<&Arc<LightingDivisionHost>> {
-            Some(&self.host)
-        }
-    }
-
     async fn setup_chain_parent_with_one_link(app: &Arc<AppState>) -> String {
-        let host = LightingDivisionHost::new(Arc::new(StubAdapter {
-            parent_id: "parent_x".into(),
-        }));
-        let parent: Arc<dyn Device> = Arc::new(ChainParent { host: host.clone() });
-        app.device_registry.write().await.push(parent.clone());
+        let parent = MockDevice::new("parent_x").with_chain(vec![ChannelDescriptor {
+            channel_id: "ch0".into(),
+            display_name: "Channel".into(),
+            max_leds: 120,
+            color_order: Default::default(),
+            cooling_channel: None,
+        }]);
+        let host = parent.chain.clone().unwrap();
+        app.device_registry.write().await.push(Arc::new(parent));
         let (child_id, child_dev) = host
             .add_link(
                 "ch0",

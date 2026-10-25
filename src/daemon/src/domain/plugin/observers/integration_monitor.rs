@@ -350,91 +350,15 @@ async fn remove_children(app: &Arc<AppState>, gone: &[String]) {
 #[cfg(test)]
 mod tests {
     use super::*;
-    use crate::domain::device::{CapabilityRef, Controller};
     use crate::test_support::MockDevice;
-    use anyhow::Result;
-    use async_trait::async_trait;
-    use std::sync::atomic::{AtomicBool, Ordering};
-    use std::sync::Mutex;
+    use std::sync::atomic::Ordering;
 
-    /// A mock integration root whose `resync_children` returns a scripted result
-    /// (like `MockController` in the HID hotplug tests). Its `is_live` flag is
-    /// settable; an `Err` script greys it, mirroring the real `LuaDevice`.
-    type ScriptedResync = Result<(Vec<Arc<dyn Device>>, Vec<String>)>;
-
-    struct MockRoot {
-        id: String,
-        integration_id: String,
-        live: Arc<AtomicBool>,
-        unrecoverable: Arc<AtomicBool>,
-        script: Mutex<Option<ScriptedResync>>,
-    }
-
-    impl MockRoot {
-        fn new(plugin_id: &str) -> Arc<Self> {
-            Arc::new(Self {
-                id: format!("{plugin_id}-root"),
-                integration_id: plugin_id.to_string(),
-                live: Arc::new(AtomicBool::new(true)),
-                unrecoverable: Arc::new(AtomicBool::new(false)),
-                script: Mutex::new(None),
-            })
-        }
-
-        fn scripted(self: &Arc<Self>, result: ScriptedResync) {
-            *self.script.lock().unwrap() = Some(result);
-        }
-    }
-
-    #[async_trait]
-    impl Device for MockRoot {
-        fn id(&self) -> &str {
-            &self.id
-        }
-        fn name(&self) -> &str {
-            &self.id
-        }
-        fn vendor(&self) -> &str {
-            "Test"
-        }
-        fn model(&self) -> &str {
-            &self.id
-        }
-        async fn initialize(&self) -> Result<bool> {
-            Ok(true)
-        }
-        async fn close(&self) {}
-        fn integration_id(&self) -> Option<String> {
-            Some(self.integration_id.clone())
-        }
-        fn is_live(&self) -> bool {
-            self.live.load(Ordering::Relaxed)
-        }
-        fn is_unrecoverable(&self) -> bool {
-            self.unrecoverable.load(Ordering::Relaxed)
-        }
-        fn capabilities(&self) -> Vec<CapabilityRef<'_>> {
-            vec![CapabilityRef::Controller(self)]
-        }
-    }
-
-    #[async_trait]
-    impl Controller for MockRoot {
-        async fn resync_children(
-            &self,
-            _existing: &HashSet<String>,
-        ) -> Result<(Vec<Arc<dyn Device>>, Vec<String>)> {
-            match self.script.lock().unwrap().take() {
-                Some(Ok(v)) => Ok(v),
-                Some(Err(e)) => {
-                    // Mirror `LuaDevice::resync_children`: an enumerate error
-                    // greys the integration.
-                    self.live.store(false, Ordering::Relaxed);
-                    Err(e)
-                }
-                None => Ok((vec![], vec![])),
-            }
-        }
+    fn root(plugin_id: &str) -> Arc<MockDevice> {
+        Arc::new(
+            MockDevice::new(&format!("{plugin_id}-root"))
+                .with_integration_id(plugin_id)
+                .with_controller(),
+        )
     }
 
     fn child(root_id: &str, idx: u32) -> Arc<MockDevice> {
@@ -444,10 +368,10 @@ mod tests {
     #[tokio::test]
     async fn case_c_add_registers_the_new_child() {
         crate::test_support::with_tmp_config(|app| async move {
-            let root = MockRoot::new("openrgb");
+            let root = root("openrgb");
             let existing = child(&root.id, 0);
             let added = child(&root.id, 1);
-            root.scripted(Ok((vec![added.clone() as Arc<dyn Device>], vec![])));
+            root.script_resync(Ok((vec![added.clone() as Arc<dyn Device>], vec![])));
             {
                 let mut devices = app.device_registry.write().await;
                 devices.push(root.clone() as Arc<dyn Device>);
@@ -472,10 +396,10 @@ mod tests {
     #[tokio::test]
     async fn case_c_remove_drops_only_the_departed_child() {
         crate::test_support::with_tmp_config(|app| async move {
-            let root = MockRoot::new("openrgb");
+            let root = root("openrgb");
             let keep = child(&root.id, 0);
             let drop = child(&root.id, 1);
-            root.scripted(Ok((vec![], vec![drop.id.clone()])));
+            root.script_resync(Ok((vec![], vec![drop.id.clone()])));
             {
                 let mut devices = app.device_registry.write().await;
                 devices.push(root.clone() as Arc<dyn Device>);
@@ -506,10 +430,10 @@ mod tests {
     #[tokio::test]
     async fn explicit_child_ids_are_tracked_without_ctrl_prefixes() {
         crate::test_support::with_tmp_config(|app| async move {
-            let root = MockRoot::new("hwmon");
+            let root = root("hwmon");
             let existing = Arc::new(MockDevice::new("hwmon_pci_temp"));
             let added = Arc::new(MockDevice::new("hwmon_pci_fan1"));
-            root.scripted(Ok((vec![added.clone() as Arc<dyn Device>], vec![])));
+            root.script_resync(Ok((vec![added.clone() as Arc<dyn Device>], vec![])));
             app.device_registry.write().await.extend([
                 root.clone() as Arc<dyn Device>,
                 existing.clone() as Arc<dyn Device>,
@@ -545,8 +469,8 @@ mod tests {
     #[tokio::test]
     async fn case_c_drop_greys_the_root_but_leaves_it_registered() {
         crate::test_support::with_tmp_config(|app| async move {
-            let root = MockRoot::new("openrgb");
-            root.scripted(Err(anyhow::anyhow!("connection reset")));
+            let root = root("openrgb");
+            root.script_resync(Err(anyhow::anyhow!("connection reset")));
             app.device_registry
                 .write()
                 .await
@@ -574,9 +498,9 @@ mod tests {
     ) {
         crate::test_support::with_tmp_config(|app| async move {
             app.set_discovery_scope(scope).await;
-            let root = MockRoot::new("openrgb");
+            let root = root("openrgb");
             // Would report a drop if enumerated — but the tick must skip it.
-            root.scripted(Err(anyhow::anyhow!("should not be called")));
+            root.script_resync(Err(anyhow::anyhow!("should not be called")));
             app.device_registry
                 .write()
                 .await
@@ -614,8 +538,8 @@ mod tests {
                 filter: Arc::new(DiscoveryFilter { specs: vec![] }),
             })
             .await;
-            let root = MockRoot::new("openrgb");
-            root.scripted(Err(anyhow::anyhow!("dropped")));
+            let root = root("openrgb");
+            root.script_resync(Err(anyhow::anyhow!("dropped")));
             app.device_registry
                 .write()
                 .await
@@ -707,7 +631,7 @@ mod tests {
     async fn a_reenabled_plugin_leaves_disabled_and_gets_processed() {
         crate::test_support::with_tmp_config(|app| async move {
             register_integration(&app, "openrgb");
-            let root = MockRoot::new("openrgb");
+            let root = root("openrgb");
             app.device_registry
                 .write()
                 .await
@@ -726,9 +650,9 @@ mod tests {
     async fn unrecoverable_root_is_not_reconnected_automatically() {
         crate::test_support::with_tmp_config(|app| async move {
             register_integration(&app, "openrgb");
-            let root = MockRoot::new("openrgb");
-            root.live.store(false, Ordering::Relaxed);
-            root.unrecoverable.store(true, Ordering::Relaxed);
+            let root = root("openrgb");
+            root.live.store(false, Ordering::SeqCst);
+            root.unrecoverable.store(true, Ordering::SeqCst);
             app.device_registry
                 .write()
                 .await

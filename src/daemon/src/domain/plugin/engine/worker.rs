@@ -1225,6 +1225,10 @@ impl PluginHandle {
         self.call("lcd_reset", ()).await
     }
 
+    pub async fn dpi_status(&self) -> Result<Option<InitDpi>> {
+        self.call_opt("dpi_status").await
+    }
+
     pub async fn dpi_set(&self, dpi: u16) -> Result<()> {
         self.call("set_dpi", dpi).await
     }

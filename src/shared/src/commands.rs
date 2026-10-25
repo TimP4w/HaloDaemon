@@ -53,6 +53,26 @@ pub enum ScreenRotation {
     R270,
 }
 
+impl ScreenRotation {
+    pub fn degrees(self) -> u32 {
+        match self {
+            Self::R0 => 0,
+            Self::R90 => 90,
+            Self::R180 => 180,
+            Self::R270 => 270,
+        }
+    }
+
+    pub fn from_degrees(degrees: u32) -> Self {
+        match degrees % 360 {
+            90 => Self::R90,
+            180 => Self::R180,
+            270 => Self::R270,
+            _ => Self::R0,
+        }
+    }
+}
+
 /// Typed IPC commands shared between the daemon and the UI.
 #[derive(Debug, Clone, Serialize, Deserialize)]
 #[serde(tag = "type", rename_all = "snake_case")]
@@ -393,14 +413,10 @@ pub enum DaemonCommand {
     SetScreenImage {
         id: String,
         data_b64: String,
-        #[serde(default, skip_serializing_if = "Option::is_none")]
-        request_id: Option<String>,
     },
     SetScreenImageFromLibrary {
         id: String,
         filename: String,
-        #[serde(default, skip_serializing_if = "Option::is_none")]
-        request_id: Option<String>,
     },
     SetScreenRotation {
         id: String,
@@ -595,11 +611,6 @@ impl DaemonCommand {
     pub fn set_engine_fps(engine: EngineKind, fps: u64) -> Self {
         Self::set_engine_config(engine, None, None, Some(fps), None)
     }
-
-    /// `SetEngineConfig` setting only an engine's tick interval.
-    pub fn set_engine_tick_ms(engine: EngineKind, tick_ms: u64) -> Self {
-        Self::set_engine_config(engine, None, Some(tick_ms), None, None)
-    }
 }
 
 #[cfg(test)]
@@ -612,583 +623,336 @@ mod tests {
         serde_json::to_value(cmd).unwrap()
     }
 
+    fn widget() -> crate::types::HomeWidget {
+        crate::types::HomeWidget {
+            id: "w1".into(),
+            kind: crate::types::HomeWidgetKind::Chart {
+                sensor_id: "cpu".into(),
+            },
+            color: 2,
+            label: "CPU".into(),
+        }
+    }
+
     #[test]
-    fn screen_rotation_serializes_as_string() {
+    fn wire_formats_are_stable_and_round_trip() {
+        let host = HashMap::from([("host".to_string(), "127.0.0.1".to_string())]);
+        let cases = [
+            (
+                DaemonCommand::SetEngineConfig {
+                    engine: EngineKind::FanCurve,
+                    enabled: Some(true),
+                    tick_ms: None,
+                    fps: None,
+                    failsafe_duty: None,
+                },
+                json!({"type": "set_engine_config", "engine": "fan_curve", "enabled": true}),
+            ),
+            (
+                DaemonCommand::set_engine_enabled(EngineKind::Canvas, false),
+                json!({"type": "set_engine_config", "engine": "canvas", "enabled": false}),
+            ),
+            (
+                DaemonCommand::set_engine_fps(EngineKind::Lcd, 30),
+                json!({"type": "set_engine_config", "engine": "lcd", "fps": 30}),
+            ),
+            (
+                DaemonCommand::MarkTourSeen {
+                    tour: "page:home".into(),
+                },
+                json!({"type": "mark_tour_seen", "tour": "page:home"}),
+            ),
+            (
+                DaemonCommand::ResetToursSeen,
+                json!({"type": "reset_tours_seen"}),
+            ),
+            (
+                DaemonCommand::SetLanguage { lang: "it".into() },
+                json!({"type": "set_language", "lang": "it"}),
+            ),
+            (
+                DaemonCommand::SetHomeWidgets {
+                    widgets: vec![widget()],
+                },
+                json!({"type": "set_home_widgets", "widgets": [{
+                    "id": "w1", "kind": {"type": "chart", "sensor_id": "cpu"}, "color": 2, "label": "CPU",
+                }]}),
+            ),
+            (
+                DaemonCommand::SetCoolingWidgets {
+                    widgets: vec![widget()],
+                },
+                json!({"type": "set_cooling_widgets", "widgets": [{
+                    "id": "w1", "kind": {"type": "chart", "sensor_id": "cpu"}, "color": 2, "label": "CPU",
+                }]}),
+            ),
+            (
+                DaemonCommand::SetChoice {
+                    id: "dev1".into(),
+                    key: "profile".into(),
+                    selected: 2,
+                },
+                json!({"type": "set_choice", "id": "dev1", "key": "profile", "selected": 2}),
+            ),
+            (
+                DaemonCommand::SetRange {
+                    id: "dev2".into(),
+                    key: "brightness".into(),
+                    value: 75,
+                },
+                json!({"type": "set_range", "id": "dev2", "key": "brightness", "value": 75}),
+            ),
+            (
+                DaemonCommand::SetBoolean {
+                    id: "dev3".into(),
+                    key: "enabled".into(),
+                    value: true,
+                },
+                json!({"type": "set_boolean", "id": "dev3", "key": "enabled", "value": true}),
+            ),
+            (
+                DaemonCommand::TriggerAction {
+                    id: "dev4".into(),
+                    key: "reboot".into(),
+                },
+                json!({"type": "trigger_action", "id": "dev4", "key": "reboot"}),
+            ),
+            (DaemonCommand::Rediscover, json!({"type": "rediscover"})),
+            (
+                DaemonCommand::GetUdevRulesStatus,
+                json!({"type": "get_udev_rules_status"}),
+            ),
+            (
+                DaemonCommand::SetPluginEnabled {
+                    id: "nzxt_kraken".into(),
+                    enabled: false,
+                },
+                json!({"type": "set_plugin_enabled", "id": "nzxt_kraken", "enabled": false}),
+            ),
+            (
+                DaemonCommand::ImportPluginRepository {
+                    source_path: "/r.tar.gz".into(),
+                },
+                json!({"type": "import_plugin_repository", "source_path": "/r.tar.gz"}),
+            ),
+            (
+                DaemonCommand::GetPluginAsset {
+                    plugin_id: "my_driver".into(),
+                    name: "logo.png".into(),
+                },
+                json!({"type": "get_plugin_asset", "plugin_id": "my_driver", "name": "logo.png"}),
+            ),
+            (
+                DaemonCommand::AddPluginRepo {
+                    url: "https://github.com/example/foo".into(),
+                },
+                json!({"type": "add_plugin_repo", "url": "https://github.com/example/foo"}),
+            ),
+            (
+                DaemonCommand::RemovePluginRepo { slug: "foo".into() },
+                json!({"type": "remove_plugin_repo", "slug": "foo"}),
+            ),
+            (
+                DaemonCommand::CheckPluginRepoUpdates,
+                json!({"type": "check_plugin_repo_updates"}),
+            ),
+            (
+                DaemonCommand::UpdatePluginRepo { slug: "foo".into() },
+                json!({"type": "update_plugin_repo", "slug": "foo"}),
+            ),
+            (
+                DaemonCommand::UpdateAllPlugins,
+                json!({"type": "update_all_plugins"}),
+            ),
+            (
+                DaemonCommand::SetPluginConfig {
+                    id: "openrgb".into(),
+                    values: host.clone(),
+                },
+                json!({"type": "set_plugin_config", "id": "openrgb", "values": {"host": "127.0.0.1"}}),
+            ),
+            (
+                DaemonCommand::SetIntegrationEnabled {
+                    id: "openrgb".into(),
+                    enabled: false,
+                },
+                json!({"type": "set_integration_enabled", "id": "openrgb", "enabled": false}),
+            ),
+            (
+                DaemonCommand::SetIntegrationConfig {
+                    id: "openrgb".into(),
+                    values: host,
+                },
+                json!({"type": "set_integration_config", "id": "openrgb", "values": {"host": "127.0.0.1"}}),
+            ),
+            (
+                DaemonCommand::BeginIntegrationSetup {
+                    id: "nanoleaf".into(),
+                },
+                json!({"type": "begin_integration_setup", "id": "nanoleaf"}),
+            ),
+            (
+                DaemonCommand::ResetIntegrationSetup {
+                    id: "nanoleaf".into(),
+                },
+                json!({"type": "reset_integration_setup", "id": "nanoleaf"}),
+            ),
+            (
+                DaemonCommand::SelectIntegrationSetupMode {
+                    id: "nanoleaf".into(),
+                    mode: crate::types::IntegrationSetupMode::Automatic,
+                },
+                json!({"type": "select_integration_setup_mode", "id": "nanoleaf", "mode": "automatic"}),
+            ),
+            (
+                DaemonCommand::SubmitIntegrationSetup {
+                    id: "nanoleaf".into(),
+                    candidate_id: Some("device-1".into()),
+                    values: HashMap::new(),
+                },
+                json!({"type": "submit_integration_setup", "id": "nanoleaf", "candidate_id": "device-1", "values": {}}),
+            ),
+            (
+                DaemonCommand::LoadLcdTemplate {
+                    name: "My Preset".into(),
+                },
+                json!({"type": "load_lcd_template", "name": "My Preset"}),
+            ),
+            (
+                DaemonCommand::DeleteLcdTemplate {
+                    name: "My Preset".into(),
+                },
+                json!({"type": "delete_lcd_template", "name": "My Preset"}),
+            ),
+            (
+                DaemonCommand::SaveCustomEffect {
+                    name: "Comet".into(),
+                    params: HashMap::from([("speed".to_string(), EffectParamValue::Float(50.0))]),
+                },
+                json!({"type": "save_custom_effect", "name": "Comet", "params": {"speed": 50.0}}),
+            ),
+            (
+                DaemonCommand::DeleteCustomEffect {
+                    name: "Comet".into(),
+                },
+                json!({"type": "delete_custom_effect", "name": "Comet"}),
+            ),
+            (DaemonCommand::CanvasStop, json!({"type": "canvas_stop"})),
+            (
+                DaemonCommand::SwitchProfile {
+                    name: "gaming".into(),
+                },
+                json!({"type": "switch_profile", "name": "gaming"}),
+            ),
+            (
+                DaemonCommand::SetLightingTargets {
+                    device_ids: vec!["dev1".into()],
+                    channels: HashMap::from([("dev1".to_string(), vec!["z0".to_string()])]),
+                },
+                json!({"type": "set_lighting_targets", "device_ids": ["dev1"], "channels": {"dev1": ["z0"]}}),
+            ),
+            (
+                DaemonCommand::RenameProfile {
+                    old_name: "old".into(),
+                    new_name: "new".into(),
+                },
+                json!({"type": "rename_profile", "old_name": "old", "new_name": "new"}),
+            ),
+            (
+                DaemonCommand::SetCoolingCurvePoints {
+                    device_id: "kraken".into(),
+                    channel_id: "pump".into(),
+                    points: vec![[30.0, 20.0], [80.0, 100.0]],
+                    sensor_id: None,
+                },
+                json!({
+                    "type": "set_cooling_curve_points", "device_id": "kraken", "channel_id": "pump",
+                    "points": [[30.0, 20.0], [80.0, 100.0]]
+                }),
+            ),
+            (
+                DaemonCommand::LightingApply {
+                    id: "d".into(),
+                    state: LightingState::Static {
+                        color: RgbColor { r: 1, g: 2, b: 3 },
+                    },
+                },
+                json!({"type": "lighting_apply", "id": "d", "state": {"mode": "static", "color": {"r": 1, "g": 2, "b": 3}}}),
+            ),
+            (
+                DaemonCommand::LightingApply {
+                    id: "d".into(),
+                    state: LightingState::DirectEffect {
+                        id: "rainbow".into(),
+                        params: HashMap::new(),
+                    },
+                },
+                json!({"type": "lighting_apply", "id": "d", "state": {"mode": "direct_effect", "id": "rainbow", "params": {}}}),
+            ),
+            (
+                DaemonCommand::ReceiverStartPairing {
+                    id: "rcv".into(),
+                    timeout_secs: 30,
+                },
+                json!({"type": "receiver_start_pairing", "id": "rcv", "timeout_secs": 30}),
+            ),
+            (
+                DaemonCommand::ReceiverStopPairing { id: "rcv".into() },
+                json!({"type": "receiver_stop_pairing", "id": "rcv"}),
+            ),
+            (
+                DaemonCommand::ReceiverUnpair {
+                    id: "rcv".into(),
+                    slot: 2,
+                },
+                json!({"type": "receiver_unpair", "id": "rcv", "slot": 2}),
+            ),
+            (
+                DaemonCommand::SetKeyboardLayout {
+                    id: "kbd".into(),
+                    selection: crate::keyboard::KeyboardLayoutSelection {
+                        variant: Some(crate::keyboard::KeyVariant::Iso),
+                        language: Some(crate::types::KeyboardLayout::CH),
+                    },
+                },
+                json!({"type": "set_keyboard_layout", "id": "kbd", "selection": {"variant": "iso", "language": "c_h"}}),
+            ),
+            (
+                DaemonCommand::SetKeyboardLayout {
+                    id: "kbd".into(),
+                    selection: Default::default(),
+                },
+                json!({"type": "set_keyboard_layout", "id": "kbd", "selection": {}}),
+            ),
+            (DaemonCommand::Shutdown, json!({"type": "shutdown"})),
+            (DaemonCommand::Ping, json!({"type": "ping"})),
+        ];
+        for (cmd, wire) in cases {
+            assert_eq!(roundtrip(&cmd), wire);
+            let parsed: DaemonCommand = serde_json::from_value(wire.clone()).unwrap();
+            assert_eq!(roundtrip(&parsed), wire);
+        }
+    }
+
+    #[test]
+    fn screen_rotation_is_a_string() {
         assert_eq!(
             serde_json::to_value(ScreenRotation::R270).unwrap(),
             json!("r270")
         );
-    }
-
-    #[test]
-    fn screen_rotation_round_trips_as_string() {
         assert_eq!(
             serde_json::from_value::<ScreenRotation>(json!("r90")).unwrap(),
             ScreenRotation::R90
-        );
-        assert_eq!(
-            serde_json::from_value::<ScreenRotation>(
-                serde_json::to_value(ScreenRotation::R180).unwrap()
-            )
-            .unwrap(),
-            ScreenRotation::R180
-        );
-    }
-
-    #[test]
-    fn set_engine_config_wire_format_uses_snake_case_engine() {
-        let v = roundtrip(&DaemonCommand::SetEngineConfig {
-            engine: EngineKind::FanCurve,
-            enabled: Some(true),
-            tick_ms: None,
-            fps: None,
-            failsafe_duty: None,
-        });
-        assert_eq!(
-            v,
-            json!({"type": "set_engine_config", "engine": "fan_curve", "enabled": true})
-        );
-    }
-
-    #[test]
-    fn mark_tour_seen_wire_format() {
-        let v = roundtrip(&DaemonCommand::MarkTourSeen {
-            tour: "page:home".into(),
-        });
-        assert_eq!(v, json!({"type": "mark_tour_seen", "tour": "page:home"}));
-    }
-
-    #[test]
-    fn reset_tours_seen_wire_format() {
-        let v = roundtrip(&DaemonCommand::ResetToursSeen);
-        assert_eq!(v, json!({"type": "reset_tours_seen"}));
-    }
-
-    #[test]
-    fn set_language_wire_format() {
-        let v = roundtrip(&DaemonCommand::SetLanguage { lang: "it".into() });
-        assert_eq!(v, json!({"type": "set_language", "lang": "it"}));
-    }
-
-    #[test]
-    fn set_home_widgets_wire_format() {
-        let v = roundtrip(&DaemonCommand::SetHomeWidgets {
-            widgets: vec![crate::types::HomeWidget {
-                id: "w1".into(),
-                kind: crate::types::HomeWidgetKind::Chart {
-                    sensor_id: "cpu".into(),
-                },
-                color: 2,
-                label: "CPU".into(),
-            }],
-        });
-        assert_eq!(
-            v,
-            json!({
-                "type": "set_home_widgets",
-                "widgets": [{
-                    "id": "w1",
-                    "kind": {"type": "chart", "sensor_id": "cpu"},
-                    "color": 2,
-                    "label": "CPU",
-                }],
-            })
-        );
-    }
-
-    #[test]
-    fn set_cooling_widgets_wire_format() {
-        let v = roundtrip(&DaemonCommand::SetCoolingWidgets {
-            widgets: vec![crate::types::HomeWidget {
-                id: "w1".into(),
-                kind: crate::types::HomeWidgetKind::Chart {
-                    sensor_id: "cpu".into(),
-                },
-                color: 2,
-                label: "CPU".into(),
-            }],
-        });
-        assert_eq!(
-            v,
-            json!({
-                "type": "set_cooling_widgets",
-                "widgets": [{
-                    "id": "w1",
-                    "kind": {"type": "chart", "sensor_id": "cpu"},
-                    "color": 2,
-                    "label": "CPU",
-                }],
-            })
         );
     }
 
     #[test]
     fn engine_kind_rejects_unknown_engine() {
         assert!(serde_json::from_value::<EngineKind>(json!("nonsense")).is_err());
-        assert_eq!(
-            serde_json::from_value::<EngineKind>(json!("canvas")).unwrap(),
-            EngineKind::Canvas
-        );
     }
 
     #[test]
-    fn set_choice_wire_format() {
-        let v = roundtrip(&DaemonCommand::SetChoice {
-            id: "dev1".into(),
-            key: "profile".into(),
-            selected: 2,
-        });
-        assert_eq!(
-            v,
-            json!({"type": "set_choice", "id": "dev1", "key": "profile", "selected": 2})
-        );
-    }
-
-    #[test]
-    fn set_range_wire_format() {
-        let v = roundtrip(&DaemonCommand::SetRange {
-            id: "dev2".into(),
-            key: "brightness".into(),
-            value: 75,
-        });
-        assert_eq!(
-            v,
-            json!({"type": "set_range", "id": "dev2", "key": "brightness", "value": 75})
-        );
-    }
-
-    #[test]
-    fn set_boolean_wire_format() {
-        let v = roundtrip(&DaemonCommand::SetBoolean {
-            id: "dev3".into(),
-            key: "enabled".into(),
-            value: true,
-        });
-        assert_eq!(
-            v,
-            json!({"type": "set_boolean", "id": "dev3", "key": "enabled", "value": true})
-        );
-    }
-
-    #[test]
-    fn trigger_action_wire_format() {
-        let v = roundtrip(&DaemonCommand::TriggerAction {
-            id: "dev4".into(),
-            key: "reboot".into(),
-        });
-        assert_eq!(
-            v,
-            json!({"type": "trigger_action", "id": "dev4", "key": "reboot"})
-        );
-    }
-
-    #[test]
-    fn rediscover_wire_format() {
-        let v = roundtrip(&DaemonCommand::Rediscover);
-        assert_eq!(v, json!({"type": "rediscover"}));
-    }
-
-    #[test]
-    fn get_udev_rules_status_wire_format() {
-        let value = roundtrip(&DaemonCommand::GetUdevRulesStatus);
-        assert_eq!(value, json!({"type": "get_udev_rules_status"}));
-    }
-
-    #[test]
-    fn set_plugin_enabled_wire_format() {
-        let v = roundtrip(&DaemonCommand::SetPluginEnabled {
-            id: "nzxt_kraken".into(),
-            enabled: false,
-        });
-        assert_eq!(
-            v,
-            json!({"type": "set_plugin_enabled", "id": "nzxt_kraken", "enabled": false})
-        );
-    }
-
-    #[test]
-    fn import_plugin_repository_wire_format() {
-        let v = roundtrip(&DaemonCommand::ImportPluginRepository {
-            source_path: "/home/user/my-repository.tar.gz".into(),
-        });
-        assert_eq!(
-            v,
-            json!({"type": "import_plugin_repository", "source_path": "/home/user/my-repository.tar.gz"})
-        );
-    }
-
-    #[test]
-    fn confirm_plugin_enable_batch_wire_format() {
-        let v = roundtrip(&DaemonCommand::ConfirmPluginEnableBatch {
-            plugins: vec![PluginEnableConfirmation {
-                id: "halo_effects".into(),
-                authority: PluginAuthority::default(),
-            }],
-        });
-        assert_eq!(v["type"], "confirm_plugin_enable_batch");
-        assert_eq!(v["plugins"][0]["id"], "halo_effects");
-    }
-
-    #[test]
-    fn get_plugin_asset_wire_format() {
-        let v = roundtrip(&DaemonCommand::GetPluginAsset {
-            plugin_id: "my_driver".into(),
-            name: "logo.png".into(),
-        });
-        assert_eq!(
-            v,
-            json!({"type": "get_plugin_asset", "plugin_id": "my_driver", "name": "logo.png"})
-        );
-    }
-
-    #[test]
-    fn add_plugin_repo_wire_format() {
-        let v = roundtrip(&DaemonCommand::AddPluginRepo {
-            url: "https://github.com/example/foo".into(),
-        });
-        assert_eq!(
-            v,
-            json!({"type": "add_plugin_repo", "url": "https://github.com/example/foo"})
-        );
-    }
-
-    #[test]
-    fn remove_plugin_repo_wire_format() {
-        let v = roundtrip(&DaemonCommand::RemovePluginRepo { slug: "foo".into() });
-        assert_eq!(v, json!({"type": "remove_plugin_repo", "slug": "foo"}));
-    }
-
-    #[test]
-    fn check_plugin_repo_updates_wire_format() {
-        let v = roundtrip(&DaemonCommand::CheckPluginRepoUpdates);
-        assert_eq!(v, json!({"type": "check_plugin_repo_updates"}));
-    }
-
-    #[test]
-    fn update_plugin_repo_wire_format() {
-        let v = roundtrip(&DaemonCommand::UpdatePluginRepo { slug: "foo".into() });
-        assert_eq!(v, json!({"type": "update_plugin_repo", "slug": "foo"}));
-    }
-
-    #[test]
-    fn update_all_plugins_wire_format() {
-        let v = roundtrip(&DaemonCommand::UpdateAllPlugins);
-        assert_eq!(v, json!({"type": "update_all_plugins"}));
-    }
-
-    #[test]
-    fn set_plugin_config_wire_format() {
-        let mut values = HashMap::new();
-        values.insert("host".to_string(), "127.0.0.1".to_string());
-        let v = roundtrip(&DaemonCommand::SetPluginConfig {
-            id: "openrgb".into(),
-            values,
-        });
-        assert_eq!(
-            v,
-            json!({"type": "set_plugin_config", "id": "openrgb", "values": {"host": "127.0.0.1"}})
-        );
-    }
-
-    #[test]
-    fn set_integration_enabled_wire_format() {
-        let v = roundtrip(&DaemonCommand::SetIntegrationEnabled {
-            id: "openrgb".into(),
-            enabled: false,
-        });
-        assert_eq!(
-            v,
-            json!({"type": "set_integration_enabled", "id": "openrgb", "enabled": false})
-        );
-    }
-
-    #[test]
-    fn set_integration_config_wire_format() {
-        let mut values = HashMap::new();
-        values.insert("host".to_string(), "127.0.0.1".to_string());
-        let v = roundtrip(&DaemonCommand::SetIntegrationConfig {
-            id: "openrgb".into(),
-            values,
-        });
-        assert_eq!(
-            v,
-            json!({"type": "set_integration_config", "id": "openrgb", "values": {"host": "127.0.0.1"}})
-        );
-    }
-
-    #[test]
-    fn integration_setup_commands_have_stable_wire_formats() {
-        assert_eq!(
-            serde_json::to_value(DaemonCommand::BeginIntegrationSetup {
-                id: "nanoleaf".into(),
-            })
-            .unwrap(),
-            json!({"type": "begin_integration_setup", "id": "nanoleaf"})
-        );
-        assert_eq!(
-            serde_json::to_value(DaemonCommand::ResetIntegrationSetup {
-                id: "nanoleaf".into(),
-            })
-            .unwrap(),
-            json!({"type": "reset_integration_setup", "id": "nanoleaf"})
-        );
-        assert_eq!(
-            serde_json::to_value(DaemonCommand::SelectIntegrationSetupMode {
-                id: "nanoleaf".into(),
-                mode: crate::types::IntegrationSetupMode::Automatic,
-            })
-            .unwrap(),
-            json!({
-                "type": "select_integration_setup_mode",
-                "id": "nanoleaf",
-                "mode": "automatic"
-            })
-        );
-        assert_eq!(
-            serde_json::to_value(DaemonCommand::SubmitIntegrationSetup {
-                id: "nanoleaf".into(),
-                candidate_id: Some("device-1".into()),
-                values: HashMap::new(),
-            })
-            .unwrap(),
-            json!({
-                "type": "submit_integration_setup",
-                "id": "nanoleaf",
-                "candidate_id": "device-1",
-                "values": {}
-            })
-        );
-    }
-
-    #[test]
-    fn engine_config_constructors_set_only_their_field() {
-        assert_eq!(
-            roundtrip(&DaemonCommand::set_engine_enabled(
-                EngineKind::Canvas,
-                false
-            )),
-            json!({"type": "set_engine_config", "engine": "canvas", "enabled": false})
-        );
-        assert_eq!(
-            roundtrip(&DaemonCommand::set_engine_fps(EngineKind::Lcd, 30)),
-            json!({"type": "set_engine_config", "engine": "lcd", "fps": 30})
-        );
-        assert_eq!(
-            roundtrip(&DaemonCommand::set_engine_tick_ms(
-                EngineKind::FanCurve,
-                2000
-            )),
-            json!({"type": "set_engine_config", "engine": "fan_curve", "tick_ms": 2000})
-        );
-    }
-
-    #[test]
-    fn save_lcd_template_wire_format() {
-        let v = roundtrip(&DaemonCommand::SaveLcdTemplate {
-            name: "My Preset".into(),
-            def: crate::lcd_custom::CustomTemplateDef::default(),
-        });
-        assert_eq!(v["type"], "save_lcd_template");
-        assert_eq!(v["name"], "My Preset");
-    }
-
-    #[test]
-    fn load_and_delete_lcd_template_wire_format() {
-        assert_eq!(
-            roundtrip(&DaemonCommand::LoadLcdTemplate {
-                name: "My Preset".into(),
-            }),
-            json!({"type": "load_lcd_template", "name": "My Preset"})
-        );
-        assert_eq!(
-            roundtrip(&DaemonCommand::DeleteLcdTemplate {
-                name: "My Preset".into(),
-            }),
-            json!({"type": "delete_lcd_template", "name": "My Preset"})
-        );
-    }
-
-    #[test]
-    fn render_lcd_editor_wire_format() {
-        let mut known = HashMap::new();
-        known.insert("w1".to_string(), 42u64);
-        let v = roundtrip(&DaemonCommand::RenderLcdEditor {
-            device_id: "dev1".into(),
-            def: crate::lcd_custom::CustomTemplateDef::default(),
-            known: known.clone(),
-        });
-        assert_eq!(v["type"], "render_lcd_editor");
-        assert_eq!(v["device_id"], "dev1");
-        assert!(v["def"]["widgets"].is_array());
-        assert_eq!(v["known"]["w1"], 42);
-        let back: DaemonCommand = serde_json::from_value(v).unwrap();
-        match back {
-            DaemonCommand::RenderLcdEditor { known: k, .. } => assert_eq!(k, known),
-            _ => panic!("wrong variant"),
-        }
-    }
-
-    #[test]
-    fn save_and_delete_custom_effect_wire_format() {
-        let mut params = HashMap::new();
-        params.insert("speed".to_string(), EffectParamValue::Float(50.0));
-        assert_eq!(
-            roundtrip(&DaemonCommand::SaveCustomEffect {
-                name: "Comet".into(),
-                params: params.clone(),
-            }),
-            json!({"type": "save_custom_effect", "name": "Comet", "params": {"speed": 50.0}})
-        );
-        assert_eq!(
-            roundtrip(&DaemonCommand::DeleteCustomEffect {
-                name: "Comet".into(),
-            }),
-            json!({"type": "delete_custom_effect", "name": "Comet"})
-        );
-    }
-
-    #[test]
-    fn canvas_stop_wire_format() {
-        assert_eq!(
-            roundtrip(&DaemonCommand::CanvasStop),
-            json!({"type": "canvas_stop"})
-        );
-        let cmd: DaemonCommand = serde_json::from_value(json!({"type": "canvas_stop"})).unwrap();
-        assert!(matches!(cmd, DaemonCommand::CanvasStop));
-    }
-
-    #[test]
-    fn set_choice_roundtrip_deserialise() {
-        let json_str = r#"{"type":"set_choice","id":"x","key":"k","selected":1}"#;
-        let cmd: DaemonCommand = serde_json::from_str(json_str).unwrap();
-        assert!(matches!(cmd, DaemonCommand::SetChoice { selected: 1, .. }));
-    }
-
-    #[test]
-    fn switch_profile_wire_format() {
-        let v = roundtrip(&DaemonCommand::SwitchProfile {
-            name: "gaming".into(),
-        });
-        assert_eq!(v, json!({"type": "switch_profile", "name": "gaming"}));
-    }
-
-    #[test]
-    fn set_lighting_targets_wire_format() {
-        let v = roundtrip(&DaemonCommand::SetLightingTargets {
-            device_ids: vec!["dev1".into()],
-            channels: HashMap::from([("dev1".to_string(), vec!["z0".to_string()])]),
-        });
-        assert_eq!(
-            v,
-            json!({
-                "type": "set_lighting_targets",
-                "device_ids": ["dev1"],
-                "channels": {"dev1": ["z0"]}
-            })
-        );
-    }
-
-    #[test]
-    fn rename_profile_wire_format() {
-        let v = roundtrip(&DaemonCommand::RenameProfile {
-            old_name: "old".into(),
-            new_name: "new".into(),
-        });
-        assert_eq!(
-            v,
-            json!({"type": "rename_profile", "old_name": "old", "new_name": "new"})
-        );
-    }
-
-    #[test]
-    fn set_cooling_curve_points_carries_device_and_channel() {
-        let v = roundtrip(&DaemonCommand::SetCoolingCurvePoints {
-            device_id: "kraken".into(),
-            channel_id: "pump".into(),
-            points: vec![[30.0, 20.0], [80.0, 100.0]],
-            sensor_id: None,
-        });
-        assert_eq!(
-            v,
-            json!({
-                "type": "set_cooling_curve_points", "device_id": "kraken", "channel_id": "pump",
-                "points": [[30.0, 20.0], [80.0, 100.0]]
-            })
-        );
-    }
-
-    #[test]
-    fn lighting_apply_carries_rgb_state() {
-        let v = roundtrip(&DaemonCommand::LightingApply {
-            id: "d".into(),
-            state: LightingState::Static {
-                color: RgbColor { r: 1, g: 2, b: 3 },
-            },
-        });
-        assert_eq!(
-            v,
-            json!({"type": "lighting_apply", "id": "d", "state": {"mode": "static", "color": {"r": 1, "g": 2, "b": 3}}})
-        );
-    }
-
-    #[test]
-    fn lighting_apply_carries_direct_effect_state() {
-        let v = roundtrip(&DaemonCommand::LightingApply {
-            id: "d".into(),
-            state: LightingState::DirectEffect {
-                id: "rainbow".into(),
-                params: HashMap::new(),
-            },
-        });
-        assert_eq!(
-            v,
-            json!({"type": "lighting_apply", "id": "d", "state": {"mode": "direct_effect", "id": "rainbow", "params": {}}})
-        );
-        let back: DaemonCommand = serde_json::from_value(v).unwrap();
-        assert!(matches!(
-            back,
-            DaemonCommand::LightingApply {
-                state: LightingState::DirectEffect { .. },
-                ..
-            }
-        ));
-    }
-
-    #[test]
-    fn canvas_effect_crud_roundtrips() {
-        for cmd in [
-            DaemonCommand::CanvasUpsertEffect {
-                instance_id: "a".into(),
-                def: crate::types::EffectDef {
-                    effect_id: "screen_sampler".into(),
-                    name: Some("Desk glow".into()),
-                    params: HashMap::new(),
-                },
-            },
-            DaemonCommand::CanvasRemoveEffect {
-                instance_id: "a".into(),
-            },
-            DaemonCommand::CanvasSetDefaultEffect {
-                instance_id: Some("a".into()),
-            },
-        ] {
-            let back: DaemonCommand = serde_json::from_value(roundtrip(&cmd)).unwrap();
-            assert_eq!(std::mem::discriminant(&back), std::mem::discriminant(&cmd));
-        }
-    }
-
-    #[test]
-    fn upsert_effect_name_roundtrips_and_defaults_to_none() {
-        let v = roundtrip(&DaemonCommand::CanvasUpsertEffect {
-            instance_id: "a".into(),
-            def: crate::types::EffectDef {
-                effect_id: "screen_sampler".into(),
-                name: Some("Desk glow".into()),
-                params: HashMap::new(),
-            },
-        });
-        assert_eq!(v["def"]["name"], json!("Desk glow"));
-        // Pre-name payloads (and configs) must still parse.
+    fn upsert_effect_name_defaults_to_none() {
         let cmd: DaemonCommand = serde_json::from_value(json!({
             "type": "canvas_upsert_effect",
             "instance_id": "a",
@@ -1202,148 +966,10 @@ mod tests {
     }
 
     #[test]
-    fn place_zone_carries_effect_instance() {
-        let v = roundtrip(&DaemonCommand::CanvasPlaceZone {
-            device_id: "d".into(),
-            channel_id: "z".into(),
-            x: None,
-            y: None,
-            w: None,
-            h: None,
-            rotation: None,
-            effect: Some("bars".into()),
-            sampling_mode: None,
-        });
-        assert_eq!(v["effect"], json!("bars"));
-    }
-
-    #[test]
-    fn receiver_start_pairing_wire_format() {
-        let v = roundtrip(&DaemonCommand::ReceiverStartPairing {
-            id: "rcv".into(),
-            timeout_secs: 30,
-        });
-        assert_eq!(
-            v,
-            json!({"type": "receiver_start_pairing", "id": "rcv", "timeout_secs": 30})
-        );
-    }
-
-    #[test]
-    fn receiver_stop_pairing_wire_format() {
-        let v = roundtrip(&DaemonCommand::ReceiverStopPairing { id: "rcv".into() });
-        assert_eq!(v, json!({"type": "receiver_stop_pairing", "id": "rcv"}));
-    }
-
-    #[test]
-    fn receiver_unpair_wire_format() {
-        let v = roundtrip(&DaemonCommand::ReceiverUnpair {
-            id: "rcv".into(),
-            slot: 2,
-        });
-        assert_eq!(
-            v,
-            json!({"type": "receiver_unpair", "id": "rcv", "slot": 2})
-        );
-    }
-
-    #[test]
-    fn shutdown_wire_format() {
-        let cmd: DaemonCommand = serde_json::from_value(json!({"type": "shutdown"})).unwrap();
-        assert!(matches!(cmd, DaemonCommand::Shutdown));
-    }
-
-    #[test]
-    fn ping_wire_format() {
-        // The GUI heartbeat writes this exact frame; guard against drift.
-        let cmd: DaemonCommand = serde_json::from_value(json!({"type": "ping"})).unwrap();
-        assert!(matches!(cmd, DaemonCommand::Ping));
-    }
-
-    #[test]
-    fn unit_variant_ignores_extra_fields() {
+    fn ignores_unmodelled_fields() {
         let cmd: DaemonCommand =
             serde_json::from_value(json!({"type": "canvas_subscribe", "ignored": true})).unwrap();
         assert!(matches!(cmd, DaemonCommand::CanvasSubscribe));
-    }
-
-    // UI-shaped payload deserialisation
-    // Feed the exact JSON the UI sends through the enum, guarding against drift.
-
-    #[test]
-    fn set_device_visibility_parses_ui_payload() {
-        let cmd: DaemonCommand = serde_json::from_value(
-            json!({"type": "set_device_visibility", "device_id": "d", "state": "hidden"}),
-        )
-        .expect("UI payload must deserialise");
-        assert!(matches!(
-            cmd,
-            DaemonCommand::SetDeviceVisibility {
-                state: VisibilityState::Hidden,
-                ..
-            }
-        ));
-    }
-
-    #[test]
-    fn set_channel_visibility_parses_ui_payload() {
-        let cmd: DaemonCommand = serde_json::from_value(json!({
-            "type": "set_channel_visibility",
-            "device_id": "d",
-            "kind": "cooling",
-            "channel_id": "fan1",
-            "state": "disabled",
-        }))
-        .expect("UI payload must deserialise");
-        assert!(matches!(
-            cmd,
-            DaemonCommand::SetChannelVisibility {
-                kind: ChannelKind::Cooling,
-                state: VisibilityState::Disabled,
-                ..
-            }
-        ));
-    }
-
-    #[test]
-    fn set_device_name_parses_ui_payload() {
-        let cmd: DaemonCommand = serde_json::from_value(
-            json!({"type": "set_device_name", "device_id": "d", "name": "My Fan"}),
-        )
-        .expect("UI payload must deserialise");
-        assert!(matches!(cmd, DaemonCommand::SetDeviceName { .. }));
-    }
-
-    #[test]
-    fn remove_profile_override_parses_device_capability() {
-        let cmd: DaemonCommand = serde_json::from_value(json!({
-            "type": "remove_profile_override",
-            "profile": "Gaming",
-            "target": { "kind": "device_capability", "device_id": "d", "state_key": "fan_curve" }
-        }))
-        .unwrap();
-        assert!(matches!(cmd, DaemonCommand::RemoveProfileOverride { .. }));
-    }
-
-    #[test]
-    fn remove_profile_override_parses_canvas() {
-        let cmd: DaemonCommand = serde_json::from_value(json!({
-            "type": "remove_profile_override",
-            "profile": "Gaming",
-            "target": { "kind": "canvas" }
-        }))
-        .unwrap();
-        assert!(matches!(
-            cmd,
-            DaemonCommand::RemoveProfileOverride {
-                target: OverrideTarget::Canvas,
-                ..
-            }
-        ));
-    }
-
-    #[test]
-    fn struct_variant_ignores_unmodelled_fields() {
         let cmd: DaemonCommand = serde_json::from_value(
             json!({"type": "canvas_place_zone", "device_id": "d", "channel_id": "z", "x": 0.1, "y": 0.2}),
         )
@@ -1352,39 +978,17 @@ mod tests {
     }
 
     #[test]
-    fn set_keyboard_layout_roundtrips() {
-        use crate::keyboard::{KeyVariant, KeyboardLayoutSelection};
-        use crate::types::KeyboardLayout;
-        let cmd = DaemonCommand::SetKeyboardLayout {
-            id: "kbd".into(),
-            selection: KeyboardLayoutSelection {
-                variant: Some(KeyVariant::Iso),
-                language: Some(KeyboardLayout::CH),
-            },
-        };
-        let v = roundtrip(&cmd);
-        assert_eq!(v["type"], "set_keyboard_layout");
-        assert_eq!(v["id"], "kbd");
-        assert_eq!(v["selection"]["variant"], "iso");
-        assert_eq!(v["selection"]["language"], "c_h");
-        let back: DaemonCommand = serde_json::from_value(v).unwrap();
-        match back {
-            DaemonCommand::SetKeyboardLayout { selection, .. } => {
-                assert_eq!(selection.variant, Some(KeyVariant::Iso));
-                assert_eq!(selection.language, Some(KeyboardLayout::CH));
-            }
-            _ => panic!("wrong variant"),
+    fn parses_ui_payloads() {
+        for payload in [
+            json!({"type": "set_device_visibility", "device_id": "d", "state": "hidden"}),
+            json!({"type": "set_channel_visibility", "device_id": "d", "kind": "cooling", "channel_id": "fan1", "state": "disabled"}),
+            json!({"type": "set_device_name", "device_id": "d", "name": "My Fan"}),
+            json!({"type": "remove_profile_override", "profile": "Gaming",
+                "target": { "kind": "device_capability", "device_id": "d", "state_key": "fan_curve" }}),
+            json!({"type": "remove_profile_override", "profile": "Gaming", "target": { "kind": "canvas" }}),
+        ] {
+            let cmd: DaemonCommand = serde_json::from_value(payload.clone()).unwrap();
+            assert_eq!(roundtrip(&cmd), payload);
         }
-    }
-
-    #[test]
-    fn set_keyboard_layout_auto_omits_axes() {
-        use crate::keyboard::KeyboardLayoutSelection;
-        let v = roundtrip(&DaemonCommand::SetKeyboardLayout {
-            id: "kbd".into(),
-            selection: KeyboardLayoutSelection::default(),
-        });
-        assert!(v["selection"].get("variant").is_none());
-        assert!(v["selection"].get("language").is_none());
     }
 }

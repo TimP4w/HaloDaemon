@@ -1000,83 +1000,6 @@ mod tests {
             .is_empty());
     }
 
-    use super::super::{CapabilityRef, LightingCapability, LightingStateSlot};
-    use halod_shared::types::{LedPosition, LightingChannel, LightingDescriptor, LightingState};
-
-    /// Minimal RGB device with a single zone — enough to exercise
-    /// `register_auto_link`, which reads the first zone's topology + led count.
-    struct StubRgbDevice {
-        id: String,
-        desc: LightingDescriptor,
-        rgb: LightingStateSlot,
-    }
-
-    impl StubRgbDevice {
-        fn new(id: &str, leds: u32) -> Arc<Self> {
-            Arc::new(Self {
-                id: id.to_string(),
-                desc: LightingDescriptor {
-                    channels: vec![LightingChannel {
-                        id: "z0".to_string(),
-                        name: "z0".to_string(),
-                        topology: ZoneTopology::Linear,
-                        leds: (0..leds)
-                            .map(|i| LedPosition {
-                                id: i as _,
-                                x: 0.0,
-                                y: 0.0,
-                            })
-                            .collect(),
-                        color_order: Default::default(),
-                        division: Default::default(),
-                        visibility: Default::default(),
-                    }],
-                    native_effects: vec![],
-                },
-                rgb: LightingStateSlot::default(),
-            })
-        }
-    }
-
-    #[async_trait]
-    impl Device for StubRgbDevice {
-        fn id(&self) -> &str {
-            &self.id
-        }
-        fn name(&self) -> &str {
-            &self.id
-        }
-        fn vendor(&self) -> &str {
-            "stub"
-        }
-        fn model(&self) -> &str {
-            "stub"
-        }
-        async fn initialize(&self) -> Result<bool> {
-            Ok(true)
-        }
-        async fn close(&self) {}
-        fn capabilities(&self) -> Vec<CapabilityRef<'_>> {
-            vec![CapabilityRef::Lighting(self)]
-        }
-    }
-
-    #[async_trait]
-    impl LightingCapability for StubRgbDevice {
-        fn descriptor(&self) -> &LightingDescriptor {
-            &self.desc
-        }
-        async fn apply(&self, _: LightingState) -> Result<()> {
-            Ok(())
-        }
-        async fn write_frame(&self, _: &str, _: &[u8]) -> Result<()> {
-            Ok(())
-        }
-        fn lighting_state(&self) -> &LightingStateSlot {
-            &self.rgb
-        }
-    }
-
     #[tokio::test]
     async fn add_link_uses_supplied_name_not_child_default() {
         let host = stub_parts().0;
@@ -1095,11 +1018,13 @@ mod tests {
     async fn auto_link_replace_keeps_children_consistent_with_link_state() {
         let host = stub_parts().0;
 
-        let first: Arc<dyn Device> = StubRgbDevice::new("hw_a", 4);
+        let first: Arc<dyn Device> =
+            Arc::new(crate::test_support::MockDevice::new("hw_a").with_rgb());
         host.register_auto_link("a", first).await;
 
         // A re-detect replaces the locked slot-0 link with a fresh accessory.
-        let second: Arc<dyn Device> = StubRgbDevice::new("hw_b", 4);
+        let second: Arc<dyn Device> =
+            Arc::new(crate::test_support::MockDevice::new("hw_b").with_rgb());
         host.register_auto_link("a", second).await;
 
         // Exactly one locked link, and `children()` must mirror it — not the

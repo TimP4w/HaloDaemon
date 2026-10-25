@@ -502,16 +502,8 @@ mod tests {
     }
 
     #[test]
-    fn param_str_and_variant_fall_back_on_missing_key() {
+    fn param_str_falls_back_on_missing_key() {
         let w = widget("w1", 0.0, 0.0);
         assert_eq!(halod_shared::lcd_custom::param_str(&w, "text"), "");
-        assert_eq!(halod_shared::lcd_custom::param_variant(&w, "stat"), "stat");
-    }
-
-    #[test]
-    fn shared_size_constants_match_expected() {
-        // Pins the editor's view of the shared size constant it still uses (the
-        // inline text-edit box); the daemon mirrors it so the two can't drift.
-        assert_eq!(halod_shared::lcd_geometry::TEXT_FONT, 0.22);
     }
 }

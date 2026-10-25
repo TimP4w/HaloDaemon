@@ -1,9 +1,8 @@
 // SPDX-License-Identifier: GPL-3.0-or-later
 use anyhow::Result;
 use halod_shared::types::{AppRule, PluginAuthority, VisibilityState, DEFAULT_PROFILE_NAME};
-// Types shared with wire protocol; re-exported for backward-compat.
 pub use halod_shared::types::{
-    CanvasState, CoolingConfig, GuiConfig, LcdConfig, PlacedZone, RgbConfig,
+    CanvasState, CoolingConfig, GuiConfig, LcdConfig, PlacedZone, PluginReleasePolicy, RgbConfig,
 };
 use halod_shared::zone_transform::ZoneContentTransform;
 use serde::de::DeserializeOwned;
@@ -60,7 +59,7 @@ pub fn load() -> Result<Config> {
 }
 
 pub fn save(cfg: &Config) -> Result<()> {
-    atomic_write(
+    crate::util::fs::atomic_write(
         &main_config_path(),
         &serde_yaml::to_string(&MainFile {
             active_profile: cfg.active_profile.clone(),
@@ -70,7 +69,7 @@ pub fn save(cfg: &Config) -> Result<()> {
             gui: cfg.gui.clone(),
         })?,
     )?;
-    atomic_write(
+    crate::util::fs::atomic_write(
         &devices_config_path(),
         &serde_yaml::to_string(&DevicesFile {
             known_devices: cfg.known_devices.clone(),
@@ -80,22 +79,18 @@ pub fn save(cfg: &Config) -> Result<()> {
             keyboard_layouts: cfg.keyboard_layouts.clone(),
         })?,
     )?;
-    atomic_write(
+    crate::util::fs::atomic_write(
         &app_rules_config_path(),
         &serde_yaml::to_string(&AppRulesFile {
             app_rules: cfg.app_rules.clone(),
         })?,
     )?;
-    atomic_write(
+    crate::util::fs::atomic_write(
         &plugins_config_path(),
         &serde_yaml::to_string(&cfg.plugins)?,
     )?;
     save_profiles(&cfg.profiles)?;
     Ok(())
-}
-
-pub(crate) fn atomic_write(path: &Path, contents: &str) -> Result<()> {
-    crate::util::fs::atomic_write_str(path, contents)
 }
 
 fn load_file<T: Default + DeserializeOwned>(path: &Path, label: &str) -> Result<T> {
@@ -176,7 +171,7 @@ fn save_profiles(profiles: &HashMap<String, Profile>) -> Result<()> {
             name: name.clone(),
             profile: profile.clone(),
         })?;
-        atomic_write(&dir.join(&filename), &yaml)?;
+        crate::util::fs::atomic_write(&dir.join(&filename), &yaml)?;
         expected.insert(filename);
     }
 
@@ -224,30 +219,14 @@ fn profile_filename(name: &str) -> String {
     }
 }
 
-fn fnv1a64(s: &str) -> u64 {
+pub(crate) fn fnv1a64(s: &str) -> u64 {
     use std::hash::Hasher;
     let mut h = fnv::FnvHasher::default();
     h.write(s.as_bytes());
     h.finish()
 }
 
-pub fn config_dir() -> PathBuf {
-    if let Ok(dir) = std::env::var("HALOD_CONFIG_DIR") {
-        return PathBuf::from(dir);
-    }
-    #[cfg(target_os = "windows")]
-    {
-        let appdata = std::env::var("APPDATA").unwrap_or_else(|_| ".".to_string());
-        PathBuf::from(appdata).join(halod_shared::app::APP_NAME)
-    }
-    #[cfg(not(target_os = "windows"))]
-    {
-        let home = std::env::var("HOME").unwrap_or_else(|_| ".".to_string());
-        PathBuf::from(home)
-            .join(".config")
-            .join(halod_shared::app::APP_NAME)
-    }
-}
+pub use halod_shared::app::config_dir;
 
 fn main_config_path() -> PathBuf {
     config_dir().join("config.yaml")
@@ -415,14 +394,6 @@ pub struct PluginRepoRecord {
     /// Last successful release synchronization (RFC 3339).
     #[serde(default)]
     pub last_sync: Option<String>,
-}
-
-#[derive(Debug, Clone, Default, PartialEq, Eq, Serialize, Deserialize)]
-#[serde(rename_all = "snake_case", tag = "mode", content = "tag")]
-pub enum PluginReleasePolicy {
-    #[default]
-    Latest,
-    Pinned(String),
 }
 
 #[derive(Debug, Clone, Copy, Default, PartialEq, Eq, Serialize, Deserialize)]

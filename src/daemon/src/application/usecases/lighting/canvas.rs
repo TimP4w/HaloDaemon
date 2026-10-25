@@ -382,19 +382,10 @@ mod tests {
     use super::*;
     use crate::application::state::AppState;
     use crate::config::Config;
-    use crate::test_support::MockDevice;
+    use crate::test_support::{app_with, MockDevice};
 
     fn placed_channels(dev: &MockDevice) -> Vec<config::PlacedZone> {
         dev.rgb.as_ref().unwrap().placed_channels()
-    }
-
-    fn make_app(device: Arc<MockDevice>) -> Arc<AppState> {
-        let app = Arc::new(AppState::new(Config::default()));
-        app.device_registry
-            .try_write()
-            .unwrap()
-            .push(device as Arc<dyn crate::domain::device::Device>);
-        app
     }
 
     #[test]
@@ -413,7 +404,7 @@ mod tests {
     #[tokio::test]
     async fn place_zone_rejects_unknown_zone_id() {
         let dev = Arc::new(MockDevice::new("dev0").with_rgb());
-        let app = make_app(dev.clone());
+        let app = app_with(vec![dev.clone()]);
         let err = place_zone(
             "dev0".into(),
             "nope".into(),
@@ -434,7 +425,7 @@ mod tests {
     #[tokio::test]
     async fn upsert_effect_rejects_too_many_params() {
         let dev = Arc::new(MockDevice::new("dev0").with_rgb());
-        let app = make_app(dev);
+        let app = app_with(vec![dev]);
         let mut def = EffectDef {
             effect_id: "x".into(),
             name: None,
@@ -452,7 +443,7 @@ mod tests {
     #[tokio::test]
     async fn place_zone_adds_zone_to_device_slot() {
         let dev = Arc::new(MockDevice::new("dev0").with_rgb());
-        let app = make_app(dev.clone());
+        let app = app_with(vec![dev.clone()]);
         upsert_effect("bars".into(), def("screen_sampler"), app.clone())
             .await
             .unwrap();
@@ -485,7 +476,7 @@ mod tests {
     #[tokio::test]
     async fn place_zone_replaces_existing_zone() {
         let dev = Arc::new(MockDevice::new("dev0").with_rgb());
-        let app = make_app(dev.clone());
+        let app = app_with(vec![dev.clone()]);
         place_zone(
             "dev0".into(),
             "ring".into(),
@@ -546,7 +537,7 @@ mod tests {
     #[tokio::test]
     async fn remove_zone_removes_zone_from_slot() {
         let dev = Arc::new(MockDevice::new("dev0").with_rgb());
-        let app = make_app(dev.clone());
+        let app = app_with(vec![dev.clone()]);
         place_zone(
             "dev0".into(),
             "ring".into(),
@@ -571,7 +562,7 @@ mod tests {
     #[tokio::test]
     async fn move_zone_updates_position_and_effect_in_slot() {
         let dev = Arc::new(MockDevice::new("dev0").with_rgb());
-        let app = make_app(dev.clone());
+        let app = app_with(vec![dev.clone()]);
         upsert_effect("bars".into(), def("screen_sampler"), app.clone())
             .await
             .unwrap();
@@ -641,7 +632,7 @@ mod tests {
     #[tokio::test]
     async fn move_and_remove_error_for_unplaced_zone() {
         let dev = Arc::new(MockDevice::new("dev0").with_rgb());
-        let app = make_app(dev);
+        let app = app_with(vec![dev]);
 
         let move_err = move_zone(
             "dev0".into(),
@@ -668,7 +659,7 @@ mod tests {
     #[tokio::test]
     async fn stop_disables_engine_and_blanks_engine_mode_device() {
         let dev = Arc::new(MockDevice::new("dev0").with_rgb());
-        let app = make_app(dev.clone());
+        let app = app_with(vec![dev.clone()]);
         // Placing a zone puts the device into Engine mode.
         place_zone(
             "dev0".into(),
@@ -704,7 +695,7 @@ mod tests {
     async fn stop_blanks_direct_effect_device() {
         use crate::domain::device::LightingCapability;
         let dev = Arc::new(MockDevice::new("dev0").with_rgb());
-        let app = make_app(dev.clone());
+        let app = app_with(vec![dev.clone()]);
         // A direct (software) effect is also engine-driven, so stop must blank it.
         dev.apply(LightingState::DirectEffect {
             id: "breathing".into(),
@@ -794,7 +785,7 @@ mod tests {
     #[tokio::test]
     async fn place_zone_rejects_a_dangling_effect() {
         let dev = Arc::new(MockDevice::new("dev0").with_rgb());
-        let app = make_app(dev);
+        let app = app_with(vec![dev]);
         assert!(place_zone(
             "dev0".into(),
             "ring".into(),

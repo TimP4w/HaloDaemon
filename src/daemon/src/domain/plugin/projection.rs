@@ -110,14 +110,7 @@ pub async fn project(app: &AppState, cfg: &Config, devices: &[WireDevice]) -> Pl
                 slug: record.slug.clone(),
                 repository_id: record.repository_id.clone(),
                 release_tag: record.release_tag.clone(),
-                release_policy: match &record.release_policy {
-                    crate::config::PluginReleasePolicy::Latest => {
-                        halod_shared::types::PluginReleasePolicy::Latest
-                    }
-                    crate::config::PluginReleasePolicy::Pinned(tag) => {
-                        halod_shared::types::PluginReleasePolicy::Pinned(tag.clone())
-                    }
-                },
+                release_policy: record.release_policy.clone(),
                 active_revision: record.active_revision.clone(),
                 previous_release_tag: record.previous_release_tag.clone(),
                 last_sync: record.last_sync.clone(),

@@ -89,22 +89,14 @@ pub async fn set_software_dpi_steps(id: String, steps: Vec<u32>, app: Arc<AppSta
 mod tests {
     use super::*;
     use crate::config::Config;
-    use crate::domain::device::Device;
-    use crate::test_support::MockDevice;
+    use crate::test_support::{app_with, MockDevice};
     use halod_shared::types::{ButtonAction, MACRO_MAX_DELAY_MS, MACRO_MAX_STEPS};
     use std::sync::Arc;
-
-    fn make_app(dev: Arc<MockDevice>) -> Arc<AppState> {
-        let app = Arc::new(AppState::new(Config::default()));
-        let devices: Vec<Arc<dyn Device>> = vec![dev as Arc<dyn Device>];
-        *app.device_registry.try_write().unwrap() = devices;
-        app
-    }
 
     #[tokio::test]
     async fn set_button_mapping_happy_path() {
         let dev = Arc::new(MockDevice::new("dev1").with_key_remap());
-        let app = make_app(dev.clone());
+        let app = app_with(vec![dev.clone()]);
         let mapping = ButtonMapping {
             cid: 1,
             base: ButtonAction::Native,
@@ -144,7 +136,7 @@ mod tests {
     #[tokio::test]
     async fn set_button_mapping_error_when_capability_absent() {
         let dev = Arc::new(MockDevice::new("dev1")); // no key_remap capability
-        let app = make_app(dev.clone());
+        let app = app_with(vec![dev.clone()]);
         let mapping = ButtonMapping {
             cid: 1,
             base: ButtonAction::Native,
@@ -159,14 +151,14 @@ mod tests {
     #[tokio::test]
     async fn reset_button_mapping_happy_path() {
         let dev = Arc::new(MockDevice::new("dev1").with_key_remap());
-        let app = make_app(dev.clone());
+        let app = app_with(vec![dev.clone()]);
         reset_button_mapping("dev1".into(), 1, app).await.unwrap();
     }
 
     #[tokio::test]
     async fn reset_button_mapping_error_when_capability_absent() {
         let dev = Arc::new(MockDevice::new("dev1"));
-        let app = make_app(dev.clone());
+        let app = app_with(vec![dev.clone()]);
         let err = reset_button_mapping("dev1".into(), 1, app)
             .await
             .unwrap_err();
@@ -176,14 +168,14 @@ mod tests {
     #[tokio::test]
     async fn reset_all_button_mappings_happy_path() {
         let dev = Arc::new(MockDevice::new("dev1").with_key_remap());
-        let app = make_app(dev.clone());
+        let app = app_with(vec![dev.clone()]);
         reset_all_button_mappings("dev1".into(), app).await.unwrap();
     }
 
     #[tokio::test]
     async fn reset_all_button_mappings_error_when_capability_absent() {
         let dev = Arc::new(MockDevice::new("dev1"));
-        let app = make_app(dev.clone());
+        let app = app_with(vec![dev.clone()]);
         let err = reset_all_button_mappings("dev1".into(), app)
             .await
             .unwrap_err();
@@ -193,7 +185,7 @@ mod tests {
     #[tokio::test]
     async fn set_software_dpi_steps_happy_path() {
         let dev = Arc::new(MockDevice::new("dev1").with_dpi());
-        let app = make_app(dev.clone());
+        let app = app_with(vec![dev.clone()]);
         set_software_dpi_steps("dev1".into(), vec![800, 1600], app)
             .await
             .unwrap();
@@ -254,7 +246,7 @@ mod tests {
     #[tokio::test]
     async fn set_software_dpi_steps_error_when_capability_absent() {
         let dev = Arc::new(MockDevice::new("dev1")); // no dpi capability
-        let app = make_app(dev.clone());
+        let app = app_with(vec![dev.clone()]);
         let err = set_software_dpi_steps("dev1".into(), vec![800], app)
             .await
             .unwrap_err();

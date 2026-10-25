@@ -139,18 +139,13 @@ pub async fn set_channel_transform(
 #[cfg(test)]
 mod tests {
     use super::*;
-    use crate::config::Config;
     use crate::domain::device::LightingCapability;
-    use crate::test_support::MockDevice;
+    use crate::test_support::{app_with, MockDevice};
     use halod_shared::types::RgbColor;
     #[tokio::test]
     async fn set_channel_transform_stores_transform_in_config() {
         let dev = Arc::new(MockDevice::new("dev1").with_rgb());
-        let app = Arc::new(AppState::new(Config::default()));
-        app.device_registry
-            .write()
-            .await
-            .push(dev.clone() as Arc<dyn crate::domain::device::Device>);
+        let app = app_with(vec![dev.clone()]);
 
         set_channel_transform(
             "dev1".into(),
@@ -190,11 +185,7 @@ mod tests {
     #[tokio::test]
     async fn set_channel_transform_reapplies_current_state() {
         let dev = Arc::new(MockDevice::new("dev1").with_rgb());
-        let app = Arc::new(AppState::new(Config::default()));
-        app.device_registry
-            .write()
-            .await
-            .push(dev.clone() as Arc<dyn crate::domain::device::Device>);
+        let app = app_with(vec![dev.clone()]);
 
         let color = RgbColor {
             r: 10,
@@ -227,11 +218,7 @@ mod tests {
         // No current state → nothing to re-apply, but the call still succeeds and
         // stores the transform.
         let dev = Arc::new(MockDevice::new("dev1").with_rgb());
-        let app = Arc::new(AppState::new(Config::default()));
-        app.device_registry
-            .write()
-            .await
-            .push(dev.clone() as Arc<dyn crate::domain::device::Device>);
+        let app = app_with(vec![dev.clone()]);
 
         set_channel_transform(
             "dev1".into(),
@@ -250,11 +237,7 @@ mod tests {
     #[tokio::test]
     async fn rgb_apply_applies_state_and_persists() {
         let dev = std::sync::Arc::new(MockDevice::new("dev1").with_rgb());
-        let app = std::sync::Arc::new(AppState::new(Config::default()));
-        app.device_registry
-            .write()
-            .await
-            .push(dev.clone() as std::sync::Arc<dyn crate::domain::device::Device>);
+        let app = app_with(vec![dev.clone()]);
 
         let state = LightingState::Static {
             color: RgbColor { r: 255, g: 0, b: 0 },
@@ -272,11 +255,7 @@ mod tests {
     #[tokio::test]
     async fn rgb_apply_clears_canvas_placement() {
         let dev = Arc::new(MockDevice::new("dev1").with_rgb());
-        let app = Arc::new(AppState::new(Config::default()));
-        app.device_registry
-            .write()
-            .await
-            .push(dev.clone() as Arc<dyn crate::domain::device::Device>);
+        let app = app_with(vec![dev.clone()]);
 
         dev.rgb
             .as_ref()
@@ -312,11 +291,7 @@ mod tests {
     #[tokio::test]
     async fn rgb_apply_engine_state_keeps_canvas_placement() {
         let dev = Arc::new(MockDevice::new("dev1").with_rgb());
-        let app = Arc::new(AppState::new(Config::default()));
-        app.device_registry
-            .write()
-            .await
-            .push(dev.clone() as Arc<dyn crate::domain::device::Device>);
+        let app = app_with(vec![dev.clone()]);
 
         dev.rgb
             .as_ref()
@@ -346,11 +321,7 @@ mod tests {
         // stale frame after our apply below; the drain + re-apply must make
         // the final write ours (see `super::canvas::STOP_DRAIN_MS`).
         let dev = Arc::new(MockDevice::new("dev1").with_rgb());
-        let app = Arc::new(AppState::new(Config::default()));
-        app.device_registry
-            .write()
-            .await
-            .push(dev.clone() as Arc<dyn crate::domain::device::Device>);
+        let app = app_with(vec![dev.clone()]);
         dev.apply(LightingState::DirectEffect {
             id: "breathing".into(),
             params: Default::default(),
@@ -382,11 +353,7 @@ mod tests {
     #[tokio::test]
     async fn rgb_apply_static_to_static_does_not_drain_again() {
         let dev = Arc::new(MockDevice::new("dev1").with_rgb());
-        let app = Arc::new(AppState::new(Config::default()));
-        app.device_registry
-            .write()
-            .await
-            .push(dev.clone() as Arc<dyn crate::domain::device::Device>);
+        let app = app_with(vec![dev.clone()]);
         dev.apply(LightingState::Static {
             color: RgbColor { r: 1, g: 2, b: 3 },
         })
@@ -416,11 +383,7 @@ mod tests {
     #[tokio::test]
     async fn rgb_apply_errors_when_device_lacks_rgb_capability() {
         let dev = std::sync::Arc::new(MockDevice::new("dev1"));
-        let app = std::sync::Arc::new(AppState::new(Config::default()));
-        app.device_registry
-            .write()
-            .await
-            .push(dev as std::sync::Arc<dyn crate::domain::device::Device>);
+        let app = app_with(vec![dev]);
 
         let err = lighting_apply(
             "dev1".into(),

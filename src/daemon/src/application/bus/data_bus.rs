@@ -312,7 +312,7 @@ pub struct DataBus {
 }
 
 #[derive(Clone, Debug)]
-#[allow(dead_code)] // Pending feature: no production change-stream subscriber yet.
+#[allow(dead_code)] // `revision` is only asserted by tests.
 pub struct DataChange {
     pub key: String,
     pub revision: u64,

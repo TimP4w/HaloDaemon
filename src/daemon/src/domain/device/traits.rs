@@ -339,8 +339,11 @@ pub(crate) async fn restore_capabilities(
     let (lighting, rest): (Vec<_>, Vec<_>) = rest
         .into_iter()
         .partition(|cap| matches!(cap, CapabilityRef::Lighting(_)));
+    let (dpi, rest): (Vec<_>, Vec<_>) = rest
+        .into_iter()
+        .partition(|cap| matches!(cap, CapabilityRef::Dpi(_)));
     let mut ok = true;
-    for cap in onboard.into_iter().chain(rest).chain(lighting) {
+    for cap in onboard.into_iter().chain(rest).chain(dpi).chain(lighting) {
         let key = cap.state_key();
         if key.is_empty() {
             continue;
@@ -482,90 +485,25 @@ mod tests {
     #[tokio::test]
     async fn default_save_state_uses_capabilities() {
         use crate::domain::cooling::model::FanCurveRecord;
+        use crate::test_support::MockDevice;
 
-        use halod_shared::types::{CoolingChannel, CoolingChannelKind};
+        let dev = MockDevice::new("mock").with_curve(FanCurveRecord {
+            sensor_id: Some("cpu".into()),
+            points: vec![(30.0, 25.0), (70.0, 75.0)],
+        });
 
-        struct MockFanDevice {
-            cooling: CoolingStateSlot,
-        }
-        #[async_trait::async_trait]
-        impl CoolingCapability for MockFanDevice {
-            fn cooling_channels(&self) -> Vec<CoolingChannel> {
-                vec![CoolingChannel {
-                    id: "fan".into(),
-                    name: "Fan".into(),
-                    kind: CoolingChannelKind::Fan,
-                    controllable: true,
-                    rpm: None,
-                    duty: Some(0),
-                    visibility: Default::default(),
-                }]
-            }
-            async fn get_cooling_status(&self, channel_id: &str) -> anyhow::Result<CoolingChannel> {
-                self.cooling_channels()
-                    .into_iter()
-                    .find(|channel| channel.id == channel_id)
-                    .ok_or_else(|| anyhow::anyhow!("unknown cooling channel '{channel_id}'"))
-            }
-            async fn set_cooling_duty(&self, _: &str, _: u8) -> anyhow::Result<()> {
-                Ok(())
-            }
-            fn cooling_state(&self) -> &CoolingStateSlot {
-                &self.cooling
-            }
-        }
-
-        struct MockDevice {
-            fan: MockFanDevice,
-        }
-        #[async_trait::async_trait]
-        impl Device for MockDevice {
-            fn id(&self) -> &str {
-                "mock"
-            }
-            fn name(&self) -> &str {
-                "mock"
-            }
-            fn vendor(&self) -> &str {
-                "test"
-            }
-            fn model(&self) -> &str {
-                "test"
-            }
-            async fn initialize(&self) -> anyhow::Result<bool> {
-                Ok(true)
-            }
-            async fn close(&self) {}
-            fn capabilities(&self) -> Vec<CapabilityRef<'_>> {
-                vec![CapabilityRef::Cooling(&self.fan)]
-            }
-        }
-
-        let dev = MockDevice {
-            fan: MockFanDevice {
-                cooling: CoolingStateSlot::default(),
-            },
-        };
-        dev.fan.cooling.set_curve(
-            "fan".to_string(),
-            FanCurveRecord {
-                sensor_id: Some("cpu".into()),
-                points: vec![(30.0, 25.0), (70.0, 75.0)],
-            },
-        );
-
-        let saved = dev.save_state().await;
+        let saved = Device::save_state(&dev).await;
         assert!(!saved.is_null());
         assert!(!saved["fan_curve"].is_null());
 
-        let dev2 = MockDevice {
-            fan: MockFanDevice {
-                cooling: CoolingStateSlot::default(),
-            },
-        };
-        dev2.load_state(&saved).await;
+        let dev2 = MockDevice::new("mock").with_fan();
+        Device::load_state(&dev2, &saved).await;
         assert_eq!(
-            dev2.fan.cooling.curve("fan").unwrap().sensor_id.as_deref(),
+            dev2.cooling_state()
+                .curve("default")
+                .unwrap()
+                .sensor_id
+                .as_deref(),
             Some("cpu")
         );
     }
@@ -600,44 +538,12 @@ mod tests {
 
     #[tokio::test]
     async fn capability_ref_dispatches_state_key() {
-        use halod_shared::types::{CoolingChannel, CoolingChannelKind};
-        struct MockFan {
-            cooling: CoolingStateSlot,
-        }
-        #[async_trait::async_trait]
-        impl CoolingCapability for MockFan {
-            fn cooling_channels(&self) -> Vec<CoolingChannel> {
-                vec![CoolingChannel {
-                    id: "fan".into(),
-                    name: "Fan".into(),
-                    kind: CoolingChannelKind::Fan,
-                    controllable: true,
-                    rpm: None,
-                    duty: Some(50),
-                    visibility: Default::default(),
-                }]
-            }
-            async fn get_cooling_status(&self, channel_id: &str) -> anyhow::Result<CoolingChannel> {
-                self.cooling_channels()
-                    .into_iter()
-                    .find(|channel| channel.id == channel_id)
-                    .ok_or_else(|| anyhow::anyhow!("unknown cooling channel '{channel_id}'"))
-            }
-            async fn set_cooling_duty(&self, _: &str, _: u8) -> anyhow::Result<()> {
-                Ok(())
-            }
-            fn cooling_state(&self) -> &CoolingStateSlot {
-                &self.cooling
-            }
-        }
-        let fan = MockFan {
-            cooling: CoolingStateSlot::default(),
-        };
+        let fan = crate::test_support::MockDevice::new("fan").with_fan();
         let cap = CapabilityRef::Cooling(&fan);
         assert_eq!(cap.state_key(), "fan_curve");
         assert!(cap.save_state().is_null());
-        fan.cooling.set_curve(
-            "fan".to_string(),
+        fan.cooling_state().set_curve(
+            "default".to_string(),
             crate::domain::cooling::model::FanCurveRecord {
                 sensor_id: Some("cpu".into()),
                 points: vec![(30.0, 20.0), (100.0, 100.0)],
@@ -645,9 +551,9 @@ mod tests {
         );
         let saved = cap.save_state();
         assert!(!saved.is_null());
-        fan.cooling.clear_curves();
+        fan.cooling_state().clear_curves();
         cap.restore_state(&saved).await;
-        assert!(fan.cooling.curve("fan").is_some());
+        assert!(fan.cooling_state().curve("default").is_some());
     }
 
     #[tokio::test]

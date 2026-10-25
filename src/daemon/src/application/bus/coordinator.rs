@@ -126,7 +126,7 @@ fn same_bus_value(left: &halod_shared::bus::BusValue, right: &halod_shared::bus:
 #[cfg(test)]
 mod tests {
     use super::*;
-    use crate::{config::Config, domain::device::Device, test_support::MockDevice};
+    use crate::test_support::{app_with, MockDevice};
 
     #[test]
     fn semantic_changes_own_their_topic_dependency_graph() {
@@ -186,11 +186,7 @@ mod tests {
 
     #[tokio::test]
     async fn device_change_does_not_upsert_unrelated_topics() {
-        let app = Arc::new(AppState::new(Config::default()));
-        app.device_registry
-            .write()
-            .await
-            .push(Arc::new(MockDevice::new("mouse")) as Arc<dyn Device>);
+        let app = app_with(vec![Arc::new(MockDevice::new("mouse"))]);
         // Bootstrap normally seeds this retained projection. A later
         // observational device change may request it for override tracking,
         // but must not publish it when it is unchanged.
@@ -212,11 +208,7 @@ mod tests {
 
     #[tokio::test]
     async fn unchanged_projection_does_not_emit_a_transaction() {
-        let app = Arc::new(AppState::new(Config::default()));
-        app.device_registry
-            .write()
-            .await
-            .push(Arc::new(MockDevice::new("mouse")) as Arc<dyn Device>);
+        let app = app_with(vec![Arc::new(MockDevice::new("mouse"))]);
         app.effective_state
             .record(&app, Change::Device("mouse".into()))
             .await;

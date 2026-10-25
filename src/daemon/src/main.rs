@@ -408,7 +408,6 @@ async fn run_daemon(
     let focus_watcher = profiles::observers::active_window::FocusWatcherEngine::new(app.clone());
 
     app.lighting.set_engine(rgb.clone());
-    app.cooling.set_engine();
     app.lcd.set_engine(lcd.clone(), video);
     // Receivers are subscribed lazily; SendError just means no live receivers yet,
     // but watch still stores the value so future subscribers see `true`.

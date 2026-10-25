@@ -11,20 +11,6 @@ use super::TabCtx;
 use crate::ui::components as widgets;
 use crate::ui::theme;
 
-fn param_label(param: &EffectParamDescriptor) -> &str {
-    &param.label
-}
-
-fn param_heading(ui: &mut egui::Ui, label: &str) {
-    widgets::field_label(ui, label);
-}
-
-/// Translated display text for one `ParamKind::Enum` option, keyed by the
-/// param's `id` and the raw option value (e.g. `lcd.enum_variant.24h`).
-fn enum_option_label(_param_id: &str, option: &str) -> String {
-    option.to_owned()
-}
-
 /// Render one template parameter widget. Returns true if the value changed.
 pub(super) fn render_param(
     ui: &mut egui::Ui,
@@ -42,7 +28,7 @@ pub(super) fn render_param(
             let readout = format!("{v:.0}");
             if widgets::slider_row(
                 ui,
-                param_label(param),
+                &param.label,
                 &mut v,
                 (*min as f32)..=(*max as f32),
                 &readout,
@@ -61,7 +47,7 @@ pub(super) fn render_param(
                     b: 255,
                 },
             };
-            param_heading(ui, param_label(param));
+            widgets::field_label(ui, &param.label);
             if let Some(c) =
                 widgets::color_swatch_row(ui, ("lcd_param_color", param.id.as_str()), current)
             {
@@ -79,12 +65,8 @@ pub(super) fn render_param(
                 },
             };
             let mut value = current;
-            let (edited, committed) = widgets::num_input_row(
-                ui,
-                param_label(param),
-                &mut value,
-                *min as f32..=*max as f32,
-            );
+            let (edited, committed) =
+                widgets::num_input_row(ui, &param.label, &mut value, *min as f32..=*max as f32);
             if edited || committed {
                 values.insert(param.id.clone(), EffectParamValue::Float(value as f64));
                 return true;
@@ -97,7 +79,7 @@ pub(super) fn render_param(
                 _ => String::new(),
             };
             let mut s = current.clone();
-            param_heading(ui, param_label(param));
+            widgets::field_label(ui, &param.label);
             widgets::text_field(ui, &mut s, "", ui.available_width());
             if s != current {
                 values.insert(param.id.clone(), EffectParamValue::Str(s));
@@ -116,7 +98,7 @@ pub(super) fn render_param(
                 ui,
                 |ui| {
                     ui.label(
-                        egui::RichText::new(param_label(param))
+                        egui::RichText::new(&param.label)
                             .font(theme::body_sm())
                             .color(theme::TEXT_MUT),
                     );
@@ -149,7 +131,7 @@ pub(super) fn render_param(
                 Some(EffectParamValue::Str(s)) => s.clone(),
                 _ => String::new(),
             };
-            param_heading(ui, param_label(param));
+            widgets::field_label(ui, &param.label);
             let new_val = widgets::combo_picker_full(
                 ui,
                 &param.id,
@@ -170,11 +152,9 @@ pub(super) fn render_param(
                 Some(EffectParamValue::Str(s)) => s.clone(),
                 _ => options.first().cloned().unwrap_or_default(),
             };
-            let opts: Vec<(String, String)> = options
-                .iter()
-                .map(|o| (o.clone(), enum_option_label(&param.id, o)))
-                .collect();
-            param_heading(ui, param_label(param));
+            let opts: Vec<(String, String)> =
+                options.iter().map(|o| (o.clone(), o.clone())).collect();
+            widgets::field_label(ui, &param.label);
             let new_val = widgets::combo_picker_full(ui, &param.id, &opts, &current, None);
             if let Some(new_val) = new_val {
                 if new_val != current {

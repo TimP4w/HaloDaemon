@@ -1,5 +1,4 @@
 // SPDX-License-Identifier: GPL-3.0-or-later
-//! Shared, lazily loaded access to fonts installed on the host.
 
 use std::collections::BTreeSet;
 use std::sync::OnceLock;
@@ -13,7 +12,7 @@ fn database() -> &'static fontdb::Database {
     })
 }
 
-/// Sorted, deduplicated family names exposed by the host font database.
+/// Sorted and deduplicated.
 pub fn families() -> &'static [String] {
     static FAMILIES: OnceLock<Vec<String>> = OnceLock::new();
     FAMILIES.get_or_init(|| {
@@ -26,7 +25,7 @@ pub fn families() -> &'static [String] {
     })
 }
 
-/// Font bytes and collection index for the best match to `family`.
+/// Font bytes and collection index.
 pub fn data(family: &str) -> Option<(Vec<u8>, u32)> {
     let families = [fontdb::Family::Name(family)];
     let id = database().query(&fontdb::Query {

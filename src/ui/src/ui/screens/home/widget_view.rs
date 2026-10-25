@@ -213,7 +213,6 @@ pub fn paint(
     }
 }
 
-#[allow(clippy::too_many_arguments)]
 fn chart(
     p: &egui::Painter,
     rect: Rect,

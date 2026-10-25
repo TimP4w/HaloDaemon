@@ -8,7 +8,7 @@ use std::sync::atomic::{AtomicBool, Ordering};
 use std::sync::{Arc, Mutex, MutexGuard, OnceLock, RwLock, Weak};
 use std::time::Duration;
 
-use anyhow::Result;
+use anyhow::{Context, Result};
 use async_trait::async_trait;
 use halod_shared::keyboard::{KeyId, KeyVariant, KeyboardLayoutStatus, VisualKey};
 use halod_shared::types::{
@@ -42,6 +42,7 @@ use super::worker::{
     DetectedController, DevMatch, InitControls, InitDpi, InitKeyboard, InitKeyboardVariant,
     InitLcd, InitLightingChannel, PluginHandle,
 };
+use crate::domain::registry::identity::{DeviceIdentity, DeviceOrigin};
 use std::collections::{HashMap, HashSet};
 
 const POLL_FAILURE_DEGRADE_THRESHOLD: u8 = 3;
@@ -519,6 +520,7 @@ pub struct LuaDevice {
     device_type: DeviceType,
     control_layout: Vec<CategoryLayout>,
     visibility: VisibilitySlot,
+    identity: OnceLock<DeviceIdentity>,
     transport_kind: &'static str,
     dynamic_model: OnceLock<String>,
     worker: Option<PluginHandle>,
@@ -1178,6 +1180,7 @@ impl LuaDevice {
                 .and_then(|s| super::transport::descriptor_for(s.transport.kind()))
                 .map(|d| d.kind)
                 .unwrap_or("tcp"),
+            identity: OnceLock::new(),
             dynamic_model: OnceLock::new(),
             worker,
             transport,
@@ -1247,6 +1250,10 @@ impl LuaDevice {
 
     /// Set the weak self-reference (children need the parent as a `FanHub`).
     /// Called from `build_device` inside `Arc::new_cyclic`.
+    pub(in crate::domain::plugin) fn set_identity(&self, identity: DeviceIdentity) {
+        let _ = self.identity.set(identity);
+    }
+
     pub(in crate::domain::plugin) fn set_self_ref(&mut self, weak: Weak<LuaDevice>) {
         self.self_ref = weak;
     }
@@ -1666,6 +1673,26 @@ impl Device for LuaDevice {
         self.transport.as_ref().and_then(PluginIo::usb_location)
     }
 
+    fn identity(&self) -> DeviceIdentity {
+        self.identity
+            .get()
+            .cloned()
+            .unwrap_or_else(|| DeviceIdentity::serial(None))
+    }
+
+    fn wire_serial_number(&self) -> Option<String> {
+        self.identity.get().and_then(|i| i.serial.clone())
+    }
+
+    fn conflict_origin(&self) -> DeviceOrigin {
+        let is_child = self.worker.as_ref().is_some_and(|w| w.is_child());
+        if is_child && self.plugin_type == PluginKind::Integration {
+            DeviceOrigin::Integration(self.plugin_id.clone())
+        } else {
+            DeviceOrigin::Plugin(self.plugin_id.clone())
+        }
+    }
+
     async fn wire_connection_type(&self) -> Option<halod_shared::types::ConnectionType> {
         ConnectionCapability::connection_status(self)
             .await
@@ -1780,7 +1807,7 @@ impl Device for LuaDevice {
         if let Some(lcd) = outcome.lcd {
             self.lcd_slot.set_brightness(lcd.brightness);
             self.lcd_slot
-                .set_rotation(degrees_to_rotation(lcd.rotation));
+                .set_rotation(ScreenRotation::from_degrees(lcd.rotation));
             self.lcd_slot.set_raw_streaming(lcd.raw_streaming);
             self.lcd_slot.set_latches_last_frame(lcd.latches);
             self.lcd_needs_rgb_restore
@@ -1850,9 +1877,9 @@ impl Device for LuaDevice {
             }
             for mapping in to_arm {
                 let cid = mapping.cid;
-                if let Err(e) = w.key_remap_set_mapping(mapping).await {
-                    log::warn!("[{}] key_remap re-arm failed for cid {cid}: {e:#}", self.id);
-                }
+                self.track(w.key_remap_set_mapping(mapping).await)
+                    .await
+                    .with_context(|| format!("re-arming key mapping for cid {cid}"))?;
             }
         }
         // Seed the host range/choice caches with the values the device reported,
@@ -2500,7 +2527,7 @@ impl LuaDevice {
             d.set_self_ref(weak.clone());
             d
         });
-        let identity = crate::domain::registry::identity::DeviceIdentity {
+        let identity = DeviceIdentity {
             scope: Some(ctx.identity_scope.clone()),
             serial: crate::domain::registry::identity::normalize_serial(
                 controller.serial.as_deref(),
@@ -2512,19 +2539,8 @@ impl LuaDevice {
             usb: None,
             usb_address: None,
         };
-        Some(Arc::new(
-            crate::domain::registry::identity::IdentifiedDevice::new(
-                child as Arc<dyn Device>,
-                identity,
-                if self.plugin_type == PluginKind::Integration {
-                    crate::domain::registry::identity::DeviceOrigin::Integration(
-                        self.plugin_id.clone(),
-                    )
-                } else {
-                    crate::domain::registry::identity::DeviceOrigin::Plugin(self.plugin_id.clone())
-                },
-            ),
-        ))
+        child.set_identity(identity);
+        Some(child)
     }
 }
 
@@ -2535,24 +2551,6 @@ impl LuaDevice {
 /// native driver for the same hardware.
 fn integration_root_id(plugin_type: PluginKind, plugin_id: &str, is_child: bool) -> Option<String> {
     (plugin_type == PluginKind::Integration && !is_child).then(|| plugin_id.to_owned())
-}
-
-fn degrees_to_rotation(degrees: u32) -> ScreenRotation {
-    match degrees % 360 {
-        90 => ScreenRotation::R90,
-        180 => ScreenRotation::R180,
-        270 => ScreenRotation::R270,
-        _ => ScreenRotation::R0,
-    }
-}
-
-fn rotation_to_degrees(rotation: ScreenRotation) -> u32 {
-    match rotation {
-        ScreenRotation::R0 => 0,
-        ScreenRotation::R90 => 90,
-        ScreenRotation::R180 => 180,
-        ScreenRotation::R270 => 270,
-    }
 }
 
 /// Build an `LcdDescriptor` from the panel info `initialize` reported.
@@ -2567,7 +2565,7 @@ fn build_lcd_descriptor(lcd: &InitLcd) -> LcdDescriptor {
     } else {
         lcd.rotations
             .iter()
-            .map(|d| degrees_to_rotation(*d))
+            .map(|d| ScreenRotation::from_degrees(*d))
             .collect()
     };
     LcdDescriptor {
@@ -2619,7 +2617,7 @@ impl LcdCapability for LuaDevice {
     /// One rendered engine frame. Rotation/brightness/mode live in the slot and
     /// are passed to the plugin so it can pre-rotate and pick the stream path.
     async fn stream_frame(&self, rgba: &[u8], width: u32, height: u32) -> Result<()> {
-        let rotation = rotation_to_degrees(self.lcd_slot.rotation());
+        let rotation = self.lcd_slot.rotation().degrees();
         let raw = self.lcd_slot.raw_streaming();
         let brightness = self.lcd_slot.brightness();
         // The bulk transfer owns the transport; silence the status poll meanwhile.
@@ -2632,14 +2630,14 @@ impl LcdCapability for LuaDevice {
     }
 
     async fn set_image(&self, data: &[u8]) -> Result<()> {
-        let rotation = rotation_to_degrees(self.lcd_slot.rotation());
+        let rotation = self.lcd_slot.rotation().degrees();
         let _pause = PollPause::new(self);
         let result = self.worker()?.lcd_set_image(data.to_vec(), rotation).await;
         self.track(result).await
     }
 
     async fn set_brightness(&self, brightness: u8) -> Result<()> {
-        let rotation = rotation_to_degrees(self.lcd_slot.rotation());
+        let rotation = self.lcd_slot.rotation().degrees();
         let result = self
             .worker()?
             .lcd_set_brightness(brightness, rotation)
@@ -2653,7 +2651,8 @@ impl LcdCapability for LuaDevice {
         let brightness = self.lcd_slot.brightness();
         let result = self.worker()?.lcd_set_rotation(brightness, degrees).await;
         self.track(result).await?;
-        self.lcd_slot.set_rotation(degrees_to_rotation(degrees));
+        self.lcd_slot
+            .set_rotation(ScreenRotation::from_degrees(degrees));
         Ok(())
     }
 
@@ -2683,6 +2682,26 @@ fn dpi_state_from_runtime(dpi: &InitDpi) -> DpiState {
 }
 
 impl LuaDevice {
+    async fn refresh_dpi_status(&self) -> Result<()> {
+        if !self.caps.read().unwrap().contains(&Cap::Dpi) {
+            return Ok(());
+        }
+        if let Some(dpi) = self.worker()?.dpi_status().await? {
+            *self.dpi_state.lock_recover() = dpi_state_from_runtime(&dpi);
+            *self.dpi_config.lock_recover() = DpiConfig {
+                min: dpi.min,
+                max: dpi.max,
+                mode: if dpi.onboard {
+                    DpiMode::Onboard
+                } else {
+                    DpiMode::Host
+                },
+                mode_control: dpi.mode_control,
+            };
+        }
+        Ok(())
+    }
+
     fn clamp_dpi(&self, dpi: u16) -> u16 {
         let config = self.dpi_config.lock_recover();
         dpi.clamp(config.min, config.max)
@@ -2691,6 +2710,30 @@ impl LuaDevice {
 
 #[async_trait]
 impl DpiCapability for LuaDevice {
+    fn state_key(&self) -> &'static str {
+        "dpi"
+    }
+
+    fn save_state(&self) -> serde_json::Value {
+        if self.dpi_config.lock_recover().mode != DpiMode::Host {
+            return serde_json::Value::Null;
+        }
+        serde_json::json!({ "steps": self.dpi_state.lock_recover().steps })
+    }
+
+    async fn restore_state(&self, value: &serde_json::Value) -> bool {
+        if self.dpi_config.lock_recover().mode != DpiMode::Host {
+            return true;
+        }
+        let Some(steps) = value.get("steps") else {
+            return true;
+        };
+        let Ok(steps) = serde_json::from_value::<Vec<u16>>(steps.clone()) else {
+            return false;
+        };
+        self.set_dpi_steps(steps).await.is_ok()
+    }
+
     async fn dpi_status(&self) -> DpiStatus {
         let dpi = self.dpi_state.lock_recover();
         let config = self.dpi_config.lock_recover().clone();
@@ -2839,13 +2882,20 @@ impl BooleanCapability for LuaDevice {
         {
             current.value = value;
         }
-        let mut config = self.dpi_config.lock_recover();
-        if config.mode_control.as_deref() == Some(key) {
-            config.mode = if value {
-                DpiMode::Host
-            } else {
-                DpiMode::Onboard
-            };
+        let changes_dpi_mode = {
+            let mut config = self.dpi_config.lock_recover();
+            let changes = config.mode_control.as_deref() == Some(key);
+            if changes {
+                config.mode = if value {
+                    DpiMode::Host
+                } else {
+                    DpiMode::Onboard
+                };
+            }
+            changes
+        };
+        if changes_dpi_mode {
+            self.refresh_dpi_status().await?;
         }
         Ok(())
     }
@@ -2954,12 +3004,14 @@ impl PairingCapability for LuaDevice {
 impl OnboardProfilesCapability for LuaDevice {
     async fn switch_profile(&self, slot: u8) -> Result<()> {
         let result = self.worker()?.onboard_switch_profile(slot).await;
-        self.track(result).await
+        self.track(result).await?;
+        self.refresh_dpi_status().await
     }
 
     async fn restore_profile(&self, slot: u8) -> Result<()> {
         let result = self.worker()?.onboard_restore_profile(slot).await;
-        self.track(result).await
+        self.track(result).await?;
+        self.refresh_dpi_status().await
     }
 
     async fn set_profile_enabled(&self, slot: u8, enabled: bool) -> Result<()> {
@@ -2967,7 +3019,8 @@ impl OnboardProfilesCapability for LuaDevice {
             .worker()?
             .onboard_set_profile_enabled(slot, enabled)
             .await;
-        self.track(result).await
+        self.track(result).await?;
+        self.refresh_dpi_status().await
     }
 
     async fn to_wire(&self) -> Option<DeviceCapability> {
@@ -3224,6 +3277,31 @@ mod tests {
     }
 
     #[tokio::test(flavor = "multi_thread", worker_threads = 2)]
+    async fn discovery_identity_reaches_conflict_detection_and_wire() {
+        let (_tmp, manifest) = test_manifest("identity", &["controls"], "return {}");
+        let device = LuaDevice::new(LuaDeviceParts {
+            id: "identity_0".into(),
+            manifest: &manifest,
+            spec: Some(&manifest.devices[0]),
+            notify: Weak::new(),
+            runtime: None,
+            worker: LuaDeviceWorker::None,
+        });
+        let identity = DeviceIdentity::serial(Some("ABC".into()));
+        device.set_identity(identity.clone());
+
+        assert_eq!(device.identity(), identity);
+        assert_eq!(
+            device.serialize().await.serial_number.as_deref(),
+            Some("abc")
+        );
+        assert_eq!(
+            device.conflict_origin(),
+            DeviceOrigin::Plugin("identity".into())
+        );
+    }
+
+    #[tokio::test(flavor = "multi_thread", worker_threads = 2)]
     async fn spec_scoped_capabilities_narrow_the_device_surface() {
         let tmp = tempfile::tempdir().unwrap();
         let dir = tmp.path().join("scoped_caps");
@@ -3302,6 +3380,93 @@ mod tests {
                 Cap::Lighting,
             ]
         );
+    }
+
+    #[tokio::test]
+    async fn dpi_mode_and_profile_changes_refresh_stages() {
+        let script = r#"
+            local host = true
+            local software = { 400, 800, 1200 }
+            local onboard = { 800, 1200, 400, 2400, 3200 }
+            local function status()
+                return { min = 100, max = 3200, mode_control = "host_mode",
+                    steps = host and software or onboard, onboard = not host,
+                    current = host and 800 or onboard[1] }
+            end
+            return {
+                initialize = function() return { dpi = status() } end,
+                dpi_status = status,
+                set_boolean = function(dev, key, value) host = value end,
+                set_dpi_steps = function(dev, steps)
+                    if host then software = steps else onboard = steps end
+                end,
+                switch_profile = function(dev, slot) onboard = { 1600, 3200 } end,
+                restore_profile = function(dev, slot) onboard = { 400, 800 } end,
+            }
+        "#;
+        let (_tmp, manifest) = test_manifest(
+            "dpi_modes",
+            &["dpi", "controls", "onboard_profiles"],
+            script,
+        );
+        let dev = hid_device("dpi-0", &manifest, Arc::new(MockTransport::empty()));
+        assert!(dev.initialize().await.unwrap());
+        dev.set_boolean("host_mode", false).await.unwrap();
+        let status = dev.dpi_status().await;
+        assert_eq!(status.mode, DpiMode::Onboard);
+        assert_eq!(status.steps, vec![800, 1200, 400, 2400, 3200]);
+        assert_eq!(status.current_index, 0);
+        dev.set_dpi_steps(vec![400, 800, 1200, 2400, 3200])
+            .await
+            .unwrap();
+        dev.set_boolean("host_mode", true).await.unwrap();
+        assert_eq!(dev.dpi_status().await.steps, vec![400, 800, 1200]);
+        dev.set_boolean("host_mode", false).await.unwrap();
+        assert_eq!(
+            dev.dpi_status().await.steps,
+            vec![400, 800, 1200, 2400, 3200]
+        );
+        dev.switch_profile(2).await.unwrap();
+        assert_eq!(dev.dpi_status().await.steps, vec![1600, 3200]);
+        dev.restore_profile(2).await.unwrap();
+        assert_eq!(dev.dpi_status().await.steps, vec![400, 800]);
+        dev.close().await;
+    }
+
+    #[tokio::test]
+    async fn host_dpi_stages_survive_restart_in_saved_order() {
+        let script = r#"
+            return {
+                initialize = function()
+                    return { dpi = { min = 100, max = 3200,
+                        steps = { 800, 1200, 400, 2400, 3200 } } }
+                end,
+                set_dpi_steps = function(dev, steps) end,
+            }
+        "#;
+        let (_tmp, manifest) = test_manifest("dpi_persistence", &["dpi"], script);
+        let first = hid_device("dpi-0", &manifest, Arc::new(MockTransport::empty()));
+        assert!(first.initialize().await.unwrap());
+        let steps = vec![400, 800, 1200, 2400, 3200];
+        first.set_dpi_steps(steps.clone()).await.unwrap();
+        let saved = Device::save_state(&first).await;
+        first.close().await;
+
+        let restarted = hid_device("dpi-0", &manifest, Arc::new(MockTransport::empty()));
+        assert!(restarted.initialize().await.unwrap());
+        assert!(Device::load_state(&restarted, &saved).await);
+        assert_eq!(restarted.dpi_status().await.steps, steps);
+        assert!(
+            !DpiCapability::restore_state(&restarted, &serde_json::json!({ "steps": [70000] }))
+                .await
+        );
+        restarted.dpi_config.lock_recover().mode = DpiMode::Onboard;
+        assert!(DpiCapability::save_state(&restarted).is_null());
+        assert!(
+            DpiCapability::restore_state(&restarted, &serde_json::json!({ "steps": [1600] })).await
+        );
+        assert_eq!(restarted.dpi_status().await.steps, steps);
+        restarted.close().await;
     }
 
     #[test]
@@ -3784,6 +3949,39 @@ mod tests {
             f64::from(cooling.duty.unwrap()) + 1.0,
             "each inline telemetry request must run read_status first"
         );
+        dev.close().await;
+    }
+
+    #[tokio::test]
+    async fn failed_key_mapping_arm_does_not_mark_device_ready() {
+        let script = r#"
+            local attempts = 0
+            return {
+                initialize = function(dev)
+                    return { key_remap = {
+                        buttons = { { cid = 5, label = "B5", divertable = true, group = 0 } },
+                        default_mappings = {
+                            { cid = 5, base = { type = "dpi_cycle", direction = "up" },
+                              shifted = { type = "native" } },
+                        },
+                    } }
+                end,
+                set_button_mapping = function(dev, mapping)
+                    attempts = attempts + 1
+                    if attempts == 1 then error("device still waking") end
+                    dev.transport:write(string.char(0xEE, mapping.cid))
+                end,
+            }
+        "#;
+        let (_tmp, manifest) = test_manifest("cold_rearm", &["key_remap"], script);
+        let mock = Arc::new(MockTransport::empty());
+        let dev = hid_device("cold_rearm-0", &manifest, mock.clone());
+        let error = dev.initialize().await.unwrap_err();
+        assert!(format!("{error:#}").contains("device still waking"));
+        assert!(!dev.is_live());
+        assert!(dev.initialize().await.unwrap());
+        assert!(dev.is_live());
+        assert_eq!(*mock.written.lock().await, vec![vec![0xEE, 5]]);
         dev.close().await;
     }
 

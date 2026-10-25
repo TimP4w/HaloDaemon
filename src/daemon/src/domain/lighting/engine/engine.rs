@@ -1057,11 +1057,11 @@ impl RgbEngine {
 #[cfg(test)]
 mod tests {
     use super::*;
-    use crate::config::Config;
     use crate::domain::device::{
         CapabilityRef, LightingCapability, LightingStateSlot, VisibilitySlot,
     };
     use crate::domain::lighting::engine::color::LinearColor;
+    use crate::test_support::app_with;
     use anyhow::Result;
     use async_trait::async_trait;
     use halod_shared::types::{
@@ -1232,10 +1232,6 @@ mod tests {
                 key => Some(key),
             }
         }
-    }
-
-    fn make_app() -> Arc<AppState> {
-        Arc::new(AppState::new(Config::default()))
     }
 
     fn make_zone(device_id: &str, channel_id: &str) -> PlacedZone {
@@ -1540,11 +1536,10 @@ mod tests {
 
     #[tokio::test]
     async fn sync_tick_state_collects_zones_from_device_slots() {
-        let app = make_app();
         let zone = make_zone("dev0", "ring");
         let dev: Arc<dyn Device> =
             MockRgbDevice::new_with_zones("dev0", "ring", 3, false, vec![zone.clone()]);
-        app.device_registry.write().await.push(dev);
+        let app = app_with(vec![dev]);
 
         let engine = RgbEngine::new(app).await;
         let (canvas_state, rgb_devices, direct) = engine.sync_tick_state().await;
@@ -1559,7 +1554,6 @@ mod tests {
         // An offline device (integration whose server dropped) must be dropped
         // from both the canvas and direct-effect sets so the engine never queues
         // a frame for its dead socket.
-        let app = make_app();
         let canvas = MockRgbDevice::new_with_zones(
             "dead0",
             "ring",
@@ -1574,11 +1568,7 @@ mod tests {
             params: HashMap::new(),
         });
         direct_dev.live.store(false, Ordering::SeqCst);
-        {
-            let mut devices = app.device_registry.write().await;
-            devices.push(canvas as Arc<dyn Device>);
-            devices.push(direct_dev as Arc<dyn Device>);
-        }
+        let app = app_with(vec![canvas, direct_dev]);
 
         let engine = RgbEngine::new(app).await;
         let (canvas_state, rgb_devices, direct) = engine.sync_tick_state().await;
@@ -1596,7 +1586,7 @@ mod tests {
 
     #[tokio::test]
     async fn dispatch_writes_skips_an_offline_device() {
-        let engine = RgbEngine::new(make_app()).await;
+        let engine = RgbEngine::new(app_with(vec![])).await;
         let dev = MockRgbDevice::new("dev0", "ring", 3, false);
         dev.live.store(false, Ordering::SeqCst);
         let dev_arc: Arc<dyn Device> = dev.clone();
@@ -1622,16 +1612,12 @@ mod tests {
 
     #[tokio::test]
     async fn sync_tick_state_collects_direct_effect_devices() {
-        let app = make_app();
         let dev = MockRgbDevice::new("dev0", "ring", 3, false);
         *dev.rgb_state.lock().unwrap() = Some(LightingState::DirectEffect {
             id: "breathing".into(),
             params: HashMap::new(),
         });
-        app.device_registry
-            .write()
-            .await
-            .push(dev as Arc<dyn Device>);
+        let app = app_with(vec![dev]);
 
         let engine = RgbEngine::new(app).await;
         let (_, _, direct) = engine.sync_tick_state().await;
@@ -1641,11 +1627,7 @@ mod tests {
 
     #[tokio::test]
     async fn tick_state_reuses_prepared_arcs_until_registry_revision_changes() {
-        let app = make_app();
-        app.device_registry
-            .write()
-            .await
-            .push(MockRgbDevice::new_engine_mode("dev0", "ring", false) as Arc<dyn Device>);
+        let app = app_with(vec![MockRgbDevice::new_engine_mode("dev0", "ring", false)]);
         let engine = RgbEngine::new(app.clone()).await;
 
         let (canvas_a, devices_a, _) = engine.sync_tick_state().await;
@@ -1664,17 +1646,13 @@ mod tests {
 
     #[tokio::test]
     async fn disabled_direct_effect_device_is_never_collected_or_written() {
-        let app = make_app();
         let dev = MockRgbDevice::new("dev0", "ring", 3, false);
         *dev.rgb_state.lock().unwrap() = Some(LightingState::DirectEffect {
             id: "breathing".into(),
             params: HashMap::new(),
         });
         dev.set_active_state(VisibilityState::Disabled);
-        app.device_registry
-            .write()
-            .await
-            .push(dev.clone() as Arc<dyn Device>);
+        let app = app_with(vec![dev.clone()]);
 
         let engine = RgbEngine::new(app).await;
         let (_, _, direct) = engine.sync_tick_state().await;
@@ -1694,16 +1672,12 @@ mod tests {
 
     #[tokio::test]
     async fn tick_direct_effect_writes_frame() {
-        let app = make_app();
         let dev = MockRgbDevice::new("dev0", "ring", 4, false);
         *dev.rgb_state.lock().unwrap() = Some(LightingState::DirectEffect {
             id: "breathing".into(),
             params: HashMap::new(),
         });
-        app.device_registry
-            .write()
-            .await
-            .push(dev.clone() as Arc<dyn Device>);
+        let app = app_with(vec![dev.clone()]);
 
         let engine = RgbEngine::new(app).await;
         engine.tick(0.1, 0.05, 0).await;
@@ -1770,18 +1744,11 @@ mod tests {
 
     #[tokio::test]
     async fn tick_direct_plugin_effect_receives_live_sensor_reading() {
-        let app = make_app();
+        let app = app_with(vec![]);
         let _tmp = load_test_sensor_plugin(&app);
 
-        let sensor_dev = crate::test_support::MockDevice::new("sensor_dev").with_sensor(vec![
-            halod_shared::types::Sensor {
-                id: "temp1".into(),
-                name: "CPU".into(),
-                value: 80.0,
-                unit: halod_shared::types::SensorUnit::Celsius,
-                sensor_type: halod_shared::types::SensorType::Temperature,
-            },
-        ]);
+        let sensor_dev =
+            crate::test_support::MockDevice::new("sensor_dev").with_temp("temp1", 80.0);
         app.device_registry
             .write()
             .await
@@ -1815,16 +1782,12 @@ mod tests {
 
     #[tokio::test]
     async fn tick_unknown_direct_effect_falls_back_to_off_and_caches() {
-        let app = make_app();
         let dev = MockRgbDevice::new("dev0", "ring", 4, false);
         *dev.rgb_state.lock().unwrap() = Some(LightingState::DirectEffect {
             id: "sensor_gradient".into(),
             params: HashMap::new(),
         });
-        app.device_registry
-            .write()
-            .await
-            .push(dev.clone() as Arc<dyn Device>);
+        let app = app_with(vec![dev.clone()]);
 
         let engine = RgbEngine::new(app).await;
         engine.tick(0.1, 0.05, 0).await;
@@ -1843,16 +1806,12 @@ mod tests {
 
     #[tokio::test]
     async fn tick_prunes_direct_effect_when_reverted() {
-        let app = make_app();
         let dev = MockRgbDevice::new("dev0", "ring", 4, false);
         *dev.rgb_state.lock().unwrap() = Some(LightingState::DirectEffect {
             id: "breathing".into(),
             params: HashMap::new(),
         });
-        app.device_registry
-            .write()
-            .await
-            .push(dev.clone() as Arc<dyn Device>);
+        let app = app_with(vec![dev.clone()]);
 
         let engine = RgbEngine::new(app).await;
         engine.tick(0.1, 0.05, 0).await;
@@ -1875,12 +1834,8 @@ mod tests {
 
     #[tokio::test]
     async fn reconcile_engine_mode_reverts_zoneless_engine_device() {
-        let app = make_app();
         let dev = MockRgbDevice::new_engine_mode("dev0", "ring", false);
-        app.device_registry
-            .write()
-            .await
-            .push(dev.clone() as Arc<dyn Device>);
+        let app = app_with(vec![dev.clone()]);
 
         let engine = RgbEngine::new(app).await;
         engine.reconcile_engine_mode(&CanvasState::default()).await;
@@ -1894,12 +1849,8 @@ mod tests {
 
     #[tokio::test]
     async fn reconcile_does_not_blank_device_that_left_canvas_for_a_direct_effect() {
-        let app = make_app();
         let dev = MockRgbDevice::new_engine_mode("dev0", "ring", false);
-        app.device_registry
-            .write()
-            .await
-            .push(dev.clone() as Arc<dyn Device>);
+        let app = app_with(vec![dev.clone()]);
         let engine = RgbEngine::new(app).await;
 
         let mut placed = CanvasState::default();
@@ -1920,12 +1871,8 @@ mod tests {
 
     #[tokio::test]
     async fn reconcile_engine_mode_does_not_loop_when_revert_write_fails() {
-        let app = make_app();
         let dev = MockRgbDevice::new_engine_mode("dev0", "ring", true);
-        app.device_registry
-            .write()
-            .await
-            .push(dev.clone() as Arc<dyn Device>);
+        let app = app_with(vec![dev.clone()]);
 
         let engine = RgbEngine::new(app).await;
         engine.reconcile_engine_mode(&CanvasState::default()).await;
@@ -1939,13 +1886,9 @@ mod tests {
 
     #[tokio::test]
     async fn reconcile_engine_mode_does_not_loop_when_driver_never_records_state() {
-        let app = make_app();
         let dev = MockRgbDevice::new_engine_mode("dev0", "ring", true);
         dev.skip_record_on_fail.store(true, Ordering::SeqCst);
-        app.device_registry
-            .write()
-            .await
-            .push(dev.clone() as Arc<dyn Device>);
+        let app = app_with(vec![dev.clone()]);
 
         let engine = RgbEngine::new(app).await;
         engine.reconcile_engine_mode(&CanvasState::default()).await;
@@ -1977,7 +1920,7 @@ mod tests {
 
     #[tokio::test]
     async fn dispatch_writes_frame_when_device_is_free() {
-        let engine = RgbEngine::new(make_app()).await;
+        let engine = RgbEngine::new(app_with(vec![])).await;
         let dev = MockRgbDevice::new_engine_mode("dev0", "ring", false);
         let mut pending: PendingWrites = HashMap::new();
         pending.insert(
@@ -1997,7 +1940,7 @@ mod tests {
 
     #[tokio::test]
     async fn dispatch_drops_stale_frame_after_device_leaves_engine_mode() {
-        let engine = RgbEngine::new(make_app()).await;
+        let engine = RgbEngine::new(app_with(vec![])).await;
         let dev = MockRgbDevice::new_engine_mode("dev0", "ring", false);
         let mut pending: PendingWrites = HashMap::new();
         pending.insert(
@@ -2020,7 +1963,7 @@ mod tests {
 
     #[tokio::test]
     async fn dispatch_drops_direct_frame_after_effect_parameters_change() {
-        let engine = RgbEngine::new(make_app()).await;
+        let engine = RgbEngine::new(app_with(vec![])).await;
         let dev = MockRgbDevice::new("dev0", "ring", 3, false);
         let original = EffectSignature {
             effect_id: "breathing".into(),
@@ -2056,7 +1999,7 @@ mod tests {
 
     #[tokio::test]
     async fn dispatch_drops_frame_while_previous_write_is_in_flight() {
-        let engine = RgbEngine::new(make_app()).await;
+        let engine = RgbEngine::new(app_with(vec![])).await;
         let dev = MockRgbDevice::new("dev0", "ring", 3, false);
         // Occupy the device's slot with a task that never finishes on its own.
         let (unblock, blocked) = tokio::sync::oneshot::channel::<()>();
@@ -2090,7 +2033,7 @@ mod tests {
 
     #[tokio::test]
     async fn dispatch_drops_a_shared_bus_frame_for_every_device_together() {
-        let engine = RgbEngine::new(make_app()).await;
+        let engine = RgbEngine::new(app_with(vec![])).await;
         let first = MockRgbDevice::new_engine_mode("dev0", "ring", false);
         let second = MockRgbDevice::new_engine_mode("dev1", "ring", false);
         first.write_group.store(42, Ordering::SeqCst);
@@ -2126,7 +2069,7 @@ mod tests {
 
     #[tokio::test]
     async fn publish_frame_delivers_frame_to_subscriber() {
-        let engine = RgbEngine::new(make_app()).await;
+        let engine = RgbEngine::new(app_with(vec![])).await;
         let mut rx = engine.subscribe();
         engine.publish_frame(black_srgb(), 42, vec![]);
 
@@ -2161,12 +2104,8 @@ mod tests {
 
     #[tokio::test(start_paused = true)]
     async fn wake_applies_a_direct_effect_without_waiting_for_the_idle_poll() {
-        let app = make_app();
         let dev = MockRgbDevice::new("dev0", "ring", 4, false);
-        app.device_registry
-            .write()
-            .await
-            .push(dev.clone() as Arc<dyn Device>);
+        let app = app_with(vec![dev.clone()]);
         let engine = RgbEngine::new(Arc::clone(&app)).await;
         let cfg = crate::application::run_loop::EngineConfigReceiver::new(
             Arc::clone(&app.data_bus),
@@ -2198,17 +2137,16 @@ mod tests {
 
     #[tokio::test]
     async fn tick_reports_no_work_with_no_zones_no_direct_no_subscriber() {
-        let engine = RgbEngine::new(make_app()).await;
+        let engine = RgbEngine::new(app_with(vec![])).await;
         assert!(!engine.tick(0.0, 0.0, 0).await);
     }
 
     #[tokio::test]
     async fn tick_reports_work_with_a_placed_zone() {
-        let app = make_app();
         let zone = make_zone("dev0", "ring");
         let dev: Arc<dyn Device> =
             MockRgbDevice::new_with_zones("dev0", "ring", 3, false, vec![zone.clone()]);
-        app.device_registry.write().await.push(dev);
+        let app = app_with(vec![dev]);
 
         let engine = RgbEngine::new(app).await;
         assert!(engine.tick(0.0, 0.0, 0).await);
@@ -2216,16 +2154,12 @@ mod tests {
 
     #[tokio::test]
     async fn tick_reports_work_with_a_direct_effect_device() {
-        let app = make_app();
         let dev = MockRgbDevice::new("dev0", "ring", 4, false);
         *dev.rgb_state.lock().unwrap() = Some(LightingState::DirectEffect {
             id: "breathing".into(),
             params: HashMap::new(),
         });
-        app.device_registry
-            .write()
-            .await
-            .push(dev as Arc<dyn Device>);
+        let app = app_with(vec![dev]);
 
         let engine = RgbEngine::new(app).await;
         assert!(engine.tick(0.0, 0.0, 0).await);
@@ -2233,7 +2167,7 @@ mod tests {
 
     #[tokio::test]
     async fn tick_reports_work_with_a_live_subscriber() {
-        let engine = RgbEngine::new(make_app()).await;
+        let engine = RgbEngine::new(app_with(vec![])).await;
         let _rx = engine.subscribe();
         assert!(engine.tick(0.0, 0.0, 0).await);
     }
@@ -2295,7 +2229,7 @@ mod tests {
 
     #[tokio::test]
     async fn tick_renders_a_plugin_pixmap_effect_end_to_end() {
-        let app = make_app();
+        let app = app_with(vec![]);
         let _tmp = load_test_effect_plugin(&app);
         let zone = make_zone("dev0", "ring");
         let dev = MockRgbDevice::new_with_zones("dev0", "ring", 2, false, vec![zone]);
@@ -2333,7 +2267,7 @@ mod tests {
 
     #[tokio::test]
     async fn tick_renders_a_plugin_direct_effect_end_to_end() {
-        let app = make_app();
+        let app = app_with(vec![]);
         let _tmp = load_test_effect_plugin(&app);
         let dev = MockRgbDevice::new("dev0", "ring", 3, false);
         *dev.rgb_state.lock().unwrap() = Some(LightingState::DirectEffect {

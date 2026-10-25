@@ -1,7 +1,7 @@
 // SPDX-License-Identifier: GPL-3.0-or-later
 //! Match host capabilities and connected hardware against *disabled* plugins
 //! to recommend one the user could enable. This is deliberately independent of the activation matcher
-//! (`match_handle`), which excludes disabled/unconsented plugins — a
+//! (`make_device`), which excludes disabled/unconsented plugins — a
 //! recommendation is exactly the opposite population. Runs at startup only (no
 //! continuous probing); the enable action still routes through consent.
 

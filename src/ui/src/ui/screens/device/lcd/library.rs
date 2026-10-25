@@ -327,7 +327,6 @@ pub(super) fn select_image(
         halod_shared::commands::DaemonCommand::SetScreenImageFromLibrary {
             id: id.to_string(),
             filename: filename.to_string(),
-            request_id: None,
         },
     );
 }
@@ -432,7 +431,6 @@ fn start_upload(ui: &egui::Ui, ctx: &TabCtx, st: &mut DeviceUi, id: &str, path: 
                     halod_shared::commands::DaemonCommand::SetScreenImage {
                         id: device_id,
                         data_b64: b64,
-                        request_id: None,
                     },
                 );
             }

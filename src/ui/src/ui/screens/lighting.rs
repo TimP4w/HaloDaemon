@@ -32,10 +32,7 @@ use crate::ui::theme;
 /// Synthetic grid id prefix for a saved custom effect: `"custom:<name>"`.
 const CUSTOM_PREFIX: &str = "custom:";
 
-/// Tab indices for the unified RGB Lighting view.
 pub(crate) const TAB_CANVAS: usize = 0;
-#[expect(dead_code, reason = "stable direct-lighting tab index")]
-pub(crate) const TAB_DIRECT: usize = 1;
 
 // ── Constants ─────────────────────────────────────────────────────────────────
 
@@ -50,8 +47,6 @@ const ZONE_PILL_GAP: f32 = 6.0;
 // ── State ─────────────────────────────────────────────────────────────────────
 
 pub struct LightingUi {
-    /// Active sub-view: [`TAB_CANVAS`] (Effects Canvas) or [`TAB_DIRECT`]
-    /// (Direct Effects).
     pub tab: usize,
     pub color: RgbColor,
     /// Active effect id. Empty string = Static (LightingState::Static).
@@ -104,7 +99,6 @@ impl Default for LightingUi {
 
 // ── Entry point ───────────────────────────────────────────────────────────────
 
-#[allow(clippy::too_many_arguments)]
 pub fn show(
     ui: &mut egui::Ui,
     state: &TopicStore,
@@ -358,7 +352,6 @@ fn selected_custom<'a>(st: &LightingUi, custom: &'a [EffectDef]) -> Option<&'a E
 
 // ── Effect Designer actions row ──────────────────────────────────────────────
 
-#[allow(clippy::too_many_arguments)]
 /// The card shown below the effect grid: edit/export/delete for the selected
 /// custom effect. Returns `false` (these actions don't need a re-apply).
 fn effect_actions_row(

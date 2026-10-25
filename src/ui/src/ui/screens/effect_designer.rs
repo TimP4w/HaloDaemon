@@ -4,7 +4,7 @@
 use crate::ui::components as widgets;
 use std::collections::HashMap;
 
-use egui::{Color32, Pos2, Rect, Sense, Stroke, Vec2};
+use egui::{Color32, Pos2, Sense, Stroke, Vec2};
 use halod_shared::effect_designer::{
     validate_effect_name, ColorMode, DesignerParams, Direction, Generator, RingScope,
 };
@@ -366,7 +366,7 @@ impl DesignerUi {
         let margin = 16.0;
         let inner = rect.shrink(margin);
         let plot = match aspect {
-            Some((aw, ah)) => fit_aspect_rect(inner, aw, ah),
+            Some((aw, ah)) => widgets::letterbox(inner, aw / ah),
             None => inner,
         };
         for &(p_zone, p_ring, nx, ny) in positions {
@@ -749,13 +749,6 @@ fn parse_import(bytes: &[u8]) -> Result<(String, DesignerParams), String> {
 
 // ── Pure geometry / labels (unit-testable) ───────────────────────────────
 
-/// The largest `aspect_w:aspect_h` rect centered inside `inner`, so plotted
-/// content (e.g. a ring) keeps its true proportions instead of stretching to
-/// fill whatever rect the layout happened to allocate.
-fn fit_aspect_rect(inner: Rect, aspect_w: f32, aspect_h: f32) -> Rect {
-    widgets::letterbox(inner, aspect_w / aspect_h)
-}
-
 /// Each rig returns `(p_zone, p_ring, nx, ny)`: `p_zone`/`p_ring` are the
 /// LED's fractional position in chain (wiring) order across the whole zone
 /// and within its own ring (equal for a single-ring rig — strip/ring/matrix
@@ -925,30 +918,6 @@ fn formula_text(g: Generator) -> &'static str {
 mod tests {
     use super::*;
     use halod_shared::types::EffectParamValue;
-
-    #[test]
-    fn fit_aspect_rect_keeps_square_aspect_inside_a_wide_rect() {
-        let inner = Rect::from_min_size(Pos2::ZERO, Vec2::new(400.0, 100.0));
-        let square = fit_aspect_rect(inner, 1.0, 1.0);
-        assert!((square.width() - square.height()).abs() < 1e-4);
-        assert!((square.height() - inner.height()).abs() < 1e-4);
-        assert!((square.center() - inner.center()).length() < 1e-4);
-    }
-
-    #[test]
-    fn fit_aspect_rect_keeps_square_aspect_inside_a_tall_rect() {
-        let inner = Rect::from_min_size(Pos2::ZERO, Vec2::new(100.0, 400.0));
-        let square = fit_aspect_rect(inner, 1.0, 1.0);
-        assert!((square.width() - square.height()).abs() < 1e-4);
-        assert!((square.width() - inner.width()).abs() < 1e-4);
-    }
-
-    #[test]
-    fn fit_aspect_rect_preserves_a_non_square_ratio() {
-        let inner = Rect::from_min_size(Pos2::ZERO, Vec2::new(500.0, 500.0));
-        let wide = fit_aspect_rect(inner, 8.0, 4.0);
-        assert!((wide.width() / wide.height() - 2.0).abs() < 1e-4);
-    }
 
     #[test]
     fn strip_positions_spans_0_to_1_and_is_monotonic() {

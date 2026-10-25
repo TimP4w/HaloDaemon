@@ -381,6 +381,7 @@ fn encode_preview(rgba: Vec<u8>, w: u32, h: u32) -> Option<String> {
 #[cfg(test)]
 mod tests {
     use super::*;
+    use crate::test_support::app_with;
     use crate::{
         application::state::AppState, config::Config, domain::device::Device,
         test_support::MockDevice,
@@ -434,12 +435,8 @@ mod tests {
 
     #[tokio::test]
     async fn start_returns_err_when_path_does_not_exist() {
-        let app = Arc::new(AppState::new(Config::default()));
         let dev = Arc::new(MockDevice::new("lcd1").with_lcd());
-        app.device_registry
-            .write()
-            .await
-            .push(Arc::clone(&dev) as Arc<dyn Device>);
+        let app = app_with(vec![dev.clone()]);
 
         let engine = make_engine(Arc::clone(&app));
         let result = engine

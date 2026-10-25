@@ -108,6 +108,7 @@ pub async fn persist_device_state(app: &Arc<AppState>, device: &dyn Device) {
 mod override_diff_tests {
     use super::{record_changed_overrides, seed_missing_default_baselines};
     use crate::config::Config;
+    use crate::test_support::app_with;
     use halod_shared::types::DEFAULT_PROFILE_NAME;
     use serde_json::json;
 
@@ -179,12 +180,9 @@ mod override_diff_tests {
 
     #[tokio::test]
     async fn persist_device_state_partial_override_falls_back_on_profile_switch() {
-        use crate::application::state::AppState;
-        use crate::domain::device::Device;
         use crate::test_support::MockDevice;
         use std::sync::Arc;
 
-        let app = Arc::new(AppState::new(Config::default()));
         let dev = Arc::new(MockDevice::new("dev1").with_choice().with_fan());
         dev.choice.as_ref().unwrap().record("mode", 1);
         dev.fan.as_ref().unwrap().set_curve(
@@ -194,10 +192,7 @@ mod override_diff_tests {
                 points: vec![(20.0, 25.0), (80.0, 100.0)],
             },
         );
-        app.device_registry
-            .write()
-            .await
-            .push(dev.clone() as Arc<dyn Device>);
+        let app = app_with(vec![dev.clone()]);
 
         // Baseline saved while on the default profile.
         super::persist_device_state(&app, dev.as_ref()).await;

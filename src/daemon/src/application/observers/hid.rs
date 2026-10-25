@@ -401,7 +401,7 @@ async fn add_hid_device(
         }
     };
 
-    let Some(impl_) = app.registry.make_device(app, handle.clone()) else {
+    let Some(impl_) = app.registry.make_device(app, &handle) else {
         return;
     };
     let serial_key = serial.filter(|s| !s.is_empty()).unwrap_or("").to_string();
@@ -442,17 +442,15 @@ async fn add_hid_device(
 #[cfg(test)]
 mod tests {
     use super::*;
-    use crate::config::Config;
-    use crate::test_support::MockDevice;
+    use crate::test_support::{app_with, MockDevice};
     use std::sync::atomic::Ordering;
 
     #[tokio::test]
     async fn removing_a_hid_key_closes_children_registered_after_tracking() {
-        let app = Arc::new(AppState::new(Config::default()));
         let root = Arc::new(MockDevice::new("logitech-c547"));
         let late_child = Arc::new(MockDevice::new("logitech_6B3DD4CD"));
         let unrelated = Arc::new(MockDevice::new("other"));
-        app.device_registry.write().await.push(root.clone());
+        let app = app_with(vec![root.clone()]);
         app.hid
             .track(
                 "046d:c547:".into(),

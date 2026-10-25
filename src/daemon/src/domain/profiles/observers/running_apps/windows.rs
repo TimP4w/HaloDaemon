@@ -175,16 +175,6 @@ fn icon_cache_dir() -> Option<PathBuf> {
     Some(dir)
 }
 
-// FNV-1a — stable across process runs, unlike DefaultHasher (random-seeded).
-fn fnv1a(bytes: &[u8]) -> u64 {
-    let mut h: u64 = 0xcbf2_9ce4_8422_2325;
-    for b in bytes {
-        h ^= *b as u64;
-        h = h.wrapping_mul(0x0000_0100_0000_01b3);
-    }
-    h
-}
-
 fn icon_path_for_exe(exe_path: &Path) -> Option<String> {
     let cache_dir = icon_cache_dir()?;
     let key_bytes = exe_path.to_string_lossy().to_lowercase();
@@ -192,7 +182,10 @@ fn icon_path_for_exe(exe_path: &Path) -> Option<String> {
         .file_stem()
         .and_then(|s| s.to_str())
         .unwrap_or("app");
-    let cache_file = cache_dir.join(format!("{stem}-{:016x}.png", fnv1a(key_bytes.as_bytes())));
+    let cache_file = cache_dir.join(format!(
+        "{stem}-{:016x}.png",
+        crate::config::fnv1a64(&key_bytes)
+    ));
     if cache_file.exists() {
         return cache_file.to_str().map(|s| s.to_string());
     }
@@ -298,32 +291,4 @@ unsafe fn encode_hicon_png(icon: HICON) -> Option<Vec<u8>> {
     )
     .ok()?;
     Some(out)
-}
-
-#[cfg(test)]
-mod tests {
-    use super::fnv1a;
-
-    #[test]
-    fn fnv1a_empty_input_returns_offset_basis() {
-        assert_eq!(fnv1a(b""), 0xcbf2_9ce4_8422_2325);
-    }
-
-    #[test]
-    fn fnv1a_single_byte_matches_known_vector() {
-        assert_eq!(fnv1a(b"a"), 0xaf63_dc4c_8601_ec8c);
-    }
-
-    #[test]
-    fn fnv1a_multi_byte_matches_known_vector() {
-        assert_eq!(fnv1a(b"foobar"), 0x8594_4171_f739_67e8);
-    }
-
-    #[test]
-    fn fnv1a_differs_for_distinct_inputs() {
-        assert_ne!(
-            fnv1a(b"c:\\program files\\foo\\app.exe"),
-            fnv1a(b"c:\\program files\\bar\\app.exe"),
-        );
-    }
 }

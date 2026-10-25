@@ -80,7 +80,6 @@ rustls = { version = "0.23.42", default-features = false, features = ["ring", "s
 x509-parser = "0.18.1"
 
 [dev-dependencies]
-ed25519-dalek = "3.0.0"
 tokio    = { version = "1.53.1", features = ["test-util"] }
 proptest = "1.11.0"
 
@@ -132,7 +131,6 @@ windows    = { version = "0.62.2", features = [
 ] }
 # SCM dispatcher + service install/uninstall/stop for the supervisor service.
 windows-service = "0.8.1"
-libloading = "0.9.0"
 
 # ── Linux packaging ──────────────────────────────────────────────────────────
 # Both the .deb (cargo-deb) and .rpm (cargo-generate-rpm) ship BOTH binaries

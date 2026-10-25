@@ -1,21 +1,14 @@
-//! Shared IPC socket-path logic for the daemon and UI.
-
 #[cfg(unix)]
 use std::path::PathBuf;
 
-/// Real uid of the current process.
 #[cfg(unix)]
 pub fn current_uid() -> u32 {
     // SAFETY: `getuid` is always safe — it reads the real uid and never fails.
     unsafe { libc::getuid() }
 }
 
-/// Directory that holds the Unix command socket, plus whether it is the
-/// *fallback* location (i.e. `XDG_RUNTIME_DIR` was unset).
-///
-/// `XDG_RUNTIME_DIR` is already a per-user `0700` dir. When unset, fall back to
-/// a per-user (`uid`-suffixed) subdirectory of the temp dir rather than the
-/// world-accessible temp dir itself; the daemon must create it `0700`.
+/// Without `XDG_RUNTIME_DIR`, falls back to a uid-suffixed temp subdir (flagged `true`)
+/// rather than the world-accessible temp dir; the daemon must create it `0700`.
 #[cfg(unix)]
 pub fn runtime_dir() -> (PathBuf, bool) {
     runtime_dir_from(
@@ -25,8 +18,7 @@ pub fn runtime_dir() -> (PathBuf, bool) {
     )
 }
 
-/// Pure runtime-directory resolver used by startup and tests. Keeping the
-/// process environment at this boundary avoids mutating it in concurrent tests.
+/// Pure so concurrent tests needn't mutate the process environment.
 #[cfg(unix)]
 pub fn runtime_dir_from(
     xdg_runtime_dir: Option<std::ffi::OsString>,

@@ -24,11 +24,6 @@ pub async fn topology_changed(app: &Arc<AppState>) {
 }
 
 #[cfg(test)]
-pub async fn gui_changed(app: &Arc<AppState>) {
-    app.record_change(crate::domain::events::Change::Gui).await;
-}
-
-#[cfg(test)]
 mod tests {
     use super::*;
     use crate::config::Config;

@@ -1,8 +1,3 @@
-//! Debug / diagnostics types exchanged on the IPC channel.
-//!
-//! The daemon emits a `DebugInfo` snapshot on demand (`get_debug_info`); the UI
-//! renders it in the per-device debug dialog and the Settings → Debug panel.
-
 use serde::{Deserialize, Serialize};
 
 #[derive(Debug, Clone, PartialEq, Eq, Serialize, Deserialize)]
@@ -12,33 +7,29 @@ pub enum OsKind {
     Windows,
 }
 
-#[derive(Debug, Clone, PartialEq, Eq, Serialize, Deserialize)]
+#[derive(Debug, Clone, Copy, PartialEq, Eq, Serialize, Deserialize)]
 #[serde(rename_all = "lowercase")]
 pub enum SmbusBusKind {
     Chipset,
     Gpu,
 }
 
-/// Process-wide diagnostics: OS, elevation, daemon build, helper presence.
 #[derive(Debug, Clone, Serialize, Deserialize)]
 pub struct SystemDebugInfo {
     pub os: OsKind,
-    /// Free-form version string, e.g. kernel release on Linux or Windows build.
+    /// Kernel release on Linux, build on Windows.
     pub os_version: String,
     /// `geteuid() == 0` on Unix; `IsUserAnAdmin` on Windows.
     pub running_elevated: bool,
-    /// PawnIO driver detected on Windows; `None` outside Windows.
+    /// `None` outside Windows.
     pub pawnio_present: Option<bool>,
-    /// `udev/60-halod.rules` reachable on Linux; `None` outside Linux.
+    /// `udev/60-halod.rules`; `None` outside Linux.
     pub udev_rules_present: Option<bool>,
     pub daemon_version: String,
-    /// `CARGO_PKG_NAME` plus features compiled in.
     pub daemon_build: String,
 }
 
-/// One enumerated HID interface from the OS, regardless of whether HaloDaemon
-/// recognises it. Lets the debug UI explain "the device is plugged in, but no
-/// descriptor matched".
+/// Includes unrecognised interfaces, so the UI can show "plugged in, but no descriptor matched".
 #[derive(Debug, Clone, Serialize, Deserialize)]
 pub struct HidEntryDebugInfo {
     pub vid: u16,
@@ -53,14 +44,10 @@ pub struct HidEntryDebugInfo {
     pub manufacturer: String,
     #[serde(default)]
     pub product: String,
-    /// `Some(device_id)` when a HaloDaemon device claims this HID entry.
     #[serde(default, skip_serializing_if = "Option::is_none")]
     pub matched_device_id: Option<String>,
 }
 
-/// Per-device diagnostic record. Common fields are filled by the daemon from
-/// the device's id/vendor/model; `fields` is a free-form list of extras
-/// surfaced by the driver (wpid, host mode, firmware version…).
 #[derive(Debug, Clone, Serialize, Deserialize)]
 pub struct DeviceDebugInfo {
     pub id: String,
@@ -68,19 +55,14 @@ pub struct DeviceDebugInfo {
     pub vendor: String,
     pub model: String,
     pub connected: bool,
-    /// Transport layer the device is registered through: "hid", "smbus",
-    /// "smbus_gpu", "usb", "hwmon", "child". "unknown" means
-    /// the driver did not override `debug_transport()`.
+    /// "hid", "smbus", "smbus_gpu", "usb", "hwmon", "child", or "unknown".
     pub transport: String,
-    /// Free-form key/value pairs, ordered as the driver returned them.
+    /// Ordered as the driver returned them.
     #[serde(default)]
     pub fields: Vec<(String, String)>,
 }
 
-/// A well-known dependency the daemon can report on. The `snake_case`
-/// `Serialize` output doubles as the `depcheck.rules.<key>.*` i18n key segment
-/// the UI looks up (`DependencyRule::i18n_key`), so the daemon emits a typed
-/// value and the UI matches it exhaustively — no free-text slug can drift.
+/// The `snake_case` serialization doubles as the `depcheck.rules.<key>.*` i18n key segment.
 #[derive(Debug, Clone, Copy, PartialEq, Eq, Hash, Serialize, Deserialize)]
 #[serde(rename_all = "snake_case")]
 pub enum DependencyRule {
@@ -98,8 +80,6 @@ pub enum DependencyRule {
 }
 
 impl DependencyRule {
-    /// Every variant, so tests and callers can iterate without a hand-copied
-    /// list that could drift from the enum.
     pub const ALL: &'static [DependencyRule] = &[
         DependencyRule::Ffmpeg,
         DependencyRule::Pactl,
@@ -114,7 +94,6 @@ impl DependencyRule {
         DependencyRule::GnomeExtension,
     ];
 
-    /// The `depcheck.rules.<key>.*` i18n key segment for this rule.
     pub fn i18n_key(self) -> &'static str {
         match self {
             DependencyRule::Ffmpeg => "ffmpeg",
@@ -132,31 +111,21 @@ impl DependencyRule {
     }
 }
 
-/// One external runtime dependency (a CLI, helper, or platform integration)
-/// the daemon relies on, and whether it was detected. Built by the daemon for
-/// the host it actually runs on, so the UI only ever sees rows that apply to
-/// the current platform.
+/// Only rows applicable to the daemon's host platform are emitted.
 #[derive(Debug, Clone, Serialize, Deserialize)]
 pub struct DependencyStatus {
-    /// Which dependency this row reports on.
     pub id: DependencyRule,
-    /// Whether the dependency was found / is usable right now.
     pub present: bool,
-    /// `true` when its absence breaks core functionality; `false` when it only
-    /// gates an optional feature. Drives the "missing" severity in the UI.
+    /// `false` when it only gates an optional feature.
     pub required: bool,
-    /// Platform relevance label, e.g. `All`, `Linux`, `GNOME`, `Windows`.
+    /// e.g. `All`, `Linux`, `GNOME`, `Windows`.
     pub platform: String,
-    /// Selects a fix-message variant when the resolution depends on runtime
-    /// state, looked up as `depcheck.rules.<id>.fix_<fix_variant>`; empty
-    /// picks the plain `depcheck.rules.<id>.fix` key.
+    /// Looked up as `depcheck.rules.<id>.fix_<fix_variant>`; empty picks `depcheck.rules.<id>.fix`.
     #[serde(default)]
     pub fix_variant: String,
 }
 
-/// One SMBus controller discovered on the system, whether or not a HaloDaemon
-/// driver claims it. Surfaces the "PawnIO is loaded but I see no DRAM RGB"
-/// failure mode that no other panel shows.
+/// Includes unclaimed controllers, to surface "PawnIO is loaded but no DRAM RGB".
 #[derive(Debug, Clone, Serialize, Deserialize)]
 pub struct SmbusBusDebugInfo {
     pub kind: SmbusBusKind,
@@ -173,7 +142,7 @@ pub struct DebugInfo {
     pub hid_entries: Vec<HidEntryDebugInfo>,
     #[serde(default)]
     pub smbus_buses: Vec<SmbusBusDebugInfo>,
-    /// External runtime dependencies detected on the host, in display order.
+    /// In display order.
     #[serde(default)]
     pub dependencies: Vec<DependencyStatus>,
 }
@@ -245,7 +214,6 @@ mod tests {
         let json =
             r#"{"vid":1,"pid":2,"path":"/dev/hidraw0","interface":0,"usage_page":0,"usage":0}"#;
         let back: HidEntryDebugInfo = serde_json::from_str(json).unwrap();
-        // #[serde(default)] fields
         assert_eq!(back.serial, "");
         assert_eq!(back.manufacturer, "");
         assert_eq!(back.product, "");

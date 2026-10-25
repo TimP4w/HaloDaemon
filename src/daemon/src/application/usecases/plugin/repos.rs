@@ -54,24 +54,7 @@ async fn package_disk_hash(
 }
 
 fn github_owner_project(url: &str) -> Option<(String, String)> {
-    let parsed = url::Url::parse(url).ok()?;
-    if parsed.scheme() != "https" || parsed.host_str() != Some("github.com") {
-        return None;
-    }
-    let mut parts = parsed.path_segments()?.filter(|part| !part.is_empty());
-    let owner = parts.next()?;
-    let project = parts.next()?.trim_end_matches(".git");
-    if parts.next().is_some()
-        || !owner.bytes().all(github_name_byte)
-        || !project.bytes().all(github_name_byte)
-    {
-        return None;
-    }
-    Some((owner.to_owned(), project.to_owned()))
-}
-
-fn github_name_byte(byte: u8) -> bool {
-    byte.is_ascii_alphanumeric() || matches!(byte, b'-' | b'_' | b'.')
+    crate::domain::plugin::release_source::github_project(url).ok()
 }
 
 /// Register an immutable GitHub plugin release source.
@@ -209,26 +192,6 @@ fn archive_repository_root(extracted: &std::path::Path) -> Result<std::path::Pat
     Ok(root)
 }
 
-fn archive_sha256(source: &std::path::Path) -> Result<String> {
-    use sha2::{Digest as _, Sha256};
-    use std::io::Read as _;
-    let mut file = std::fs::File::open(source)?;
-    let mut hasher = Sha256::new();
-    let mut buffer = [0_u8; 64 * 1024];
-    loop {
-        let read = file.read(&mut buffer)?;
-        if read == 0 {
-            break;
-        }
-        hasher.update(&buffer[..read]);
-    }
-    Ok(hasher
-        .finalize()
-        .iter()
-        .map(|byte| format!("{byte:02x}"))
-        .collect())
-}
-
 pub async fn import_local_repo(source_path: String, app: Arc<AppState>) -> Result<()> {
     let source = std::fs::canonicalize(&source_path)
         .with_context(|| format!("resolving local repository source {source_path}"))?;
@@ -272,7 +235,7 @@ pub async fn import_local_repo(source_path: String, app: Arc<AppState>) -> Resul
     {
         anyhow::bail!("repository '{}' is already registered", manifest.id);
     }
-    let revision = archive_sha256(&source)?;
+    let revision = halod_plugin_signing::file_sha256(&source)?;
     let destination = crate::config::plugin_repos_dir().join(&slug);
     let final_revision = destination.join("revisions").join(&revision);
     std::fs::create_dir_all(final_revision.parent().expect("revision has parent"))?;
@@ -334,7 +297,7 @@ async fn refresh_archive_repo(record: PluginRepoRecord, app: Arc<AppState>) -> R
     if !matches!(trust, repo::RepositoryTrust::Unsigned) {
         repo::verify_repository_signature(&root, &trust)?;
     }
-    let revision = archive_sha256(&source)?;
+    let revision = halod_plugin_signing::file_sha256(&source)?;
     let destination = crate::config::plugin_repos_dir().join(&record.slug);
     let final_revision = destination.join("revisions").join(&revision);
     if final_revision.exists() {

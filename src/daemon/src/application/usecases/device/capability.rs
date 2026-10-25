@@ -105,7 +105,7 @@ async fn apply(dev: &dyn Device, param: &CapabilityParam) -> Result<Effects> {
                 .context("device does not support DPI control")?
                 .set_dpi_steps(steps16)
                 .await?;
-            Ok(Effects { persist: false })
+            Ok(Effects { persist: true })
         }
         CapabilityParam::EqPreset { preset_index } => {
             dev.as_equalizer()
@@ -138,17 +138,10 @@ async fn apply(dev: &dyn Device, param: &CapabilityParam) -> Result<Effects> {
 #[cfg(test)]
 mod tests {
     use super::*;
-    use crate::config::Config;
     use crate::domain::device::LightingCapability;
-    use crate::test_support::MockDevice;
+    use crate::test_support::{app_with, MockDevice};
     use halod_shared::types::{Boolean, EqBand, Equalizer, LightingState, RgbColor};
     use std::sync::atomic::Ordering;
-
-    fn make_app(devices: Vec<Arc<dyn Device>>) -> Arc<AppState> {
-        let app = Arc::new(AppState::new(Config::default()));
-        *app.device_registry.try_write().unwrap() = devices;
-        app
-    }
 
     // ── Boolean ──────────────────────────────────────────────────────────
 
@@ -162,7 +155,7 @@ mod tests {
             category: String::new(),
             visible_when: None,
         }]));
-        let app = make_app(vec![dev.clone() as Arc<dyn Device>]);
+        let app = app_with(vec![dev.clone()]);
         set_capability_param(
             "dev1".into(),
             CapabilityParam::Boolean {
@@ -192,7 +185,7 @@ mod tests {
     }
 
     async fn toggle_host_mode(dev: Arc<MockDevice>) {
-        let app = make_app(vec![dev as Arc<dyn Device>]);
+        let app = app_with(vec![dev]);
         set_capability_param(
             "dev1".into(),
             CapabilityParam::Boolean {
@@ -244,7 +237,7 @@ mod tests {
             category: String::new(),
             visible_when: None,
         }]));
-        let app = make_app(vec![dev.clone() as Arc<dyn Device>]);
+        let app = app_with(vec![dev.clone()]);
         let err = set_capability_param(
             "dev1".into(),
             CapabilityParam::Boolean {
@@ -272,7 +265,7 @@ mod tests {
     #[tokio::test]
     async fn set_range_calls_capability() {
         let dev = Arc::new(MockDevice::new("dev1").with_range());
-        let app = make_app(vec![dev.clone() as Arc<dyn Device>]);
+        let app = app_with(vec![dev.clone()]);
 
         set_capability_param(
             "dev1".into(),
@@ -300,7 +293,7 @@ mod tests {
     async fn set_range_publishes_new_profile_override() {
         let dev = Arc::new(MockDevice::new("dev1").with_range());
         dev.range.as_ref().unwrap().record("nc_level", 0);
-        let app = make_app(vec![dev as Arc<dyn Device>]);
+        let app = app_with(vec![dev]);
         {
             let mut cfg = app.config.write().await;
             cfg.active_profile_data_mut().device_states.insert(
@@ -343,7 +336,7 @@ mod tests {
     #[tokio::test]
     async fn set_choice_calls_capability() {
         let dev = Arc::new(MockDevice::new("dev1").with_choice());
-        let app = make_app(vec![dev.clone() as Arc<dyn Device>]);
+        let app = app_with(vec![dev.clone()]);
 
         set_capability_param(
             "dev1".into(),
@@ -371,7 +364,7 @@ mod tests {
     async fn set_choice_publishes_new_profile_override() {
         let dev = Arc::new(MockDevice::new("dev1").with_choice());
         dev.choice.as_ref().unwrap().record("nc_mode", 0);
-        let app = make_app(vec![dev as Arc<dyn Device>]);
+        let app = app_with(vec![dev]);
         {
             let mut cfg = app.config.write().await;
             cfg.active_profile_data_mut().device_states.insert(
@@ -414,7 +407,7 @@ mod tests {
     #[tokio::test]
     async fn trigger_action_calls_capability() {
         let dev = Arc::new(MockDevice::new("dev1").with_action());
-        let app = make_app(vec![dev.clone() as Arc<dyn Device>]);
+        let app = app_with(vec![dev.clone()]);
 
         set_capability_param(
             "dev1".into(),
@@ -442,7 +435,7 @@ mod tests {
     #[tokio::test]
     async fn set_dpi_steps_calls_capability() {
         let dev = Arc::new(MockDevice::new("dev1").with_dpi());
-        let app = make_app(vec![dev.clone() as Arc<dyn Device>]);
+        let app = app_with(vec![dev.clone()]);
 
         set_capability_param(
             "dev1".into(),
@@ -461,7 +454,7 @@ mod tests {
     #[tokio::test]
     async fn set_dpi_steps_errors_without_dpi_capability() {
         let dev = Arc::new(MockDevice::new("dev1")); // no .with_dpi()
-        let app = make_app(vec![dev.clone() as Arc<dyn Device>]);
+        let app = app_with(vec![dev.clone()]);
 
         let err = set_capability_param(
             "dev1".into(),
@@ -476,20 +469,12 @@ mod tests {
     }
 
     #[tokio::test]
-    async fn set_dpi_steps_does_not_persist_device_state() {
-        let dev = Arc::new(MockDevice::new("dev1").with_dpi());
-        let app = make_app(vec![dev.clone() as Arc<dyn Device>]);
-
-        set_capability_param(
-            "dev1".into(),
-            CapabilityParam::DpiSteps { steps: vec![1200] },
-            app.clone(),
-        )
-        .await
-        .unwrap();
-
-        let cfg = app.config.read().await;
-        assert!(!cfg.active_profile_data().device_states.contains_key("dev1"));
+    async fn set_dpi_steps_requests_persistence() {
+        let dev = MockDevice::new("dev1").with_dpi();
+        let effects = apply(&dev, &CapabilityParam::DpiSteps { steps: vec![1200] })
+            .await
+            .unwrap();
+        assert!(effects.persist);
     }
 
     // ── Equalizer ────────────────────────────────────────────────────────
@@ -519,7 +504,7 @@ mod tests {
     #[tokio::test]
     async fn set_eq_preset_calls_capability() {
         let dev = eq_dev("dev1");
-        let app = make_app(vec![dev.clone() as Arc<dyn Device>]);
+        let app = app_with(vec![dev.clone()]);
 
         set_capability_param(
             "dev1".into(),
@@ -538,7 +523,7 @@ mod tests {
     #[tokio::test]
     async fn set_eq_preset_publishes_updated_device_record() {
         let dev = eq_dev("headset");
-        let app = make_app(vec![dev as Arc<dyn Device>]);
+        let app = app_with(vec![dev]);
         let mut transactions = app.data_bus.subscribe_transactions();
 
         set_capability_param(
@@ -572,7 +557,7 @@ mod tests {
     #[tokio::test]
     async fn set_eq_preset_persists_state() {
         let dev = eq_dev("dev1");
-        let app = make_app(vec![dev.clone() as Arc<dyn Device>]);
+        let app = app_with(vec![dev.clone()]);
 
         set_capability_param(
             "dev1".into(),
@@ -594,7 +579,7 @@ mod tests {
     #[tokio::test]
     async fn set_eq_bands_calls_capability() {
         let dev = eq_dev("dev2");
-        let app = make_app(vec![dev.clone() as Arc<dyn Device>]);
+        let app = app_with(vec![dev.clone()]);
 
         let values = vec![1.0f32; 10];
         set_capability_param("dev2".into(), CapabilityParam::EqBands { values }, app)
@@ -613,7 +598,7 @@ mod tests {
     #[tokio::test]
     async fn set_eq_bands_persists_state() {
         let dev = eq_dev("dev2");
-        let app = make_app(vec![dev.clone() as Arc<dyn Device>]);
+        let app = app_with(vec![dev.clone()]);
 
         // set a preset first so current_state is non-null
         set_capability_param(
@@ -642,7 +627,7 @@ mod tests {
     #[tokio::test]
     async fn set_eq_bands_rejects_wrong_count() {
         let dev = eq_dev("dev3");
-        let app = make_app(vec![dev.clone() as Arc<dyn Device>]);
+        let app = app_with(vec![dev.clone()]);
 
         // device reports 10 bands; sending 5 must fail
         let result = set_capability_param(
@@ -659,7 +644,7 @@ mod tests {
     #[tokio::test]
     async fn set_eq_bands_rejects_non_finite() {
         let dev = eq_dev("dev4");
-        let app = make_app(vec![dev.clone() as Arc<dyn Device>]);
+        let app = app_with(vec![dev.clone()]);
 
         let mut values = vec![0.0f32; 10];
         values[3] = f32::NAN;

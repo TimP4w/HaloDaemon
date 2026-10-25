@@ -404,7 +404,7 @@ where
                     stream.read_exact(&mut payload).await?;
                 }
                 if frame_type == FRAME_JSON {
-                    let reaction = handle_json(&payload, tx, repaint, &mut None);
+                    let reaction = handle_json(&payload, tx, repaint);
                     if reaction.relist_lcd_images {
                         write_cmd(stream, &DaemonCommand::ListLcdImages).await?;
                     }
@@ -484,12 +484,7 @@ pub struct Reaction {
     pub relist_lcd_images: bool,
 }
 
-fn handle_json(
-    payload: &[u8],
-    tx: &UiTx,
-    repaint: &impl Fn(),
-    _unused_cursor: &mut Option<u64>,
-) -> Reaction {
+fn handle_json(payload: &[u8], tx: &UiTx, repaint: &impl Fn()) -> Reaction {
     let value = match serde_json::from_slice::<serde_json::Value>(payload) {
         Ok(v) => v,
         Err(e) => {
@@ -844,7 +839,7 @@ mod tests {
     fn lcd_upload_progress_frame_lands_on_the_watch_channel() {
         let (tx, rx) = test_tx();
         let payload = br#"{"type":"lcd_upload_progress","data":{"device_id":"lcd","stage":"processing","percent":42}}"#;
-        assert!(!handle_json(payload, &tx, &|| {}, &mut None).relist_lcd_images);
+        assert!(!handle_json(payload, &tx, &|| {}).relist_lcd_images);
         let got = rx.borrow().clone().expect("progress routed");
         assert_eq!(got.device_id, "lcd");
         assert_eq!(got.percent, Some(42));
@@ -875,7 +870,7 @@ mod tests {
         }))
         .unwrap();
 
-        handle_json(&payload, &tx, &|| {}, &mut None);
+        handle_json(&payload, &tx, &|| {});
 
         assert_eq!(tx.event_session_id.load(Ordering::Acquire), 12);
         assert_eq!(tx.last_event_id.load(Ordering::Acquire), 1);
@@ -902,7 +897,7 @@ mod tests {
         let payload = format!(
             r#"{{"type":"plugin_asset","plugin_id":"acme","name":"logo.png","data_b64":"{data_b64}"}}"#
         );
-        assert!(!handle_json(payload.as_bytes(), &tx, &|| {}, &mut None).relist_lcd_images);
+        assert!(!handle_json(payload.as_bytes(), &tx, &|| {}).relist_lcd_images);
         let got = assets_r
             .borrow_and_update()
             .get("acme/logo.png")
@@ -916,7 +911,7 @@ mod tests {
         let (tx, _) = test_tx();
         let mut rx = tx.udev_rules.subscribe();
         let payload = br#"{"type":"udev_rules_status","data":{"supported":true,"current":false,"installed_path":"/usr/lib/udev/rules.d/60-halod.rules","generated_rule_count":43}}"#;
-        assert!(!handle_json(payload, &tx, &|| {}, &mut None).relist_lcd_images);
+        assert!(!handle_json(payload, &tx, &|| {}).relist_lcd_images);
         let got = rx.borrow_and_update().clone().unwrap();
         assert!(got.supported);
         assert!(!got.current);
@@ -940,7 +935,7 @@ mod tests {
             ),
         ] {
             let (tx, rx) = test_tx();
-            assert!(!handle_json(raw, &tx, &|| {}, &mut None).relist_lcd_images);
+            assert!(!handle_json(raw, &tx, &|| {}).relist_lcd_images);
             let got = rx.borrow().clone().expect("terminal routed");
             assert_eq!(got.stage, stage);
         }
@@ -954,9 +949,7 @@ mod tests {
             stage: halod_shared::types::LcdUploadStage::Applying,
             percent: None,
         }));
-        assert!(
-            handle_json(br#"{"type":"image_uploaded"}"#, &tx, &|| {}, &mut None).relist_lcd_images
-        );
+        assert!(handle_json(br#"{"type":"image_uploaded"}"#, &tx, &|| {}).relist_lcd_images);
         assert!(rx.borrow().is_none(), "stale progress cleared");
     }
 
@@ -967,8 +960,7 @@ mod tests {
             !handle_json(
                 br#"{"type":"error","message":"raw stack trace","handled":true}"#,
                 &tx,
-                &|| {},
-                &mut None
+                &|| {}
             )
             .relist_lcd_images
         );
@@ -981,7 +973,7 @@ mod tests {
         assert!(!handle_json(
             br#"{"type":"error","code":"repository_signature_verification_failed","message":"release signature does not match release.yaml"}"#,
             &tx,
-            &|| {}, &mut None
+            &|| {}
         ).relist_lcd_images);
         let notification = tx.notifications.lock().unwrap().pop().unwrap();
         assert_eq!(
@@ -1013,13 +1005,13 @@ mod tests {
         }))
         .unwrap();
 
-        handle_json(&payload, &tx, &|| {}, &mut None);
+        handle_json(&payload, &tx, &|| {});
         assert!(canvas_r.borrow_and_update().is_some());
 
         tx.canvas_frame.send_replace(None);
         let _ = canvas_r.borrow_and_update();
         tx.hidden.store(true, Ordering::Relaxed);
-        handle_json(&payload, &tx, &|| {}, &mut None);
+        handle_json(&payload, &tx, &|| {});
         assert!(canvas_r.borrow().is_none());
     }
 

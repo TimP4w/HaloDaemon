@@ -80,7 +80,7 @@ pub async fn save_custom_effect(
     };
     let path = effect_path(&name);
     let yaml = serde_yaml::to_string(&def)?;
-    tokio::task::spawn_blocking(move || crate::config::atomic_write(&path, &yaml)).await??;
+    tokio::task::spawn_blocking(move || crate::util::fs::atomic_write(&path, &yaml)).await??;
     log::info!("[RGB] saved custom effect '{name}'");
     app.lighting.custom_effects.refresh().await;
     app.record_change(crate::domain::events::Change::LightingCatalog)

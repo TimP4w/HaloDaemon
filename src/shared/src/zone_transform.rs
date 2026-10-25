@@ -1,56 +1,34 @@
-//! Per-zone LED-content transform.
-//!
-//! A device's RGB zone can carry a transform that permutes its LED colour
-//! array before the colours reach hardware — used to correct for physical
-//! mounting (a fan installed upside-down, a ring whose first LED faces the
-//! "wrong" way). The transform is **topology-dependent**:
-//!
-//! - **Ring topologies** (`Ring`, `Rings { count }`) use an *index-based*
-//!   transform: [`ZoneContentTransform::ring_source`] cyclically shifts
-//!   (`led_offset`) and/or reverses (`reverse`) the LED sequence. For
-//!   `Rings { count }` it is applied to each ring slice individually (see
-//!   [`ring_slice`]), and `swap_rings` additionally reverses the order of the
-//!   ring slices themselves (e.g. the leftmost fan becomes the rightmost).
-//! - **Non-ring topologies** (`Linear`, `Grid`, `Keyboard`) use a *geometric*
-//!   transform: `flip_h` / `flip_v` mirror the LED order across the zone's
-//!   horizontal / vertical centre axis (a position-based permutation).
-//!
-//! The transform is always expressed as a permutation of a zone's colour
-//! array: `output[i] = colors[perm[i]]` (see [`build_permutation`] /
-//! [`transform_colors`]).
+//! Ring topologies use an index transform (offset/reverse per ring, `swap_rings`);
+//! non-ring topologies use a geometric mirror (`flip_h`/`flip_v`).
 
 use serde::{Deserialize, Serialize};
 
 use crate::types::{LedPosition, LightingChannel, RgbColor, ZoneTopology};
 
-/// LED-content transform parameters for one RGB zone.
 #[derive(Debug, Clone, Copy, Default, PartialEq, Serialize, Deserialize)]
 pub struct ZoneContentTransform {
-    /// Mirror horizontally (non-ring topologies).
+    /// Non-ring topologies.
     #[serde(default)]
     pub flip_h: bool,
-    /// Mirror vertically (non-ring topologies).
+    /// Non-ring topologies.
     #[serde(default)]
     pub flip_v: bool,
-    /// Reverse the LED direction within each ring (ring topologies).
+    /// Ring topologies.
     #[serde(default)]
     pub reverse: bool,
-    /// Cyclic LED-index offset within each ring (ring topologies).
+    /// Ring topologies.
     #[serde(default)]
     pub led_offset: i32,
-    /// Reverse the order of fan rings (`Rings` topology only).
+    /// `Rings` topology only.
     #[serde(default)]
     pub swap_rings: bool,
 }
 
 impl ZoneContentTransform {
-    /// Returns `true` when the transform has no effect.
     pub fn is_identity(&self) -> bool {
         !self.flip_h && !self.flip_v && !self.reverse && self.led_offset == 0 && !self.swap_rings
     }
 
-    /// Source ring-local index that output ring-local index `j` samples from,
-    /// for a ring of `ring_len` LEDs.
     pub fn ring_source(&self, j: usize, ring_len: usize) -> usize {
         if ring_len == 0 {
             return 0;
@@ -66,12 +44,7 @@ impl ZoneContentTransform {
     }
 }
 
-/// Normalized canvas position of an LED at in-zone coords `(lx, ly)` ∈ [0,1]
-/// for a placed zone at `(x, y)` with size `(w, h)` rotated by `rotation_deg`.
-///
-/// Pure geometry, before any pixel/screen scaling — both the daemon canvas
-/// sampler and the GUI canvas overlay delegate here so the placement math stays
-/// in one place.
+/// `(lx, ly)` ∈ [0,1]; result is normalized, before any pixel scaling.
 pub fn led_canvas_norm(
     lx: f32,
     ly: f32,
@@ -92,15 +65,14 @@ pub fn led_canvas_norm(
     (cx + dx, cy + dy)
 }
 
-/// `[start, end)` LED-index range of ring `ring_idx`, assuming `total_leds` is
-/// split into `ring_count` contiguous equal-sized slices.
+/// `[start, end)`, assuming contiguous equal-sized slices.
 pub fn ring_slice(total_leds: usize, ring_count: usize, ring_idx: usize) -> (usize, usize) {
     let per = total_leds / ring_count.max(1);
     let start = ring_idx.saturating_mul(per);
     (start, start.saturating_add(per))
 }
 
-/// Synthetic position for a ring zone's LED when unrolled: `(px, 0.5)`, 0..1.
+/// `(px, 0.5)`, 0..1.
 pub fn unrolled_led_pos(index: usize, total: usize) -> (f32, f32) {
     let px = if total > 1 {
         index as f32 / (total - 1) as f32
@@ -110,13 +82,7 @@ pub fn unrolled_led_pos(index: usize, total: usize) -> (f32, f32) {
     (px, 0.5)
 }
 
-/// Output→source LED-index permutation for `zone` under transform `t`:
-/// `output[i] = colors[perm[i]]`. Length equals `zone.leds.len()`.
-///
-/// Ring topologies permute via [`ZoneContentTransform::ring_source`] (per ring
-/// slice for `Rings`); non-ring topologies use a position-mirror — each LED is
-/// mapped to the LED nearest the mirror of its position about the zone centre.
-/// An identity transform (or an unpartitionable `Rings` zone) yields `0..n`.
+/// `output[i] = colors[perm[i]]`. An unpartitionable `Rings` zone yields `0..n`.
 pub fn build_permutation(zone: &LightingChannel, t: &ZoneContentTransform) -> Vec<usize> {
     let n = zone.leds.len();
     if t.is_identity() || n == 0 {
@@ -131,8 +97,7 @@ pub fn build_permutation(zone: &LightingChannel, t: &ZoneContentTransform) -> Ve
             }
             let mut perm = Vec::with_capacity(n);
             for r in 0..count {
-                // Output rings stay in order 0..count; `swap_rings` makes each
-                // output ring sample from the opposite ring slice.
+                // Output rings keep their order; `swap_rings` samples the opposite slice.
                 let src_ring = if t.swap_rings { count - 1 - r } else { r };
                 let (start, end) = ring_slice(n, count, src_ring);
                 let ring_len = end - start;
@@ -148,7 +113,6 @@ pub fn build_permutation(zone: &LightingChannel, t: &ZoneContentTransform) -> Ve
     }
 }
 
-/// Position-mirror permutation for non-ring topologies.
 fn flip_permutation(leds: &[LedPosition], t: &ZoneContentTransform) -> Vec<usize> {
     if (!t.flip_h && !t.flip_v) || leds.is_empty() {
         return (0..leds.len()).collect();
@@ -187,7 +151,6 @@ fn flip_permutation(leds: &[LedPosition], t: &ZoneContentTransform) -> Vec<usize
     }
 }
 
-/// `true` when `perm` is a permutation of `0..perm.len()` (every index hit once).
 pub(crate) fn is_bijection(perm: &[usize]) -> bool {
     let mut seen = vec![false; perm.len()];
     for &i in perm {
@@ -199,7 +162,6 @@ pub(crate) fn is_bijection(perm: &[usize]) -> bool {
     true
 }
 
-/// Apply [`build_permutation`] to a zone's colour array.
 pub fn transform_colors(
     colors: &[RgbColor],
     zone: &LightingChannel,
@@ -277,7 +239,6 @@ mod tests {
 
     #[test]
     fn led_canvas_norm_zero_rotation_places_led() {
-        // Unit zone at origin; LED at (0.25, 0.75) lands at (0.25, 0.75).
         let (nx, ny) = led_canvas_norm(0.25, 0.75, 0.0, 0.0, 1.0, 1.0, 0.0);
         assert!((nx - 0.25).abs() < 1e-6, "nx={nx}");
         assert!((ny - 0.75).abs() < 1e-6, "ny={ny}");
@@ -285,9 +246,6 @@ mod tests {
 
     #[test]
     fn led_canvas_norm_90_rotation_maps_offset_to_rotated_axis() {
-        // Unit zone centred at (0.5, 0.5); LED at top-centre (0.5, 0.0) has
-        // local offset (0, -0.5). A +90° rotation maps it to (+0.5, 0), i.e.
-        // canvas (1.0, 0.5).
         let (nx, ny) = led_canvas_norm(0.5, 0.0, 0.0, 0.0, 1.0, 1.0, 90.0);
         assert!((nx - 1.0).abs() < 1e-5, "nx={nx}");
         assert!((ny - 0.5).abs() < 1e-5, "ny={ny}");
@@ -295,7 +253,6 @@ mod tests {
 
     #[test]
     fn led_canvas_norm_center_is_invariant_under_rotation() {
-        // The centre LED (0.5, 0.5) sits at the zone centre regardless of angle.
         for &deg in &[0.0f32, 30.0, 90.0, 180.0, 270.0] {
             let (nx, ny) = led_canvas_norm(0.5, 0.5, 0.25, 0.25, 0.5, 0.5, deg);
             assert!((nx - 0.5).abs() < 1e-6, "deg={deg} nx={nx}");
@@ -344,7 +301,6 @@ mod tests {
             led_offset: 2,
             ..Default::default()
         };
-        // reverse: j=0 -> 7, then +2 -> 9 % 8 == 1.
         assert_eq!(t.ring_source(0, 8), 1);
     }
 
@@ -369,7 +325,6 @@ mod tests {
 
     #[test]
     fn build_permutation_rings_is_per_ring() {
-        // 4 LEDs, 2 rings of 2; offset 1 swaps within each ring, no leakage.
         let t = ZoneContentTransform {
             led_offset: 1,
             ..Default::default()
@@ -399,7 +354,6 @@ mod tests {
 
     #[test]
     fn build_permutation_rings_swap_reorders_whole_rings() {
-        // 4 LEDs, 2 rings of 2; swap_rings alone swaps the ring slices.
         let t = ZoneContentTransform {
             swap_rings: true,
             ..Default::default()
@@ -410,7 +364,6 @@ mod tests {
 
     #[test]
     fn build_permutation_rings_swap_composes_with_reverse() {
-        // 4 LEDs, 2 rings of 2; swap reorders rings, reverse mirrors within each.
         let t = ZoneContentTransform {
             swap_rings: true,
             reverse: true,
@@ -436,7 +389,6 @@ mod tests {
             flip_h: true,
             ..Default::default()
         };
-        // flip_h swaps left/right: 0<->1, 2<->3.
         assert_eq!(build_permutation(&grid_zone(), &t), vec![1, 0, 3, 2]);
     }
 
@@ -446,15 +398,12 @@ mod tests {
             flip_v: true,
             ..Default::default()
         };
-        // flip_v swaps top/bottom: 0<->2, 1<->3.
         assert_eq!(build_permutation(&grid_zone(), &t), vec![2, 3, 0, 1]);
     }
 
     #[test]
     fn flip_on_irregular_layout_falls_back_to_identity() {
-        // Three collinear LEDs with no mirror partner for the middle one: the
-        // nearest-neighbour mirror collides (both ends map to the same source),
-        // so the flip must degrade to identity rather than drop/duplicate a LED.
+        // The nearest-neighbour mirror collides here, so the flip must degrade to identity.
         let zone = LightingChannel {
             id: "k".into(),
             name: "K".into(),
@@ -488,7 +437,6 @@ mod tests {
             ..Default::default()
         };
         let perm = build_permutation(&zone, &t);
-        // Identity fallback: every LED preserved exactly once.
         assert_eq!(perm, vec![0, 1, 2]);
     }
 
@@ -545,7 +493,6 @@ mod prop_tests {
         }
     }
 
-    /// Delegates to the shared `is_bijection` (module-level, test-gated).
     fn any_transform() -> impl Strategy<Value = ZoneContentTransform> {
         (
             any::<bool>(),
@@ -566,8 +513,6 @@ mod prop_tests {
     }
 
     proptest! {
-        /// At zero rotation an LED's normalized position stays within the zone
-        /// bounding box for any in-zone coordinate.
         #[test]
         fn led_canvas_norm_unrotated_stays_in_bbox(
             lx in 0.0f32..=1.0,
@@ -582,7 +527,6 @@ mod prop_tests {
             prop_assert!(py >= y - 1e-4 && py <= y + h + 1e-4);
         }
 
-        /// Rotating a full turn is the identity transform.
         #[test]
         fn led_canvas_norm_full_turn_is_identity(
             lx in 0.0f32..=1.0,
@@ -598,7 +542,6 @@ mod prop_tests {
             prop_assert!((ay - by).abs() < 1e-3);
         }
 
-        /// `ring_source` always maps into `0..ring_len`.
         #[test]
         fn ring_source_is_in_bounds(
             t in any_transform(),
@@ -609,15 +552,12 @@ mod prop_tests {
             prop_assert!(t.ring_source(j, ring_len) < ring_len);
         }
 
-        /// For a fixed transform, `ring_source` over `0..ring_len` is a bijection
-        /// of the ring's indices — reverse+offset only permute, never collide.
         #[test]
         fn ring_source_is_a_bijection(t in any_transform(), ring_len in 1usize..256) {
             let mapped: Vec<usize> = (0..ring_len).map(|j| t.ring_source(j, ring_len)).collect();
             prop_assert!(super::is_bijection(&mapped));
         }
 
-        /// `build_permutation` always returns a vector the length of the zone.
         #[test]
         fn build_permutation_length_matches_zone(
             t in any_transform(),
@@ -627,16 +567,12 @@ mod prop_tests {
             prop_assert_eq!(perm.len(), n);
         }
 
-        /// Ring-topology permutations are bijections of `0..n` — no LED dropped
-        /// or duplicated, for any transform.
         #[test]
         fn build_permutation_ring_is_a_bijection(t in any_transform(), n in 1usize..256) {
             let perm = build_permutation(&line_zone(ZoneTopology::Ring, n), &t);
             prop_assert!(super::is_bijection(&perm));
         }
 
-        /// `Rings` permutations are bijections when the ring count evenly divides
-        /// the LED count (the configured, controllable case).
         #[test]
         fn build_permutation_rings_is_a_bijection(
             t in any_transform(),
@@ -649,9 +585,6 @@ mod prop_tests {
             prop_assert!(super::is_bijection(&perm));
         }
 
-        /// Non-ring (geometric flip) permutations are bijections of `0..n` for
-        /// ANY layout, including irregular ones where the nearest-neighbour mirror
-        /// would otherwise collide — the identity fallback guarantees it.
         #[test]
         fn build_permutation_flip_is_always_a_bijection(
             t in any_transform(),
@@ -675,9 +608,6 @@ mod prop_tests {
             prop_assert!(super::is_bijection(&perm));
         }
 
-        /// Because a ring permutation is a bijection, `transform_colors` must
-        /// preserve the multiset of colours — it only reorders, never invents or
-        /// drops a colour.
         #[test]
         fn transform_colors_preserves_color_multiset(
             t in any_transform(),

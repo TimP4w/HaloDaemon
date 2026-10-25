@@ -13,7 +13,7 @@ use crate::application::state::AppState;
 use crate::infrastructure::drivers::transports::smbus::{BusInfo, SmBusTransport};
 use halod_shared::debug_info::{
     DebugInfo, DependencyRule, DependencyStatus, DeviceDebugInfo, HidEntryDebugInfo, OsKind,
-    SmbusBusDebugInfo, SmbusBusKind as DebugSmbusBusKind, SystemDebugInfo,
+    SmbusBusDebugInfo, SmbusBusKind, SystemDebugInfo,
 };
 
 pub async fn get_debug_info(client: ClientHandle, app: Arc<AppState>) -> Result<()> {
@@ -308,16 +308,13 @@ async fn enumerate_smbus() -> Vec<SmbusBusDebugInfo> {
     let (chipset, gpu) = SmBusTransport::enumerate_for_debug().await;
     let mut out: Vec<SmbusBusDebugInfo> = chipset
         .into_iter()
-        .map(|b| smbus_to_wire(b, DebugSmbusBusKind::Chipset))
+        .map(|b| smbus_to_wire(b, SmbusBusKind::Chipset))
         .collect();
-    out.extend(
-        gpu.into_iter()
-            .map(|b| smbus_to_wire(b, DebugSmbusBusKind::Gpu)),
-    );
+    out.extend(gpu.into_iter().map(|b| smbus_to_wire(b, SmbusBusKind::Gpu)));
     out
 }
 
-fn smbus_to_wire(b: BusInfo, kind: DebugSmbusBusKind) -> SmbusBusDebugInfo {
+fn smbus_to_wire(b: BusInfo, kind: SmbusBusKind) -> SmbusBusDebugInfo {
     SmbusBusDebugInfo {
         kind,
         bus_number: b.bus_number,
@@ -405,9 +402,8 @@ async fn build_device_debug(
         fields.push(("serial_number".to_string(), serial.clone()));
     }
 
-    for (k, v) in device.debug_info_extra() {
-        fields.push((k, v));
-    }
+    fields.extend(device.debug_info_extra());
+    fields.extend(device.identity().debug_fields());
 
     DeviceDebugInfo {
         id: wire.id,

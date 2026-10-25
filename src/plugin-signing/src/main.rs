@@ -1,6 +1,6 @@
 // SPDX-License-Identifier: GPL-3.0-or-later
 
-use std::path::{Path, PathBuf};
+use std::path::PathBuf;
 
 use anyhow::{anyhow, bail, Context, Result};
 use base64::{engine::general_purpose::STANDARD as B64, Engine as _};
@@ -39,10 +39,7 @@ fn run(args: Vec<String>) -> Result<()> {
 }
 
 fn bundle(args: &[String]) -> Result<()> {
-    let repo = args
-        .first()
-        .map(PathBuf::from)
-        .ok_or_else(|| anyhow!("missing <repo>"))?;
+    let repo = repo_arg(args)?;
     let output = option(args, "--output")?
         .map(PathBuf::from)
         .ok_or_else(|| anyhow!("missing --output"))?;
@@ -57,42 +54,15 @@ fn bundle(args: &[String]) -> Result<()> {
 }
 
 fn index(args: &[String]) -> Result<()> {
-    let repo = args
-        .first()
-        .map(PathBuf::from)
-        .ok_or_else(|| anyhow!("missing <repo>"))?;
-    let mut version = None;
-    let mut id = None;
-    let mut name = None;
-    let mut check = false;
-    let mut i = 1;
-    while i < args.len() {
-        match args[i].as_str() {
-            "--version" => {
-                i += 1;
-                version = Some(
-                    args.get(i)
-                        .ok_or_else(|| anyhow!("--version requires a value"))?,
-                );
-            }
-            "--check" => check = true,
-            "--id" => {
-                i += 1;
-                id = Some(
-                    args.get(i)
-                        .ok_or_else(|| anyhow!("--id requires a value"))?,
-                );
-            }
-            "--name" => {
-                i += 1;
-                name = Some(
-                    args.get(i)
-                        .ok_or_else(|| anyhow!("--name requires a value"))?,
-                );
-            }
-            other => bail!("unknown index argument '{other}'"),
-        }
-        i += 1;
+    let repo = repo_arg(args)?;
+    let version = option(args, "--version")?;
+    let id = option(args, "--id")?;
+    let name = option(args, "--name")?;
+    let check = args.iter().any(|arg| arg == "--check");
+    if let Some(arg) = args.iter().skip(1).find(|arg| {
+        arg.starts_with("--") && !["--version", "--id", "--name", "--check"].contains(&arg.as_str())
+    }) {
+        bail!("unknown index argument '{arg}'");
     }
     if check && version.is_some() {
         bail!("--check and --version are mutually exclusive");
@@ -100,8 +70,7 @@ fn index(args: &[String]) -> Result<()> {
     if id.is_some() != name.is_some() {
         bail!("--id and --name must be provided together");
     }
-    let identity = id.zip(name).map(|(id, name)| (id.as_str(), name.as_str()));
-    let changed = signing::rewrite_index(&repo, version.map(String::as_str), check, identity)?;
+    let changed = signing::rewrite_index(&repo, version, check, id.zip(name))?;
     println!(
         "{}",
         if changed {
@@ -114,10 +83,7 @@ fn index(args: &[String]) -> Result<()> {
 }
 
 fn sign(args: &[String]) -> Result<()> {
-    let repo = args
-        .first()
-        .map(PathBuf::from)
-        .ok_or_else(|| anyhow!("missing <repo>"))?;
+    let repo = repo_arg(args)?;
     let key_id = option(args, "--key-id")?.ok_or_else(|| anyhow!("missing --key-id"))?;
     let key_env = option(args, "--key-env")?.unwrap_or(DEFAULT_KEY_ENV);
     let encoded = Zeroizing::new(
@@ -138,9 +104,9 @@ fn sign(args: &[String]) -> Result<()> {
         public_key: B64.encode(signing_key.verifying_key().to_bytes()),
     });
     let payload = signing::canonical_index_bytes(&manifest)?;
-    atomic_write(&repo.join("release.yaml"), &payload)?;
+    signing::atomic_write(&repo.join("release.yaml"), &payload)?;
     let signature = signing_key.sign(&payload).to_bytes();
-    atomic_write(
+    signing::atomic_write(
         &repo.join("release.sig"),
         &signing::signature_bytes(key_id, &signature),
     )?;
@@ -149,52 +115,22 @@ fn sign(args: &[String]) -> Result<()> {
 }
 
 fn verify(args: &[String]) -> Result<()> {
-    let repo = args
-        .first()
-        .map(PathBuf::from)
-        .ok_or_else(|| anyhow!("missing <repo>"))?;
-    let mut keys = Vec::new();
-    let mut i = 1;
-    while i < args.len() {
-        if args[i] != "--trusted-key" {
-            bail!("unknown verify argument '{}'", args[i]);
-        }
-        i += 1;
-        let value = args
-            .get(i)
-            .ok_or_else(|| anyhow!("--trusted-key requires id=base64"))?;
-        let (id, key) = value
-            .split_once('=')
-            .ok_or_else(|| anyhow!("trusted key must be id=base64"))?;
-        keys.push((id.to_owned(), key.to_owned()));
-        i += 1;
-    }
-    if keys.is_empty() {
-        bail!("at least one --trusted-key is required");
-    }
+    let repo = repo_arg(args)?;
+    let keys = trusted_keys(&args[1..])?;
     let manifest = signing::read_repository_index(&repo)?;
     signing::validate_repository(&repo, &manifest)?;
     let payload = std::fs::read(repo.join("release.yaml"))?;
     let signature = std::fs::read(repo.join("release.sig"))?;
-    let borrowed: Vec<(&str, &str)> = keys
-        .iter()
-        .map(|(id, key)| (id.as_str(), key.as_str()))
-        .collect();
+    let borrowed = borrow_keys(&keys);
     signing::verify_signature(&payload, &signature, &borrowed)?;
     println!("release signature and all package hashes are valid");
     Ok(())
 }
 
 fn verify_assets(args: &[String]) -> Result<()> {
-    let repo = args
-        .first()
-        .map(PathBuf::from)
-        .ok_or_else(|| anyhow!("missing <asset-dir>"))?;
+    let repo = repo_arg(args)?;
     let keys = trusted_keys(&args[1..])?;
-    let borrowed: Vec<(&str, &str)> = keys
-        .iter()
-        .map(|(id, key)| (id.as_str(), key.as_str()))
-        .collect();
+    let borrowed = borrow_keys(&keys);
     signing::verify_release_assets(&repo, &borrowed)?;
     println!("release signature and archive are valid");
     Ok(())
@@ -223,6 +159,12 @@ fn trusted_keys(args: &[String]) -> Result<Vec<(String, String)>> {
     Ok(keys)
 }
 
+fn borrow_keys(keys: &[(String, String)]) -> Vec<(&str, &str)> {
+    keys.iter()
+        .map(|(id, key)| (id.as_str(), key.as_str()))
+        .collect()
+}
+
 fn keygen(key_id: Option<&str>) -> Result<()> {
     let mut seed = Zeroizing::new([0_u8; 32]);
     getrandom::fill(seed.as_mut()).context("reading OS randomness")?;
@@ -234,6 +176,12 @@ fn keygen(key_id: Option<&str>) -> Result<()> {
         B64.encode(key.verifying_key().to_bytes())
     );
     Ok(())
+}
+
+fn repo_arg(args: &[String]) -> Result<PathBuf> {
+    args.first()
+        .map(PathBuf::from)
+        .ok_or_else(|| anyhow!("missing <repo>"))
 }
 
 fn one_repo_arg(args: &[String]) -> Result<PathBuf> {
@@ -251,14 +199,4 @@ fn option<'a>(args: &'a [String], name: &str) -> Result<Option<&'a str>> {
         .map(String::as_str)
         .map(Some)
         .ok_or_else(|| anyhow!("{name} requires a value"))
-}
-
-fn atomic_write(path: &Path, bytes: &[u8]) -> Result<()> {
-    use std::io::Write;
-    let parent = path.parent().unwrap_or_else(|| Path::new("."));
-    let mut temp = tempfile::NamedTempFile::new_in(parent)?;
-    temp.write_all(bytes)?;
-    temp.as_file().sync_all()?;
-    temp.persist(path).map_err(|error| error.error)?;
-    Ok(())
 }

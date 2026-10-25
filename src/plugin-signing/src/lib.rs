@@ -148,7 +148,6 @@ pub struct BundleMetadata {
 pub fn write_bundle(repo_dir: &Path, output: &Path) -> Result<BundleMetadata> {
     let manifest = read_repository_index(repo_dir)?;
     validate_repository(repo_dir, &manifest)?;
-    reject_symlinks(repo_dir)?;
     if !repo_dir.join("release.sig").is_file() {
         bail!("release.sig is missing");
     }
@@ -157,8 +156,7 @@ pub fn write_bundle(repo_dir: &Path, output: &Path) -> Result<BundleMetadata> {
         repository_id: manifest.id.clone(),
         repository_version: manifest.version.clone(),
     };
-    let mut paths = Vec::new();
-    collect_bundle_paths(repo_dir, repo_dir, &mut paths)?;
+    let mut paths = walk_files(repo_dir, true)?;
     paths.sort();
     let parent = output.parent().unwrap_or_else(|| Path::new("."));
     let mut temp = tempfile::NamedTempFile::new_in(parent)?;
@@ -234,31 +232,6 @@ pub fn extract_bundle(bytes: &[u8], destination: &Path) -> Result<BundleMetadata
         bail!("bundle metadata has an empty release tag");
     }
     Ok(metadata)
-}
-
-fn collect_bundle_paths(root: &Path, current: &Path, out: &mut Vec<PathBuf>) -> Result<()> {
-    for entry in fs::read_dir(current)? {
-        let entry = entry?;
-        let path = entry.path();
-        let file_type = entry.file_type()?;
-        if entry.file_name() == ".git" {
-            continue;
-        }
-        if file_type.is_symlink() {
-            bail!("repository contains a symlink: {}", path.display());
-        }
-        if file_type.is_dir() {
-            collect_bundle_paths(root, &path, out)?;
-        } else if file_type.is_file() {
-            out.push(path.strip_prefix(root)?.to_path_buf());
-        } else {
-            bail!(
-                "repository contains an unsupported file: {}",
-                path.display()
-            );
-        }
-    }
-    Ok(())
 }
 
 fn append_bundle_file(writer: &mut fs::File, path: &Path, bytes: &[u8]) -> Result<()> {
@@ -628,9 +601,15 @@ pub fn rewrite_index(
 /// Deterministic SHA-256 over sorted UTF-8 forward-slash relative paths,
 /// file lengths, and bytes. Symlinks and non-UTF-8 paths are rejected.
 pub fn package_hash(package_dir: &Path) -> Result<String> {
-    reject_symlinks(package_dir)?;
-    let mut files = Vec::new();
-    collect_package_files(package_dir, package_dir, &mut files)?;
+    let mut files = walk_files(package_dir, false)?
+        .into_iter()
+        .map(|relative| {
+            Ok((
+                normalized_relative_path(&relative)?,
+                package_dir.join(relative),
+            ))
+        })
+        .collect::<Result<Vec<_>>>()?;
     files.sort_by(|left, right| left.0.as_bytes().cmp(right.0.as_bytes()));
     let mut hasher = Sha256::new();
     for (relative, path) in files {
@@ -727,17 +706,36 @@ pub fn signing_key_fingerprint(key: &RepositorySigningKey) -> Result<String> {
 }
 
 pub fn reject_symlinks(root: &Path) -> Result<()> {
-    for entry in fs::read_dir(root).with_context(|| format!("reading {}", root.display()))? {
-        let entry = entry?;
-        let file_type = entry.file_type()?;
-        if file_type.is_symlink() {
-            bail!("repo contains a symlink: {}", entry.path().display());
+    walk_files(root, true).map(drop)
+}
+
+fn walk_files(root: &Path, skip_git: bool) -> Result<Vec<PathBuf>> {
+    fn walk(root: &Path, current: &Path, skip_git: bool, out: &mut Vec<PathBuf>) -> Result<()> {
+        for entry in
+            fs::read_dir(current).with_context(|| format!("reading {}", current.display()))?
+        {
+            let entry = entry?;
+            let path = entry.path();
+            let file_type = entry.file_type()?;
+            if file_type.is_symlink() {
+                bail!("repository contains a symlink: {}", path.display());
+            }
+            if skip_git && entry.file_name() == ".git" {
+                continue;
+            }
+            if file_type.is_dir() {
+                walk(root, &path, skip_git, out)?;
+            } else if file_type.is_file() {
+                out.push(path.strip_prefix(root)?.to_path_buf());
+            } else {
+                bail!("repository contains a non-regular file: {}", path.display());
+            }
         }
-        if file_type.is_dir() && entry.file_name() != ".git" {
-            reject_symlinks(&entry.path())?;
-        }
+        Ok(())
     }
-    Ok(())
+    let mut out = Vec::new();
+    walk(root, root, skip_git, &mut out)?;
+    Ok(out)
 }
 
 fn read_package_meta(package_dir: &Path) -> Result<PackageMeta> {
@@ -789,36 +787,6 @@ fn normalized_relative_path(path: &Path) -> Result<String> {
     Ok(parts.join("/"))
 }
 
-fn collect_package_files(
-    root: &Path,
-    current: &Path,
-    out: &mut Vec<(String, PathBuf)>,
-) -> Result<()> {
-    for entry in fs::read_dir(current).with_context(|| format!("reading {}", current.display()))? {
-        let entry = entry?;
-        let file_type = entry.file_type()?;
-        if file_type.is_symlink() {
-            bail!("package contains a symlink: {}", entry.path().display());
-        }
-        if file_type.is_dir() {
-            collect_package_files(root, &entry.path(), out)?;
-        } else if file_type.is_file() {
-            let relative = entry
-                .path()
-                .strip_prefix(root)
-                .expect("walk remains under root")
-                .to_owned();
-            out.push((normalized_relative_path(&relative)?, entry.path()));
-        } else {
-            bail!(
-                "package contains a non-regular file: {}",
-                entry.path().display()
-            );
-        }
-    }
-    Ok(())
-}
-
 fn yaml_string(value: &str) -> String {
     // JSON strings are valid YAML scalars and give deterministic escaping.
     serde_yaml::to_string(value)
@@ -835,9 +803,13 @@ fn decode_array<const N: usize>(value: &str, label: &str) -> Result<[u8; N]> {
         .map_err(|_| anyhow!("{label} is not {N} bytes"))
 }
 
-fn file_sha256(path: &Path) -> Result<String> {
+pub fn file_sha256(path: &Path) -> Result<String> {
     let bytes = fs::read(path).with_context(|| format!("reading {}", path.display()))?;
-    Ok(hex_lower(Sha256::digest(bytes)))
+    Ok(sha256_hex(bytes))
+}
+
+pub fn sha256_hex(bytes: impl AsRef<[u8]>) -> String {
+    hex_lower(Sha256::digest(bytes))
 }
 
 fn hex_lower(bytes: impl AsRef<[u8]>) -> String {
@@ -848,7 +820,7 @@ fn hex_lower(bytes: impl AsRef<[u8]>) -> String {
         .collect()
 }
 
-fn atomic_write(path: &Path, bytes: &[u8]) -> Result<()> {
+pub fn atomic_write(path: &Path, bytes: &[u8]) -> Result<()> {
     let parent = path.parent().unwrap_or_else(|| Path::new("."));
     let mut temp = tempfile::NamedTempFile::new_in(parent)
         .with_context(|| format!("creating temporary file beside {}", path.display()))?;

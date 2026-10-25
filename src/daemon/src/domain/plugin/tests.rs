@@ -51,8 +51,13 @@ fn transport_open_failures_back_off_between_attempts() {
     // ...but only until the backoff elapses.
     let age = |registry: &super::Registry| {
         let mut failures = registry.transport_open_failures.write().unwrap();
-        failures.get_mut(&key).unwrap().last_attempt =
-            std::time::Instant::now() - super::TRANSPORT_OPEN_BACKOFF;
+        let streak = failures.get_mut(&key).unwrap();
+        let then = std::time::Instant::now() - super::TRANSPORT_OPEN_BACKOFF;
+        let mut aged = crate::util::backoff::FailureStreak::first(then);
+        for _ in 1..streak.failures() {
+            aged.record(then);
+        }
+        *streak = aged;
     };
     age(&registry);
     assert!(!registry.transport_open_blocked(&key));

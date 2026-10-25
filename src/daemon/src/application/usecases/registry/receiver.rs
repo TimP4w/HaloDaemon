@@ -167,124 +167,44 @@ pub async fn unpair(id: String, slot: u8, app: Arc<AppState>) -> Result<()> {
 #[cfg(test)]
 mod tests {
     use super::*;
-    use crate::config::Config;
-    use crate::domain::device::{CapabilityRef, Device, PairingCapability};
-    use async_trait::async_trait;
-    use std::sync::atomic::{AtomicBool, AtomicU8, Ordering};
+    use crate::domain::device::Device;
+    use crate::test_support::{app_with, MockDevice};
+    use std::sync::atomic::Ordering;
 
-    #[derive(Default)]
-    struct MockReceiver {
-        started_timeout: AtomicU8,
-        unpaired_slot: AtomicU8,
-        stopped: AtomicBool,
-    }
-
-    #[async_trait]
-    impl PairingCapability for MockReceiver {
-        async fn start_pairing(&self, timeout_secs: u8) -> Result<()> {
-            self.started_timeout.store(timeout_secs, Ordering::SeqCst);
-            Ok(())
-        }
-        async fn stop_pairing(&self) -> Result<()> {
-            self.stopped.store(true, Ordering::SeqCst);
-            Ok(())
-        }
-        async fn unpair(&self, slot: u8) -> Result<Option<Arc<dyn Device>>> {
-            self.unpaired_slot.store(slot, Ordering::SeqCst);
-            Ok(None)
-        }
-    }
-
-    #[async_trait]
-    impl Device for MockReceiver {
-        fn id(&self) -> &str {
-            "mock_receiver"
-        }
-        fn name(&self) -> &str {
-            "Mock Receiver"
-        }
-        fn vendor(&self) -> &str {
-            "Mock"
-        }
-        fn model(&self) -> &str {
-            "Receiver"
-        }
-        async fn initialize(&self) -> Result<bool> {
-            Ok(true)
-        }
-        async fn close(&self) {}
-        fn capabilities(&self) -> Vec<CapabilityRef<'_>> {
-            vec![CapabilityRef::Pairing(self)]
-        }
-    }
-
-    async fn app_with(dev: Arc<dyn Device>) -> Arc<AppState> {
-        let app = Arc::new(AppState::new(Config::default()));
-        app.device_registry.write().await.push(dev);
-        app
+    fn receiver() -> (Arc<MockDevice>, Arc<AppState>) {
+        let mock = Arc::new(MockDevice::new("mock_receiver").with_pairing());
+        (mock.clone(), app_with(vec![mock]))
     }
 
     #[tokio::test]
     async fn start_pairing_forwards_timeout() {
-        let mock = Arc::new(MockReceiver::default());
-        let app = app_with(Arc::clone(&mock) as Arc<dyn Device>).await;
+        let (mock, app) = receiver();
         start_pairing("mock_receiver".into(), 30, app)
             .await
             .unwrap();
-        assert_eq!(mock.started_timeout.load(Ordering::SeqCst), 30);
+        assert_eq!(mock.calls(), ["start_pairing 30"]);
     }
 
     #[tokio::test]
     async fn stop_pairing_closes_lock() {
-        let mock = Arc::new(MockReceiver::default());
-        let app = app_with(Arc::clone(&mock) as Arc<dyn Device>).await;
+        let (mock, app) = receiver();
         stop_pairing("mock_receiver".into(), app).await.unwrap();
-        assert!(mock.stopped.load(Ordering::SeqCst));
+        assert_eq!(mock.calls(), ["stop_pairing"]);
     }
 
     #[tokio::test]
     async fn unpair_forwards_slot() {
-        let mock = Arc::new(MockReceiver::default());
-        let app = app_with(Arc::clone(&mock) as Arc<dyn Device>).await;
+        let (mock, app) = receiver();
         unpair("mock_receiver".into(), 3, app).await.unwrap();
-        assert_eq!(mock.unpaired_slot.load(Ordering::SeqCst), 3);
-    }
-
-    #[derive(Default)]
-    struct MockController;
-
-    impl crate::domain::device::Controller for MockController {}
-
-    #[async_trait]
-    impl Device for MockController {
-        fn id(&self) -> &str {
-            "mock_controller"
-        }
-        fn name(&self) -> &str {
-            "Mock Controller"
-        }
-        fn vendor(&self) -> &str {
-            "Mock"
-        }
-        fn model(&self) -> &str {
-            "Controller"
-        }
-        async fn initialize(&self) -> Result<bool> {
-            Ok(true)
-        }
-        async fn close(&self) {}
-        fn capabilities(&self) -> Vec<CapabilityRef<'_>> {
-            vec![CapabilityRef::Controller(self)]
-        }
+        assert_eq!(mock.calls(), ["unpair 3"]);
     }
 
     #[tokio::test]
     async fn revive_reinitializes_only_the_children_that_came_back() {
-        use crate::test_support::MockDevice;
-        let app = Arc::new(AppState::new(Config::default()));
-        let root = Arc::new(MockController) as Arc<dyn Device>;
+        let root: Arc<dyn Device> = Arc::new(MockDevice::new("mock_controller").with_controller());
         let asleep = Arc::new(MockDevice::new("child-asleep").offline());
         let awake = Arc::new(MockDevice::new("child-awake"));
+        let app = app_with(vec![root.clone(), asleep.clone(), awake.clone()]);
         {
             let mut cfg = app.config.write().await;
             for id in ["child-asleep", "child-awake"] {
@@ -292,12 +212,6 @@ mod tests {
                     .device_states
                     .insert(id.into(), serde_json::json!({ "x": 1 }));
             }
-        }
-        {
-            let mut devices = app.device_registry.write().await;
-            devices.push(root.clone());
-            devices.push(asleep.clone() as Arc<dyn Device>);
-            devices.push(awake.clone() as Arc<dyn Device>);
         }
         app.device_registry
             .children
@@ -331,7 +245,7 @@ mod tests {
 
     #[tokio::test]
     async fn start_pairing_unknown_device_errors() {
-        let app = Arc::new(AppState::new(Config::default()));
+        let app = app_with(vec![]);
         assert!(start_pairing("nope".into(), 30, app).await.is_err());
     }
 }

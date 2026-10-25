@@ -11,22 +11,17 @@ static TMP_SEQ: AtomicU64 = AtomicU64::new(0);
 /// created owner-only, fully written and fsync'd, then renamed over the
 /// destination (replacing it on every platform), then the parent dir fsync'd on
 /// Unix. Sync/permission failures propagate; the temp is removed on any error.
-pub fn atomic_write(path: &Path, bytes: &[u8]) -> Result<()> {
+pub fn atomic_write(path: &Path, bytes: impl AsRef<[u8]>) -> Result<()> {
     let parent = path.parent().unwrap_or_else(|| Path::new("."));
     std::fs::create_dir_all(parent).with_context(|| format!("creating {}", parent.display()))?;
     let base = path.file_name().and_then(|n| n.to_str()).unwrap_or("tmp");
     let seq = TMP_SEQ.fetch_add(1, Ordering::Relaxed);
     let tmp = parent.join(format!(".{base}.{}.{seq}.tmp", std::process::id()));
-    let res = write_and_replace(&tmp, path, bytes);
+    let res = write_and_replace(&tmp, path, bytes.as_ref());
     if res.is_err() {
         let _ = std::fs::remove_file(&tmp);
     }
     res
-}
-
-/// Convenience for string payloads.
-pub fn atomic_write_str(path: &Path, contents: &str) -> Result<()> {
-    atomic_write(path, contents.as_bytes())
 }
 
 fn write_and_replace(tmp: &Path, dst: &Path, bytes: &[u8]) -> Result<()> {
@@ -164,9 +159,9 @@ mod tests {
     fn writes_and_replaces_existing() {
         let dir = tempfile::tempdir().unwrap();
         let p = dir.path().join("f.txt");
-        atomic_write_str(&p, "one").unwrap();
+        atomic_write(&p, "one").unwrap();
         assert_eq!(std::fs::read_to_string(&p).unwrap(), "one");
-        atomic_write_str(&p, "two").unwrap();
+        atomic_write(&p, "two").unwrap();
         assert_eq!(std::fs::read_to_string(&p).unwrap(), "two");
     }
 
@@ -174,7 +169,7 @@ mod tests {
     fn leaves_no_temp_files() {
         let dir = tempfile::tempdir().unwrap();
         let p = dir.path().join("f.txt");
-        atomic_write_str(&p, "x").unwrap();
+        atomic_write(&p, "x").unwrap();
         let tmps = std::fs::read_dir(dir.path())
             .unwrap()
             .filter_map(|e| e.ok())
@@ -189,7 +184,7 @@ mod tests {
         use std::os::unix::fs::PermissionsExt as _;
         let dir = tempfile::tempdir().unwrap();
         let p = dir.path().join("f.txt");
-        atomic_write_str(&p, "x").unwrap();
+        atomic_write(&p, "x").unwrap();
         let mode = std::fs::metadata(&p).unwrap().permissions().mode() & 0o777;
         assert_eq!(mode, 0o600);
     }
@@ -202,12 +197,12 @@ mod tests {
     fn reader_interference_fails_safely_then_replaces_after_close() {
         let dir = tempfile::tempdir().unwrap();
         let p = dir.path().join("f.txt");
-        atomic_write_str(&p, "old").unwrap();
+        atomic_write(&p, "old").unwrap();
         let reader = std::fs::File::open(&p).unwrap();
-        assert!(atomic_write_str(&p, "new").is_err());
+        assert!(atomic_write(&p, "new").is_err());
         assert_eq!(std::fs::read_to_string(&p).unwrap(), "old");
         drop(reader);
-        atomic_write_str(&p, "new").unwrap();
+        atomic_write(&p, "new").unwrap();
         assert_eq!(std::fs::read_to_string(&p).unwrap(), "new");
     }
 
@@ -216,12 +211,12 @@ mod tests {
     fn writer_interference_fails_safely_then_replaces_after_close() {
         let dir = tempfile::tempdir().unwrap();
         let p = dir.path().join("f.txt");
-        atomic_write_str(&p, "old").unwrap();
+        atomic_write(&p, "old").unwrap();
         let writer = std::fs::OpenOptions::new().write(true).open(&p).unwrap();
-        assert!(atomic_write_str(&p, "new").is_err());
+        assert!(atomic_write(&p, "new").is_err());
         assert_eq!(std::fs::read_to_string(&p).unwrap(), "old");
         drop(writer);
-        atomic_write_str(&p, "new").unwrap();
+        atomic_write(&p, "new").unwrap();
         assert_eq!(std::fs::read_to_string(&p).unwrap(), "new");
     }
 
@@ -233,7 +228,7 @@ mod tests {
         let dir = tempfile::tempdir().unwrap();
         let p = dir.path().join("cfg.yaml");
         for i in 0..25 {
-            atomic_write_str(&p, &format!("gen {i}")).unwrap();
+            atomic_write(&p, &format!("gen {i}")).unwrap();
             assert_eq!(std::fs::read_to_string(&p).unwrap(), format!("gen {i}"));
         }
         let leftovers = std::fs::read_dir(dir.path())
@@ -273,13 +268,13 @@ mod tests {
         use windows::Win32::Foundation::CloseHandle;
         let dir = tempfile::tempdir().unwrap();
         let p = dir.path().join("config.yaml");
-        atomic_write_str(&p, "old").unwrap();
+        atomic_write(&p, "old").unwrap();
         let held = open_without_delete_sharing(&p).0 as usize;
         let release = std::thread::spawn(move || {
             std::thread::sleep(std::time::Duration::from_millis(150));
             unsafe { CloseHandle(windows::Win32::Foundation::HANDLE(held as *mut _)).unwrap() };
         });
-        atomic_write_str(&p, "new").unwrap();
+        atomic_write(&p, "new").unwrap();
         release.join().unwrap();
         assert_eq!(std::fs::read_to_string(p).unwrap(), "new");
     }
@@ -290,9 +285,9 @@ mod tests {
         use windows::Win32::Foundation::CloseHandle;
         let dir = tempfile::tempdir().unwrap();
         let p = dir.path().join("secret.json");
-        atomic_write_str(&p, "old").unwrap();
+        atomic_write(&p, "old").unwrap();
         let held = open_without_delete_sharing(&p);
-        assert!(atomic_write_str(&p, "new").is_err());
+        assert!(atomic_write(&p, "new").is_err());
         unsafe { CloseHandle(held).unwrap() };
         assert_eq!(std::fs::read_to_string(&p).unwrap(), "old");
         assert_eq!(

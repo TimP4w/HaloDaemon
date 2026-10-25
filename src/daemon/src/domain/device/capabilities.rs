@@ -675,10 +675,7 @@ pub trait LcdCapability: Send + Sync {
             let rotation =
                 serde_json::from_value::<halod_shared::types::ScreenRotation>(value.clone());
             let degrees = match rotation {
-                Ok(halod_shared::types::ScreenRotation::R0) => Some(0),
-                Ok(halod_shared::types::ScreenRotation::R90) => Some(90),
-                Ok(halod_shared::types::ScreenRotation::R180) => Some(180),
-                Ok(halod_shared::types::ScreenRotation::R270) => Some(270),
+                Ok(rotation) => Some(rotation.degrees()),
                 Err(error) => {
                     log::warn!("[lcd restore_state] invalid rotation {value}: {error}");
                     None

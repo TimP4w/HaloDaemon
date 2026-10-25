@@ -121,7 +121,7 @@ mod tests {
     use super::*;
     use crate::application::state::AppState;
     use crate::config::Config;
-    use crate::test_support::MockDevice;
+    use crate::test_support::{app_with, MockDevice};
 
     use std::sync::Arc;
 
@@ -130,14 +130,8 @@ mod tests {
     }
 
     fn make_app_with_fan(id: &str) -> (Arc<AppState>, Arc<MockDevice>) {
-        let cfg = Config::default();
-        let app = Arc::new(AppState::new(cfg));
         let device = Arc::new(MockDevice::new(id).with_fan());
-        {
-            let mut devices = app.device_registry.try_write().unwrap();
-            devices.push(device.clone() as Arc<dyn crate::domain::device::Device>);
-        }
-        (app, device)
+        (app_with(vec![device.clone()]), device)
     }
 
     fn sensor(id: &str, kind: halod_shared::types::SensorType) -> halod_shared::types::Sensor {
@@ -154,18 +148,13 @@ mod tests {
         fan_id: &str,
         sensor_id: &str,
     ) -> (Arc<AppState>, Arc<MockDevice>) {
-        let cfg = Config::default();
-        let app = Arc::new(AppState::new(cfg));
         let reading = sensor(sensor_id, halod_shared::types::SensorType::Temperature);
         let device = Arc::new(
             MockDevice::new(fan_id)
                 .with_fan()
                 .with_sensor(vec![reading.clone()]),
         );
-        {
-            let mut devices = app.device_registry.try_write().unwrap();
-            devices.push(device.clone() as Arc<dyn crate::domain::device::Device>);
-        }
+        let app = app_with(vec![device.clone()]);
         app.data_bus
             .replace_host_sensors(vec![(fan_id.to_owned(), reading)]);
         (app, device)
@@ -263,17 +252,11 @@ mod tests {
 
     #[tokio::test]
     async fn set_fan_curve_points_rejects_non_temperature_sensor() {
-        let cfg = Config::default();
-        let app = Arc::new(AppState::new(cfg));
-        let device = Arc::new(
+        let app = app_with(vec![Arc::new(
             MockDevice::new("fan_0")
                 .with_fan()
                 .with_sensor(vec![sensor("load0", halod_shared::types::SensorType::Load)]),
-        );
-        {
-            let mut devices = app.device_registry.try_write().unwrap();
-            devices.push(device.clone() as Arc<dyn crate::domain::device::Device>);
-        }
+        )]);
         crate::application::usecases::device::telemetry::observe(&app).await;
         let err = set_cooling_curve_points(
             "fan_0".into(),

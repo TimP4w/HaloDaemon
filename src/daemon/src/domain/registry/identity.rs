@@ -1,19 +1,12 @@
 // SPDX-License-Identifier: GPL-3.0-or-later
-use std::{
-    collections::{BTreeMap, BTreeSet},
-    sync::Arc,
-};
+use std::collections::{BTreeMap, BTreeSet};
 
-use async_trait::async_trait;
 use halod_shared::types::{
     ConflictConfidence, ConflictDeviceSource, ConflictParticipant, DeviceConflictSummary,
     VisibilityState,
 };
 
-use crate::{
-    domain::device::{CapabilityRef, Device, KeyboardLayoutSlot, VisibilitySlot},
-    domain::registry::observers::discovery::DiscoveryHandle,
-};
+use crate::domain::registry::observers::discovery::DiscoveryHandle;
 
 #[derive(Debug, Clone, PartialEq, Eq, PartialOrd, Ord, Hash)]
 pub enum IdentityScope {
@@ -69,6 +62,54 @@ impl DeviceIdentity {
         } else {
             0
         }
+    }
+
+    pub fn debug_fields(&self) -> Vec<(String, String)> {
+        let mut fields = Vec::new();
+        if let Some(serial) = &self.serial {
+            fields.push(("identity_serial".into(), serial.clone()));
+        }
+        if let Some(location) = &self.location {
+            fields.push((
+                "identity_location".into(),
+                match location {
+                    LocationKey::HidPath(path) => format!("hid:{path}"),
+                    LocationKey::UsbPort {
+                        bus,
+                        port_path,
+                        interface,
+                    } => format!(
+                        "usb:{bus}-{}:if{interface}",
+                        port_path
+                            .iter()
+                            .map(u8::to_string)
+                            .collect::<Vec<_>>()
+                            .join(".")
+                    ),
+                    LocationKey::Smbus { bus, address } => {
+                        format!("smbus:i2c-{bus}@0x{address:02x}")
+                    }
+                    LocationKey::Opaque(value) => format!("opaque:{value}"),
+                },
+            ));
+        }
+        if let Some((vid, pid)) = self.usb {
+            fields.push(("identity_usb".into(), format!("{vid:04x}:{pid:04x}")));
+        }
+        if let Some(address) = self.usb_address {
+            fields.push(("identity_usb_address".into(), address.to_string()));
+        }
+        if let Some(scope) = &self.scope {
+            fields.push((
+                "identity_scope".into(),
+                match scope {
+                    IdentityScope::Local => "local".into(),
+                    IdentityScope::Remote(endpoint) => format!("remote:{endpoint}"),
+                },
+            ));
+        }
+        fields.push(("identity_strength".into(), self.strength().to_string()));
+        fields
     }
 
     pub fn serial(value: Option<String>) -> Self {
@@ -406,181 +447,6 @@ impl UnionFind {
     }
 }
 
-pub struct IdentifiedDevice {
-    inner: Arc<dyn Device>,
-    identity: DeviceIdentity,
-    origin: DeviceOrigin,
-}
-
-impl IdentifiedDevice {
-    pub fn new(inner: Arc<dyn Device>, mut identity: DeviceIdentity, origin: DeviceOrigin) -> Self {
-        if identity.serial.is_none() {
-            identity.serial = normalize_serial(inner.hardware_serial().as_deref());
-        }
-        Self {
-            inner,
-            identity,
-            origin,
-        }
-    }
-}
-
-#[async_trait]
-impl Device for IdentifiedDevice {
-    fn id(&self) -> &str {
-        self.inner.id()
-    }
-    fn name(&self) -> &str {
-        self.inner.name()
-    }
-    fn has_external_name(&self) -> bool {
-        self.inner.has_external_name()
-    }
-    fn vendor(&self) -> &str {
-        self.inner.vendor()
-    }
-    fn model(&self) -> &str {
-        self.inner.model()
-    }
-    async fn initialize(&self) -> anyhow::Result<bool> {
-        self.inner.initialize().await
-    }
-    async fn close(&self) {
-        self.inner.close().await
-    }
-    async fn serialize(&self) -> halod_shared::types::WireDevice {
-        self.inner.serialize().await
-    }
-    fn wire_device_type(&self) -> halod_shared::types::DeviceType {
-        self.inner.wire_device_type()
-    }
-    fn integration_id(&self) -> Option<String> {
-        self.inner.integration_id()
-    }
-    fn owning_plugin_id(&self) -> Option<String> {
-        self.inner.owning_plugin_id()
-    }
-    async fn wire_connection_type(&self) -> Option<halod_shared::types::ConnectionType> {
-        self.inner.wire_connection_type().await
-    }
-    fn wire_serial_number(&self) -> Option<String> {
-        self.inner
-            .wire_serial_number()
-            .or_else(|| self.identity.serial.clone())
-    }
-    fn wire_device_connected(&self) -> bool {
-        self.inner.wire_device_connected()
-    }
-    fn is_live(&self) -> bool {
-        self.inner.is_live()
-    }
-    async fn wire_device_name(&self) -> String {
-        self.inner.wire_device_name().await
-    }
-    fn hardware_serial(&self) -> Option<String> {
-        self.inner
-            .hardware_serial()
-            .or_else(|| self.identity.serial.clone())
-    }
-    fn identity(&self) -> DeviceIdentity {
-        self.identity.clone()
-    }
-    fn conflict_origin(&self) -> DeviceOrigin {
-        self.origin.clone()
-    }
-    fn capabilities(&self) -> Vec<CapabilityRef<'_>> {
-        self.inner.capabilities()
-    }
-    fn chain_host(&self) -> Option<&Arc<crate::domain::device::chain::LightingDivisionHost>> {
-        self.inner.chain_host()
-    }
-    fn keyboard_layout_slot(&self) -> Option<&KeyboardLayoutSlot> {
-        self.inner.keyboard_layout_slot()
-    }
-    fn is_unrecoverable(&self) -> bool {
-        self.inner.is_unrecoverable()
-    }
-    fn visibility_slot(&self) -> Option<&VisibilitySlot> {
-        self.inner.visibility_slot()
-    }
-    fn active_state(&self) -> VisibilityState {
-        self.inner.active_state()
-    }
-    fn set_active_state(&self, state: VisibilityState) {
-        self.inner.set_active_state(state)
-    }
-    async fn save_state(&self) -> serde_json::Value {
-        self.inner.save_state().await
-    }
-    async fn load_state(&self, state: &serde_json::Value) -> bool {
-        self.inner.load_state(state).await
-    }
-    fn debug_info_extra(&self) -> Vec<(String, String)> {
-        let mut fields = self.inner.debug_info_extra();
-        if let Some(serial) = &self.identity.serial {
-            fields.push(("identity_serial".into(), serial.clone()));
-        }
-        if let Some(location) = &self.identity.location {
-            fields.push((
-                "identity_location".into(),
-                match location {
-                    LocationKey::HidPath(path) => format!("hid:{path}"),
-                    LocationKey::UsbPort {
-                        bus,
-                        port_path,
-                        interface,
-                    } => format!(
-                        "usb:{bus}-{}:if{interface}",
-                        port_path
-                            .iter()
-                            .map(u8::to_string)
-                            .collect::<Vec<_>>()
-                            .join(".")
-                    ),
-                    LocationKey::Smbus { bus, address } => {
-                        format!("smbus:i2c-{bus}@0x{address:02x}")
-                    }
-                    LocationKey::Opaque(value) => format!("opaque:{value}"),
-                },
-            ));
-        }
-        if let Some((vid, pid)) = self.identity.usb {
-            fields.push(("identity_usb".into(), format!("{vid:04x}:{pid:04x}")));
-        }
-        if let Some(address) = self.identity.usb_address {
-            fields.push(("identity_usb_address".into(), address.to_string()));
-        }
-        if let Some(scope) = &self.identity.scope {
-            fields.push((
-                "identity_scope".into(),
-                match scope {
-                    IdentityScope::Local => "local".into(),
-                    IdentityScope::Remote(endpoint) => format!("remote:{endpoint}"),
-                },
-            ));
-        }
-        fields.push((
-            "identity_strength".into(),
-            self.identity.strength().to_string(),
-        ));
-        fields.push((
-            "identity_origin".into(),
-            match &self.origin {
-                DeviceOrigin::Builtin => "builtin".into(),
-                DeviceOrigin::Plugin(id) => format!("plugin:{id}"),
-                DeviceOrigin::Integration(id) => format!("integration:{id}"),
-            },
-        ));
-        fields
-    }
-    fn debug_transport(&self) -> Option<&'static str> {
-        self.inner.debug_transport()
-    }
-    fn write_rate_status(&self) -> Option<halod_shared::types::WriteRateStatus> {
-        self.inner.write_rate_status()
-    }
-}
-
 #[cfg(test)]
 mod tests {
     use super::*;
@@ -616,71 +482,6 @@ mod tests {
         assert_eq!(hid_path_location(" \0 "), None);
         assert_eq!(opaque_location("\0"), None);
     }
-    #[tokio::test]
-    async fn wrapper_forwards_chain_host_to_inner() {
-        use crate::domain::device::chain::{
-            ChannelDescriptor, LightingDivisionAdapter, LightingDivisionHost,
-        };
-        use anyhow::Result;
-        use async_trait::async_trait;
-
-        struct StubAdapter;
-        #[async_trait]
-        impl LightingDivisionAdapter for StubAdapter {
-            fn parent_id(&self) -> String {
-                "p".into()
-            }
-            fn channels(&self) -> Vec<ChannelDescriptor> {
-                vec![]
-            }
-            async fn write_divided_frame(&self, _: &str, _: &[u8]) -> Result<()> {
-                Ok(())
-            }
-        }
-
-        struct ChainDevice(Arc<LightingDivisionHost>);
-        #[async_trait]
-        impl Device for ChainDevice {
-            fn id(&self) -> &str {
-                "d"
-            }
-            fn name(&self) -> &str {
-                "d"
-            }
-            fn vendor(&self) -> &str {
-                "v"
-            }
-            fn model(&self) -> &str {
-                "m"
-            }
-            async fn initialize(&self) -> anyhow::Result<bool> {
-                Ok(true)
-            }
-            async fn close(&self) {}
-            fn capabilities(&self) -> Vec<CapabilityRef<'_>> {
-                vec![]
-            }
-            fn chain_host(&self) -> Option<&Arc<LightingDivisionHost>> {
-                Some(&self.0)
-            }
-        }
-
-        let host = LightingDivisionHost::new(Arc::new(StubAdapter));
-        let inner: Arc<dyn Device> = Arc::new(ChainDevice(host));
-        let identity = DeviceIdentity {
-            scope: Some(IdentityScope::Local),
-            serial: None,
-            location: None,
-            usb: None,
-            usb_address: None,
-        };
-        let wrapped = IdentifiedDevice::new(inner, identity, DeviceOrigin::Builtin);
-        assert!(
-            wrapped.chain_host().is_some(),
-            "IdentifiedDevice must forward chain_host so chain usecases reach the host"
-        );
-    }
-
     #[test]
     fn conflicting_serials_do_not_merge_through_location() {
         let entries = vec![

@@ -495,7 +495,7 @@ async fn reconcile_plugin_set(app: &Arc<AppState>, plugins: &[String]) {
     // newly imported or updated plugins need their new specs to claim it.
     let mut specs = app.registry.device_specs_for(plugins);
 
-    // 1. Refresh manifests + disabled/granted/config so match_handle reflects
+    // 1. Refresh manifests + disabled/granted/config so make_device reflects
     //    the new state, then add the post-change specs.
     reload_registry(app).await;
     specs.extend(app.registry.device_specs_for(plugins));

@@ -318,6 +318,7 @@ impl KeyRemapEngine {
 #[cfg(test)]
 mod tests {
     use super::*;
+    use crate::test_support::app_with;
     use crate::{config::Config, domain::device::Device, test_support::MockDevice};
 
     fn mapping(cid: u16, base: ButtonAction, shifted: ButtonAction) -> ButtonMapping {
@@ -418,12 +419,8 @@ mod tests {
 
     #[tokio::test]
     async fn momentary_dpi_press_saves_restore_point_and_applies_target() {
-        let app = Arc::new(AppState::new(Config::default()));
         let dev = Arc::new(MockDevice::new("dev1").with_dpi_initial(800));
-        app.device_registry
-            .write()
-            .await
-            .push(Arc::clone(&dev) as Arc<dyn Device>);
+        let app = app_with(vec![dev.clone()]);
 
         let engine = test_engine(Arc::clone(&app));
         let mut held = HashMap::new();
@@ -455,12 +452,8 @@ mod tests {
 
     #[tokio::test]
     async fn momentary_dpi_release_restores_saved_dpi() {
-        let app = Arc::new(AppState::new(Config::default()));
         let dev = Arc::new(MockDevice::new("dev1").with_dpi_initial(800));
-        app.device_registry
-            .write()
-            .await
-            .push(Arc::clone(&dev) as Arc<dyn Device>);
+        let app = app_with(vec![dev.clone()]);
 
         let engine = test_engine(Arc::clone(&app));
         let mut held = HashMap::new();
@@ -513,12 +506,8 @@ mod tests {
     #[tokio::test]
     async fn momentary_dpi_release_uses_held_value_not_live_hardware() {
         // Release must restore the app-state-held DPI, not the live hardware value.
-        let app = Arc::new(AppState::new(Config::default()));
         let dev = Arc::new(MockDevice::new("dev1").with_dpi_initial(800));
-        app.device_registry
-            .write()
-            .await
-            .push(Arc::clone(&dev) as Arc<dyn Device>);
+        let app = app_with(vec![dev.clone()]);
 
         let engine = test_engine(Arc::clone(&app));
         let mut held = HashMap::new();
@@ -554,12 +543,8 @@ mod tests {
 
     #[tokio::test]
     async fn momentary_dpi_restore_failure_enters_restore_pending_and_retries() {
-        let app = Arc::new(AppState::new(Config::default()));
         let dev = Arc::new(MockDevice::new("dev1").with_dpi_initial(800));
-        app.device_registry
-            .write()
-            .await
-            .push(Arc::clone(&dev) as Arc<dyn Device>);
+        let app = app_with(vec![dev.clone()]);
         let engine = test_engine(Arc::clone(&app));
         let mut held = HashMap::new();
         engine
@@ -731,17 +716,9 @@ mod tests {
             },
         )];
 
-        let app = Arc::new(AppState::new(Config::default()));
         let dev_a = Arc::new(MockDevice::new("dev_a").with_key_remap_mappings(dev_a_mappings));
         let dev_b = Arc::new(MockDevice::new("dev_b").with_key_remap_mappings(dev_b_mappings));
-        app.device_registry
-            .write()
-            .await
-            .push(Arc::clone(&dev_a) as Arc<dyn Device>);
-        app.device_registry
-            .write()
-            .await
-            .push(Arc::clone(&dev_b) as Arc<dyn Device>);
+        let app = app_with(vec![dev_a.clone(), dev_b.clone()]);
 
         let engine = test_engine(Arc::clone(&app));
         let mut held = HashMap::new();
@@ -859,12 +836,8 @@ mod tests {
             },
             ButtonAction::Native,
         )];
-        let app = Arc::new(AppState::new(Config::default()));
         let dev = Arc::new(MockDevice::new("dev1").with_key_remap_mappings(mappings));
-        app.device_registry
-            .write()
-            .await
-            .push(Arc::clone(&dev) as Arc<dyn Device>);
+        let app = app_with(vec![dev.clone()]);
         let engine = test_engine(Arc::clone(&app));
         let mut held = HashMap::new();
         let mut pressed = HashMap::new();
@@ -893,12 +866,8 @@ mod tests {
             },
             ButtonAction::Native,
         )];
-        let app = Arc::new(AppState::new(Config::default()));
         let dev = Arc::new(MockDevice::new("dev1").with_key_remap_mappings(mappings));
-        app.device_registry
-            .write()
-            .await
-            .push(Arc::clone(&dev) as Arc<dyn Device>);
+        let app = app_with(vec![dev.clone()]);
         let engine = test_engine(Arc::clone(&app));
         let mut held = HashMap::new();
         let mut pressed = HashMap::new();

@@ -203,104 +203,11 @@ pub async fn restore_saved_chains(app: Arc<AppState>) {
 #[cfg(test)]
 mod tests {
     use super::*;
-    use crate::config::Config;
-    use crate::domain::device::chain::{
-        ChannelDescriptor, LightingDivisionAdapter, LightingDivisionHost,
-    };
-    use crate::domain::device::{CapabilityRef, Device};
+    use crate::domain::device::chain::ChannelDescriptor;
     use crate::domain::registry::model::{ChainLinkRecord, ChannelLayoutRecord, DeviceLayout};
-    use async_trait::async_trait;
+    use crate::test_support::{app_with, MockDevice};
     use halod_shared::types::{ColorOrder, ZoneTopology};
     use std::sync::Arc;
-
-    fn make_app_with(dev: Arc<dyn Device>) -> Arc<AppState> {
-        let app = Arc::new(AppState::new(Config::default()));
-        app.device_registry.try_write().unwrap().push(dev);
-        app
-    }
-
-    struct MockAdapter {
-        id: String,
-        channels: Vec<ChannelDescriptor>,
-    }
-
-    #[async_trait]
-    impl LightingDivisionAdapter for MockAdapter {
-        fn parent_id(&self) -> String {
-            self.id.clone()
-        }
-
-        fn channels(&self) -> Vec<ChannelDescriptor> {
-            self.channels.clone()
-        }
-
-        async fn write_divided_frame(
-            &self,
-            _channel_id: &str,
-            _composed: &[u8],
-        ) -> anyhow::Result<()> {
-            Ok(())
-        }
-    }
-
-    /// Minimal Device with a real LightingDivisionHost controlled by the test.
-    struct MockChainDevice {
-        id: String,
-        host: Arc<LightingDivisionHost>,
-    }
-
-    impl MockChainDevice {
-        fn new(id: &str) -> Self {
-            let host = LightingDivisionHost::new(Arc::new(MockAdapter {
-                id: id.to_owned(),
-                channels: vec![],
-            }));
-            Self {
-                id: id.to_string(),
-                host,
-            }
-        }
-        fn with_channels(self, descriptors: Vec<ChannelDescriptor>) -> Self {
-            let host = LightingDivisionHost::new(Arc::new(MockAdapter {
-                id: self.id.clone(),
-                channels: descriptors,
-            }));
-            {
-                let mut state = host.state.lock().unwrap();
-                let _ = &mut state;
-            }
-            Self { id: self.id, host }
-        }
-        fn restore_fails(self) -> Self {
-            self
-        }
-    }
-
-    #[async_trait]
-    impl Device for MockChainDevice {
-        fn id(&self) -> &str {
-            &self.id
-        }
-        fn name(&self) -> &str {
-            "mock-chain"
-        }
-        fn vendor(&self) -> &str {
-            "mock"
-        }
-        fn model(&self) -> &str {
-            "mock"
-        }
-        async fn initialize(&self) -> anyhow::Result<bool> {
-            Ok(true)
-        }
-        async fn close(&self) {}
-        fn capabilities(&self) -> Vec<CapabilityRef<'_>> {
-            vec![]
-        }
-        fn chain_host(&self) -> Option<&Arc<LightingDivisionHost>> {
-            Some(&self.host)
-        }
-    }
 
     fn strip_topology() -> ZoneTopology {
         ZoneTopology::Linear
@@ -320,12 +227,9 @@ mod tests {
 
     #[tokio::test]
     async fn rgb_chain_add_link_rejects_led_count_zero() {
-        let dev = Arc::new(MockChainDevice::new("dev1").with_channels(vec![channel(
-            "ch0",
-            "Channel 0",
-            100,
-        )]));
-        let app = make_app_with(dev as Arc<dyn Device>);
+        let dev =
+            Arc::new(MockDevice::new("dev1").with_chain(vec![channel("ch0", "Channel 0", 100)]));
+        let app = app_with(vec![dev]);
         let err = lighting_add_segment(
             "dev1".into(),
             "ch0".into(),
@@ -344,15 +248,14 @@ mod tests {
 
     #[tokio::test]
     async fn persist_layout_records_user_link_with_stable_id() {
-        let dev = Arc::new(MockChainDevice::new("dev1").with_channels(vec![channel(
-            "ch0",
-            "Channel 0",
-            100,
-        )]));
-        let app = make_app_with(dev.clone() as Arc<dyn Device>);
+        let dev =
+            Arc::new(MockDevice::new("dev1").with_chain(vec![channel("ch0", "Channel 0", 100)]));
+        let app = app_with(vec![dev.clone()]);
 
         let (child_id, child) = dev
-            .host
+            .chain
+            .as_ref()
+            .unwrap()
             .add_link(
                 "ch0",
                 ChainLinkSpec {
@@ -378,12 +281,9 @@ mod tests {
     #[tokio::test]
     async fn persist_layout_removes_device_entry_when_all_channels_empty() {
         // All links are locked → nothing to persist → device entry removed.
-        let dev = Arc::new(MockChainDevice::new("dev1").with_channels(vec![channel(
-            "ch0",
-            "Channel 0",
-            100,
-        )]));
-        let app = make_app_with(dev.clone() as Arc<dyn Device>);
+        let dev =
+            Arc::new(MockDevice::new("dev1").with_chain(vec![channel("ch0", "Channel 0", 100)]));
+        let app = app_with(vec![dev.clone()]);
         // Pre-seed a stale entry so we can confirm it's removed.
         app.config.write().await.device_layouts.insert(
             "dev1".into(),
@@ -404,8 +304,8 @@ mod tests {
 
     #[tokio::test]
     async fn restore_saved_chains_prunes_failed_records() {
-        let dev = Arc::new(MockChainDevice::new("dev1").restore_fails());
-        let app = make_app_with(dev as Arc<dyn Device>);
+        let dev = Arc::new(MockDevice::new("dev1").with_chain(vec![]));
+        let app = app_with(vec![dev]);
 
         // Insert a saved layout with one record that will fail to restore.
         {
@@ -440,12 +340,9 @@ mod tests {
 
     #[tokio::test]
     async fn restore_saved_chains_recreates_child_with_persisted_id() {
-        let dev = Arc::new(MockChainDevice::new("dev1").with_channels(vec![channel(
-            "ch0",
-            "Channel 0",
-            100,
-        )]));
-        let app = make_app_with(dev.clone() as Arc<dyn Device>);
+        let dev =
+            Arc::new(MockDevice::new("dev1").with_chain(vec![channel("ch0", "Channel 0", 100)]));
+        let app = app_with(vec![dev.clone()]);
         app.config.write().await.device_layouts.insert(
             "dev1".into(),
             DeviceLayout {
@@ -470,7 +367,7 @@ mod tests {
             .iter()
             .any(|device| device.id() == "stable-child-id"));
         drop(registry);
-        let links = dev.host.persistent_links();
+        let links = dev.chain.as_ref().unwrap().persistent_links();
         assert_eq!(links["ch0"][0].child_id, "stable-child-id");
         assert_eq!(links["ch0"][0].name, "Restored strip");
     }

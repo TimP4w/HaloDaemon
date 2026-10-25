@@ -27,15 +27,10 @@ pub fn lcd_templates_dir() -> std::path::PathBuf {
 /// leading dot, non-empty, bounded length. The `.yaml` extension is appended
 /// server-side and never accepted from the client.
 pub fn validate_template_name(name: &str) -> Result<()> {
-    let ok = !name.is_empty()
-        && !name.starts_with('.')
-        && name.len() <= 64
-        && name
-            .chars()
-            .all(|c| c.is_ascii_alphanumeric() || matches!(c, ' ' | '_' | '-'));
-    if !ok {
-        anyhow::bail!("invalid template name");
-    }
+    anyhow::ensure!(
+        halod_shared::effect_designer::validate_effect_name(name),
+        "invalid template name"
+    );
     Ok(())
 }
 
@@ -228,7 +223,7 @@ pub async fn save_template(name: String, def: CustomTemplateDef, app: Arc<AppSta
         "template too large"
     );
     let path = template_path(&name);
-    tokio::task::spawn_blocking(move || crate::config::atomic_write(&path, &yaml)).await??;
+    tokio::task::spawn_blocking(move || crate::util::fs::atomic_write(&path, &yaml)).await??;
     log::info!("[LCD] saved template '{name}'");
     app.lcd.refresh_templates().await;
     app.record_change(crate::domain::events::Change::LcdCatalog)

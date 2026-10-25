@@ -37,3 +37,15 @@ pub const REPO_URL: &str = "https://github.com/TimP4w/HaloDaemon";
 
 /// Author/developer credit shown in the GUI about/credits.
 pub const AUTHOR: &str = "TimP4w";
+
+pub fn config_dir() -> std::path::PathBuf {
+    if let Ok(dir) = std::env::var("HALOD_CONFIG_DIR") {
+        return dir.into();
+    }
+    #[cfg(target_os = "windows")]
+    let base = std::path::PathBuf::from(std::env::var("APPDATA").unwrap_or_else(|_| ".".into()));
+    #[cfg(not(target_os = "windows"))]
+    let base = std::path::PathBuf::from(std::env::var("HOME").unwrap_or_else(|_| ".".into()))
+        .join(".config");
+    base.join(APP_NAME)
+}

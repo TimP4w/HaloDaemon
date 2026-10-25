@@ -87,7 +87,6 @@ pub enum CellPreview {
 /// label. `strip_h` sizes the preview; `glow` adds the active cyan bloom +
 /// thicker border used by the global lighting page (the per-device tab passes
 /// `false`). Returns whether it was clicked. Shared by both lighting screens.
-#[allow(clippy::too_many_arguments)]
 pub fn effect_cell(
     ui: &mut egui::Ui,
     label: &str,

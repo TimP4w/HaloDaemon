@@ -10,10 +10,7 @@ use tokio::sync::{broadcast, mpsc};
 use tokio::time::Duration;
 
 use halod_shared::bus::{BusEvent, BusEventReplay, BusSubscribe, BusTransaction};
-use halod_shared::frames::{
-    decode_binary_payload, decode_header, encode_json_frame, payload_exceeds_max, FRAME_BINARY,
-    FRAME_JSON,
-};
+use halod_shared::frames::{decode_header, encode_json_frame, payload_exceeds_max, FRAME_JSON};
 
 use crate::application::state::AppState;
 
@@ -38,46 +35,11 @@ pub enum LeaseState {
     Expired,
 }
 
-/// Which engine topics a client has subscribed to; carried by `ClientState::Subscribed`.
-#[derive(Debug, Clone, Copy, PartialEq, Eq, Default)]
-pub struct SubscribedTopics {
-    pub canvas: bool,
-    pub lcd: bool,
-}
-
-/// A client's IPC connection lifecycle.
-#[derive(Debug, Clone, PartialEq)]
-pub enum ClientState {
-    Connected,
-    Subscribed(SubscribedTopics),
-    Closing,
-    Closed,
-}
-
-#[derive(Debug, Clone, Copy)]
-pub enum SubscriptionTopic {
-    Canvas,
-    Lcd,
-}
-
+#[derive(Default)]
 struct SubscriptionState {
-    client: ClientState,
-    canvas_lease: LeaseState,
-    lcd_lease: LeaseState,
+    closing: bool,
     canvas_task: bool,
     lcd_task: bool,
-}
-
-impl Default for SubscriptionState {
-    fn default() -> Self {
-        Self {
-            client: ClientState::Connected,
-            canvas_lease: LeaseState::Unsubscribed,
-            lcd_lease: LeaseState::Unsubscribed,
-            canvas_task: false,
-            lcd_task: false,
-        }
-    }
 }
 
 /// Per-client one-shot subscription flags, shared across clones of a handle so a
@@ -153,24 +115,17 @@ impl ClientHandle {
     /// Claim the canvas subscription; returns `true` only on the first call.
     pub fn try_subscribe_canvas(&self) -> bool {
         let mut lifecycle = self.subs.lifecycle.lock().unwrap();
-        if lifecycle.canvas_task
-            || matches!(lifecycle.client, ClientState::Closing | ClientState::Closed)
-        {
+        if lifecycle.canvas_task || lifecycle.closing {
             return false;
         }
         lifecycle.canvas_task = true;
-        lifecycle.canvas_lease = LeaseState::Active {
-            last_keepalive: tokio::time::Instant::now(),
-        };
         true
     }
 
     /// Claim the LCD-engine subscription; returns `true` only on the first call.
     pub fn try_subscribe_lcd(&self) -> bool {
         let mut lifecycle = self.subs.lifecycle.lock().unwrap();
-        if lifecycle.lcd_task
-            || matches!(lifecycle.client, ClientState::Closing | ClientState::Closed)
-        {
+        if lifecycle.lcd_task || lifecycle.closing {
             return false;
         }
         lifecycle.lcd_task = true;
@@ -182,12 +137,9 @@ impl ClientHandle {
         let active = LeaseState::Active {
             last_keepalive: tokio::time::Instant::now(),
         };
-        let mut lifecycle = self.subs.lifecycle.lock().unwrap();
-        if matches!(lifecycle.client, ClientState::Closing | ClientState::Closed) {
+        if self.subs.lifecycle.lock().unwrap().closing {
             return;
         }
-        lifecycle.lcd_lease = active;
-        drop(lifecycle);
         self.subs.lcd_lease.send_replace(active);
     }
 
@@ -198,11 +150,6 @@ impl ClientHandle {
 
     /// Transition an `Active` lease to `Expired`; a no-op if already expired/unsubscribed or renewed since.
     pub(crate) fn expire_lcd_lease(&self) {
-        let mut lifecycle = self.subs.lifecycle.lock().unwrap();
-        if matches!(lifecycle.lcd_lease, LeaseState::Active { .. }) {
-            lifecycle.lcd_lease = LeaseState::Expired;
-        }
-        drop(lifecycle);
         let _ = self.subs.lcd_lease.send_if_modified(|s| {
             if matches!(s, LeaseState::Active { .. }) {
                 *s = LeaseState::Expired;
@@ -213,22 +160,13 @@ impl ClientHandle {
         });
     }
 
-    /// Register a spawned engine-subscription forwarder as owned by this client, advancing its state to `Subscribed`.
-    pub fn track_subscription(&self, topic: SubscriptionTopic, task: tokio::task::JoinHandle<()>) {
-        let mut lifecycle = self.subs.lifecycle.lock().unwrap();
-        if matches!(lifecycle.client, ClientState::Closing | ClientState::Closed) {
+    /// Register a spawned engine-subscription forwarder as owned by this client.
+    pub fn track_subscription(&self, task: tokio::task::JoinHandle<()>) {
+        let lifecycle = self.subs.lifecycle.lock().unwrap();
+        if lifecycle.closing {
             task.abort();
             return;
         }
-        let mut topics = match lifecycle.client {
-            ClientState::Subscribed(t) => t,
-            _ => SubscribedTopics::default(),
-        };
-        match topic {
-            SubscriptionTopic::Canvas => topics.canvas = true,
-            SubscriptionTopic::Lcd => topics.lcd = true,
-        }
-        lifecycle.client = ClientState::Subscribed(topics);
         self.subs.tasks.lock().unwrap().push(task);
     }
 
@@ -236,19 +174,9 @@ impl ClientHandle {
         self.subs.tasks.lock().unwrap().push(task);
     }
 
-    #[cfg(test)]
-    pub fn state(&self) -> ClientState {
-        self.subs.lifecycle.lock().unwrap().client.clone()
-    }
-
-    /// Abort every tracked subscription task and transition to `Closed`; called once at client teardown.
+    /// Abort every tracked subscription task; called once at client teardown.
     pub async fn close(&self) {
-        {
-            let mut lifecycle = self.subs.lifecycle.lock().unwrap();
-            lifecycle.client = ClientState::Closing;
-            lifecycle.canvas_lease = LeaseState::Expired;
-            lifecycle.lcd_lease = LeaseState::Expired;
-        }
+        self.subs.lifecycle.lock().unwrap().closing = true;
         self.subs.lcd_lease.send_replace(LeaseState::Expired);
         let tasks: Vec<_> = self.subs.tasks.lock().unwrap().drain(..).collect();
         for task in &tasks {
@@ -257,7 +185,6 @@ impl ClientHandle {
         for task in tasks {
             let _ = task.await;
         }
-        self.subs.lifecycle.lock().unwrap().client = ClientState::Closed;
     }
 }
 
@@ -655,112 +582,24 @@ where
     Ok(serde_json::from_value(value)?)
 }
 
-/// Pairs JSON command frames with their accompanying binary payload frames for
-/// commands that carry a binary body (currently `set_screen_image`).
-///
-/// The GUI sends two frames per such command: a JSON frame with metadata and a
-/// binary frame with the raw image bytes. Either may arrive first; the assembler
-/// buffers whichever arrives first until its counterpart appears, then returns
-/// the fully-assembled message with the binary data base64-encoded into
-/// `data_b64`.
-pub(crate) struct ClientFrameAssembler {
-    pending_commands: std::collections::HashMap<String, Value>,
-    pending_binary: std::collections::HashMap<String, Vec<u8>>,
-}
-
-impl ClientFrameAssembler {
-    const MAX_PENDING: usize = 8;
-
-    pub(crate) fn new() -> Self {
-        Self {
-            pending_commands: std::collections::HashMap::new(),
-            pending_binary: std::collections::HashMap::new(),
-        }
+fn parse_json_frame(frame_type: u8, payload: &[u8], client_id: u64) -> Option<Value> {
+    if frame_type != FRAME_JSON {
+        return None;
     }
-
-    /// Feed a raw frame (identified by `frame_type`) to the assembler.
-    ///
-    /// Returns `Some(msg)` when a complete, ready-to-dispatch message is
-    /// available:
-    /// - For ordinary JSON frames (not `set_screen_image`): the parsed `Value`
-    ///   is returned immediately.
-    /// - For `set_screen_image` JSON + binary pairs: the message is returned
-    ///   only once both halves have arrived, with `data_b64` injected.
-    ///
-    /// Returns `None` when the frame was buffered awaiting its partner, when it
-    /// was dropped due to overflow, or when parsing failed.
-    pub(crate) fn process_frame(
-        &mut self,
-        frame_type: u8,
-        payload: &[u8],
-        client_id: u64,
-    ) -> Option<Value> {
-        use base64::Engine as _;
-
-        if frame_type == FRAME_JSON {
-            match serde_json::from_slice::<Value>(payload) {
-                Ok(msg) => {
-                    let cmd = msg["type"].as_str().unwrap_or("");
-                    let req_id = msg["request_id"].as_str().unwrap_or("").to_string();
-                    if cmd == "set_screen_image" && !req_id.is_empty() {
-                        if let Some(data) = self.pending_binary.remove(&req_id) {
-                            let mut msg = msg;
-                            let b64 = base64::engine::general_purpose::STANDARD.encode(&data);
-                            msg["data_b64"] = json!(b64);
-                            Some(msg)
-                        } else if self.pending_commands.len() < Self::MAX_PENDING {
-                            if self.pending_commands.contains_key(&req_id) {
-                                log::warn!(
-                                    "IPC: duplicate req_id {req_id} for set_screen_image, dropping earlier command"
-                                );
-                            }
-                            self.pending_commands.insert(req_id, msg);
-                            None
-                        } else {
-                            log::warn!(
-                                "IPC: too many unpaired set_screen_image commands, dropping"
-                            );
-                            None
-                        }
-                    } else {
-                        Some(msg)
-                    }
-                }
-                Err(_) => {
-                    log::warn!(
-                        "IPC: client {client_id} sent malformed JSON frame ({} bytes), dropping",
-                        payload.len()
-                    );
-                    None
-                }
-            }
-        } else if frame_type == FRAME_BINARY {
-            if let Some((req_id, _content_type, data)) = decode_binary_payload(payload) {
-                if let Some(mut pending_msg) = self.pending_commands.remove(&req_id) {
-                    let b64 = base64::engine::general_purpose::STANDARD.encode(&data);
-                    pending_msg["data_b64"] = json!(b64);
-                    Some(pending_msg)
-                } else if self.pending_binary.len() < Self::MAX_PENDING {
-                    self.pending_binary.insert(req_id, data);
-                    None
-                } else {
-                    log::warn!("IPC: too many unpaired binary payloads, dropping");
-                    None
-                }
-            } else {
-                None
-            }
-        } else {
-            None
-        }
-    }
+    serde_json::from_slice(payload)
+        .map_err(|_| {
+            log::warn!(
+                "IPC: client {client_id} sent malformed JSON frame ({} bytes), dropping",
+                payload.len()
+            )
+        })
+        .ok()
 }
 
 async fn run_client_loop<S>(mut stream: S, handle: &ClientHandle, app: Arc<AppState>) -> Result<()>
 where
     S: AsyncReadExt + Unpin,
 {
-    let mut assembler = ClientFrameAssembler::new();
     let mut header = [0u8; 5];
 
     const READ_IDLE_TIMEOUT: Duration = Duration::from_secs(60);
@@ -783,7 +622,7 @@ where
                 .map_err(|_| anyhow::anyhow!("client idle timeout"))?
                 .map_err(anyhow::Error::from)?;
         }
-        if let Some(msg) = assembler.process_frame(frame_type, &payload, handle.id) {
+        if let Some(msg) = parse_json_frame(frame_type, &payload, handle.id) {
             // Device-scoped commands are spawned onto a per-device lock inside
             // `handle_message`, so a slow device never blocks the reader; global
             // commands run inline in read order.
@@ -1188,7 +1027,7 @@ mod handle_tests {
             transactions,
             events,
         ));
-        crate::application::usecases::registry::runtime::gui_changed(&app).await;
+        crate::application::usecases::registry::runtime::publish_gui(&app).await;
         tokio::task::yield_now().await;
 
         let queued = rx.recv().await.unwrap();
@@ -1260,59 +1099,26 @@ mod handle_tests {
         assert_eq!(calls.load(std::sync::atomic::Ordering::SeqCst), 2);
     }
 
-    #[test]
-    fn client_state_starts_connected() {
-        let (tx, _rx) = mpsc::channel::<Arc<Vec<u8>>>(4);
-        let handle = ClientHandle {
-            id: 0,
-            tx,
-            subs: Arc::default(),
-        };
-        assert_eq!(handle.state(), ClientState::Connected);
-    }
-
     #[tokio::test]
-    async fn tracking_a_subscription_advances_to_subscribed_with_that_topic() {
+    async fn close_aborts_tracked_tasks_and_refuses_new_subscriptions() {
         let (tx, _rx) = mpsc::channel::<Arc<Vec<u8>>>(4);
         let handle = ClientHandle {
             id: 0,
             tx,
             subs: Arc::default(),
         };
-        handle.track_subscription(SubscriptionTopic::Canvas, tokio::spawn(async {}));
-        assert_eq!(
-            handle.state(),
-            ClientState::Subscribed(SubscribedTopics {
-                canvas: true,
-                lcd: false
-            })
-        );
-        handle.track_subscription(SubscriptionTopic::Lcd, tokio::spawn(async {}));
-        assert_eq!(
-            handle.state(),
-            ClientState::Subscribed(SubscribedTopics {
-                canvas: true,
-                lcd: true
-            })
-        );
-    }
-
-    #[tokio::test]
-    async fn close_aborts_tracked_subscription_tasks_and_ends_closed() {
-        let (tx, _rx) = mpsc::channel::<Arc<Vec<u8>>>(4);
-        let handle = ClientHandle {
-            id: 0,
-            tx,
-            subs: Arc::default(),
-        };
-        let task = tokio::spawn(async {
-            tokio::time::sleep(std::time::Duration::from_secs(3600)).await;
-        });
-        handle.track_subscription(SubscriptionTopic::Canvas, task);
+        handle.track_subscription(tokio::spawn(std::future::pending()));
 
         handle.close().await;
 
-        assert_eq!(handle.state(), ClientState::Closed);
+        assert!(handle.subs.tasks.lock().unwrap().is_empty());
+        assert!(!handle.try_subscribe_canvas());
+        assert!(!handle.try_subscribe_lcd());
+        let late = tokio::spawn(std::future::pending::<()>());
+        let abort = late.abort_handle();
+        handle.track_subscription(late);
+        tokio::task::yield_now().await;
+        assert!(abort.is_finished());
     }
 
     #[test]

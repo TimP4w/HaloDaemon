@@ -64,13 +64,6 @@ impl UsbClaim {
             had_kernel_driver,
         })
     }
-
-    #[expect(dead_code, reason = "explicit early release for transport owners")]
-    pub fn release(self) {
-        // Drop runs, releasing the interface and re-attaching the kernel driver
-        // on Linux. The caller has taken ownership and wants explicit cleanup;
-        // letting the value drop is the correct behaviour.
-    }
 }
 
 impl Drop for UsbClaim {

@@ -29,11 +29,7 @@ use halod_shared::types::{WriteRateLimit, WriteRateStatus};
 use halod_hwaccess::smbus::{enumerate_buses, enumerate_gpu_buses};
 pub use halod_hwaccess::smbus::{BusInfo, SmBusSyncOps};
 
-#[derive(Clone, Copy, Debug, PartialEq, Eq)]
-pub enum SmbusBusKind {
-    Chipset,
-    Gpu,
-}
+pub use halod_shared::debug_info::SmbusBusKind;
 
 /// A PCI-identity filter that gates a GPU-bus scan to known cards, so the daemon
 /// never pokes an RGB address on a graphics card it doesn't recognise — the GPU

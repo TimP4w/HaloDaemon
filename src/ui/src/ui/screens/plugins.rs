@@ -141,7 +141,6 @@ impl PluginsUi {
         self.requested_assets.clear();
     }
 
-    #[allow(clippy::too_many_arguments)] // screen inputs mirror independent IPC result streams
     pub fn show(
         &mut self,
         ui: &mut egui::Ui,
@@ -1384,22 +1383,11 @@ pub(crate) fn decode_new_assets(
     }
 }
 
-/// The centered, aspect-preserving sub-rect of `into` that a `tex`-sized image
-/// fills (letterbox). Keeps a non-square logo from being stretched to the
-/// square tile. Pure so the geometry is unit-testable.
-pub(crate) fn logo_fit_rect(tex: Vec2, into: Rect) -> Rect {
-    if tex.x <= 0.0 || tex.y <= 0.0 {
-        return into;
-    }
-    let scale = (into.width() / tex.x).min(into.height() / tex.y);
-    Rect::from_center_size(into.center(), Vec2::new(tex.x * scale, tex.y * scale))
-}
-
 /// Paint a logo texture into `rect`, letterboxed to preserve its aspect ratio.
 pub(crate) fn draw_logo_fit(painter: &egui::Painter, rect: Rect, tex: &egui::TextureHandle) {
     painter.image(
         tex.id(),
-        logo_fit_rect(tex.size_vec2(), rect),
+        widgets::letterbox(rect, tex.size_vec2().x / tex.size_vec2().y),
         Rect::from_min_max(Pos2::new(0.0, 0.0), Pos2::new(1.0, 1.0)),
         egui::Color32::WHITE,
     );
@@ -1943,7 +1931,6 @@ fn detail_pane<R>(ui: &mut egui::Ui, body: impl FnOnce(&mut egui::Ui) -> R) -> R
         .inner
 }
 
-#[allow(clippy::too_many_arguments)] // detail pane mutates independent modal/task state slots
 fn detail_body(
     ui: &mut egui::Ui,
     p: &PluginInfo,
@@ -3115,7 +3102,6 @@ fn updates_disabled_note(ui: &mut egui::Ui) {
 /// The repo detail panel: header, stat boxes, "Check for updates", the list
 /// of plugins it provides, and Remove (hidden for the official repo). Returns
 /// a clicked plugin id, if any, so the caller can switch the selection to it.
-#[allow(clippy::too_many_arguments)] // repo detail threads independent check/update UI state
 fn repo_detail_body(
     ui: &mut egui::Ui,
     r: &PluginRepoInfo,
@@ -4029,20 +4015,6 @@ mod tests {
     fn assets_to_request_empty_when_plugin_declares_no_assets() {
         let p = info("a", true);
         assert!(assets_to_request(&p, &HashMap::new(), &HashSet::new()).is_empty());
-    }
-
-    #[test]
-    fn logo_fit_rect_fills_square_and_centers() {
-        let into = Rect::from_min_size(Pos2::new(10.0, 20.0), Vec2::splat(40.0));
-        // A square logo fills the tile exactly.
-        assert_eq!(logo_fit_rect(Vec2::splat(64.0), into), into);
-        // A wide logo keeps its aspect: full width, centered vertically.
-        let wide = logo_fit_rect(Vec2::new(100.0, 50.0), into);
-        assert_eq!(wide.width(), 40.0);
-        assert_eq!(wide.height(), 20.0);
-        assert_eq!(wide.center(), into.center());
-        // A degenerate size falls back to the whole tile rather than dividing by zero.
-        assert_eq!(logo_fit_rect(Vec2::ZERO, into), into);
     }
 
     fn repo(slug: &str, release_tag: &str) -> PluginRepoInfo {

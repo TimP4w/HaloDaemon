@@ -84,7 +84,6 @@ impl Default for CoolingUi {
     }
 }
 
-#[allow(clippy::too_many_arguments)]
 pub fn show(
     ui: &mut egui::Ui,
     state: &TopicStore,

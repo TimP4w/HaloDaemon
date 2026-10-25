@@ -1535,10 +1535,12 @@ fn ellipsize_graphemes(
     }
     let mut result = String::new();
     for grapheme in text.graphemes(true) {
-        let mut candidate = result.clone();
-        candidate.push_str(grapheme);
-        candidate.push_str(ellipsis);
-        if text_width(font, &candidate, size, style) > width {
+        let kept = result.len();
+        result.push_str(grapheme);
+        result.push_str(ellipsis);
+        let fits = text_width(font, &result, size, style) <= width;
+        result.truncate(kept);
+        if !fits {
             break;
         }
         result.push_str(grapheme);
@@ -1827,31 +1829,8 @@ fn ellipsize_text(
     canvas_height: u32,
     style: WidgetTextStyle,
 ) -> String {
-    let text = bounded_text(text);
-    let scaled = font.as_scaled(PxScale::from(bounded_dimension(size, canvas_height) as f32));
-    let advance = |character| scaled.h_advance(scaled.glyph_id(character));
-    let max_width = (max_width - style.italic_reach(size) - style.embolden(size) as f32).max(0.0);
-    let full_width: f32 = text.chars().map(&advance).sum();
-    if full_width <= max_width {
-        return text;
-    }
-    let ellipsis = '…';
-    let ellipsis_width = advance(ellipsis);
-    if ellipsis_width > max_width {
-        return String::new();
-    }
-    let mut result = String::new();
-    let mut width = 0.0;
-    for character in text.chars() {
-        let next = advance(character);
-        if width + next + ellipsis_width > max_width {
-            break;
-        }
-        result.push(character);
-        width += next;
-    }
-    result.push(ellipsis);
-    result
+    let size = bounded_dimension(size, canvas_height) as f32;
+    ellipsize_graphemes(font, &bounded_text(text), max_width, size, style, false)
 }
 
 fn lua_color(lua: &Lua, value: Option<mlua::Value>, fallback: RgbColor) -> mlua::Result<Rgba<u8>> {

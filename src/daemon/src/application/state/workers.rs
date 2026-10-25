@@ -195,20 +195,15 @@ pub async fn shutdown(app: Arc<AppState>) {
 mod tests {
     use super::*;
     use crate::{
-        config::Config,
         domain::{device::Device, events::Change},
-        test_support::MockDevice,
+        test_support::{app_with, MockDevice},
     };
 
     #[tokio::test]
     async fn persist_worker_publishes_engine_originated_profile_override() {
         let device = Arc::new(MockDevice::new("dev1").with_choice());
         device.choice.as_ref().unwrap().record("nc_mode", 0);
-        let app = Arc::new(AppState::new(Config::default()));
-        app.device_registry
-            .write()
-            .await
-            .push(device.clone() as Arc<dyn Device>);
+        let app = app_with(vec![device.clone()]);
         {
             let mut config = app.config.write().await;
             config.active_profile_data_mut().device_states.insert(

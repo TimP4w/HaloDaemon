@@ -1,29 +1,10 @@
-//! Generic, editable keyboard-layout model.
-//!
-//! A keyboard layout is described as a vendor-neutral **base template**
-//! ([`StandardLayout`]) plus an ordered list of per-device **edits**
-//! ([`KeyEdit`]) that add, remove, or move individual keys. A device profile
-//! references a [`KeyLayoutSpec`], which also carries a `cid_map` translating
-//! the device's firmware/internal key IDs onto the resolved key set.
-//!
-//! The base template provides logical grid geometry (`col`/`row` in arbitrary
-//! grid units, plus key `w`/`h`); a driver maps each resolved [`KeyCell`] to a
-//! renderable LED position by translating the firmware ID through the
-//! `cid_map`. Nothing in this module is vendor-specific.
-
 use serde::{Deserialize, Serialize};
 
 use crate::types::KeyboardLayout;
 
-/// Device-neutral identity of a single physical key.
-///
-/// Covers every key found on a standard keyboard, plus [`KeyId::Custom`] for
-/// keys a particular device adds that have no standard equivalent (media keys,
-/// macro/G-keys, an `Fn` key, scroll-wheel tilt, etc.).
 #[derive(Debug, Clone, Copy, PartialEq, Eq, Hash, Serialize, Deserialize)]
 #[serde(rename_all = "snake_case")]
 pub enum KeyId {
-    // Function row
     Escape,
     F1,
     F2,
@@ -37,7 +18,6 @@ pub enum KeyId {
     F10,
     F11,
     F12,
-    // Number row
     Backtick,
     Digit1,
     Digit2,
@@ -51,7 +31,6 @@ pub enum KeyId {
     Digit0,
     Minus,
     Equals,
-    // Letters
     A,
     B,
     C,
@@ -78,7 +57,6 @@ pub enum KeyId {
     X,
     Y,
     Z,
-    // Punctuation
     LeftBracket,
     RightBracket,
     Backslash,
@@ -89,13 +67,11 @@ pub enum KeyId {
     Slash,
     /// The extra `<>` key found on ISO layouts (left of `Z`).
     IsoExtra,
-    // Whitespace / editing
     Tab,
     CapsLock,
     Enter,
     Backspace,
     Space,
-    // Modifiers
     LeftShift,
     RightShift,
     LeftCtrl,
@@ -104,24 +80,20 @@ pub enum KeyId {
     RightAlt,
     LeftSuper,
     RightSuper,
-    // Navigation cluster
     Insert,
     Delete,
     Home,
     End,
     PageUp,
     PageDown,
-    // Arrows
     Up,
     Down,
     Left,
     Right,
-    // System keys
     PrintScreen,
     ScrollLock,
     Pause,
     Menu,
-    // Numpad
     NumLock,
     NumDiv,
     NumMul,
@@ -139,14 +111,10 @@ pub enum KeyId {
     Num8,
     Num9,
     NumDot,
-    /// A non-standard key identified by a device-defined opaque number.
     Custom(u16),
 }
 
-/// One key's logical identity plus its grid geometry.
-///
-/// `col`/`row` place the key on an arbitrary logical grid (smaller `row` is
-/// physically higher); `w`/`h` are the key's size in the same grid units.
+/// Grid units; smaller `row` is physically higher.
 #[derive(Debug, Clone, Copy, PartialEq, Serialize, Deserialize)]
 pub struct KeyCell {
     pub id: KeyId,
@@ -157,7 +125,6 @@ pub struct KeyCell {
 }
 
 impl KeyCell {
-    /// Convenience constructor for a default `1x1` key.
     pub const fn new(id: KeyId, col: f32, row: f32) -> Self {
         Self {
             id,
@@ -169,12 +136,6 @@ impl KeyCell {
     }
 }
 
-/// Named base keyboard templates.
-///
-/// - [`StandardLayout::Tkl`] — ANSI TKL, 86 keys. Enter in home row, Backslash in QWERTY row.
-/// - [`StandardLayout::TklIso`] — ISO 105 TKL, 86 keys. Enter in QWERTY-row upper arm, Backslash in home row.
-/// - [`StandardLayout::FullSize`] — ANSI 100%, 105 keys (TKL + `RightSuper` + `Menu` + numpad).
-/// - [`StandardLayout::FullSizeIso`] — ISO 105 100%, 105 keys (`TklIso` + `RightSuper` + `Menu` + numpad).
 #[derive(Debug, Clone, Copy, PartialEq, Eq, Serialize, Deserialize)]
 #[serde(rename_all = "snake_case")]
 pub enum StandardLayout {
@@ -185,7 +146,6 @@ pub enum StandardLayout {
 }
 
 impl StandardLayout {
-    /// The ordered grid of keys for this template.
     pub fn cells(&self) -> Vec<KeyCell> {
         match self {
             StandardLayout::Tkl => tkl_cells(),
@@ -196,58 +156,7 @@ impl StandardLayout {
     }
 }
 
-/// A single per-device modification applied over a [`StandardLayout`] base.
-#[derive(Debug, Clone, Serialize, Deserialize)]
-#[serde(tag = "op", rename_all = "snake_case")]
-pub enum KeyEdit {
-    /// Append a key not present on the base template.
-    Add(KeyCell),
-    /// Remove the key with this identity from the base template.
-    Remove(KeyId),
-    /// Move an existing key; `None` fields are left unchanged.
-    Modify {
-        id: KeyId,
-        col: Option<f32>,
-        row: Option<f32>,
-    },
-}
-
-/// A complete keyboard layout: a base template, device edits, and a map from
-/// the device's firmware/internal key IDs onto resolved [`KeyId`]s.
-#[derive(Debug, Clone, Copy)]
-pub struct KeyLayoutSpec<'a> {
-    pub base: StandardLayout,
-    pub edits: &'a [KeyEdit],
-    /// Maps a device's firmware/internal key ID to a [`KeyId`].
-    pub cid_map: &'a [(u32, KeyId)],
-}
-
-impl<'a> KeyLayoutSpec<'a> {
-    /// Apply `edits` over `base.cells()` and return the resolved key grid.
-    pub fn resolve(&self) -> Vec<KeyCell> {
-        let mut cells = self.base.cells();
-        for edit in self.edits {
-            match edit {
-                KeyEdit::Add(cell) => cells.push(*cell),
-                KeyEdit::Remove(id) => cells.retain(|c| c.id != *id),
-                KeyEdit::Modify { id, col, row } => {
-                    for cell in cells.iter_mut().filter(|c| c.id == *id) {
-                        if let Some(c) = col {
-                            cell.col = *c;
-                        }
-                        if let Some(r) = row {
-                            cell.row = *r;
-                        }
-                    }
-                }
-            }
-        }
-        cells
-    }
-}
-
-/// Physical keyboard variant: the shape of the alpha block, independent of the
-/// language legends printed on the caps.
+/// Alpha-block shape, independent of the printed language legends.
 #[derive(Debug, Clone, Copy, PartialEq, Eq, Serialize, Deserialize)]
 #[serde(rename_all = "snake_case")]
 pub enum KeyVariant {
@@ -255,9 +164,7 @@ pub enum KeyVariant {
     Iso,
 }
 
-/// A user's per-device layout selection. `None` on either axis means "Auto" —
-/// resolve it from the firmware-detected language (and, for the variant, from
-/// whether that language is an ISO language and the device supports ISO).
+/// `None` on an axis means Auto: resolved from the firmware-detected language.
 #[derive(Debug, Default, Clone, Copy, PartialEq, Eq, Serialize, Deserialize)]
 pub struct KeyboardLayoutSelection {
     #[serde(default, skip_serializing_if = "Option::is_none")]
@@ -267,15 +174,12 @@ pub struct KeyboardLayoutSelection {
 }
 
 impl KeyboardLayoutSelection {
-    /// True when both axes are Auto — the state stored as *absence* in config.
+    /// Stored as absence in config.
     pub fn is_auto(&self) -> bool {
         self.variant.is_none() && self.language.is_none()
     }
 }
 
-/// One renderable key: its resolved grid geometry plus the device IDs that
-/// address it — an RGB LED id (for the Lighting tab) and, optionally, a
-/// KeyRemap control id (for the clickable Keys tab).
 #[derive(Debug, Clone, Serialize, Deserialize)]
 pub struct VisualKey {
     pub led_id: u32,
@@ -284,29 +188,20 @@ pub struct VisualKey {
     pub cell: KeyCell,
 }
 
-/// Everything both GUI tabs need to draw a keyboard and its layout selector.
 #[derive(Debug, Clone, Serialize, Deserialize)]
 pub struct KeyboardLayoutStatus {
-    /// Resolved key grid. Empty ⇒ the device has no grid geometry, so the GUI
-    /// keeps its bare LED-dot rendering but still shows the selector.
+    /// Empty when the device has no grid geometry (GUI falls back to LED dots).
     #[serde(default)]
     pub keys: Vec<VisualKey>,
-    /// Effective variant after resolving the selection.
     pub variant: KeyVariant,
-    /// Effective language after resolving the selection.
     pub language: KeyboardLayout,
-    /// Language reported by the firmware; `Unknown` when not detectable.
+    /// `Unknown` when not detectable.
     pub detected_language: KeyboardLayout,
-    /// The user's raw selection (Auto = `None` on an axis).
     pub selection: KeyboardLayoutSelection,
-    /// Whether the device declares an ISO variant (gates the variant selector).
     pub iso_supported: bool,
-    /// Languages the device offers.
     pub languages: Vec<KeyboardLayout>,
 }
 
-/// Whether a language layout is physically an ISO layout (implies the ISO
-/// alpha block when the variant is left on Auto).
 pub fn is_iso_language(l: KeyboardLayout) -> bool {
     matches!(
         l,
@@ -318,29 +213,23 @@ pub fn is_iso_language(l: KeyboardLayout) -> bool {
     )
 }
 
-/// ANSI TKL key grid — 86 keys (smaller `row` = physically higher).
-///
 /// IsoExtra is included so ISO cid_maps can reference it.
 fn tkl_cells() -> Vec<KeyCell> {
     let mut cells = tkl_common_cells();
-    // QWERTY row — Backslash at the ANSI position (right of `]`, 1.5u wide).
     cells.push(cell(KeyId::Backslash, 13.5, 2.5, 1.5, 1.0));
-    // Home row — Enter at the ANSI position (2.25u wide key at end of row).
     cells.push(cell(KeyId::Enter, 12.75, 3.5, 2.25, 1.0));
     cells
 }
 
-/// A key cell with explicit width/height. `col` is the key's **left edge**.
+/// `col` is the key's left edge.
 const fn cell(id: KeyId, col: f32, row: f32, w: f32, h: f32) -> KeyCell {
     KeyCell { id, col, row, w, h }
 }
 
-/// The keys common to both the ANSI and ISO TKL grids — every key except the
-/// two that differ in shape/position between variants (`Enter`, `Backslash`).
+/// Everything except `Enter` and `Backslash`, which differ between ANSI and ISO.
 fn tkl_common_cells() -> Vec<KeyCell> {
     use KeyId::*;
     [
-        // Function row
         (Escape, 0.0, 0.0, 1.0, 1.0),
         (F1, 2.0, 0.0, 1.0, 1.0),
         (F2, 3.0, 0.0, 1.0, 1.0),
@@ -357,7 +246,6 @@ fn tkl_common_cells() -> Vec<KeyCell> {
         (PrintScreen, 15.5, 0.0, 1.0, 1.0),
         (ScrollLock, 16.5, 0.0, 1.0, 1.0),
         (Pause, 17.5, 0.0, 1.0, 1.0),
-        // Number row
         (Backtick, 0.0, 1.5, 1.0, 1.0),
         (Digit1, 1.0, 1.5, 1.0, 1.0),
         (Digit2, 2.0, 1.5, 1.0, 1.0),
@@ -375,7 +263,7 @@ fn tkl_common_cells() -> Vec<KeyCell> {
         (Insert, 15.5, 1.5, 1.0, 1.0),
         (Home, 16.5, 1.5, 1.0, 1.0),
         (PageUp, 17.5, 1.5, 1.0, 1.0),
-        // QWERTY row (Tab 1.5u; the variant key at col 13.5 is added by caller)
+        // the variant key at col 13.5 is added by the caller
         (Tab, 0.0, 2.5, 1.5, 1.0),
         (Q, 1.5, 2.5, 1.0, 1.0),
         (W, 2.5, 2.5, 1.0, 1.0),
@@ -392,7 +280,7 @@ fn tkl_common_cells() -> Vec<KeyCell> {
         (Delete, 15.5, 2.5, 1.0, 1.0),
         (End, 16.5, 2.5, 1.0, 1.0),
         (PageDown, 17.5, 2.5, 1.0, 1.0),
-        // Home row (CapsLock 1.75u; the variant keys after Quote are per-caller)
+        // the variant keys after Quote are per-caller
         (CapsLock, 0.0, 3.5, 1.75, 1.0),
         (A, 1.75, 3.5, 1.0, 1.0),
         (S, 2.75, 3.5, 1.0, 1.0),
@@ -405,7 +293,7 @@ fn tkl_common_cells() -> Vec<KeyCell> {
         (L, 9.75, 3.5, 1.0, 1.0),
         (Semicolon, 10.75, 3.5, 1.0, 1.0),
         (Quote, 11.75, 3.5, 1.0, 1.0),
-        // ZXCV row (short 1.25u LeftShift + IsoExtra; ANSI drops IsoExtra)
+        // ANSI drops IsoExtra
         (LeftShift, 0.0, 4.5, 1.25, 1.0),
         (IsoExtra, 1.25, 4.5, 1.0, 1.0),
         (Z, 2.25, 4.5, 1.0, 1.0),
@@ -420,7 +308,6 @@ fn tkl_common_cells() -> Vec<KeyCell> {
         (Slash, 11.25, 4.5, 1.0, 1.0),
         (RightShift, 12.25, 4.5, 2.75, 1.0),
         (Up, 16.5, 4.5, 1.0, 1.0),
-        // Modifier row
         (LeftCtrl, 0.0, 5.5, 1.25, 1.0),
         (LeftSuper, 1.25, 5.5, 1.25, 1.0),
         (LeftAlt, 2.5, 5.5, 1.25, 1.0),
@@ -436,65 +323,47 @@ fn tkl_common_cells() -> Vec<KeyCell> {
     .collect()
 }
 
-/// ISO 105 TKL key grid — 86 keys.
-///
-/// Differs from [`tkl_cells`] in two ways:
-/// - `Enter` is the ISO inverted-L shape; LED placed in the upper arm (QWERTY-row level).
-/// - `Backslash` (`#/\` key) is in the home row, between `Quote` and the lower arm of `Enter`.
 fn iso_tkl_cells() -> Vec<KeyCell> {
     let mut cells = tkl_common_cells();
-    // QWERTY row — ISO Enter upper arm (1.5u) replaces the ANSI `\` slot. LED
-    // sits in the upper arm; the GUI derives the inverted-L lower arm.
+    // LED sits in the upper arm; the GUI derives the inverted-L lower arm.
     cells.push(cell(KeyId::Enter, 13.5, 2.5, 1.5, 1.0));
-    // Home row — Backslash (`#/\` key) between Quote and the Enter lower arm.
     cells.push(cell(KeyId::Backslash, 12.75, 3.5, 1.0, 1.0));
     cells
 }
 
-/// Keys present on 100% keyboards but absent from the TKL template: `RightSuper`,
-/// `Menu`, and a full numpad. Shared by both ANSI and ISO full-size grids.
 fn full_size_extra_cells() -> impl Iterator<Item = KeyCell> {
     use KeyId::*;
     [
-        // Modifier row additions (fill the RightAlt→RightCtrl gap on 100%).
         (RightSuper, 11.25, 5.5, 1.25, 1.0),
         (Menu, 12.5, 5.5, 1.25, 1.0),
-        // Numpad — top row (same row level as number row)
         (NumLock, 19.5, 1.5, 1.0, 1.0),
         (NumDiv, 20.5, 1.5, 1.0, 1.0),
         (NumMul, 21.5, 1.5, 1.0, 1.0),
         (NumSub, 22.5, 1.5, 1.0, 1.0),
-        // Numpad — second row
         (Num7, 19.5, 2.5, 1.0, 1.0),
         (Num8, 20.5, 2.5, 1.0, 1.0),
         (Num9, 21.5, 2.5, 1.0, 1.0),
         (NumAdd, 22.5, 3.0, 1.0, 2.0), // tall 1×2, spans the second + middle rows
-        // Numpad — middle row
         (Num4, 19.5, 3.5, 1.0, 1.0),
         (Num5, 20.5, 3.5, 1.0, 1.0),
         (Num6, 21.5, 3.5, 1.0, 1.0),
-        // Numpad — lower row
         (Num1, 19.5, 4.5, 1.0, 1.0),
         (Num2, 20.5, 4.5, 1.0, 1.0),
         (Num3, 21.5, 4.5, 1.0, 1.0),
         (NumEnter, 22.5, 5.0, 1.0, 2.0), // tall 1×2, spans the lower + bottom rows
-        // Numpad — bottom row
-        (Num0, 19.5, 5.5, 2.0, 1.0), // wide 2×1
+        (Num0, 19.5, 5.5, 2.0, 1.0),
         (NumDot, 21.5, 5.5, 1.0, 1.0),
     ]
     .into_iter()
     .map(|(id, col, row, w, h)| cell(id, col, row, w, h))
 }
 
-/// ANSI 100% key grid — 105 keys.
-///
 fn full_size_cells() -> Vec<KeyCell> {
     let mut cells = tkl_cells();
     cells.extend(full_size_extra_cells());
     cells
 }
 
-/// ISO 105 100% key grid — 105 keys.
 fn iso_full_size_cells() -> Vec<KeyCell> {
     let mut cells = iso_tkl_cells();
     cells.extend(full_size_extra_cells());
@@ -504,14 +373,6 @@ fn iso_full_size_cells() -> Vec<KeyCell> {
 #[cfg(test)]
 mod tests {
     use super::*;
-
-    fn test_spec(edits: &'static [KeyEdit]) -> KeyLayoutSpec<'static> {
-        KeyLayoutSpec {
-            base: StandardLayout::Tkl,
-            edits,
-            cid_map: &[],
-        }
-    }
 
     #[test]
     fn tkl_base_has_expected_key_count() {
@@ -600,73 +461,6 @@ mod tests {
         assert_no_duplicate_keys(StandardLayout::FullSizeIso, "FullSizeIso");
     }
 
-    #[test]
-    fn resolve_add_appends_key() {
-        static EDITS: &[KeyEdit] = &[KeyEdit::Add(KeyCell::new(KeyId::Custom(99), 1.0, 2.0))];
-        let cells = test_spec(EDITS).resolve();
-        assert_eq!(cells.len(), 87);
-        assert!(cells.iter().any(|c| c.id == KeyId::Custom(99)));
-    }
-
-    #[test]
-    fn resolve_remove_drops_key() {
-        static EDITS: &[KeyEdit] = &[KeyEdit::Remove(KeyId::Escape)];
-        let cells = test_spec(EDITS).resolve();
-        assert_eq!(cells.len(), 85);
-        assert!(!cells.iter().any(|c| c.id == KeyId::Escape));
-    }
-
-    #[test]
-    fn resolve_modify_patches_position() {
-        static EDITS: &[KeyEdit] = &[KeyEdit::Modify {
-            id: KeyId::Escape,
-            col: Some(9.0),
-            row: None,
-        }];
-        let cells = test_spec(EDITS).resolve();
-        let esc = cells.iter().find(|c| c.id == KeyId::Escape).unwrap();
-        assert_eq!(esc.col, 9.0);
-        assert_eq!(esc.row, 0.0, "row left unchanged when None");
-    }
-
-    #[test]
-    fn resolve_modify_absent_key_is_noop() {
-        // A Modify targeting a key not present in the base silently does nothing.
-        static EDITS: &[KeyEdit] = &[KeyEdit::Modify {
-            id: KeyId::Custom(9999),
-            col: Some(1.0),
-            row: Some(1.0),
-        }];
-        let base_len = StandardLayout::Tkl.cells().len();
-        let cells = test_spec(EDITS).resolve();
-        assert_eq!(
-            cells.len(),
-            base_len,
-            "absent-key Modify must not add a cell"
-        );
-        assert!(
-            !cells.iter().any(|c| c.id == KeyId::Custom(9999)),
-            "absent-key Modify must not inject the key"
-        );
-    }
-
-    #[test]
-    fn resolve_applies_edits_in_order() {
-        static EDITS: &[KeyEdit] = &[
-            KeyEdit::Add(KeyCell::new(KeyId::Custom(1), 0.0, 0.0)),
-            KeyEdit::Modify {
-                id: KeyId::Custom(1),
-                col: Some(5.0),
-                row: Some(6.0),
-            },
-            KeyEdit::Remove(KeyId::F1),
-        ];
-        let cells = test_spec(EDITS).resolve();
-        assert!(!cells.iter().any(|c| c.id == KeyId::F1));
-        let custom = cells.iter().find(|c| c.id == KeyId::Custom(1)).unwrap();
-        assert_eq!((custom.col, custom.row), (5.0, 6.0));
-    }
-
     const ALL_LAYOUTS: [StandardLayout; 4] = [
         StandardLayout::Tkl,
         StandardLayout::TklIso,
@@ -674,7 +468,7 @@ mod tests {
         StandardLayout::FullSizeIso,
     ];
 
-    /// `col` is the left edge, `row` the vertical centre, `w`/`h` the extent.
+    /// `row` is the vertical centre.
     fn rect(c: &KeyCell) -> (f32, f32, f32, f32) {
         (c.col, c.col + c.w, c.row - c.h / 2.0, c.row + c.h / 2.0)
     }

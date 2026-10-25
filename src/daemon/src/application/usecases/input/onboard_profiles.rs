@@ -67,11 +67,8 @@ pub async fn set_onboard_profile_enabled(
 #[cfg(test)]
 mod tests {
     use super::*;
-    use crate::config::Config;
-    use crate::domain::device::{CapabilityRef, Device, OnboardProfilesCapability, VisibilitySlot};
-    use anyhow::Result;
-    use async_trait::async_trait;
-    use std::sync::{Arc, Mutex};
+    use crate::test_support::{app_with, MockDevice};
+    use std::sync::Arc;
 
     #[test]
     fn validate_slot_accepts_valid_slot() {
@@ -83,125 +80,53 @@ mod tests {
         assert!(validate_slot(0).is_err());
     }
 
-    // -- mock --
-
-    #[derive(Default)]
-    struct Calls {
-        switched: Vec<u8>,
-        restored: Vec<u8>,
-        enabled: Vec<(u8, bool)>,
-    }
-
-    struct MockOnboardDevice {
-        id: String,
-        visibility: VisibilitySlot,
-        calls: Mutex<Calls>,
-    }
-
-    impl MockOnboardDevice {
-        fn new(id: &str) -> Arc<Self> {
-            Arc::new(Self {
-                id: id.to_string(),
-                visibility: VisibilitySlot::default(),
-                calls: Mutex::new(Calls::default()),
-            })
-        }
-    }
-
-    #[async_trait]
-    impl Device for MockOnboardDevice {
-        fn id(&self) -> &str {
-            &self.id
-        }
-        fn name(&self) -> &str {
-            &self.id
-        }
-        fn vendor(&self) -> &str {
-            "mock"
-        }
-        fn model(&self) -> &str {
-            "mock"
-        }
-        async fn initialize(&self) -> Result<bool> {
-            Ok(true)
-        }
-        async fn close(&self) {}
-        fn capabilities(&self) -> Vec<CapabilityRef<'_>> {
-            vec![CapabilityRef::OnboardProfiles(self)]
-        }
-        fn visibility_slot(&self) -> Option<&VisibilitySlot> {
-            Some(&self.visibility)
-        }
-    }
-
-    #[async_trait]
-    impl OnboardProfilesCapability for MockOnboardDevice {
-        async fn switch_profile(&self, slot: u8) -> Result<()> {
-            self.calls.lock().unwrap().switched.push(slot);
-            Ok(())
-        }
-        async fn restore_profile(&self, slot: u8) -> Result<()> {
-            self.calls.lock().unwrap().restored.push(slot);
-            Ok(())
-        }
-        async fn set_profile_enabled(&self, slot: u8, enabled: bool) -> Result<()> {
-            self.calls.lock().unwrap().enabled.push((slot, enabled));
-            Ok(())
-        }
-    }
-
-    fn make_app_with_device(device: Arc<dyn Device>) -> Arc<AppState> {
-        let app = Arc::new(AppState::new(Config::default()));
-        app.device_registry.try_write().unwrap().push(device);
-        app
+    fn setup() -> (Arc<MockDevice>, Arc<AppState>) {
+        let dev = Arc::new(MockDevice::new("mouse0").with_onboard());
+        (dev.clone(), app_with(vec![dev]))
     }
 
     // -- handler tests --
 
     #[tokio::test]
     async fn switch_onboard_profile_calls_capability() {
-        let dev = MockOnboardDevice::new("mouse0");
-        let app = make_app_with_device(dev.clone());
+        let (dev, app) = setup();
         switch_onboard_profile("mouse0".into(), 2, app)
             .await
             .unwrap();
-        assert_eq!(dev.calls.lock().unwrap().switched, vec![2]);
+        assert_eq!(dev.calls(), ["switch 2"]);
     }
 
     #[tokio::test]
     async fn switch_onboard_profile_rejects_slot_zero() {
-        let dev = MockOnboardDevice::new("mouse0");
-        let app = make_app_with_device(dev.clone());
+        let (dev, app) = setup();
         let err = switch_onboard_profile("mouse0".into(), 0, app)
             .await
             .unwrap_err();
         assert!(err.to_string().contains("slot"));
-        assert!(dev.calls.lock().unwrap().switched.is_empty());
+        assert!(dev.calls().is_empty());
     }
 
     #[tokio::test]
     async fn restore_onboard_profile_calls_capability() {
-        let dev = MockOnboardDevice::new("mouse0");
-        let app = make_app_with_device(dev.clone());
+        let (dev, app) = setup();
         restore_onboard_profile("mouse0".into(), 3, app)
             .await
             .unwrap();
-        assert_eq!(dev.calls.lock().unwrap().restored, vec![3]);
+        assert_eq!(dev.calls(), ["restore 3"]);
     }
 
     #[tokio::test]
     async fn set_onboard_profile_enabled_calls_capability() {
-        let dev = MockOnboardDevice::new("mouse0");
-        let app = make_app_with_device(dev.clone());
+        let (dev, app) = setup();
         set_onboard_profile_enabled("mouse0".into(), 1, false, app)
             .await
             .unwrap();
-        assert_eq!(dev.calls.lock().unwrap().enabled, vec![(1, false)]);
+        assert_eq!(dev.calls(), ["enable 1 false"]);
     }
 
     #[tokio::test]
     async fn switch_onboard_profile_errors_on_missing_device() {
-        let app = Arc::new(AppState::new(Config::default()));
+        let app = app_with(vec![]);
         let err = switch_onboard_profile("ghost".into(), 1, app)
             .await
             .unwrap_err();

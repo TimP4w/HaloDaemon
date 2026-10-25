@@ -349,7 +349,6 @@ pub fn ingest_frame(ctx: &egui::Context, ui: &mut CanvasUi, frame: &CanvasFrame)
 /// The Effects Canvas tab body: right-hand instance rack + the live canvas
 /// stage. The shared RGB Lighting header (title + transport chrome + tab bar)
 /// is rendered by [`crate::ui::screens::lighting::show`] above this.
-#[allow(clippy::too_many_arguments)] // top-level canvas view dependencies are explicit borrows
 pub(crate) fn body(
     ui: &mut egui::Ui,
     state: &TopicStore,

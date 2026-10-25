@@ -507,6 +507,7 @@ impl LcdEngine {
 mod tests {
     use super::*;
     use crate::config::Config;
+    use crate::test_support::app_with;
 
     #[tokio::test]
     async fn new_engine_has_no_slots() {
@@ -517,15 +518,10 @@ mod tests {
 
     #[tokio::test]
     async fn has_active_content_tracks_template_id() {
-        use crate::domain::device::Device;
         use crate::test_support::MockDevice;
 
-        let app = Arc::new(AppState::new(Config::default()));
         let dev = Arc::new(MockDevice::new("lcd0").with_lcd());
-        app.device_registry
-            .write()
-            .await
-            .push(dev.clone() as Arc<dyn Device>);
+        let app = app_with(vec![dev.clone()]);
 
         let engine = LcdEngine::new(app);
         assert!(!engine.has_active_content().await);
@@ -542,19 +538,14 @@ mod tests {
 
     #[tokio::test]
     async fn offline_device_does_not_keep_engine_active_or_retain_slot() {
-        use crate::domain::device::Device;
         use crate::test_support::MockDevice;
 
-        let app = Arc::new(AppState::new(Config::default()));
         let dev = Arc::new(MockDevice::new("lcd0").with_lcd().offline());
         dev.lcd
             .as_ref()
             .unwrap()
             .set_lcd_template_id(Some("custom".into()));
-        app.device_registry
-            .write()
-            .await
-            .push(dev.clone() as Arc<dyn Device>);
+        let app = app_with(vec![dev.clone()]);
 
         let engine = LcdEngine::new(app);
         engine
@@ -628,16 +619,10 @@ mod tests {
         );
     }
 
-    /// Install every domain engine so usecases that go through them (e.g.
-    /// `load_active_profile`) reach `engine`.
-    async fn install_engines(app: &Arc<AppState>, engine: &Arc<LcdEngine>) {
+    async fn install_engines(app: &Arc<AppState>) -> Arc<LcdEngine> {
         app.lighting
             .set_engine(crate::domain::lighting::engine::RgbEngine::new(Arc::clone(app)).await);
-        app.cooling.set_engine();
-        app.lcd.set_engine(
-            Arc::clone(engine),
-            video::VideoEngine::new(Arc::clone(app), engine.frame_sender()),
-        );
+        crate::test_support::install_lcd_engine(app)
     }
 
     /// App with one LCD MockDevice whose default-profile lcd state is `state`.
@@ -665,8 +650,7 @@ mod tests {
     #[tokio::test]
     async fn load_active_profile_reactivates_restored_template_slot() {
         let (app, dev) = app_with_lcd_state(serde_json::json!({ "template_id": "custom" })).await;
-        let engine = LcdEngine::new(Arc::clone(&app));
-        install_engines(&app, &engine).await;
+        let engine = install_engines(&app).await;
 
         crate::application::usecases::profiles::lifecycle::load_active_profile(Arc::clone(&app))
             .await;
@@ -687,8 +671,7 @@ mod tests {
     #[tokio::test]
     async fn load_active_profile_clears_slot_when_profile_has_no_template() {
         let (app, dev) = app_with_lcd_state(serde_json::json!({ "template_id": null })).await;
-        let engine = LcdEngine::new(Arc::clone(&app));
-        install_engines(&app, &engine).await;
+        let engine = install_engines(&app).await;
 
         // Device currently engine-driven (previous profile).
         dev.lcd
@@ -717,8 +700,7 @@ mod tests {
     #[tokio::test]
     async fn load_active_profile_wakes_a_parked_engine_loop() {
         let (app, _dev) = app_with_lcd_state(serde_json::json!({ "template_id": "custom" })).await;
-        let engine = LcdEngine::new(Arc::clone(&app));
-        install_engines(&app, &engine).await;
+        let engine = install_engines(&app).await;
 
         let mut frames = engine.subscribe();
         crate::application::usecases::registry::runtime::bootstrap(&app).await;
@@ -743,19 +725,14 @@ mod tests {
 
     #[tokio::test]
     async fn tick_removes_slot_when_device_clears_template() {
-        use crate::domain::device::Device;
         use crate::test_support::MockDevice;
 
-        let app = Arc::new(AppState::new(Config::default()));
         let dev = Arc::new(MockDevice::new("lcd1").with_lcd());
         dev.lcd
             .as_ref()
             .unwrap()
             .set_lcd_template_id(Some("custom".into()));
-        app.device_registry
-            .write()
-            .await
-            .push(dev.clone() as Arc<dyn Device>);
+        let app = app_with(vec![dev.clone()]);
 
         let engine = LcdEngine::new(Arc::clone(&app));
 
@@ -778,20 +755,15 @@ mod tests {
 
     #[tokio::test]
     async fn fail_streak_backoff_limits_render_attempts() {
-        use crate::domain::device::Device;
         use crate::test_support::MockDevice;
 
-        let app = Arc::new(AppState::new(Config::default()));
         let dev = Arc::new(MockDevice::new("lcd2").with_lcd());
         // MockDevice.stream_frame returns Err by default (device does not support streaming).
         dev.lcd
             .as_ref()
             .unwrap()
             .set_lcd_template_id(Some("custom".into()));
-        app.device_registry
-            .write()
-            .await
-            .push(dev.clone() as Arc<dyn Device>);
+        let app = app_with(vec![dev.clone()]);
 
         let engine = LcdEngine::new(app);
 
@@ -843,10 +815,8 @@ mod tests {
 
     #[tokio::test]
     async fn latching_device_skips_stream_when_signature_unchanged() {
-        use crate::domain::device::Device;
         use crate::test_support::MockDevice;
 
-        let app = Arc::new(AppState::new(Config::default()));
         let dev = Arc::new(
             MockDevice::new("lcd3")
                 .with_lcd()
@@ -861,10 +831,7 @@ mod tests {
             .as_ref()
             .unwrap()
             .set_lcd_template_params(static_custom_params());
-        app.device_registry
-            .write()
-            .await
-            .push(dev.clone() as Arc<dyn Device>);
+        let app = app_with(vec![dev.clone()]);
 
         let engine = LcdEngine::new(app);
         engine.tick(0.0).await;
@@ -881,10 +848,8 @@ mod tests {
 
     #[tokio::test]
     async fn non_latching_device_renders_every_tick_regardless_of_signature() {
-        use crate::domain::device::Device;
         use crate::test_support::MockDevice;
 
-        let app = Arc::new(AppState::new(Config::default()));
         let dev = Arc::new(MockDevice::new("lcd4").with_lcd().with_lcd_stream_ok());
         dev.lcd
             .as_ref()
@@ -894,10 +859,7 @@ mod tests {
             .as_ref()
             .unwrap()
             .set_lcd_template_params(static_custom_params());
-        app.device_registry
-            .write()
-            .await
-            .push(dev.clone() as Arc<dyn Device>);
+        let app = app_with(vec![dev.clone()]);
 
         let engine = LcdEngine::new(app);
         engine.tick(0.0).await;
@@ -915,10 +877,8 @@ mod tests {
 
     #[tokio::test]
     async fn preview_forced_on_the_tick_a_subscriber_appears() {
-        use crate::domain::device::Device;
         use crate::test_support::MockDevice;
 
-        let app = Arc::new(AppState::new(Config::default()));
         let dev = Arc::new(MockDevice::new("lcd5").with_lcd().with_lcd_stream_ok());
         dev.lcd
             .as_ref()
@@ -928,10 +888,7 @@ mod tests {
             .as_ref()
             .unwrap()
             .set_lcd_template_params(static_custom_params());
-        app.device_registry
-            .write()
-            .await
-            .push(dev.clone() as Arc<dyn Device>);
+        let app = app_with(vec![dev.clone()]);
 
         let engine = LcdEngine::new(app);
         engine.tick(0.0).await;

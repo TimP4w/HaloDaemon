@@ -241,12 +241,11 @@ mod tests {
     use super::*;
     use crate::application::state::AppState;
     use crate::config::Config;
-    use crate::test_support::MockDevice;
-    use async_trait::async_trait;
+    use crate::test_support::{app_with, MockDevice};
 
     #[tokio::test]
     async fn snapshot_marks_matching_serials_as_a_confirmed_conflict() {
-        use crate::domain::registry::identity::{DeviceIdentity, DeviceOrigin, IdentifiedDevice};
+        use crate::domain::registry::identity::{DeviceIdentity, DeviceOrigin};
         let app = Arc::new(AppState::new(Config::default()));
         for (id, origin) in [
             ("builtin", DeviceOrigin::Builtin),
@@ -257,11 +256,11 @@ mod tests {
                 serial: Some("unit-1".into()),
                 ..Default::default()
             };
-            let dev: Arc<dyn Device> = Arc::new(IdentifiedDevice::new(
-                Arc::new(MockDevice::new(id).with_name(id)),
-                identity,
-                origin,
-            ));
+            let dev: Arc<dyn Device> = Arc::new(
+                MockDevice::new(id)
+                    .with_name(id)
+                    .with_identity(identity, origin),
+            );
             app.device_registry.write().await.push(dev);
         }
         let cfg = app.config.read().await.clone();
@@ -278,7 +277,6 @@ mod tests {
 
     #[tokio::test]
     async fn serialize_synthesizes_fan_sensors() {
-        let app = Arc::new(AppState::new(Config::default()));
         let dev: Arc<dyn Device> = Arc::new(
             MockDevice::new("test_device")
                 .with_name("Test Fan")
@@ -286,7 +284,7 @@ mod tests {
                 .with_model("Fan 3000")
                 .with_fan_rpm(1500),
         );
-        app.device_registry.write().await.push(dev);
+        let app = app_with(vec![dev]);
         crate::application::usecases::device::telemetry::observe(&app).await;
         let cfg = app.config.read().await.clone();
         let snap = app.snapshot_devices(&cfg).await;
@@ -303,9 +301,8 @@ mod tests {
     async fn retained_rpm_observation_overlays_cooling_channel() {
         use halod_shared::types::{Sensor, SensorType, SensorUnit};
 
-        let app = Arc::new(AppState::new(Config::default()));
         let dev: Arc<dyn Device> = Arc::new(MockDevice::new("fan").with_fan_rpm(900));
-        app.device_registry.write().await.push(dev);
+        let app = app_with(vec![dev]);
         app.data_bus.replace_host_sensors(vec![(
             "fan".into(),
             Sensor {
@@ -354,9 +351,8 @@ mod tests {
 
     #[tokio::test]
     async fn successfully_applied_duty_overlays_stale_telemetry() {
-        let app = Arc::new(AppState::new(Config::default()));
         let dev: Arc<dyn Device> = Arc::new(MockDevice::new("fan").with_fan_rpm(900));
-        app.device_registry.write().await.push(dev);
+        let app = app_with(vec![dev]);
         crate::application::usecases::device::telemetry::observe(&app).await;
         assert!(app.cooling.record_applied_duty("fan", "default", 100).await);
 
@@ -389,13 +385,7 @@ mod tests {
         let dev: Arc<dyn Device> = Arc::new(
             MockDevice::new("test_device")
                 .with_fan_rpm(1500)
-                .with_sensor(vec![halod_shared::types::Sensor {
-                    id: "temp1".into(),
-                    name: "Liquid".into(),
-                    value: 33.0,
-                    unit: halod_shared::types::SensorUnit::Celsius,
-                    sensor_type: halod_shared::types::SensorType::Temperature,
-                }]),
+                .with_temp("temp1", 33.0),
         );
         app.device_registry.write().await.push(dev);
         let cfg = app.config.read().await.clone();
@@ -433,7 +423,6 @@ mod tests {
 
     #[tokio::test]
     async fn serialize_keeps_device_name_when_no_record() {
-        let app = Arc::new(AppState::new(Config::default()));
         let dev: Arc<dyn Device> = Arc::new(
             MockDevice::new("test_device")
                 .with_name("Test Fan")
@@ -442,7 +431,7 @@ mod tests {
                 .with_fan()
                 .with_rgb(),
         );
-        app.device_registry.write().await.push(dev);
+        let app = app_with(vec![dev]);
         let cfg = app.config.read().await.clone();
         let snap = app.snapshot_devices(&cfg).await;
         assert_eq!(snap.devices[0].name, "Test Fan");
@@ -451,39 +440,6 @@ mod tests {
     #[tokio::test]
     async fn serialize_keeps_device_name_when_device_has_external_name() {
         use crate::domain::registry::model::DeviceRecord;
-        struct ExternalNameDevice {
-            inner: MockDevice,
-        }
-        #[async_trait]
-        impl Device for ExternalNameDevice {
-            fn id(&self) -> &str {
-                self.inner.id()
-            }
-            fn name(&self) -> &str {
-                self.inner.name()
-            }
-            fn vendor(&self) -> &str {
-                self.inner.vendor()
-            }
-            fn model(&self) -> &str {
-                self.inner.model()
-            }
-            fn capabilities(&self) -> Vec<crate::domain::device::CapabilityRef<'_>> {
-                vec![]
-            }
-            fn has_external_name(&self) -> bool {
-                true
-            }
-            async fn initialize(&self) -> anyhow::Result<bool> {
-                Ok(true)
-            }
-            async fn close(&self) {}
-            async fn serialize(&self) -> WireDevice {
-                let mut w = self.inner.serialize().await;
-                w.name = "Chain Link 1".to_string();
-                w
-            }
-        }
         let mut cfg = Config::default();
         cfg.known_devices.insert(
             "chain_dev".to_string(),
@@ -495,12 +451,11 @@ mod tests {
             },
         );
         let app = Arc::new(AppState::new(cfg));
-        let dev: Arc<dyn Device> = Arc::new(ExternalNameDevice {
-            inner: MockDevice::new("chain_dev")
-                .with_name("ARGB Strip")
-                .with_vendor("Generic")
-                .with_model("Chain Link"),
-        });
+        let dev: Arc<dyn Device> = Arc::new(
+            MockDevice::new("chain_dev")
+                .with_name("Chain Link 1")
+                .with_external_name(),
+        );
         app.device_registry.write().await.push(dev);
         let cfg = app.config.read().await.clone();
         let snap = app.snapshot_devices(&cfg).await;
@@ -511,50 +466,16 @@ mod tests {
     async fn overlay_applies_write_rate_status_when_device_reports_it() {
         use halod_shared::types::{WriteRateLimit, WriteRateStatus};
 
-        struct RateReportingDevice {
-            inner: MockDevice,
-        }
-        #[async_trait]
-        impl Device for RateReportingDevice {
-            fn id(&self) -> &str {
-                self.inner.id()
-            }
-            fn name(&self) -> &str {
-                self.inner.name()
-            }
-            fn vendor(&self) -> &str {
-                self.inner.vendor()
-            }
-            fn model(&self) -> &str {
-                self.inner.model()
-            }
-            fn capabilities(&self) -> Vec<crate::domain::device::CapabilityRef<'_>> {
-                vec![]
-            }
-            async fn initialize(&self) -> anyhow::Result<bool> {
-                Ok(true)
-            }
-            async fn close(&self) {}
-            fn write_rate_status(&self) -> Option<WriteRateStatus> {
-                Some(WriteRateStatus {
-                    limit: Some(WriteRateLimit {
-                        max_bytes_per_sec: 42,
-                    }),
-                    current_writes_per_sec: 10.0,
-                    current_bytes_per_sec: 500.0,
-                    rejected_total: 2,
-                })
-            }
-        }
-
-        let app = Arc::new(AppState::new(Config::default()));
-        let dev: Arc<dyn Device> = Arc::new(RateReportingDevice {
-            inner: MockDevice::new("rate_dev")
-                .with_name("Rate Device")
-                .with_vendor("Acme")
-                .with_model("Widget"),
-        });
-        app.device_registry.write().await.push(dev);
+        let app = app_with(vec![Arc::new(MockDevice::new("rate_dev").with_write_rate(
+            WriteRateStatus {
+                limit: Some(WriteRateLimit {
+                    max_bytes_per_sec: 42,
+                }),
+                current_writes_per_sec: 10.0,
+                current_bytes_per_sec: 500.0,
+                rejected_total: 2,
+            },
+        ))]);
         let cfg = app.config.read().await.clone();
         let snap = app.snapshot_devices(&cfg).await;
 
@@ -573,9 +494,8 @@ mod tests {
 
     #[tokio::test]
     async fn write_rate_is_none_when_device_does_not_report_it() {
-        let app = Arc::new(AppState::new(Config::default()));
         let dev: Arc<dyn Device> = Arc::new(MockDevice::new("plain_dev"));
-        app.device_registry.write().await.push(dev);
+        let app = app_with(vec![dev]);
         let cfg = app.config.read().await.clone();
         let snap = app.snapshot_devices(&cfg).await;
         assert!(snap.devices[0].write_rate.is_none());

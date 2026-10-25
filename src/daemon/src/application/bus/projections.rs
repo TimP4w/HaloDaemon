@@ -143,8 +143,7 @@ pub async fn produce(app: &AppState, cfg: &Config, requested: &[Topic]) -> Vec<(
 #[cfg(test)]
 mod tests {
     use super::*;
-    use crate::domain::device::Device;
-    use crate::test_support::MockDevice;
+    use crate::test_support::{app_with, MockDevice};
     use std::sync::Arc;
 
     #[tokio::test]
@@ -157,10 +156,9 @@ mod tests {
 
     #[tokio::test]
     async fn targeted_device_projection_emits_only_that_device() {
-        let app = Arc::new(AppState::new(Config::default()));
-        app.device_registry.write().await.extend([
-            Arc::new(MockDevice::new("first")) as Arc<dyn Device>,
-            Arc::new(MockDevice::new("second")) as Arc<dyn Device>,
+        let app = app_with(vec![
+            Arc::new(MockDevice::new("first")),
+            Arc::new(MockDevice::new("second")),
         ]);
         let records = produce(
             &app,

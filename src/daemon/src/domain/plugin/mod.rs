@@ -8,7 +8,7 @@
 //! only *existing* capability kinds; Halo owns the capability taxonomy.
 //!
 //! Registration is at runtime: `load_all` reads the plugins directory into the
-//! registry snapshot, and `make_device` consults `match_handle` before built-in
+//! registry snapshot, and `make_device` is consulted before built-in
 //! host descriptors, so a plugin shadows a built-in device for the same hardware.
 
 pub(crate) mod engine;
@@ -216,7 +216,7 @@ struct PluginState {
 /// Bound repeated opens from polling discovery scanners. A busy interface is
 /// commonly owned by another daemon; retrying it on every scan otherwise logs
 /// forever and needlessly hammers the device.
-const TRANSPORT_OPEN_ATTEMPTS: u8 = 3;
+const TRANSPORT_OPEN_ATTEMPTS: u32 = 3;
 
 /// Minimum spacing between attempts. Polling scanners re-offer an unregistered
 /// handle every few seconds, which would burn the whole attempt budget before a
@@ -227,11 +227,6 @@ const TRANSPORT_OPEN_BACKOFF: std::time::Duration = std::time::Duration::from_se
 /// Each retry re-applies device state, so the failure it provokes would
 /// otherwise queue the next retry forever.
 const RUNTIME_RECOVERY_ATTEMPTS: u32 = 3;
-
-struct TransportOpenEpisode {
-    attempts: u8,
-    last_attempt: std::time::Instant,
-}
 
 /// The device-plugin registry: every piece of runtime-mutable plugin state the
 /// daemon owns. Held as [`crate::application::state::AppState::registry`] (one per process in
@@ -263,7 +258,7 @@ pub struct Registry {
     /// Failed transport opens in the current plugin-load episode, keyed by the
     /// stable plugin device id. A successful open, plugin reload, or a USB
     /// replug resets it.
-    transport_open_failures: RwLock<HashMap<(String, String), TransportOpenEpisode>>,
+    transport_open_failures: RwLock<HashMap<(String, String), crate::util::backoff::FailureStreak>>,
     content_revision: std::sync::atomic::AtomicU64,
 }
 
@@ -727,21 +722,19 @@ impl Registry {
     fn transport_open_blocked(&self, key: &(String, String)) -> bool {
         read_recover(&self.transport_open_failures)
             .get(key)
-            .is_some_and(|episode| {
-                episode.attempts >= TRANSPORT_OPEN_ATTEMPTS
-                    || episode.last_attempt.elapsed() < TRANSPORT_OPEN_BACKOFF
+            .is_some_and(|streak| {
+                streak.failures() >= TRANSPORT_OPEN_ATTEMPTS
+                    || !streak.elapsed(std::time::Instant::now(), TRANSPORT_OPEN_BACKOFF)
             })
     }
 
-    fn note_transport_open_failure(&self, key: (String, String)) -> u8 {
-        let mut failures = write_recover(&self.transport_open_failures);
-        let episode = failures.entry(key).or_insert(TransportOpenEpisode {
-            attempts: 0,
-            last_attempt: std::time::Instant::now(),
-        });
-        episode.attempts = episode.attempts.saturating_add(1);
-        episode.last_attempt = std::time::Instant::now();
-        episode.attempts
+    fn note_transport_open_failure(&self, key: (String, String)) -> u32 {
+        let now = std::time::Instant::now();
+        write_recover(&self.transport_open_failures)
+            .entry(key)
+            .and_modify(|streak| streak.record(now))
+            .or_insert_with(|| crate::util::backoff::FailureStreak::first(now))
+            .failures()
     }
 
     fn is_disabled(&self, plugin_id: &str) -> bool {
@@ -1315,7 +1308,7 @@ impl Registry {
     /// Every enabled, permission-satisfied `Integration` plugin, for the
     /// integration `TransportScanner` (`integration_scan.rs`) — it has no
     /// `DiscoveryHandle` to match against, so it iterates these directly instead
-    /// of going through `match_handle`.
+    /// of going through `make_device`.
     pub(super) fn integration_manifests(&self) -> Vec<PluginManifest> {
         let state = self.snapshot();
         state
@@ -2251,20 +2244,6 @@ fn device_id(
 }
 
 impl Registry {
-    /// Build the plugin device matching `handle`.
-    pub fn make_device(
-        &self,
-        app: &Arc<crate::application::state::AppState>,
-        handle: DiscoveryHandle<'_>,
-    ) -> Option<Arc<dyn Device>> {
-        let identity = crate::domain::registry::identity::identity_from_handle(&handle);
-        let device = self.match_handle(app, &handle)?;
-        let origin = device.conflict_origin();
-        Some(Arc::new(
-            crate::domain::registry::identity::IdentifiedDevice::new(device, identity, origin),
-        ))
-    }
-
     /// Build a device from a matched manifest, the spec that matched, and the
     /// handle. Device-only plugins need no runtime/transport; capability plugins
     /// open their transport and spawn a worker. Returns `None` if the transport
@@ -2284,14 +2263,18 @@ impl Registry {
         }
         let notify = Arc::downgrade(app);
         if !manifest.needs_worker() {
-            return Some(Arc::new(LuaDevice::new(LuaDeviceParts {
+            let device = LuaDevice::new(LuaDeviceParts {
                 id,
                 manifest,
                 spec: Some(spec),
                 notify,
                 runtime: None,
                 worker: LuaDeviceWorker::None,
-            })));
+            });
+            device.set_identity(crate::domain::registry::identity::identity_from_handle(
+                handle,
+            ));
+            return Some(Arc::new(device));
         }
         let Ok(runtime) = tokio::runtime::Handle::try_current() else {
             log::warn!(
@@ -2409,12 +2392,15 @@ impl Registry {
             let host = crate::domain::device::chain::LightingDivisionHost::new(adapter);
             device.install_chain_host(host);
         }
+        device.set_identity(crate::domain::registry::identity::identity_from_handle(
+            handle,
+        ));
         Some(device as Arc<dyn Device>)
     }
 
-    /// Match a discovery handle against every loaded plugin. Consulted by
-    /// [`Registry::make_device`] before the native descriptors so a plugin shadows native.
-    pub fn match_handle(
+    /// Build the plugin device matching `handle`, consulted before native
+    /// descriptors so a plugin shadows native.
+    pub fn make_device(
         &self,
         app: &Arc<crate::application::state::AppState>,
         handle: &DiscoveryHandle<'_>,

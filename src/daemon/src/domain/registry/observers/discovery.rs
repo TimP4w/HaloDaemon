@@ -266,7 +266,7 @@ pub async fn discover_handle(
     if scoped && !app.handle_in_scope(&handle).await {
         return;
     }
-    if let Some(device) = app.registry.make_device(app, handle) {
+    if let Some(device) = app.registry.make_device(app, &handle) {
         crate::application::usecases::registry::registration::register_device_and_children(
             app, device,
         )
@@ -377,7 +377,7 @@ mod tests {
         let app = Arc::new(crate::application::state::AppState::new(
             crate::config::Config::default(),
         ));
-        assert!(app.registry.make_device(&app, handle).is_none());
+        assert!(app.registry.make_device(&app, &handle).is_none());
     }
 
     fn hid_handle(vid: u16, pid: u16) -> DiscoveryHandle<'static> {

@@ -1,22 +1,14 @@
 // SPDX-License-Identifier: GPL-3.0-or-later
 use halod_shared::types::FanCurveStatus;
 use std::collections::HashMap;
-use std::sync::OnceLock;
 use tokio::sync::Mutex;
 
-struct Engine;
-
-/// The fan-curve engine handle plus its runtime config/failsafe channels and
-/// the per-fan status cache the serializer reads. The engine is set once at
-/// startup; `statuses` lives outside the `OnceLock` since the engine writes
-/// it continuously once running.
 pub struct CoolingEngineState {
     /// Per-fan curve status written by the engine, read by the serializer.
     pub statuses: Mutex<HashMap<String, FanCurveStatus>>,
     /// Last duty command successfully accepted by each device channel. This is
     /// effective commanded state; RPM remains independently observed telemetry.
     pub applied_duties: Mutex<HashMap<String, u8>>,
-    engine: OnceLock<Engine>,
 }
 
 impl CoolingEngineState {
@@ -24,12 +16,7 @@ impl CoolingEngineState {
         Self {
             statuses: Mutex::new(HashMap::new()),
             applied_duties: Mutex::new(HashMap::new()),
-            engine: OnceLock::new(),
         }
-    }
-
-    pub fn set_engine(&self) {
-        let _ = self.engine.set(Engine);
     }
 
     pub async fn record_applied_duty(&self, device_id: &str, channel_id: &str, duty: u8) -> bool {

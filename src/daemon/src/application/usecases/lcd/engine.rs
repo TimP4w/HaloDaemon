@@ -87,108 +87,19 @@ pub async fn deactivate(device_id: String, app: Arc<AppState>) -> Result<()> {
 mod tests {
     use super::*;
     use crate::application::state::AppState;
-    use crate::config::Config;
-    use crate::domain::device::{CapabilityRef, LcdCapability, LcdStateSlot};
-    use async_trait::async_trait;
-    use halod_shared::types::{LcdDescriptor, LcdMode, LcdStatus, ScreenShape};
+    use crate::domain::device::LcdCapability;
+    use crate::test_support::{app_with, install_lcd_engine, MockDevice};
+    use halod_shared::types::LcdMode;
     use std::sync::Arc;
 
-    struct MockLcdDevice {
-        id: String,
-        lcd: LcdStateSlot,
-    }
-
-    impl MockLcdDevice {
-        fn new(id: &str) -> Arc<Self> {
-            Arc::new(Self {
-                id: id.to_string(),
-                lcd: LcdStateSlot::default(),
-            })
-        }
-    }
-
-    #[async_trait]
-    impl crate::domain::device::Device for MockLcdDevice {
-        fn id(&self) -> &str {
-            &self.id
-        }
-        fn name(&self) -> &str {
-            "mock"
-        }
-        fn vendor(&self) -> &str {
-            "mock"
-        }
-        fn model(&self) -> &str {
-            "mock"
-        }
-        async fn initialize(&self) -> anyhow::Result<bool> {
-            Ok(true)
-        }
-        async fn close(&self) {}
-        fn capabilities(&self) -> Vec<CapabilityRef<'_>> {
-            vec![CapabilityRef::Lcd(self)]
-        }
-    }
-
-    fn mock_lcd_descriptor() -> LcdDescriptor {
-        LcdDescriptor {
-            shape: ScreenShape::Circle,
-            width: 0,
-            height: 0,
-            supported_rotations: vec![],
-            supported_image_types: vec![],
-            latches_last_frame: false,
-        }
-    }
-
-    #[async_trait]
-    impl LcdCapability for MockLcdDevice {
-        fn lcd_descriptor(&self) -> LcdDescriptor {
-            mock_lcd_descriptor()
-        }
-        fn current_state(&self) -> LcdStatus {
-            LcdStatus {
-                descriptor: mock_lcd_descriptor(),
-                brightness: 50,
-                rotation: halod_shared::types::ScreenRotation::R0,
-                mode: LcdMode::Image,
-                active_image: None,
-                raw_streaming: false,
-                video_path: None,
-                health: Default::default(),
-            }
-        }
-        async fn set_image(&self, _data: &[u8]) -> anyhow::Result<()> {
-            Ok(())
-        }
-        async fn set_rotation(&self, _degrees: u32) -> anyhow::Result<()> {
-            Ok(())
-        }
-        async fn set_brightness(&self, _brightness: u8) -> anyhow::Result<()> {
-            Ok(())
-        }
-        async fn reset_to_default(&self) -> anyhow::Result<()> {
-            Ok(())
-        }
-        async fn set_active_image_filename(&self, _filename: Option<String>) {}
-        fn lcd_state(&self) -> &LcdStateSlot {
-            &self.lcd
-        }
-    }
-
-    fn make_app(device: Arc<MockLcdDevice>) -> Arc<AppState> {
-        let app = Arc::new(AppState::new(Config::default()));
-        app.device_registry
-            .try_write()
-            .unwrap()
-            .push(device as Arc<dyn crate::domain::device::Device>);
-        app
+    fn setup() -> (Arc<MockDevice>, Arc<AppState>) {
+        let dev = Arc::new(MockDevice::new("dev0").with_lcd());
+        (dev.clone(), app_with(vec![dev]))
     }
 
     #[tokio::test]
     async fn set_template_errors_on_unknown_template() {
-        let dev = MockLcdDevice::new("dev0");
-        let app = make_app(dev);
+        let (_, app) = setup();
         let err = set_template(
             "dev0".into(),
             "not_a_real_template".into(),
@@ -202,7 +113,7 @@ mod tests {
 
     #[tokio::test]
     async fn set_template_errors_on_missing_device() {
-        let app = Arc::new(AppState::new(Config::default()));
+        let app = app_with(vec![]);
         let err = set_template("ghost".into(), "custom".into(), HashMap::new(), app)
             .await
             .unwrap_err();
@@ -211,49 +122,39 @@ mod tests {
 
     #[tokio::test]
     async fn set_template_stores_template_id_in_slot() {
-        let dev = MockLcdDevice::new("dev0");
-        let app = make_app(dev.clone());
+        let (dev, app) = setup();
         set_template("dev0".into(), "custom".into(), HashMap::new(), app)
             .await
             .unwrap();
-        assert_eq!(dev.lcd.lcd_template_id().as_deref(), Some("custom"));
+        assert_eq!(dev.lcd_state().lcd_template_id().as_deref(), Some("custom"));
     }
 
     #[tokio::test]
     async fn set_template_keeps_template_active_when_engine_is_installed() {
-        let dev = MockLcdDevice::new("dev0");
-        let app = make_app(dev.clone());
-        let engine = LcdEngine::new(Arc::clone(&app));
-        app.lcd.set_engine(
-            Arc::clone(&engine),
-            crate::domain::lcd::engine::video::VideoEngine::new(
-                Arc::clone(&app),
-                engine.frame_sender(),
-            ),
-        );
+        let (dev, app) = setup();
+        let engine = install_lcd_engine(&app);
 
         set_template("dev0".into(), "custom".into(), HashMap::new(), app)
             .await
             .unwrap();
 
-        assert_eq!(dev.lcd.mode(), LcdMode::Engine);
-        assert_eq!(dev.lcd.lcd_template_id().as_deref(), Some("custom"));
+        assert_eq!(dev.lcd_state().mode(), LcdMode::Engine);
+        assert_eq!(dev.lcd_state().lcd_template_id().as_deref(), Some("custom"));
         assert!(engine.has_slot("dev0").await);
     }
 
     #[tokio::test]
     async fn deactivate_clears_template_id_in_slot() {
-        let dev = MockLcdDevice::new("dev0");
-        let app = make_app(dev.clone());
-        dev.lcd
+        let (dev, app) = setup();
+        dev.lcd_state()
             .set_lcd_template_id(Some("system_stats".to_string()));
         deactivate("dev0".into(), app).await.unwrap();
-        assert!(dev.lcd.lcd_template_id().is_none());
+        assert!(dev.lcd_state().lcd_template_id().is_none());
     }
 
     #[tokio::test]
     async fn deactivate_errors_on_missing_device() {
-        let app = Arc::new(AppState::new(Config::default()));
+        let app = app_with(vec![]);
         let err = deactivate("ghost".into(), app).await.unwrap_err();
         assert!(err.to_string().contains("ghost"));
     }

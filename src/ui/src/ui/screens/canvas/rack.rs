@@ -357,7 +357,6 @@ fn default_effect_card(
 
 /// One instance card: swatch, name, effect + assigned-zone count; expands to an
 /// effect picker, param sliders, per-zone assignment chips, and delete.
-#[allow(clippy::too_many_arguments)]
 fn instance_row(
     ui: &mut egui::Ui,
     state: &TopicStore,

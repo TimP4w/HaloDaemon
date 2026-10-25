@@ -1,11 +1,6 @@
-//! Single source of truth for capability state keys — the top-level keys under
-//! which a capability persists into a profile's `device_states`. The daemon
-//! returns these from `Capability::state_key()` and the UI uses them for
-//! override badges; both reference the constants here so they can't drift.
+//! Top-level keys under which a capability persists into a profile's `device_states`.
 
-/// Every capability's state key. Adding a capability means adding its constant
-/// here; the GUI translates each key to a human label (`capability_label`), so
-/// no English lives in this crate.
+/// The GUI translates each key via `capability_label`; no English lives here.
 pub const CAPABILITIES: &[&str] = &[
     RGB, DPI, FAN_CURVE, LCD, KEY_REMAP, EQUALIZER, CHOICE, RANGE, BOOLEAN,
 ];

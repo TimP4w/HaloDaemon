@@ -149,24 +149,14 @@ pub async fn set_channel_visibility(
 #[cfg(test)]
 mod tests {
     use super::*;
-    use crate::config::Config;
-    use crate::test_support::MockDevice;
+    use crate::test_support::{app_with, MockDevice};
     use halod_shared::types::VisibilityState;
     use std::sync::Arc;
 
-    fn make_app() -> Arc<AppState> {
-        Arc::new(AppState::new(Config::default()))
-    }
-
-    fn push_device(app: &Arc<AppState>, device: Arc<dyn crate::domain::device::Device>) {
-        app.device_registry.try_write().unwrap().push(device);
-    }
-
     #[tokio::test]
     async fn set_device_visibility_to_hidden_updates_config_record() {
-        let app = make_app();
         let device = Arc::new(MockDevice::new("dev1").with_rgb().with_fan());
-        push_device(&app, device.clone());
+        let app = app_with(vec![device.clone()]);
 
         set_device_visibility("dev1".into(), VisibilityState::Hidden, app.clone())
             .await
@@ -179,7 +169,6 @@ mod tests {
 
     #[tokio::test]
     async fn set_device_visibility_to_hidden_clears_engine_slots() {
-        let app = make_app();
         let device = Arc::new(MockDevice::new("dev1").with_rgb().with_fan());
         if let Some(cooling) = (device.as_ref() as &dyn crate::domain::device::Device).as_cooling()
         {
@@ -191,7 +180,7 @@ mod tests {
                 },
             );
         }
-        push_device(&app, device.clone());
+        let app = app_with(vec![device.clone()]);
 
         set_device_visibility("dev1".into(), VisibilityState::Hidden, app.clone())
             .await
@@ -206,7 +195,6 @@ mod tests {
         // if a Hidden transition ran) but the config record still reads Visible
         // (as if the process died before the save completed). A later action
         // on the device must not panic, and re-registering it must work.
-        let app = make_app();
         let device = Arc::new(MockDevice::new("dev1").with_rgb().with_fan());
         device.fan.as_ref().unwrap().set_curve(
             "default".to_string(),
@@ -215,7 +203,7 @@ mod tests {
                 points: vec![(30.0, 50.0), (80.0, 100.0)],
             },
         );
-        push_device(&app, device.clone());
+        let app = app_with(vec![device.clone()]);
         crate::application::usecases::registry::registration::clear_engine_slots(
             &(device.clone() as Arc<dyn crate::domain::device::Device>),
         );
@@ -243,7 +231,7 @@ mod tests {
 
     #[tokio::test]
     async fn set_device_visibility_for_unknown_device_still_writes_config() {
-        let app = make_app();
+        let app = app_with(vec![]);
 
         set_device_visibility("ghost".into(), VisibilityState::Hidden, app.clone())
             .await

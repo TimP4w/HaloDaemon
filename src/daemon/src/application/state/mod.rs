@@ -193,10 +193,7 @@ impl crate::domain::events::ChangeSink for AppState {
 mod tests {
     use super::*;
     use crate::config::Config;
-
-    fn make_test_app() -> AppState {
-        AppState::new(Config::default())
-    }
+    use crate::test_support::app_with;
 
     #[test]
     fn retained_record_commits_are_scoped_to_usecases() {
@@ -236,37 +233,13 @@ mod tests {
 
     #[tokio::test]
     async fn sensor_bus_collects_sensors_from_all_devices() {
-        let app = make_test_app();
         let dev1 = std::sync::Arc::new(
-            crate::test_support::MockDevice::new("sensor_dev_1").with_sensor(vec![
-                halod_shared::types::Sensor {
-                    id: "temp1".into(),
-                    name: "CPU Temp".into(),
-                    value: 45.5,
-                    unit: halod_shared::types::SensorUnit::Celsius,
-                    sensor_type: halod_shared::types::SensorType::Temperature,
-                },
-            ]),
+            crate::test_support::MockDevice::new("sensor_dev_1").with_temp("temp1", 45.5),
         );
         let dev2 = std::sync::Arc::new(
-            crate::test_support::MockDevice::new("sensor_dev_2").with_sensor(vec![
-                halod_shared::types::Sensor {
-                    id: "temp2".into(),
-                    name: "GPU Temp".into(),
-                    value: 62.0,
-                    unit: halod_shared::types::SensorUnit::Celsius,
-                    sensor_type: halod_shared::types::SensorType::Temperature,
-                },
-            ]),
+            crate::test_support::MockDevice::new("sensor_dev_2").with_temp("temp2", 62.0),
         );
-        app.device_registry
-            .write()
-            .await
-            .push(dev1 as std::sync::Arc<dyn crate::domain::device::Device>);
-        app.device_registry
-            .write()
-            .await
-            .push(dev2 as std::sync::Arc<dyn crate::domain::device::Device>);
+        let app = app_with(vec![dev1, dev2]);
 
         crate::application::usecases::device::telemetry::observe(&app).await;
         let snapshot = app.data_bus.sensors();
@@ -291,13 +264,7 @@ mod tests {
         let dev = std::sync::Arc::new(
             crate::test_support::MockDevice::new("disabled_dev")
                 .with_fan_rpm(900)
-                .with_sensor(vec![halod_shared::types::Sensor {
-                    id: "temp1".into(),
-                    name: "CPU Temp".into(),
-                    value: 45.5,
-                    unit: halod_shared::types::SensorUnit::Celsius,
-                    sensor_type: halod_shared::types::SensorType::Temperature,
-                }]),
+                .with_temp("temp1", 45.5),
         );
         app.device_registry
             .write()
@@ -313,19 +280,10 @@ mod tests {
     async fn sensor_bus_invalidates_a_failed_producer() {
         use std::sync::atomic::Ordering;
 
-        let app = make_test_app();
         let device = std::sync::Arc::new(
-            crate::test_support::MockDevice::new("sensor_dev").with_sensor(vec![
-                halod_shared::types::Sensor {
-                    id: "temp1".into(),
-                    name: "CPU Temp".into(),
-                    value: 45.5,
-                    unit: halod_shared::types::SensorUnit::Celsius,
-                    sensor_type: halod_shared::types::SensorType::Temperature,
-                },
-            ]),
+            crate::test_support::MockDevice::new("sensor_dev").with_temp("temp1", 45.5),
         );
-        app.device_registry.write().await.push(device.clone());
+        let app = app_with(vec![device.clone()]);
         crate::application::usecases::device::telemetry::observe(&app).await;
         assert!(app.data_bus.sensors().contains_key("temp1"));
 
@@ -342,12 +300,8 @@ mod tests {
 
     #[tokio::test]
     async fn sensor_bus_skips_devices_without_sensor_capability() {
-        let app = make_test_app();
         let dev = std::sync::Arc::new(crate::test_support::MockDevice::new("no_sensor").with_rgb());
-        app.device_registry
-            .write()
-            .await
-            .push(dev as std::sync::Arc<dyn crate::domain::device::Device>);
+        let app = app_with(vec![dev]);
 
         crate::application::usecases::device::telemetry::observe(&app).await;
         let snapshot = app.data_bus.sensors();
@@ -356,13 +310,9 @@ mod tests {
 
     #[tokio::test]
     async fn sensor_bus_includes_synthesized_fan_readings() {
-        let app = make_test_app();
         let dev =
             std::sync::Arc::new(crate::test_support::MockDevice::new("fan0").with_fan_rpm(900));
-        app.device_registry
-            .write()
-            .await
-            .push(dev as std::sync::Arc<dyn crate::domain::device::Device>);
+        let app = app_with(vec![dev]);
 
         crate::application::usecases::device::telemetry::observe(&app).await;
         let snapshot = app.data_bus.sensors();
@@ -375,24 +325,15 @@ mod tests {
 
     #[tokio::test]
     async fn get_active_devices_filters_by_visibility_state() {
-        let app = make_test_app();
-
         let visible_dev = std::sync::Arc::new(crate::test_support::MockDevice::new("visible_dev"));
         let hidden_dev = std::sync::Arc::new(crate::test_support::MockDevice::new("hidden_dev"));
         let unknown_dev = std::sync::Arc::new(crate::test_support::MockDevice::new("unknown_dev"));
 
-        app.device_registry
-            .write()
-            .await
-            .push(visible_dev.clone() as std::sync::Arc<dyn crate::domain::device::Device>);
-        app.device_registry
-            .write()
-            .await
-            .push(hidden_dev.clone() as std::sync::Arc<dyn crate::domain::device::Device>);
-        app.device_registry
-            .write()
-            .await
-            .push(unknown_dev.clone() as std::sync::Arc<dyn crate::domain::device::Device>);
+        let app = app_with(vec![
+            visible_dev.clone(),
+            hidden_dev.clone(),
+            unknown_dev.clone(),
+        ]);
 
         // Set up known_devices: visible_dev is Visible, hidden_dev is Hidden,
         // unknown_dev is absent (falls through to unwrap_or(true)).
@@ -530,7 +471,7 @@ mod tests {
     #[tokio::test]
     async fn handle_in_scope_defaults_open_and_honours_the_filter() {
         use crate::domain::registry::observers::discovery::{DiscoveryFilter, DiscoveryHandle};
-        let app = make_test_app();
+        let app = app_with(vec![]);
         let handle = DiscoveryHandle::Hid {
             vid: 1,
             pid: 2,

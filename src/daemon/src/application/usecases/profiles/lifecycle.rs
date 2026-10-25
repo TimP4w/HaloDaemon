@@ -269,15 +269,11 @@ pub async fn set_lighting_targets(
 #[cfg(test)]
 mod tests {
     use super::*;
-    use crate::config::Config;
-
-    fn make_app() -> Arc<AppState> {
-        Arc::new(AppState::new(Config::default()))
-    }
+    use crate::test_support::{app_with, install_lcd_engine, MockDevice};
 
     #[tokio::test]
     async fn set_lighting_targets_saves_into_active_profile_only() {
-        let app = make_app();
+        let app = app_with(vec![]);
         add_profile("Gaming".into(), app.clone()).await.unwrap();
         set_lighting_targets(
             vec!["dev1".into()],
@@ -300,14 +296,14 @@ mod tests {
 
     #[tokio::test]
     async fn switch_profile_fails_on_unknown() {
-        let app = make_app();
+        let app = app_with(vec![]);
         let err = switch_profile("ghost".into(), app).await.unwrap_err();
         assert!(err.to_string().contains("not found"));
     }
 
     #[tokio::test]
     async fn add_profile_creates_and_activates() {
-        let app = make_app();
+        let app = app_with(vec![]);
         add_profile("Gaming".into(), app.clone()).await.unwrap();
         let cfg = app.config.read().await;
         assert!(cfg.profiles.contains_key("Gaming"));
@@ -316,7 +312,7 @@ mod tests {
 
     #[tokio::test]
     async fn add_profile_rejects_duplicate() {
-        let app = make_app();
+        let app = app_with(vec![]);
         add_profile("Gaming".into(), app.clone()).await.unwrap();
         let err = add_profile("Gaming".into(), app).await.unwrap_err();
         assert!(err.to_string().contains("already exists"));
@@ -324,21 +320,21 @@ mod tests {
 
     #[tokio::test]
     async fn add_profile_rejects_empty_name() {
-        let app = make_app();
+        let app = app_with(vec![]);
         let err = add_profile("".into(), app).await.unwrap_err();
         assert!(err.to_string().contains("empty"));
     }
 
     #[tokio::test]
     async fn remove_profile_rejects_default() {
-        let app = make_app();
+        let app = app_with(vec![]);
         let err = remove_profile("default".into(), app).await.unwrap_err();
         assert!(err.to_string().contains("default"));
     }
 
     #[tokio::test]
     async fn remove_profile_switches_to_default_when_active() {
-        let app = make_app();
+        let app = app_with(vec![]);
         add_profile("Gaming".into(), app.clone()).await.unwrap();
         remove_profile("Gaming".into(), app.clone()).await.unwrap();
         let cfg = app.config.read().await;
@@ -348,7 +344,7 @@ mod tests {
 
     #[tokio::test]
     async fn rename_profile_rejects_default() {
-        let app = make_app();
+        let app = app_with(vec![]);
         let err = rename_profile("default".into(), "x".into(), app)
             .await
             .unwrap_err();
@@ -357,7 +353,7 @@ mod tests {
 
     #[tokio::test]
     async fn rename_profile_updates_active() {
-        let app = make_app();
+        let app = app_with(vec![]);
         add_profile("Gaming".into(), app.clone()).await.unwrap();
         rename_profile("Gaming".into(), "Performance".into(), app.clone())
             .await
@@ -370,7 +366,7 @@ mod tests {
 
     #[tokio::test]
     async fn switch_profile_changes_active() {
-        let app = make_app();
+        let app = app_with(vec![]);
         add_profile("Silent".into(), app.clone()).await.unwrap();
         switch_profile("default".into(), app.clone()).await.unwrap();
         let cfg = app.config.read().await;
@@ -379,7 +375,7 @@ mod tests {
 
     #[tokio::test]
     async fn switch_profile_direct_changes_active_without_saving() {
-        let app = make_app();
+        let app = app_with(vec![]);
         add_profile("Gaming".into(), app.clone()).await.unwrap();
         assert_eq!(app.config.read().await.active_profile, "Gaming");
         crate::application::usecases::profiles::lifecycle::switch_profile_direct(
@@ -403,14 +399,14 @@ mod tests {
 
     #[tokio::test]
     async fn switch_profile_direct_skips_unknown_profile() {
-        let app = make_app();
+        let app = app_with(vec![]);
         switch_profile_direct("nonexistent".into(), app.clone()).await;
         assert_eq!(app.config.read().await.active_profile, DEFAULT_PROFILE_NAME);
     }
 
     #[tokio::test]
     async fn load_reads_effective_merged_state() {
-        let app = make_app();
+        let app = app_with(vec![]);
         {
             let mut cfg = app.config.write().await;
             cfg.profiles
@@ -436,21 +432,9 @@ mod tests {
 
     #[tokio::test]
     async fn load_active_profile_reactivates_saved_lcd_template() {
-        use crate::domain::device::Device;
-        use crate::domain::lcd::engine::LcdEngine;
-        use crate::test_support::MockDevice;
-
-        let app = make_app();
         let dev = Arc::new(MockDevice::new("lcd0").with_lcd());
-        app.device_registry
-            .write()
-            .await
-            .push(dev.clone() as Arc<dyn Device>);
-
-        let engine = LcdEngine::new(app.clone());
-        let (frame_tx, _) = tokio::sync::broadcast::channel(2);
-        let video = crate::domain::lcd::engine::video::VideoEngine::new(app.clone(), frame_tx);
-        app.lcd.set_engine(engine, video);
+        let app = app_with(vec![dev.clone()]);
+        install_lcd_engine(&app);
 
         // Saved state carries a template id, as `load_state` would restore it.
         app.config
@@ -473,21 +457,9 @@ mod tests {
 
     #[tokio::test]
     async fn load_active_profile_template_survives_remove_and_readd_cycle() {
-        use crate::domain::device::Device;
-        use crate::domain::lcd::engine::LcdEngine;
-        use crate::test_support::MockDevice;
-
-        let app = make_app();
         let dev = Arc::new(MockDevice::new("lcd0").with_lcd());
-        app.device_registry
-            .write()
-            .await
-            .push(dev.clone() as Arc<dyn Device>);
-
-        let engine = LcdEngine::new(app.clone());
-        let (frame_tx, _) = tokio::sync::broadcast::channel(2);
-        let video = crate::domain::lcd::engine::video::VideoEngine::new(app.clone(), frame_tx);
-        app.lcd.set_engine(engine, video);
+        let app = app_with(vec![dev.clone()]);
+        install_lcd_engine(&app);
 
         app.config
             .write()
@@ -521,21 +493,9 @@ mod tests {
 
     #[tokio::test]
     async fn load_active_profile_clears_missing_lcd_video_path() {
-        use crate::domain::device::Device;
-        use crate::domain::lcd::engine::LcdEngine;
-        use crate::test_support::MockDevice;
-
-        let app = make_app();
         let dev = Arc::new(MockDevice::new("lcd0").with_lcd());
-        app.device_registry
-            .write()
-            .await
-            .push(dev.clone() as Arc<dyn Device>);
-
-        let engine = LcdEngine::new(app.clone());
-        let (frame_tx, _) = tokio::sync::broadcast::channel(2);
-        let video = crate::domain::lcd::engine::video::VideoEngine::new(app.clone(), frame_tx);
-        app.lcd.set_engine(engine, video);
+        let app = app_with(vec![dev.clone()]);
+        install_lcd_engine(&app);
 
         app.config
             .write()
@@ -564,21 +524,9 @@ mod tests {
 
     #[tokio::test]
     async fn load_active_profile_keeps_existing_lcd_video_path() {
-        use crate::domain::device::Device;
-        use crate::domain::lcd::engine::LcdEngine;
-        use crate::test_support::MockDevice;
-
-        let app = make_app();
         let dev = Arc::new(MockDevice::new("lcd0").with_lcd());
-        app.device_registry
-            .write()
-            .await
-            .push(dev.clone() as Arc<dyn Device>);
-
-        let engine = LcdEngine::new(app.clone());
-        let (frame_tx, _) = tokio::sync::broadcast::channel(2);
-        let video = crate::domain::lcd::engine::video::VideoEngine::new(app.clone(), frame_tx);
-        app.lcd.set_engine(engine, video);
+        let app = app_with(vec![dev.clone()]);
+        install_lcd_engine(&app);
 
         // A real, existing file: playback may fail (ffmpeg absent in CI) but the
         // path must not be treated as stale and cleared.
@@ -607,7 +555,7 @@ mod tests {
 
     #[tokio::test]
     async fn add_profile_creates_empty_profile() {
-        let app = make_app();
+        let app = app_with(vec![]);
         {
             let mut cfg = app.config.write().await;
             cfg.profiles

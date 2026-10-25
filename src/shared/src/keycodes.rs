@@ -1,8 +1,4 @@
-//! Keyboard key table shared by the GUI (recording/labels) and the daemon
-//! (injection pin tests). `name` matches `egui::Key::name()` so the GUI can
-//! look entries up directly from input events without an egui dependency
-//! here; `linux` is the evdev key code, `windows` the virtual-key code —
-//! the same platform-native `u32` convention as `MacroAtom`/`KeyChord`.
+//! `name` matches `egui::Key::name()`; `linux` is the evdev code, `windows` the virtual-key code.
 
 pub struct KeyDef {
     pub name: &'static str,
@@ -121,13 +117,11 @@ fn platform_code(def: &KeyDef) -> u32 {
     def.linux
 }
 
-/// Key code for `name` on the running platform.
 pub fn native_code(name: &str) -> Option<u32> {
     by_name(name).map(platform_code)
 }
 
-/// Display name for a platform-native key code; hex fallback for codes
-/// outside the table (e.g. hand-authored configs).
+/// Hex fallback for codes outside the table (e.g. hand-authored configs).
 pub fn label(code: u32) -> String {
     KEYS.iter()
         .find(|k| platform_code(k) == code)

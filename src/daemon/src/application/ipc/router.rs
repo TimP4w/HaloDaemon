@@ -6,7 +6,7 @@ use std::sync::Arc;
 use std::time::Duration;
 use tokio::sync::broadcast::error::RecvError;
 
-use super::{ClientHandle, LeaseState, SubscriptionTopic};
+use super::{ClientHandle, LeaseState};
 use crate::application::state::AppState;
 use crate::domain::profiles;
 
@@ -728,23 +728,13 @@ async fn dispatch(
             .await
         }
 
-        DaemonCommand::SetScreenImage {
-            id,
-            data_b64,
-            request_id,
-        } => {
-            crate::application::usecases::lcd::controls::set_screen_image(
-                id, data_b64, request_id, app, client,
-            )
-            .await
+        DaemonCommand::SetScreenImage { id, data_b64 } => {
+            crate::application::usecases::lcd::controls::set_screen_image(id, data_b64, app, client)
+                .await
         }
-        DaemonCommand::SetScreenImageFromLibrary {
-            id,
-            filename,
-            request_id,
-        } => {
+        DaemonCommand::SetScreenImageFromLibrary { id, filename } => {
             crate::application::usecases::lcd::controls::set_screen_image_from_library(
-                id, filename, request_id, app, client,
+                id, filename, app, client,
             )
             .await
         }
@@ -873,7 +863,7 @@ async fn dispatch(
                     |a| a.lighting.engine().map(|e| e.subscribe()),
                     "canvas_frame",
                 ));
-                client.track_subscription(SubscriptionTopic::Canvas, task);
+                client.track_subscription(task);
             }
             Ok(())
         }
@@ -898,7 +888,7 @@ async fn dispatch(
             client.touch_lcd_preview();
             if client.try_subscribe_lcd() {
                 let task = tokio::spawn(lcd_preview_forward_loop(app, client.clone()));
-                client.track_subscription(SubscriptionTopic::Lcd, task);
+                client.track_subscription(task);
             }
             Ok(())
         }
@@ -1190,14 +1180,8 @@ mod tests {
 
     /// Test helper: `AppState` with a live `LcdEngine`.
     fn app_with_lcd_engine() -> (Arc<AppState>, Arc<crate::domain::lcd::engine::LcdEngine>) {
-        use crate::domain::lcd::engine::{video::VideoEngine, LcdEngine};
-
         let app = Arc::new(AppState::new(Config::default()));
-        let engine = LcdEngine::new(Arc::clone(&app));
-        app.lcd.set_engine(
-            Arc::clone(&engine),
-            VideoEngine::new(Arc::clone(&app), engine.frame_sender()),
-        );
+        let engine = crate::test_support::install_lcd_engine(&app);
         let _ = app.engines_ready.send(true);
         (app, engine)
     }

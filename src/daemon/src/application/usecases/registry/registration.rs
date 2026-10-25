@@ -487,74 +487,28 @@ pub async fn unregister_device_and_children(app: &Arc<AppState>, root_id: &str) 
 mod tests {
     use super::*;
     use crate::config::Config;
-    use crate::domain::device::CapabilityRef;
-    use crate::domain::registry::identity::DeviceIdentity;
+    use crate::domain::registry::identity::{DeviceIdentity, DeviceOrigin};
     use crate::domain::registry::model::DeviceRecord;
-    use crate::test_support::MockDevice;
+    use crate::test_support::{app_with, MockDevice};
     use halod_shared::types::VisibilityState;
     use std::sync::{atomic::Ordering, Arc};
 
-    struct PluginTransportDevice {
-        id: String,
-        connection_type: ConnectionType,
-        closed: std::sync::atomic::AtomicBool,
-    }
-
-    impl PluginTransportDevice {
-        fn new(id: &str, connection_type: ConnectionType) -> Self {
-            Self {
-                id: id.into(),
-                connection_type,
-                closed: std::sync::atomic::AtomicBool::new(false),
-            }
-        }
-    }
-
-    #[async_trait::async_trait]
-    impl Device for PluginTransportDevice {
-        fn id(&self) -> &str {
-            &self.id
-        }
-        fn name(&self) -> &str {
-            &self.id
-        }
-        fn vendor(&self) -> &str {
-            "Acme"
-        }
-        fn model(&self) -> &str {
-            "Test"
-        }
-        async fn initialize(&self) -> Result<bool> {
-            Ok(true)
-        }
-        async fn close(&self) {
-            self.closed.store(true, Ordering::SeqCst);
-        }
-        fn owning_plugin_id(&self) -> Option<String> {
-            Some("acme_wireless".into())
-        }
-        fn identity(&self) -> DeviceIdentity {
-            DeviceIdentity::serial(Some("AABB1122".into()))
-        }
-        async fn wire_connection_type(&self) -> Option<ConnectionType> {
-            Some(self.connection_type)
-        }
-        fn capabilities(&self) -> Vec<CapabilityRef<'_>> {
-            Vec::new()
-        }
-    }
-
-    fn make_app() -> Arc<AppState> {
-        Arc::new(AppState::new(Config::default()))
+    fn transport(id: &str, connection_type: ConnectionType) -> Arc<MockDevice> {
+        Arc::new(
+            MockDevice::new(id)
+                .with_owning_plugin_id("acme_wireless")
+                .with_identity(
+                    DeviceIdentity::serial(Some("AABB1122".into())),
+                    DeviceOrigin::Plugin("acme_wireless".into()),
+                )
+                .with_connection_type(connection_type),
+        )
     }
 
     #[tokio::test]
     async fn wired_plugin_device_replaces_same_serial_wireless_child() {
-        let app = make_app();
-        let wireless = Arc::new(PluginTransportDevice::new(
-            "acme_wireless_AABB1122",
-            ConnectionType::Wireless,
-        ));
+        let app = app_with(vec![]);
+        let wireless = transport("acme_wireless_AABB1122", ConnectionType::Wireless);
         assert!(register_device(&app, wireless.clone()).await);
         app.device_registry
             .children
@@ -564,10 +518,7 @@ mod tests {
             .or_default()
             .insert(wireless.id().into());
 
-        let wired = Arc::new(PluginTransportDevice::new(
-            "acme_wireless-1234-c095-0",
-            ConnectionType::Wired,
-        ));
+        let wired = transport("acme_wireless-1234-c095-0", ConnectionType::Wired);
         assert!(register_device(&app, wired.clone()).await);
 
         let devices = app.device_registry.read().await;
@@ -587,17 +538,11 @@ mod tests {
 
     #[tokio::test]
     async fn wireless_plugin_child_does_not_displace_same_serial_wired_device() {
-        let app = make_app();
-        let wired = Arc::new(PluginTransportDevice::new(
-            "acme_wireless-1234-c095-0",
-            ConnectionType::Wired,
-        ));
+        let app = app_with(vec![]);
+        let wired = transport("acme_wireless-1234-c095-0", ConnectionType::Wired);
         assert!(register_device(&app, wired.clone()).await);
 
-        let wireless = Arc::new(PluginTransportDevice::new(
-            "acme_wireless_AABB1122",
-            ConnectionType::Wireless,
-        ));
+        let wireless = transport("acme_wireless_AABB1122", ConnectionType::Wireless);
         assert!(!register_device(&app, wireless.clone()).await);
 
         let devices = app.device_registry.read().await;
@@ -645,9 +590,8 @@ mod tests {
 
     #[tokio::test]
     async fn register_device_skips_already_registered_id() {
-        let app = make_app();
         let first = Arc::new(MockDevice::new("dev-1")) as Arc<dyn Device>;
-        app.device_registry.write().await.push(first);
+        let app = app_with(vec![first]);
 
         let second = Arc::new(MockDevice::new("dev-1"));
         let load = Arc::clone(&second.load_called);
@@ -667,7 +611,7 @@ mod tests {
 
     #[tokio::test]
     async fn concurrent_registration_claims_allow_only_one_owner() {
-        let app = make_app();
+        let app = app_with(vec![]);
         let (a, b) = tokio::join!(
             claim_registration(&app, "headset-1"),
             claim_registration(&app, "headset-1")
@@ -680,7 +624,7 @@ mod tests {
 
     #[tokio::test]
     async fn register_device_registers_disabled_device_without_init() {
-        let app = make_app();
+        let app = app_with(vec![]);
         {
             let mut cfg = app.config.write().await;
             cfg.known_devices.insert(
@@ -728,7 +672,7 @@ mod tests {
 
     #[tokio::test]
     async fn register_device_skips_when_init_returns_false() {
-        let app = make_app();
+        let app = app_with(vec![]);
         let device = Arc::new(MockDevice::new("dev-1").ok_false());
         let result = register_device(&app, device as Arc<dyn Device>).await;
 
@@ -741,7 +685,7 @@ mod tests {
 
     #[tokio::test]
     async fn register_device_skips_when_init_errors() {
-        let app = make_app();
+        let app = app_with(vec![]);
         let device = Arc::new(MockDevice::new("dev-1").fail());
         let result = register_device(&app, device as Arc<dyn Device>).await;
 
@@ -754,7 +698,7 @@ mod tests {
 
     #[tokio::test]
     async fn register_device_loads_state_and_pushes_active_device() {
-        let app = make_app();
+        let app = app_with(vec![]);
         {
             let mut cfg = app.config.write().await;
             cfg.active_profile_data_mut()
@@ -777,7 +721,7 @@ mod tests {
     async fn register_device_seeds_keyboard_layout_before_init() {
         use halod_shared::keyboard::{KeyVariant, KeyboardLayoutSelection};
         use halod_shared::types::KeyboardLayout;
-        let app = make_app();
+        let app = app_with(vec![]);
         app.config.write().await.keyboard_layouts.insert(
             "kbd".into(),
             KeyboardLayoutSelection {
@@ -795,7 +739,7 @@ mod tests {
 
     #[tokio::test]
     async fn register_device_does_not_load_state_when_none_saved() {
-        let app = make_app();
+        let app = app_with(vec![]);
         let mock = Arc::new(MockDevice::new("dev-1"));
         let load = Arc::clone(&mock.load_called);
         register_device(&app, mock as Arc<dyn Device>).await;
@@ -808,7 +752,7 @@ mod tests {
 
     #[tokio::test]
     async fn register_device_seeds_default_baseline_when_absent() {
-        let app = make_app();
+        let app = app_with(vec![]);
         let mock = MockDevice::new("dev-1").with_choice();
         mock.choice.as_ref().unwrap().record("mode", 1);
         let mock = Arc::new(mock);
@@ -825,7 +769,7 @@ mod tests {
 
     #[tokio::test]
     async fn register_device_does_not_overwrite_existing_default_baseline() {
-        let app = make_app();
+        let app = app_with(vec![]);
         {
             let mut cfg = app.config.write().await;
             cfg.profiles
@@ -853,7 +797,7 @@ mod tests {
 
     #[tokio::test]
     async fn register_device_seeds_baseline_not_active_profile_override() {
-        let app = make_app();
+        let app = app_with(vec![]);
         {
             let mut cfg = app.config.write().await;
             let mut gaming = crate::domain::profiles::model::Profile::default();
@@ -881,7 +825,7 @@ mod tests {
 
     #[tokio::test]
     async fn register_disabled_device_clears_fan_curve_restored_from_saved_state() {
-        let app = make_app();
+        let app = app_with(vec![]);
         {
             let mut cfg = app.config.write().await;
             cfg.known_devices.insert(
@@ -918,7 +862,7 @@ mod tests {
 
     #[tokio::test]
     async fn register_disabled_device_clears_canvas_zones_restored_from_saved_state() {
-        let app = make_app();
+        let app = app_with(vec![]);
         {
             let mut cfg = app.config.write().await;
             cfg.known_devices.insert(
@@ -956,7 +900,7 @@ mod tests {
 
     #[tokio::test]
     async fn register_disabled_device_clears_lcd_template_restored_from_saved_state() {
-        let app = make_app();
+        let app = app_with(vec![]);
         {
             let mut cfg = app.config.write().await;
             cfg.known_devices.insert(
@@ -995,18 +939,16 @@ mod tests {
 
     #[tokio::test]
     async fn unregister_device_and_children_removes_only_the_matching_subtree() {
-        let app = make_app();
         let root = Arc::new(MockDevice::new("openrgb-127_0_0_1_6742"));
         let child1 = Arc::new(MockDevice::new("openrgb-127_0_0_1_6742_ctrl_0"));
         let child2 = Arc::new(MockDevice::new("openrgb-127_0_0_1_6742_ctrl_1"));
         let unrelated = Arc::new(MockDevice::new("other-device"));
-        {
-            let mut devices = app.device_registry.write().await;
-            devices.push(root.clone());
-            devices.push(child1.clone());
-            devices.push(child2.clone());
-            devices.push(unrelated.clone());
-        }
+        let app = app_with(vec![
+            root.clone(),
+            child1.clone(),
+            child2.clone(),
+            unrelated.clone(),
+        ]);
 
         unregister_device_and_children(&app, "openrgb-127_0_0_1_6742").await;
 
@@ -1027,19 +969,17 @@ mod tests {
         // manually-added `_chain_` links) must be torn down with the parent —
         // otherwise they linger after a disable and collide with freshly-built
         // children on re-enable, leaving the plugin in a broken state.
-        let app = make_app();
         let root = Arc::new(MockDevice::new("hub-0"));
         let accessory = Arc::new(MockDevice::new("hub-0_acc_0_19"));
         let link = Arc::new(MockDevice::new("hub-0_chain_0_abcd"));
         // A sibling whose id merely shares a leading substring must survive.
         let sibling = Arc::new(MockDevice::new("hub-0b"));
-        {
-            let mut devices = app.device_registry.write().await;
-            devices.push(root.clone());
-            devices.push(accessory.clone());
-            devices.push(link.clone());
-            devices.push(sibling.clone());
-        }
+        let app = app_with(vec![
+            root.clone(),
+            accessory.clone(),
+            link.clone(),
+            sibling.clone(),
+        ]);
 
         unregister_device_and_children(&app, "hub-0").await;
 

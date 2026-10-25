@@ -6,7 +6,9 @@ use std::path::{Path, PathBuf};
 use anyhow::{Context as _, Result};
 
 use crate::constants::OFFICIAL_PLUGIN_REPO_PUBLIC_KEYS;
-pub use halod_plugin_signing::{package_hash, RepositoryManifest, RepositorySigningKey};
+pub use halod_plugin_signing::{
+    package_hash, read_repository_index, RepositoryManifest, RepositorySigningKey,
+};
 
 #[derive(Debug, Clone, Default)]
 pub enum RepositoryTrust {
@@ -20,10 +22,6 @@ pub fn read_repository_manifest(dir: &Path) -> Result<RepositoryManifest> {
     let manifest = read_repository_index(dir)?;
     halod_plugin_signing::validate_repository_packages(dir, &manifest)?;
     Ok(manifest)
-}
-
-pub fn read_repository_index(dir: &Path) -> Result<RepositoryManifest> {
-    halod_plugin_signing::read_repository_index(dir)
 }
 
 pub fn advertised_signing_key(dir: &Path) -> Result<Option<RepositorySigningKey>> {
@@ -40,12 +38,8 @@ pub fn advertised_signing_key(dir: &Path) -> Result<Option<RepositorySigningKey>
 
 pub fn verify_official_repository(dir: &Path) -> Result<RepositoryManifest> {
     let manifest = read_repository_manifest(dir)?;
-    verify_official_repository_signature(dir)?;
+    verify_repository_signature(dir, &RepositoryTrust::Official)?;
     Ok(manifest)
-}
-
-pub fn verify_official_repository_signature(dir: &Path) -> Result<()> {
-    verify_repository_signature(dir, &RepositoryTrust::Official)
 }
 
 pub fn verify_repository_signature(dir: &Path, trust: &RepositoryTrust) -> Result<()> {

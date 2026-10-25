@@ -2,19 +2,26 @@
 #![cfg(test)]
 //! Shared mock device + builders for unit tests. Test-only.
 
+use crate::application::state::AppState;
+use crate::domain::cooling::model::FanCurveRecord;
+use crate::domain::device::chain::{
+    ChannelDescriptor, LightingDivisionAdapter, LightingDivisionHost,
+};
 use crate::domain::device::{
     ActionCapability, BooleanCapability, CapabilityRef, ChoiceCapability, ChoiceStateCache,
-    CoolingCapability, CoolingStateSlot, Device, DpiCapability, EqualizerCapability,
+    Controller, CoolingCapability, CoolingStateSlot, Device, DpiCapability, EqualizerCapability,
     KeyRemapCapability, KeyboardLayoutCapability, KeyboardLayoutSlot, LcdCapability, LcdStateSlot,
-    LightingCapability, LightingStateSlot, RangeCapability, RangeStateCache, SensorCapability,
-    VisibilitySlot,
+    LightingCapability, LightingStateSlot, PairingCapability, RangeCapability, RangeStateCache,
+    SensorCapability, VisibilitySlot,
 };
+use crate::domain::lcd::engine::{video::VideoEngine, LcdEngine};
+use crate::domain::registry::identity::{DeviceIdentity, DeviceOrigin};
 use anyhow::Result;
 use async_trait::async_trait;
 use halod_shared::types::{
-    Boolean, ButtonDescriptor, ButtonMapping, CoolingChannel, CoolingChannelKind, DpiMode,
-    DpiStatus, EqBand, Equalizer, KeyRemapStatus, LcdDescriptor, LightingDescriptor, LightingState,
-    ScreenShape, Sensor,
+    Boolean, ButtonDescriptor, ButtonMapping, ConnectionType, CoolingChannel, CoolingChannelKind,
+    DpiMode, DpiStatus, EqBand, Equalizer, KeyRemapStatus, LcdDescriptor, LightingDescriptor,
+    LightingState, ScreenShape, Sensor, SensorType, SensorUnit, WriteRateStatus,
 };
 use std::sync::{
     atomic::{AtomicBool, AtomicUsize, Ordering},
@@ -25,6 +32,41 @@ use std::sync::{
 /// All such tests MUST acquire this before setting or removing the variable;
 /// they are spread across multiple modules so a single shared lock is required.
 pub static HALOD_CONFIG_DIR_LOCK: Mutex<()> = Mutex::new(());
+
+pub fn app_with(devices: Vec<Arc<dyn Device>>) -> Arc<AppState> {
+    let app = Arc::new(AppState::new(crate::config::Config::default()));
+    *app.device_registry.try_write().unwrap() = devices;
+    app
+}
+
+pub fn install_lcd_engine(app: &Arc<AppState>) -> Arc<LcdEngine> {
+    let engine = LcdEngine::new(Arc::clone(app));
+    app.lcd.set_engine(
+        Arc::clone(&engine),
+        VideoEngine::new(Arc::clone(app), engine.frame_sender()),
+    );
+    engine
+}
+
+type ScriptedResync = Result<(Vec<Arc<dyn Device>>, Vec<String>)>;
+
+struct MockChainAdapter {
+    parent_id: String,
+    channels: Vec<ChannelDescriptor>,
+}
+
+#[async_trait]
+impl LightingDivisionAdapter for MockChainAdapter {
+    fn parent_id(&self) -> String {
+        self.parent_id.clone()
+    }
+    fn channels(&self) -> Vec<ChannelDescriptor> {
+        self.channels.clone()
+    }
+    async fn write_divided_frame(&self, _: &str, _: &[u8]) -> Result<()> {
+        Ok(())
+    }
+}
 
 /// Run an async test closure with a temporary `HALOD_CONFIG_DIR`. Holds the
 /// process-wide lock across the awaited body so no other test can overwrite the
@@ -109,12 +151,15 @@ pub struct MockDevice {
     /// Owning plugin id for scoped teardown (see `Device::owning_plugin_id`).
     /// `None` for a normal built-in host device.
     pub owning_plugin_id: Option<String>,
+    pub identity: Option<(DeviceIdentity, DeviceOrigin)>,
     /// Remaining capability writes to refuse; see `refusing_writes`.
     pub refusals: Arc<AtomicUsize>,
     // Capability slots — `None` means the capability is absent.
     pub fan: Option<CoolingStateSlot>,
     /// RPM reported by the cooling channel; `None` (the default) means "no tachometer".
     pub fan_rpm: Option<u32>,
+    pub fan_duty: Mutex<u8>,
+    pub pump: bool,
     pub rgb: Option<LightingStateSlot>,
     /// Number of `LightingCapability::apply` calls, for tests asserting a specific
     /// call count (e.g. the leaving-engine-mode drain re-apply).
@@ -150,6 +195,15 @@ pub struct MockDevice {
     pub eq_state: Option<Mutex<Equalizer>>,
     pub eq_last_preset: Option<Mutex<Option<usize>>>,
     pub eq_last_bands: Option<Mutex<Option<Vec<f32>>>>,
+    pub calls: Mutex<Vec<String>>,
+    pub pairing: bool,
+    pub controller: bool,
+    pub resync: Mutex<Option<ScriptedResync>>,
+    pub unrecoverable: AtomicBool,
+    pub chain: Option<Arc<LightingDivisionHost>>,
+    pub external_name: bool,
+    pub write_rate: Option<WriteRateStatus>,
+    pub connection_type: Option<ConnectionType>,
 }
 
 impl MockDevice {
@@ -170,9 +224,12 @@ impl MockDevice {
             live: Arc::new(AtomicBool::new(true)),
             integration_id: None,
             owning_plugin_id: None,
+            identity: None,
             refusals: Arc::new(AtomicUsize::new(0)),
             fan: None,
             fan_rpm: None,
+            fan_duty: Mutex::new(0),
+            pump: false,
             rgb: None,
             rgb_apply_count: Arc::new(AtomicUsize::new(0)),
             write_order: Arc::new(Mutex::new(Vec::new())),
@@ -196,7 +253,92 @@ impl MockDevice {
             eq_state: None,
             eq_last_preset: None,
             eq_last_bands: None,
+            calls: Mutex::default(),
+            pairing: false,
+            controller: false,
+            resync: Mutex::new(None),
+            unrecoverable: AtomicBool::new(false),
+            chain: None,
+            external_name: false,
+            write_rate: None,
+            connection_type: None,
         }
+    }
+
+    pub fn with_fan_duty(self, duty: u8) -> Self {
+        *self.fan_duty.lock().unwrap() = duty;
+        self.with_fan()
+    }
+
+    pub fn with_pump(mut self) -> Self {
+        self.pump = true;
+        self.with_fan()
+    }
+
+    pub fn with_curve(self, record: FanCurveRecord) -> Self {
+        let this = self.with_fan();
+        let channel = this.cooling_channels().remove(0).id;
+        this.cooling_state().set_curve(channel, record);
+        this
+    }
+
+    pub fn fan_duty(&self) -> u8 {
+        *self.fan_duty.lock().unwrap()
+    }
+
+    pub fn with_temp(self, sensor_id: &str, value: f64) -> Self {
+        self.with_sensor(vec![Sensor {
+            id: sensor_id.to_string(),
+            name: sensor_id.to_string(),
+            value,
+            unit: SensorUnit::Celsius,
+            sensor_type: SensorType::Temperature,
+        }])
+    }
+
+    pub fn calls(&self) -> Vec<String> {
+        self.calls.lock().unwrap().clone()
+    }
+
+    fn record_call(&self, call: String) {
+        self.calls.lock().unwrap().push(call);
+    }
+
+    pub fn with_pairing(mut self) -> Self {
+        self.pairing = true;
+        self
+    }
+
+    pub fn with_controller(mut self) -> Self {
+        self.controller = true;
+        self
+    }
+
+    pub fn script_resync(&self, result: ScriptedResync) {
+        *self.resync.lock().unwrap() = Some(result);
+    }
+
+    pub fn with_chain(mut self, channels: Vec<ChannelDescriptor>) -> Self {
+        self.chain = Some(LightingDivisionHost::new(Arc::new(MockChainAdapter {
+            parent_id: self.id.clone(),
+            channels,
+        })));
+        self
+    }
+
+    pub fn with_external_name(mut self) -> Self {
+        self.external_name = true;
+        self
+    }
+
+    pub fn with_write_rate(mut self, status: WriteRateStatus) -> Self {
+        self.write_rate = Some(status);
+        self
+    }
+
+    pub fn with_connection_type(mut self, connection_type: ConnectionType) -> Self {
+        self.connection_type = Some(connection_type);
+        self
     }
 
     /// Refuse the next `n` capability writes, standing in for a device whose
@@ -248,6 +390,11 @@ impl MockDevice {
     /// (see `Device::owning_plugin_id`).
     pub fn with_owning_plugin_id(mut self, id: &str) -> Self {
         self.owning_plugin_id = Some(id.to_string());
+        self
+    }
+
+    pub fn with_identity(mut self, identity: DeviceIdentity, origin: DeviceOrigin) -> Self {
+        self.identity = Some((identity, origin));
         self
     }
 
@@ -406,8 +553,46 @@ impl Device for MockDevice {
         self.owning_plugin_id.clone()
     }
 
+    fn identity(&self) -> DeviceIdentity {
+        self.identity
+            .as_ref()
+            .map(|(identity, _)| identity.clone())
+            .unwrap_or_else(|| DeviceIdentity::serial(self.hardware_serial()))
+    }
+
+    fn conflict_origin(&self) -> DeviceOrigin {
+        match &self.identity {
+            Some((_, origin)) => origin.clone(),
+            None => self
+                .owning_plugin_id
+                .clone()
+                .map(DeviceOrigin::Plugin)
+                .unwrap_or(DeviceOrigin::Builtin),
+        }
+    }
+
     fn is_live(&self) -> bool {
         self.live.load(Ordering::SeqCst)
+    }
+
+    fn is_unrecoverable(&self) -> bool {
+        self.unrecoverable.load(Ordering::SeqCst)
+    }
+
+    fn has_external_name(&self) -> bool {
+        self.external_name
+    }
+
+    fn write_rate_status(&self) -> Option<WriteRateStatus> {
+        self.write_rate
+    }
+
+    async fn wire_connection_type(&self) -> Option<ConnectionType> {
+        self.connection_type
+    }
+
+    fn chain_host(&self) -> Option<&Arc<LightingDivisionHost>> {
+        self.chain.as_ref()
     }
 
     async fn load_state(&self, state: &serde_json::Value) -> bool {
@@ -453,6 +638,12 @@ impl Device for MockDevice {
         if self.keyboard_layout.is_some() {
             caps.push(CapabilityRef::KeyboardLayout(self));
         }
+        if self.pairing {
+            caps.push(CapabilityRef::Pairing(self));
+        }
+        if self.controller {
+            caps.push(CapabilityRef::Controller(self));
+        }
         // Deliberately last: restore ordering must not depend on declared order.
         if self.onboard_active_slot.is_some() {
             caps.push(CapabilityRef::OnboardProfiles(self));
@@ -493,13 +684,18 @@ impl KeyboardLayoutCapability for MockDevice {
 #[async_trait]
 impl CoolingCapability for MockDevice {
     fn cooling_channels(&self) -> Vec<CoolingChannel> {
+        let (id, name, kind) = if self.pump {
+            ("pump", "Pump", CoolingChannelKind::Pump)
+        } else {
+            ("default", "Fan", CoolingChannelKind::Fan)
+        };
         vec![CoolingChannel {
-            id: "default".into(),
-            name: "Fan".into(),
-            kind: CoolingChannelKind::Fan,
+            id: id.into(),
+            name: name.into(),
+            kind,
             controllable: true,
             rpm: self.fan_rpm,
-            duty: Some(0),
+            duty: Some(self.fan_duty()),
             visibility: Default::default(),
         }]
     }
@@ -509,7 +705,8 @@ impl CoolingCapability for MockDevice {
             .find(|channel| channel.id == channel_id)
             .ok_or_else(|| anyhow::anyhow!("unknown cooling channel '{channel_id}'"))
     }
-    async fn set_cooling_duty(&self, _channel_id: &str, _duty: u8) -> Result<()> {
+    async fn set_cooling_duty(&self, _channel_id: &str, duty: u8) -> Result<()> {
+        *self.fan_duty.lock().unwrap() = duty;
         Ok(())
     }
     fn cooling_state(&self) -> &CoolingStateSlot {
@@ -587,13 +784,8 @@ impl LcdCapability for MockDevice {
         }
     }
     async fn set_rotation(&self, degrees: u32) -> Result<()> {
-        let rotation = match degrees {
-            90 => halod_shared::types::ScreenRotation::R90,
-            180 => halod_shared::types::ScreenRotation::R180,
-            270 => halod_shared::types::ScreenRotation::R270,
-            _ => halod_shared::types::ScreenRotation::R0,
-        };
-        self.lcd_state().set_rotation(rotation);
+        self.lcd_state()
+            .set_rotation(halod_shared::types::ScreenRotation::from_degrees(degrees));
         Ok(())
     }
     async fn set_brightness(&self, brightness: u8) -> Result<()> {
@@ -635,13 +827,16 @@ impl ChoiceCapability for MockDevice {
 
 #[async_trait]
 impl crate::domain::device::OnboardProfilesCapability for MockDevice {
-    async fn switch_profile(&self, _slot: u8) -> Result<()> {
+    async fn switch_profile(&self, slot: u8) -> Result<()> {
+        self.record_call(format!("switch {slot}"));
         Ok(())
     }
-    async fn restore_profile(&self, _slot: u8) -> Result<()> {
+    async fn restore_profile(&self, slot: u8) -> Result<()> {
+        self.record_call(format!("restore {slot}"));
         Ok(())
     }
-    async fn set_profile_enabled(&self, _slot: u8, _enabled: bool) -> Result<()> {
+    async fn set_profile_enabled(&self, slot: u8, enabled: bool) -> Result<()> {
+        self.record_call(format!("enable {slot} {enabled}"));
         Ok(())
     }
     fn state_key(&self) -> &'static str {
@@ -659,6 +854,39 @@ impl crate::domain::device::OnboardProfilesCapability for MockDevice {
             .and_then(|s| s.as_u64())
             .map(|s| s as u8);
         true
+    }
+}
+
+#[async_trait]
+impl PairingCapability for MockDevice {
+    async fn start_pairing(&self, timeout_secs: u8) -> Result<()> {
+        self.record_call(format!("start_pairing {timeout_secs}"));
+        Ok(())
+    }
+    async fn stop_pairing(&self) -> Result<()> {
+        self.record_call("stop_pairing".into());
+        Ok(())
+    }
+    async fn unpair(&self, slot: u8) -> Result<Option<Arc<dyn Device>>> {
+        self.record_call(format!("unpair {slot}"));
+        Ok(None)
+    }
+}
+
+#[async_trait]
+impl Controller for MockDevice {
+    async fn resync_children(
+        &self,
+        _existing: &std::collections::HashSet<String>,
+    ) -> Result<(Vec<Arc<dyn Device>>, Vec<String>)> {
+        match self.resync.lock().unwrap().take() {
+            Some(Ok(v)) => Ok(v),
+            Some(Err(e)) => {
+                self.live.store(false, Ordering::SeqCst);
+                Err(e)
+            }
+            None => Ok((vec![], vec![])),
+        }
     }
 }
 

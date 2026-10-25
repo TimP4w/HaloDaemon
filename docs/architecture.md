@@ -8,9 +8,9 @@ device, a command, or an engine. Companion docs go deeper on specific areas:
 under [transports/](transports/). Plugin wire protocols are documented per
 package in the [plugins repository](https://github.com/TimP4w/HaloDaemon-plugins).
 
-## The five crates
+## The crates
 
-The workspace (`src/Cargo.toml`) has five members:
+The workspace (`src/Cargo.toml`) has six members:
 
 | Crate | Directory | Role |
 |-------|-----------|------|
@@ -19,20 +19,23 @@ The workspace (`src/Cargo.toml`) has five members:
 | `halod-broker` | [src/broker/](../src/broker/) | **Windows-only** privileged helper: runs as LocalSystem and performs the hardware access the per-user daemon can't. |
 | `halod` | [src/daemon/](../src/daemon/) | The **daemon**: device I/O, discovery, engine loops, config persistence, IPC server. Runs **per-user** (not elevated); on Windows privileged hardware access is delegated to the `halod-broker` process. |
 | `halod-gui` | [src/ui/](../src/ui/) | **GUI** (eframe/egui on a glow/OpenGL renderer) with a system tray. Talks to the daemon over IPC; holds no device logic. |
+| `halod-plugin-signing` | [src/plugin-signing/](../src/plugin-signing/) | Plugin-repository index, hashing, signature, and bundle logic shared by the daemon and the release tool (`index`/`validate` CLI). |
 
-The cardinal rule (`CLAUDE.md` → *Keep the layers separate*): protocol (wire
+The cardinal rule (`AGENTS.md` → *Keep layers separate*): protocol (wire
 encode/decode) ↔ device (`Device` trait + capabilities) ↔ transport (byte
 movement). Never leak transport bytes into a device, vendor wire formats into a
 usecase, or device logic into the GUI.
 
 ## Driver layering: vendor → device → protocol → transport
 
-Everything that touches hardware lives under
-[daemon/src/drivers/](../src/daemon/src/drivers/), organized in four stacked
+The daemon is split into `application/` (IPC, usecases, state, bus),
+`domain/` (devices, capabilities, engines, plugins), and `infrastructure/`
+(drivers, transports, platform services). Built-in hardware code lives under
+[infrastructure/drivers/](../src/daemon/src/infrastructure/drivers/), organized in four stacked
 concerns. A single physical device is the composition of all four.
 
 ```
-vendor/   organizational namespace (built-ins live under drivers/vendors/generic/)
+vendor/   organizational namespace (built-ins live under infrastructure/drivers/vendors/generic/)
   device      implements Device, declares capabilities()        ← what the rest of the daemon sees
     protocol    encodes/decodes the vendor wire format           ← "how do I phrase a 'set color' for this chip"
       transport   moves raw bytes (HID, SMBus, USB, …)           ← "how do those bytes reach the wire"
@@ -41,7 +44,7 @@ vendor/   organizational namespace (built-ins live under drivers/vendors/generic
 ### Transport: moving bytes
 
 A transport implements the `Transport` trait
-([transports/mod.rs](../src/daemon/src/drivers/transports/mod.rs)): at its core
+([transports/](../src/daemon/src/infrastructure/drivers/transports/)): at its core
 just `write(&[u8])` and `read(size)`, with default-implemented conveniences
 (`write_then_read`, `write_many`) that transports may override with
 hardware-backed versions. HID feature reports, companion collections, nonblocking
@@ -55,21 +58,19 @@ fans, or vendors.
 For that same reason, a per-device write-rate ceiling is enforced at this
 boundary rather than in a usecase or engine: `HidTransport` (and `SmBusDevice`
 for SMBus) gate every write through a `WriteRateLimiter`
-([drivers/rate_limit.rs](../src/daemon/src/drivers/rate_limit.rs)), costed in
+([infrastructure/drivers/](../src/daemon/src/infrastructure/drivers/)), costed in
 bytes/sec, delaying (never dropping) writes that exceed the limit. The
-ceiling is opt-in, not a default: `Device::write_rate_limit()` returns `None`
-unless a device explicitly declares one, following the same pattern as
-`debug_transport()`: a device overrides the default only if it needs
-something different, and today none do, so nothing is throttled. Live
+ceiling is opt-in, not a default: a plugin declares `max_bytes_per_sec` in its
+manifest transport scope; without one nothing is throttled. Live
 throughput is still measured and surfaced to the GUI regardless of whether a
 limit is set. Chain accessories (e.g. an NZXT F-series fan on a Kraken) don't
 hold their own transport at all, so their writes are already covered by
 their parent hub's limiter for free; the GUI resolves this by walking the
-hub's chain links (`ui/src/domain/models/device.rs::find_hub_write_rate`) rather than
+hub's chain links rather than
 requiring the daemon to duplicate the number per accessory. SMBus devices
-sharing one `SmBusScanEntry` (e.g. multiple DRAM sticks) share one bus-level
+sharing one `PluginScanEntry` (e.g. multiple DRAM sticks) share one bus-level
 limiter, since they already serialize through the same bus mutex; a
-different vendor's `SmBusScanEntry` on the same *physical* bus number still
+different plugin's `PluginScanEntry` on the same *physical* bus number still
 opens an independent `SmBusDevice`/limiter today; cross-vendor unification on
 one physical bus is a known, unaddressed gap. USB-control endpoints are also
 metered and receive the plugin/device write-rate limit.
@@ -82,13 +83,13 @@ replies back. Protocols hold a transport (often `Mutex<Option<T>>` so it can be
 opened/closed) and expose typed methods. See the
 [Logitech HID++ plugin](https://github.com/TimP4w/HaloDaemon-plugins/tree/main/logitech)
 for an example. When you port a wire format from third-party code, add the
-SPDX attribution header (`CLAUDE.md` → *Licensing & attribution*) and document the
+SPDX attribution header (`AGENTS.md` → *Licensing and attribution*) and document the
 format beside its package in the [official plugin repository](https://github.com/TimP4w/HaloDaemon-plugins).
 
 ### Device: the unit the daemon understands
 
 A device implements the `Device` trait
-([drivers/mod.rs](../src/daemon/src/drivers/mod.rs)). It owns one or more
+([domain/device/](../src/daemon/src/domain/device/)). It owns one or more
 protocol instances and answers two central questions:
 
 - **Identity & lifecycle** - `id()` (stable across runs, unique per physical
@@ -98,23 +99,23 @@ protocol instances and answers two central questions:
   do. This is the *only* surface the rest of the daemon talks to.
 
 Capabilities are the daemon's abstraction over heterogeneous hardware. Each
-variant of `CapabilityRef` (`Fan`, `Rgb`, `Sensor`, `Range`, `Choice`, `Boolean`,
-`Action`, `Battery`, `Equalizer`, `Dpi`, `OnboardProfiles`, `Lcd`, `KeyRemap`,
-`Chain`, `Controller`, `TransportSwitchable`) has a matching trait and a generated
-accessor (`as_rgb()`, `as_fan()`, …). **Usecases and engines never see concrete
-device types: they call `device.as_rgb()` and talk to the trait object.** Adding
-a capability variant is a deliberate compile-time event: the
-`capability_dispatch!` macro in [drivers/mod.rs](../src/daemon/src/drivers/mod.rs)
-forces every new variant to be classified `persisting` (its state is saved to
+variant of `CapabilityRef` (`Cooling`, `Lighting`, `Sensor`, `Range`, `Choice`,
+`Boolean`, `Action`, `Battery`, `Connection`, `Equalizer`, `Dpi`,
+`OnboardProfiles`, `Lcd`, `KeyRemap`, `KeyboardLayout`, `Controller`, `Pairing`)
+has a matching trait and a generated accessor (`as_lighting()`, `as_cooling()`, …).
+**Usecases and engines never see concrete device types: they call
+`device.as_lighting()` and talk to the trait object.** Adding a capability
+variant is a deliberate compile-time event: the `capability_dispatch!` macro in
+[domain/device/](../src/daemon/src/domain/device/) forces every new variant to be classified `persisting` (its state is saved to
 config) or `wire_only` (pushed to the GUI but not persisted); there is no silent
 default.
 
 `Device` also covers serialization to the wire (`serialize()` builds a
 `WireDevice` from the capability list), config state (`save_state`/`load_state`),
-and optional hooks (`after_register`, `debug_info_extra`). **Controllers** host
+and optional hooks (`debug_info_extra`). **Controllers** host
 child devices (wireless receivers, fan hubs) via `discover_children()`; chainable
-ARGB hubs implement `ChainCapability`/`ChainAdapter` so the canvas engine can
-compose per-zone frames; see [chain.rs](../src/daemon/src/drivers/chain.rs).
+ARGB hubs expose a chain host so the canvas engine can compose per-zone frames
+(see [domain/device/](../src/daemon/src/domain/device/)).
 
 ### Discovery: how a device gets constructed
 
@@ -140,19 +141,17 @@ one `PluginTransportDescriptor` per bus, defined next to the transport it wraps
 and listed there, looked up by the manifest's `match.transport` string.
 
 `discover_handle()` then registers the constructed device through
-[registry::usecases::registration](../src/daemon/src/application/usecases/registry/registration.rs), which stores
-it in `AppState`, restores its saved config, runs `discover_children()`, and calls
-`after_register()`.
+the registry usecases ([application/usecases/registry/](../src/daemon/src/application/usecases/registry/)), which store
+it in `AppState`, restore its saved config, and run `discover_children()`.
 
 ### Plugins: devices without recompiling
 
 Discovery roots and transport backends are fixed at **compile time** in those
 tables; the devices they find are not. **Device plugins**
 ([domain/plugin/](../src/daemon/src/domain/plugin/)) are the **runtime**
-registry: `load_all_with_repos()` reads packages (`plugin.yaml` + entry script)
-only from registered remote Git, local Git, or imported archive repositories, and
-`make_device()` matches a `DiscoveryHandle` against those manifests via
-`match_handle()`. A single generic
+registry: it loads packages (`plugin.yaml` + entry script) from registered
+plugin sources, and `make_device()` matches a `DiscoveryHandle` against those
+manifests via `match_handle()`. A single generic
 `LuaDevice` implements the `Device` + capability traits and forwards each call into a
 per-physical-root Lua worker thread (which owns the VM + transport). Dynamic children
 use persistent routed `dev` tables on that same serialized worker. Plugins expose only
@@ -172,23 +171,19 @@ privileged hardware access behind a separate broker (as already used for
 Windows), so a misbehaving plugin can be terminated without taking the daemon
 down and never touches privileged hardware directly.
 
-There are no plugins compiled into the daemon binary. At startup the daemon seeds
-a non-removable **official plugin repo** record and clones it over the network
-(`registry::ensure_official_repo`): a clone failure (e.g. no network on first
-launch) is logged and never fails boot, so the daemon simply has no official
-plugins until a later successful clone. Official plugins use the same
-enable-confirmation gate as all other sources. A plugin id
-is owned by whichever source loads it first (official repo, then local
-`plugins/`, then other repos in config order; see `load_all_with_repos`), so a
-community repo can never shadow an existing plugin id; a collision is rejected
-and surfaced via `take_plugin_load_warnings` rather than silently dropped.
-
-Repo updates are atomic and repository-scoped. Git object storage is separate
-from immutable executable revisions: Halo fetches, verifies the root index and
-official signature, walks first-parent history to the newest compatible commit,
-materializes and validates that proposed revision, then atomically selects it.
-Update checks never modify executable files, and a failed update leaves the
-previously selected revision running.
+**Sources.** Release builds embed a signed official plugin bundle
+(`HALOD_OFFICIAL_PLUGIN_BUNDLE`, staged by `daemon/build.rs`). At startup the
+daemon seeds the non-removable **official repo** record and extracts and
+verifies that bundle, so official plugins are available offline. When the user
+allows downloads, the latest official release is fetched in the background;
+failure leaves the embedded revision active. Other sources are GitHub release
+sources or imported release archives. Every source installs as a complete,
+verified, immutable revision that is selected atomically; update checks never
+modify installed files, and a failed update keeps the previous revision.
+Official plugins use the same enable-confirmation gate as all other sources.
+A plugin id is owned by whichever source loads it first (official repo, then
+other sources in config order), so a community source can never shadow an
+existing id; a collision is rejected and surfaced as a load warning.
 
 ## IPC and usecases: the daemon's public API
 
@@ -196,39 +191,46 @@ The daemon and GUI are separate processes talking over a Unix domain socket
 (`$XDG_RUNTIME_DIR/halod.sock`) or a Windows named pipe (`\\.\pipe\halod`), using
 binary-framed JSON.
 
-**Request/response path:** [ipc/router.rs](../src/daemon/src/ipc/router.rs)
+**Request/response path:** the router in [application/ipc/](../src/daemon/src/application/ipc/)
 receives each message, deserializes it into the typed `DaemonCommand` enum (from
 [shared/src/commands.rs](../src/shared/src/commands.rs); the `type` field is
-the serde discriminator), and `dispatch()` matches the variant to a usecase in
-the owning domain module's `usecases/` (e.g. `daemon/src/lighting/usecases/`,
-`daemon/src/cooling/usecases/`, `daemon/src/registry/usecases/`) **with
+the serde discriminator), and `dispatch()` matches the variant to a usecase under
+[application/usecases/](../src/daemon/src/application/usecases/) (one directory
+per domain: `lighting/`, `cooling/`, `lcd/`, `registry/`, …) **with
 already-parsed typed arguments**. Usecases never re-parse raw JSON. The usecase
-layer *is* the daemon's public API surface: one usecase module per concern
-(`rgb`, `fan_curve`, `dpi`, `lcd`, `profiles`, `app_rules`, `settings`, …), living
-next to the engine/state it drives rather than in one shared directory.
+layer *is* the daemon's public API surface. Before dispatch, `command_target()`
+maps device-scoped commands to the device id whose per-device lock serializes
+them (commands to different devices run concurrently), and
+`command_writes_device()` marks commands whose failure means a hardware write did
+not land.
 
 **High-frequency push path:** state that changes constantly (canvas preview, LCD
 frames, sensor readings) is *not* request/response. The router runs
 `tokio::broadcast` subscription loops (`engine_subscribe_loop`) that stream frames
-to subscribed clients, and broad device-state changes go out via
-`broadcast_state()`.
+to subscribed clients, and state changes are published as retained bus topics
+by recording a `Change` (see [application/bus/](../src/daemon/src/application/bus/)).
 
 So **adding a command is a four-part change**:
 
 1. Add a `DaemonCommand` variant in [shared/src/commands.rs](../src/shared/src/commands.rs).
-2. Add a `dispatch()` arm in [router.rs](../src/daemon/src/ipc/router.rs).
-3. Write/extend the usecase in the owning domain's `usecases/` that does the work (talking to devices through capability accessors).
+2. In the router, add a `dispatch()` arm and, if the command targets a device,
+   list it in `command_target()` (and in `command_writes_device()` if it writes
+   hardware).
+3. Write/extend the usecase in the owning domain's `application/usecases/` directory (talking to devices through capability accessors).
 4. Call it from the GUI.
 
 ## Engines: background loops over time
 
-Engines (one per owning domain: `lighting/rgb_engine/`, `cooling/fan_curve.rs`,
-`lcd/engine/`, `input/`, `profiles/focus_watcher/`; shared loop infra in
-[daemon/src/run_loop.rs](../src/daemon/src/run_loop.rs)) are the daemon's
+Engines (one per owning domain under
+[domain/](../src/daemon/src/domain/): `lighting/engine/`, `cooling/engine/`,
+`lcd/engine/`, `input/engine/`, and the active-window observer in
+`profiles/observers/`; shared loop infra in
+[application/](../src/daemon/src/application/) `run_loop.rs`) are the daemon's
 background drivers of device state. Each owns a tick interval (or is event-driven),
-reads config from a `watch` channel, mutates devices through capability accessors,
-and broadcasts changes. They are held in `AppState.engines` (a `OnceLock<Engines>`)
-and are the reason device state evolves without the user touching anything.
+subscribes to its engine-config topic on the data bus, mutates devices through
+capability accessors, and publishes changes. Each domain's state on `AppState`
+holds its engine handle, set once at startup (gated by `engines_ready`); engines
+are the reason device state evolves without the user touching anything.
 
 The set (full internals in [engines.md](engines.md)):
 
@@ -240,19 +242,20 @@ The set (full internals in [engines.md](engines.md)):
 - **fan_curve** - closed-loop temp→PWM with hysteresis, deadband, and a failsafe
   duty when the sensor is missing.
 - **lcd** - renders template images / video frames to Kraken-style LCD panels.
-- **action_executor**, **focus_watcher**, **key_remap** - event-driven engines for
+- **action_executor**, **focus** (active-window observer), **key_remap** - event-driven engines for
   actions, per-app profile switching, and key remapping.
 
-Engines receive runtime config via `watch` channels (`*_cfg_tx` on `Engines`), so
-a usecase reconfigures an engine by sending on its channel rather than calling it
+A usecase reconfigures an engine by updating config and recording a `Change`,
+which republishes the engine-config topic, rather than calling the engine
 directly.
 
 ## State and config
 
-- **`AppState`** ([daemon/src/state/mod.rs](../src/daemon/src/state/mod.rs)) is the shared
-  hub: the device registry (`Mutex<Vec<Arc<dyn Device>>>`), connected IPC clients,
-  discovery status, engine handles, fan-curve statuses, button-event broadcast,
-  and shutdown signaling. It is passed (as `Arc<AppState>`) into usecases and
+- **`AppState`** ([application/state/](../src/daemon/src/application/state/)) is the shared
+  hub: config, the device registry, connected IPC clients, discovery status,
+  per-domain state (lighting, cooling, LCD, focus, input) with their engine
+  handles, the plugin registry, the data bus, per-device command locks, and
+  shutdown signaling. It is passed (as `Arc<AppState>`) into usecases and
   engines.
 - **Config** is persisted as a directory of YAML files by concern under
   `~/.config/halod/` (Linux) or `%APPDATA%\halod\` (Windows); see
@@ -271,12 +274,12 @@ directly.
 
 The GUI ([ui/src/](../src/ui/src/)) is immediate-mode (eframe/egui on a
 glow/OpenGL renderer): each frame is drawn from app state held in
-[ui/src/app.rs](../src/ui/src/app.rs) as an `Arc<AppState>` (the latest daemon
-state, cloned when its `watch` channel changes), with GUI-side derivations under
+[ui/src/app.rs](../src/ui/src/app.rs) as an `Arc<TopicStore>` (the latest daemon
+bus state, cloned when its `watch` channel changes), with GUI-side derivations under
 [ui/src/domain/models/](../src/ui/src/domain/models/). Daemon IPC lives in
 [ui/src/runtime/ipc.rs](../src/ui/src/runtime/ipc.rs). The device page
 is **capability-driven**: each capability tab is registered in
-[ui/src/ui/screens/device/mod.rs](../src/ui/src/ui/screens/device/mod.rs) and shown only when
+[ui/src/domain/models/](../src/ui/src/domain/models/) (`device_tabs`) and shown only when
 the connected device reports that capability, so a new capability shows up in the
 UI by registering a tab, not by editing the device page. Two-way-bound widgets
 gate daemon updates for ~1.5 s after a user edit (a `LiveGuard`) and debounce
@@ -292,7 +295,7 @@ a Lua package, not as a Rust vendor module in this repo. See
 [development.md](development.md#adding-device-support) for the plugin workflow
 and the manifest/Lua authoring references.
 
-The built-in Rust driver stack (`drivers/`) is now limited to the generic
+The built-in Rust driver stack (`infrastructure/drivers/`) is now limited to the generic
 `computer`/hwmon-class devices that don't fit a plugin. The vendor → device →
 protocol → transport layering above is how those built-ins are structured, and a
 plugin needs a **new Rust change here only** when it requires a capability or a
@@ -302,7 +305,7 @@ primitive first, then consume it from Lua. When you do touch a built-in:
 1. **Transport** - reuse an existing one if the bus is already supported; write a
    new transport module only for a genuinely new bus, and document it in
    [transports/](transports/).
-2. **Device** - a file under `drivers/vendors/<vendor>/devices/` implementing
+2. **Device** - a file under `infrastructure/drivers/vendors/<vendor>/devices/` implementing
    `Device` and declaring `capabilities()`, reached from the discovery root that
    constructs it.
 3. **udev rule** (Linux) - add built-in-driver access to
@@ -311,7 +314,7 @@ primitive first, then consume it from Lua. When you do touch a built-in:
 4. **Test** - exercise the new frame encode/decode and parsing. `MockDevice` in
    [test_support.rs](../src/daemon/src/test_support.rs) covers capability-level
    tests; prefer property tests where a real invariant exists
-   (`CLAUDE.md` → *Code conventions*).
+   (`AGENTS.md` → *Code conventions*).
 
 ## End-to-end: adding a new feature (command)
 
@@ -319,12 +322,13 @@ If the feature is "let the user do X to a device", it's a new capability and/or 
 new command:
 
 1. If X is a new *kind* of control, add a `CapabilityRef` variant + trait +
-   accessor in [drivers/mod.rs](../src/daemon/src/drivers/mod.rs) (and classify it
+   accessor in [domain/device/](../src/daemon/src/domain/device/) (and classify it
    in `capability_dispatch!`), then implement it on the relevant device(s).
-2. Add the `DaemonCommand` variant, the `dispatch()` arm, and the usecase
+2. Add the `DaemonCommand` variant, the `dispatch()` arm (plus its
+   `command_target()`/`command_writes_device()` entries), and the usecase
    (see *IPC and usecases* above).
 3. Register a GUI panel for the capability (capability-driven device page) or wire
    the command into an existing view.
 4. If X needs to evolve over time (effects, curves), it belongs in an engine, fed
-   by a `watch` config channel.
+   by its engine-config topic.
 5. Test the new behaviour in its owning crate.

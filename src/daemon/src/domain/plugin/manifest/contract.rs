@@ -121,6 +121,7 @@ pub const CALLBACKS_V1: &[CallbackContract] = &[
         "nil"
     ),
     callback!("lcd_reset", Capability, "dev", "nil"),
+    callback!("dpi_status", Optional, "dev", "InitDpi | nil"),
     callback!("set_dpi", Capability, "dev, dpi", "nil"),
     callback!("set_dpi_steps", Capability, "dev, steps", "nil"),
     callback!("set_choice", Capability, "dev, key, selected_index", "nil"),

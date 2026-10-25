@@ -67,7 +67,7 @@ package instead. A new built-in is justified only when it needs a daemon-owned
 host capability that the effect sandbox intentionally does not expose.
 
 Only `screen_sampler` and the effect designer's hidden `designer` pixmap are
-built-in Rust (`daemon/src/lighting/rgb_engine/canvas/effects.rs`). Every other
+built-in Rust (`daemon/src/domain/lighting/engine/canvas/effects.rs`). Every other
 pixmap effect ships in the official repository's
 [`halo_effects`](https://github.com/TimP4w/HaloDaemon-plugins/tree/main/halo_effects)
 package; see the [plugin effect API](https://github.com/TimP4w/HaloDaemon-plugins/blob/main/docs/lua-api.md#effect-api).
@@ -193,7 +193,7 @@ A device may declare default button mappings (Logitech: the `default_buttons` ta
 
 ## Audio capture & media
 
-Two sibling shared-handle modules feed audio-reactive RGB effects and the LCD `now_playing` widget: `daemon/src/services/audio/` and `daemon/src/services/media/`.
+Two sibling shared-handle modules feed audio-reactive RGB effects and the LCD `now_playing` widget: `daemon/src/infrastructure/audio/` and `daemon/src/infrastructure/media/`.
 
 ### Lifecycle: consumer-driven singletons
 
@@ -218,7 +218,7 @@ Two LCD widgets (`AudioSpectrum`, `AudioLevel`) read the same handle from `Custo
 
 ### `media`
 
-Watches OS media-session state: MPRIS over D-Bus (`zbus`, modeled on `focus_watcher/gnome_shell.rs`) on Linux, GSMTC on Windows, and publishes `Option<MediaInfo>` (title/artist/album/status/position/art) via `MediaHandle::latest()`. The Linux watcher is event-driven (`PropertiesChanged`/`Seeked`/`NameOwnerChanged` subscriptions), tracks one `PlayerState` per MPRIS name, and selects the active player (prefer `Playing`, else most-recently-changed, else none); position is interpolated locally between updates via `MediaInfo::position_now()`. Album art resolves off the watcher, `file://` paths and `http(s)://` URLs (4 s timeout, 2 MB cap; streaming players like Spotify only expose remote art), into a small LRU-style cache of decoded, downscaled `Arc<RgbaImage>`s.
+Watches OS media-session state: MPRIS over D-Bus (`zbus`, modeled on the GNOME Shell active-window observer) on Linux, GSMTC on Windows, and publishes `Option<MediaInfo>` (title/artist/album/status/position/art) via `MediaHandle::latest()`. The Linux watcher is event-driven (`PropertiesChanged`/`Seeked`/`NameOwnerChanged` subscriptions), tracks one `PlayerState` per MPRIS name, and selects the active player (prefer `Playing`, else most-recently-changed, else none); position is interpolated locally between updates via `MediaInfo::position_now()`. Album art resolves off the watcher, `file://` paths and `http(s)://` URLs (4 s timeout, 2 MB cap; streaming players like Spotify only expose remote art), into a small LRU-style cache of decoded, downscaled `Arc<RgbaImage>`s.
 
 The **Windows GSMTC backend polls at 1 Hz** rather than subscribing to session events: a documented follow-up (`// TODO: switch to MediaPropertiesChanged events` in `media/windows.rs`), acceptable because a now-playing widget doesn't need sub-second freshness.
 

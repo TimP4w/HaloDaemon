@@ -8,7 +8,6 @@ use std::time::Duration;
 
 use anyhow::{anyhow, bail, Context as _, Result};
 use serde::Deserialize;
-use sha2::{Digest as _, Sha256};
 use ureq::RequestExt as _;
 
 use super::repo::{RepositoryManifest, RepositoryTrust};
@@ -45,7 +44,7 @@ struct GithubAsset {
     browser_download_url: String,
 }
 
-fn github_project(source: &str) -> Result<(String, String)> {
+pub(crate) fn github_project(source: &str) -> Result<(String, String)> {
     let url = url::Url::parse(source).context("parsing plugin release source URL")?;
     if url.scheme() != "https" || url.host_str() != Some("github.com") {
         bail!("plugin release source must be an https://github.com/<owner>/<project> URL");
@@ -194,10 +193,7 @@ pub fn download(
     if bytes.len() as u64 != archive.size {
         bail!("release archive size mismatch");
     }
-    let actual = Sha256::digest(&bytes)
-        .iter()
-        .map(|byte| format!("{byte:02x}"))
-        .collect::<String>();
+    let actual = halod_plugin_signing::sha256_hex(&bytes);
     if !actual.eq_ignore_ascii_case(&archive.sha256) {
         bail!("release archive hash mismatch");
     }

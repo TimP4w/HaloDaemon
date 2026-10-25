@@ -1,9 +1,4 @@
-//! Shared sizing/geometry constants for the "custom" LCD template's widgets.
-//!
-//! The daemon (`daemon/src/engines/lcd/custom.rs`) renders the real frame; the
-//! GUI editor (`ui/src/device/lcd_editor.rs`) paints a schematic stage
-//! placeholder that must stay pixel-proportional to it. Both crates read
-//! these constants so the two renderers cannot drift apart.
+//! Widget sizing shared by the daemon's LCD renderer and the GUI editor stage.
 
 /// Nominal on-screen fraction of `min(w, h)` a widget occupies at `scale == 1.0`.
 pub const WIDGET_BASE: f32 = 0.34;
@@ -23,22 +18,6 @@ pub fn widget_size(scale: f32, panel_min: f32) -> f32 {
         .min(panel_min)
 }
 
-/// Number of `AudioSpectrum` bars for a `bands` param value — rounded and
-/// clamped to `1..=SPECTRUM_MAX_BANDS`, shared by both renderers.
-pub fn spectrum_bands(bands_param: f64) -> usize {
-    (bands_param.round() as usize).clamp(1, SPECTRUM_MAX_BANDS)
-}
-
-/// Maximum `AudioSpectrum` bars; must equal the audio DSP's band count.
-pub const SPECTRUM_MAX_BANDS: usize = 64;
-
-/// Plain/pill text size as a multiple of the widget's base `size`.
-pub const TEXT_FONT: f32 = 0.22;
-
-/// Fraction of a `Shape` widget's box the primitive occupies, shared so the
-/// daemon renderer and the GUI editor draw shapes at the same size.
-pub const SHAPE_SIZE: f32 = 0.82;
-
 #[cfg(test)]
 mod tests {
     use super::*;
@@ -51,22 +30,5 @@ mod tests {
         // Scale is clamped to [MIN_SCALE, MAX_SCALE].
         assert_eq!(widget_size(0.0, 100.0), widget_size(MIN_SCALE, 100.0));
         assert_eq!(widget_size(99.0, 100.0), widget_size(MAX_SCALE, 100.0));
-    }
-
-    #[test]
-    fn shared_size_constants_have_expected_values() {
-        // Pinned on both sides (daemon + editor import these) so the two
-        // renderers cannot silently drift; see the mirrored tests in
-        // `daemon/src/engines/lcd/custom.rs` and `ui/src/device/lcd_editor.rs`.
-        assert_eq!(SHAPE_SIZE, 0.82);
-        assert_eq!(TEXT_FONT, 0.22);
-    }
-
-    #[test]
-    fn spectrum_bands_rounds_and_clamps() {
-        assert_eq!(spectrum_bands(32.0), 32);
-        assert_eq!(spectrum_bands(32.4), 32);
-        assert_eq!(spectrum_bands(0.0), 1);
-        assert_eq!(spectrum_bands(1000.0), SPECTRUM_MAX_BANDS);
     }
 }

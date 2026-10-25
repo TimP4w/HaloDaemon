@@ -16,8 +16,6 @@ pub use type_scale::*;
 
 // ── Surfaces ─────────────────────────────────────────────────────────────────
 pub const BODY: Color32 = hex(0x10121c);
-#[expect(dead_code, reason = "theme token reserved for native window chrome")]
-pub const WIN_TOP: Color32 = hex(0x141622);
 pub const TITLE_BG: Color32 = hex(0x131520);
 pub const SIDEBAR_BG: Color32 = hex(0x12141f);
 /// Raised cards throughout the application.
@@ -321,12 +319,6 @@ pub fn h_gradient(painter: &egui::Painter, rect: Rect, stops: &[Color32]) {
         }
     }
     painter.add(Shape::mesh(mesh));
-}
-
-/// Draw the small rounded RGB-spectrum logo mark.
-#[expect(dead_code, reason = "reusable compact logo renderer")]
-pub fn logo_mark(painter: &egui::Painter, rect: Rect) {
-    h_gradient(&painter.with_clip_rect(rect), rect, &LOGO_STOPS);
 }
 
 /// The "Drift" mark's conic-gradient stops (`conic-gradient(from 210deg,
@@ -655,7 +647,6 @@ pub fn round_corners(painter: &egui::Painter, rect: Rect, r: f32, bg: Color32) {
 /// `anchor`, fading in with `t` (0..1). `time` is the monotonic clock,
 /// `rx`/`ry` the blob radii, and `spread` scales how far they wander. The caller
 /// should clip the painter and keep requesting repaints while `t > 0`.
-#[allow(clippy::too_many_arguments)]
 pub fn aurora(
     painter: &egui::Painter,
     anchor: Pos2,

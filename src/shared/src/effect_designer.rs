@@ -43,15 +43,10 @@ impl Generator {
     }
 
     pub fn from_str_or_default(s: &str) -> Self {
-        match s {
-            "pulse" => Generator::Pulse,
-            "comet" => Generator::Comet,
-            "sawtooth" => Generator::Sawtooth,
-            "twinkle" => Generator::Twinkle,
-            "noise" => Generator::Noise,
-            "rain" => Generator::Rain,
-            _ => Generator::Sine,
-        }
+        Self::ALL
+            .into_iter()
+            .find(|v| v.as_str() == s)
+            .unwrap_or(Self::Sine)
     }
 }
 
@@ -74,11 +69,10 @@ impl Direction {
     }
 
     pub fn from_str_or_default(s: &str) -> Self {
-        match s {
-            "reverse" => Direction::Reverse,
-            "center" => Direction::Center,
-            _ => Direction::Forward,
-        }
+        Self::ALL
+            .into_iter()
+            .find(|v| v.as_str() == s)
+            .unwrap_or(Self::Forward)
     }
 }
 
@@ -101,11 +95,10 @@ impl ColorMode {
     }
 
     pub fn from_str_or_default(s: &str) -> Self {
-        match s {
-            "solid" => ColorMode::Solid,
-            "spectrum" => ColorMode::Spectrum,
-            _ => ColorMode::Gradient,
-        }
+        Self::ALL
+            .into_iter()
+            .find(|v| v.as_str() == s)
+            .unwrap_or(Self::Gradient)
     }
 }
 
@@ -129,10 +122,10 @@ impl RingScope {
     }
 
     pub fn from_str_or_default(s: &str) -> Self {
-        match s {
-            "zone" => RingScope::Zone,
-            _ => RingScope::PerRing,
-        }
+        Self::ALL
+            .into_iter()
+            .find(|v| v.as_str() == s)
+            .unwrap_or(Self::PerRing)
     }
 }
 

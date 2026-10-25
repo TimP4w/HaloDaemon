@@ -55,20 +55,14 @@ pub async fn set_keyboard_layout(
 #[cfg(test)]
 mod tests {
     use super::*;
-    use crate::config::Config;
-    use crate::test_support::MockDevice;
+    use crate::test_support::{app_with, MockDevice};
     use halod_shared::keyboard::KeyVariant;
     use halod_shared::types::KeyboardLayout;
 
-    fn make_app() -> Arc<AppState> {
-        Arc::new(AppState::new(Config::default()))
-    }
-
     #[tokio::test]
     async fn persists_and_applies_selection_without_dropping_device() {
-        let app = make_app();
         let device = Arc::new(MockDevice::new("kbd").with_keyboard_layout());
-        app.device_registry.write().await.push(device.clone());
+        let app = app_with(vec![device.clone()]);
 
         let sel = KeyboardLayoutSelection {
             variant: Some(KeyVariant::Iso),
@@ -105,9 +99,8 @@ mod tests {
 
     #[tokio::test]
     async fn auto_selection_removes_entry() {
-        let app = make_app();
         let device = Arc::new(MockDevice::new("kbd").with_keyboard_layout());
-        app.device_registry.write().await.push(device);
+        let app = app_with(vec![device]);
         app.config.write().await.keyboard_layouts.insert(
             "kbd".into(),
             KeyboardLayoutSelection {
@@ -129,11 +122,7 @@ mod tests {
 
     #[tokio::test]
     async fn rejects_device_without_slot() {
-        let app = make_app();
-        app.device_registry
-            .write()
-            .await
-            .push(Arc::new(MockDevice::new("plain")));
+        let app = app_with(vec![Arc::new(MockDevice::new("plain"))]);
 
         let err = set_keyboard_layout(
             "plain".into(),

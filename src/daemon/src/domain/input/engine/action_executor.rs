@@ -743,7 +743,7 @@ impl ActionExecutor {
 #[cfg(test)]
 mod tests {
     use super::*;
-    use crate::{config::Config, domain::device::Device, test_support::MockDevice};
+    use crate::test_support::{app_with, MockDevice};
     use halod_shared::types::CycleDir;
 
     #[test]
@@ -769,12 +769,8 @@ mod tests {
         // MockDevice's dpi_status() always reports an empty `steps` list, so
         // DpiCycle must be a no-op (the `steps.is_empty()` guard), never
         // calling set_dpi_index.
-        let app = Arc::new(AppState::new(Config::default()));
         let dev = Arc::new(MockDevice::new("dev1").with_dpi_initial(800));
-        app.device_registry
-            .write()
-            .await
-            .push(Arc::clone(&dev) as Arc<dyn Device>);
+        let app = app_with(vec![dev.clone()]);
 
         dpi_cycle(&CycleDir::Up, "dev1", Arc::clone(&app)).await;
 

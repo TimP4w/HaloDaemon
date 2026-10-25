@@ -183,22 +183,6 @@ pub fn param_f64(widget: &WidgetDef, key: &str, default: f64) -> f64 {
     }
 }
 
-pub fn param_bool(widget: &WidgetDef, key: &str, default: bool) -> bool {
-    match widget.params.get(key) {
-        Some(EffectParamValue::Bool(value)) => *value,
-        _ => default,
-    }
-}
-
-pub fn param_variant(widget: &WidgetDef, default: &str) -> String {
-    let value = param_str(widget, "variant");
-    if value.is_empty() {
-        default.to_owned()
-    } else {
-        value
-    }
-}
-
 pub fn scale_y(widget: &WidgetDef) -> f32 {
     param_f64(widget, SCALE_Y_PARAM, f64::from(widget.scale)) as f32
 }

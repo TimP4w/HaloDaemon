@@ -76,7 +76,6 @@ fn clamp_within(r: Rect, screen: Rect) -> Rect {
 
 /// Render the spotlight + callout for the current step. Returns `Some` if the
 /// user clicked Next or Skip this frame.
-#[allow(clippy::too_many_arguments)]
 fn overlay(
     ctx: &egui::Context,
     anchor: Rect,

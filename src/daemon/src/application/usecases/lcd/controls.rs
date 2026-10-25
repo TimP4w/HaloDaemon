@@ -161,11 +161,10 @@ fn finish_upload(client: &ClientHandle, device_id: &str, result: Result<()>) -> 
 pub async fn set_screen_image(
     id: String,
     data_b64: String,
-    request_id: Option<String>,
     app: Arc<AppState>,
     client: ClientHandle,
 ) -> Result<()> {
-    let result = set_screen_image_inner(&id, data_b64, request_id, &app, &client).await;
+    let result = set_screen_image_inner(&id, data_b64, &app, &client).await;
     app.record_change(crate::domain::events::Change::LcdDevice(id.clone()))
         .await;
     finish_upload(&client, &id, result)
@@ -174,7 +173,6 @@ pub async fn set_screen_image(
 async fn set_screen_image_inner(
     id: &str,
     data_b64: String,
-    request_id: Option<String>,
     app: &Arc<AppState>,
     client: &ClientHandle,
 ) -> Result<()> {
@@ -228,9 +226,7 @@ async fn set_screen_image_inner(
     lcd.lcd_state().set_health(LcdHealth::Stable);
     persist_device_state(app, device.as_ref()).await;
 
-    client.send_json(
-        &json!({ "type": "image_uploaded", "request_id": request_id.unwrap_or_default() }),
-    );
+    client.send_json(&json!({ "type": "image_uploaded" }));
 
     // The spawn_blocking decode + upload just freed 1-3 copies of the RGBA
     // frame buffer; ask glibc to return those pages to the OS.
@@ -245,12 +241,10 @@ async fn set_screen_image_inner(
 pub async fn set_screen_image_from_library(
     id: String,
     filename: String,
-    request_id: Option<String>,
     app: Arc<AppState>,
     client: ClientHandle,
 ) -> Result<()> {
-    let result =
-        set_screen_image_from_library_inner(&id, filename, request_id, &app, &client).await;
+    let result = set_screen_image_from_library_inner(&id, filename, &app, &client).await;
     app.record_change(crate::domain::events::Change::LcdDevice(id.clone()))
         .await;
     finish_upload(&client, &id, result)
@@ -259,7 +253,6 @@ pub async fn set_screen_image_from_library(
 async fn set_screen_image_from_library_inner(
     id: &str,
     filename: String,
-    request_id: Option<String>,
     app: &Arc<AppState>,
     client: &ClientHandle,
 ) -> Result<()> {
@@ -293,9 +286,7 @@ async fn set_screen_image_from_library_inner(
     lcd.lcd_state().set_health(LcdHealth::Stable);
     persist_device_state(app, device.as_ref()).await;
 
-    client.send_json(
-        &json!({ "type": "image_uploaded", "request_id": request_id.unwrap_or_default() }),
-    );
+    client.send_json(&json!({ "type": "image_uploaded" }));
 
     // The read + decode + upload just allocated and freed the file contents
     // plus the RGBA frame buffer; return those pages to the OS.
@@ -346,12 +337,7 @@ pub async fn set_screen_rotation(
     let lcd = device
         .as_lcd()
         .ok_or_else(|| anyhow!("device does not support LCD"))?;
-    let degrees: u32 = match rotation {
-        halod_shared::types::ScreenRotation::R0 => 0,
-        halod_shared::types::ScreenRotation::R90 => 90,
-        halod_shared::types::ScreenRotation::R180 => 180,
-        halod_shared::types::ScreenRotation::R270 => 270,
-    };
+    let degrees = rotation.degrees();
     log::info!(
         "[LCD] set_screen_rotation: {degrees}° for device {}",
         device.id()
@@ -630,15 +616,8 @@ mod tests {
         std::sync::Arc<crate::application::state::AppState>,
         std::sync::Arc<crate::test_support::MockDevice>,
     ) {
-        let app = std::sync::Arc::new(crate::application::state::AppState::new(
-            crate::config::Config::default(),
-        ));
         let dev = std::sync::Arc::new(crate::test_support::MockDevice::new(dev_id).with_lcd());
-        app.device_registry
-            .try_write()
-            .unwrap()
-            .push(dev.clone() as std::sync::Arc<dyn crate::domain::device::Device>);
-        (app, dev)
+        (crate::test_support::app_with(vec![dev.clone()]), dev)
     }
 
     #[tokio::test]
@@ -854,7 +833,7 @@ mod tests {
 
         let (app, _dev) = make_app_with_lcd_device("lcd_dev");
         let (client, mut rx) = client_and_drain();
-        set_screen_image_from_library("lcd_dev".into(), "pic.png".into(), None, app, client)
+        set_screen_image_from_library("lcd_dev".into(), "pic.png".into(), app, client)
             .await
             .unwrap();
         unsafe { std::env::remove_var("HALOD_CONFIG_DIR") };
@@ -890,10 +869,9 @@ mod tests {
         let (app, _dev) = make_app_with_lcd_device("lcd_dev");
         let (client, mut rx) = client_and_drain();
         // Valid filename (passes validation) but the file does not exist.
-        let err =
-            set_screen_image_from_library("lcd_dev".into(), "gone.png".into(), None, app, client)
-                .await
-                .unwrap_err();
+        let err = set_screen_image_from_library("lcd_dev".into(), "gone.png".into(), app, client)
+            .await
+            .unwrap_err();
         unsafe { std::env::remove_var("HALOD_CONFIG_DIR") };
         assert!(err.to_string().contains("image not found"));
 
@@ -916,7 +894,7 @@ mod tests {
     async fn set_screen_image_emits_failed_on_invalid_base64() {
         let (app, _dev) = make_app_with_lcd_device("lcd_dev");
         let (client, mut rx) = client_and_drain();
-        let err = set_screen_image("lcd_dev".into(), "not base64!!!".into(), None, app, client)
+        let err = set_screen_image("lcd_dev".into(), "not base64!!!".into(), app, client)
             .await
             .unwrap_err();
         assert!(!err.to_string().is_empty());

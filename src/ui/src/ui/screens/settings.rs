@@ -83,7 +83,6 @@ pub fn show(
 
 // ── Page body ─────────────────────────────────────────────────────────────────
 
-#[allow(clippy::too_many_arguments)]
 fn page_body(
     ui: &mut egui::Ui,
     state: &TopicStore,
@@ -186,7 +185,7 @@ fn page_body(
     });
 
     ui.add_space(theme::SPACE_10);
-    footer(ui, state);
+    footer(ui);
 }
 
 // ── Shared helpers ────────────────────────────────────────────────────────────
@@ -723,7 +722,7 @@ pub fn apply_locale(code: &str) {
 /// Waiting for the daemon's initial bus snapshot leaves startup/onboarding
 /// screens in English for a visible moment.
 pub fn apply_startup_locale() {
-    let path = gui_config_dir().join("config.yaml");
+    let path = halod_shared::app::config_dir().join("config.yaml");
     let Ok(raw) = std::fs::read_to_string(&path) else {
         return;
     };
@@ -734,23 +733,6 @@ pub fn apply_startup_locale() {
             "could not read a supported GUI language from {}",
             path.display()
         );
-    }
-}
-
-fn gui_config_dir() -> std::path::PathBuf {
-    if let Ok(dir) = std::env::var("HALOD_CONFIG_DIR") {
-        return dir.into();
-    }
-    #[cfg(target_os = "windows")]
-    {
-        std::path::PathBuf::from(std::env::var("APPDATA").unwrap_or_else(|_| ".".to_owned()))
-            .join(halod_shared::app::APP_NAME)
-    }
-    #[cfg(not(target_os = "windows"))]
-    {
-        std::path::PathBuf::from(std::env::var("HOME").unwrap_or_else(|_| ".".to_owned()))
-            .join(".config")
-            .join(halod_shared::app::APP_NAME)
     }
 }
 
@@ -1068,7 +1050,7 @@ fn section_header(ui: &mut egui::Ui, text: &str) {
 
 // ── Footer ────────────────────────────────────────────────────────────────────
 
-fn footer(ui: &mut egui::Ui, _state: &TopicStore) {
+fn footer(ui: &mut egui::Ui) {
     ui.label(
         egui::RichText::new(concat!(
             "HaloDaemon v",
@@ -1530,9 +1512,9 @@ gui:
         out
     }
 
-    /// Merge every `en` catalog file into the set of fully-qualified leaf keys
-    /// it defines (mirrors how rust-i18n merges + flattens at load time).
-    fn defined_en_keys() -> std::collections::BTreeSet<String> {
+    /// Leaf keys per locale, merged the way rust-i18n does: the locale is the
+    /// last dotted filename segment.
+    fn catalog_keys() -> std::collections::BTreeMap<String, std::collections::BTreeSet<String>> {
         fn flatten(
             prefix: &str,
             v: &serde_yaml::Value,
@@ -1556,17 +1538,19 @@ gui:
             }
         }
         let dir = format!("{}/locales", env!("CARGO_MANIFEST_DIR"));
-        let mut out = std::collections::BTreeSet::new();
+        let mut per_locale = std::collections::BTreeMap::<String, _>::new();
         for path in locale_yaml_files(std::path::Path::new(&dir)) {
             let stem = path.file_stem().and_then(|s| s.to_str()).unwrap();
-            if stem.split('.').next_back() != Some("en") {
-                continue;
-            }
+            let locale = stem.split('.').next_back().unwrap().to_string();
             let v: serde_yaml::Value =
-                serde_yaml::from_str(&std::fs::read_to_string(&path).unwrap()).unwrap();
-            flatten("", &v, &mut out);
+                serde_yaml::from_str(&std::fs::read_to_string(&path).unwrap()).expect("valid yaml");
+            flatten("", &v, per_locale.entry(locale).or_default());
         }
-        out
+        per_locale
+    }
+
+    fn defined_en_keys() -> std::collections::BTreeSet<String> {
+        catalog_keys().remove("en").unwrap_or_default()
     }
 
     /// Extract every STATIC translation key (a string-literal first argument to
@@ -1676,39 +1660,7 @@ gui:
 
     #[test]
     fn catalogs_have_identical_key_trees() {
-        // Every language must define the same keys as English, else `t!`
-        // silently falls back and strings drift untranslated. Catalogs are split
-        // across per-screen files (`<ns>.<code>.yaml`, plus the base
-        // `<code>.yaml`); rust-i18n derives the locale from the LAST dotted
-        // filename segment and merges them, so this test merges the same way.
-        use std::collections::{BTreeMap, BTreeSet};
-        fn flatten(prefix: &str, v: &serde_yaml::Value, out: &mut BTreeSet<String>) {
-            match v {
-                serde_yaml::Value::Mapping(m) => {
-                    for (k, val) in m {
-                        let key = k.as_str().unwrap_or_default();
-                        let path = if prefix.is_empty() {
-                            key.to_string()
-                        } else {
-                            format!("{prefix}.{key}")
-                        };
-                        flatten(&path, val, out);
-                    }
-                }
-                _ => {
-                    out.insert(prefix.to_string());
-                }
-            }
-        }
-        let dir = format!("{}/locales", env!("CARGO_MANIFEST_DIR"));
-        let mut per_locale: BTreeMap<String, BTreeSet<String>> = BTreeMap::new();
-        for path in locale_yaml_files(std::path::Path::new(&dir)) {
-            let stem = path.file_stem().and_then(|s| s.to_str()).unwrap();
-            let locale = stem.split('.').next_back().unwrap().to_string();
-            let text = std::fs::read_to_string(&path).unwrap();
-            let v: serde_yaml::Value = serde_yaml::from_str(&text).expect("valid yaml");
-            flatten("", &v, per_locale.entry(locale).or_default());
-        }
+        let per_locale = catalog_keys();
         let en = per_locale.get("en").expect("en catalog").clone();
         assert!(!en.is_empty(), "en catalog has no keys");
         for (code, _) in LANGUAGES.iter().filter(|(c, _)| *c != "en") {

@@ -1,13 +1,6 @@
 // SPDX-License-Identifier: GPL-3.0-or-later
-//! Shared fan/pump curve evaluation.
-//!
-//! The UI's cooling pages preview a temp→duty curve as `[temp, duty]` control
-//! points; this is the single canonical evaluator so the global cooling page and
-//! the per-device cooling tab can't drift apart.
 
-/// Linear-interpolated duty for `temp` on a `[temp, duty]` curve, clamped at the
-/// ends. An empty curve yields `0.0`; points are assumed sorted by temperature.
-///
+/// Clamped at the ends; empty yields `0.0`; points must be sorted by temperature.
 pub fn duty_at(points: &[[f32; 2]], temp: f32) -> f32 {
     duty_at_by(points, temp, |point| (point[0], point[1]))
 }
