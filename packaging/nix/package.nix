@@ -11,14 +11,14 @@
 let
   # The release workflow pins these immutable daemon release assets and their
   # fixed-output hashes. Both were produced from one authenticated plugin release.
-  officialPluginRelease = "v0.11.7";
+  officialPluginRelease = "v0.12.0";
   officialPluginBundle = pkgs.fetchurl {
     url = "https://github.com/TimP4w/HaloDaemon/releases/download/${officialPluginRelease}/official-plugins.bundle";
-    hash = "sha256-ygkn3CFYLoZOdirsuhVbJG0T8Wz4nM6QhG/YH0nlcLs=";
+    hash = "sha256-ifm67DKb5Ix2ZAQUhZ6XTB+EklQv2X76dBekPR3x4zk=";
   };
   officialPluginLicenses = pkgs.fetchurl {
     url = "https://github.com/TimP4w/HaloDaemon/releases/download/${officialPluginRelease}/official-plugins-licenses.txt";
-    hash = "sha256-rkjCGSVOABR7lfLbcxAr3tEFABa7wHWPce3f9+t4bY8=";
+    hash = "sha256-J/l1IgIYHDtQgi8dIIsunQlyV3cBlV1BKBwuAxh9IjY=";
   };
 in
 pkgs.rustPlatform.buildRustPackage {

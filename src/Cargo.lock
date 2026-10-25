@@ -2636,7 +2636,7 @@ dependencies = [
 
 [[package]]
 name = "halod"
-version = "0.11.7"
+version = "0.12.0"
 dependencies = [
  "ab_glyph",
  "anyhow",
@@ -2694,7 +2694,7 @@ dependencies = [
 
 [[package]]
 name = "halod-broker"
-version = "0.11.7"
+version = "0.12.0"
 dependencies = [
  "anyhow",
  "halod-hwaccess",
@@ -2705,7 +2705,7 @@ dependencies = [
 
 [[package]]
 name = "halod-gui"
-version = "0.11.7"
+version = "0.12.0"
 dependencies = [
  "anyhow",
  "base64",
@@ -2742,7 +2742,7 @@ dependencies = [
 
 [[package]]
 name = "halod-hwaccess"
-version = "0.11.7"
+version = "0.12.0"
 dependencies = [
  "anyhow",
  "libc",
@@ -2757,7 +2757,7 @@ dependencies = [
 
 [[package]]
 name = "halod-plugin-signing"
-version = "0.11.7"
+version = "0.12.0"
 dependencies = [
  "anyhow",
  "base64",
@@ -2773,7 +2773,7 @@ dependencies = [
 
 [[package]]
 name = "halod-shared"
-version = "0.11.7"
+version = "0.12.0"
 dependencies = [
  "fontdb",
  "libc",
