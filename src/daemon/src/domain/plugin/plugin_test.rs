@@ -1828,6 +1828,43 @@ fn open_device(
         let handle = handle.clone();
         dev_table
             .set(
+                "set_dpi_steps",
+                lua.create_function(move |_, (_self, steps): (Table, Vec<u16>)| {
+                    handle
+                        .block_on(crate::domain::device::DpiCapability::set_dpi_steps(
+                            &*device, steps,
+                        ))
+                        .map_err(mlua_err)
+                })
+                .anyhow()?,
+            )
+            .anyhow()?;
+    }
+    {
+        let device = device.clone();
+        let handle = handle.clone();
+        dev_table
+            .set(
+                "set_profile_enabled",
+                lua.create_function(move |_, (_self, slot, enabled): (Table, u8, bool)| {
+                    handle
+                        .block_on(
+                            crate::domain::device::OnboardProfilesCapability::set_profile_enabled(
+                                &*device, slot, enabled,
+                            ),
+                        )
+                        .map_err(mlua_err)
+                })
+                .anyhow()?,
+            )
+            .anyhow()?;
+    }
+
+    {
+        let device = device.clone();
+        let handle = handle.clone();
+        dev_table
+            .set(
                 "set_dpi",
                 lua.create_function(move |_, (_self, dpi): (Table, u16)| {
                     handle
