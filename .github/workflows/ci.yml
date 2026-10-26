@@ -14,7 +14,7 @@ jobs:
   fmt:
     runs-on: ubuntu-latest
     steps:
-      - uses: actions/checkout@v7.0.0
+      - uses: actions/checkout@v7.0.1
       - name: Reject silently disabled test modules
         shell: bash
         run: |
@@ -35,7 +35,7 @@ jobs:
   reuse:
     runs-on: ubuntu-latest
     steps:
-      - uses: actions/checkout@v7.0.0
+      - uses: actions/checkout@v7.0.1
       - name: REUSE lint
         uses: fsfe/reuse-action@676e2d560c9a403aa252096d99fcab3e1132b0f5 # v6.0.0
 
@@ -44,7 +44,7 @@ jobs:
   win-build-test:
     runs-on: windows-latest
     steps:
-      - uses: actions/checkout@v7.0.0
+      - uses: actions/checkout@v7.0.1
 
       # Minimal UCRT64 toolchain: GNU Rust plus gcc/pkgconf for hidapi/rusb.
       - name: Set up MSYS2 (UCRT64)
@@ -79,7 +79,7 @@ jobs:
   linux-build-test:
     runs-on: ubuntu-latest
     steps:
-      - uses: actions/checkout@v7.0.0
+      - uses: actions/checkout@v7.0.1
 
       - name: Install build dependencies
         run: |
