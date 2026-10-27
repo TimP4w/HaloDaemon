@@ -1445,15 +1445,26 @@ fn keyboard_led_positions(
     keys: &[VisualKey],
     advertised: &[u32],
 ) -> Vec<halod_shared::types::LedPosition> {
-    keys.iter()
-        .filter(|key| advertised.is_empty() || advertised.contains(&key.led_id))
-        .map(|key| halod_shared::types::LedPosition {
-            id: key.led_id,
-            // Exact projection used by the former native TKL descriptor.
-            x: (key.cell.col + key.cell.w / 2.0) / 18.0,
-            y: (key.cell.row + 1.5) / 7.0,
-        })
-        .collect()
+    let position = |id: u32| {
+        let (x, y) = keys
+            .iter()
+            .find(|key| key.led_id == id)
+            .map_or((0.5, 0.5), |key| {
+                // Exact projection used by the former native TKL descriptor.
+                (
+                    (key.cell.col + key.cell.w / 2.0) / 18.0,
+                    (key.cell.row + 1.5) / 7.0,
+                )
+            });
+        halod_shared::types::LedPosition { id, x, y }
+    };
+    // Frames are indexed by the plugin's declared `led_ids` order, so every
+    // advertised LED keeps its slot even when the selected layout lacks its key.
+    if advertised.is_empty() {
+        keys.iter().map(|key| position(key.led_id)).collect()
+    } else {
+        advertised.iter().map(|&id| position(id)).collect()
+    }
 }
 
 fn effective_keyboard_layout(
@@ -3757,6 +3768,21 @@ mod tests {
                 .collect::<Vec<_>>(),
             vec![10, 20]
         );
+    }
+
+    #[test]
+    fn keyboard_leds_follow_advertised_frame_order() {
+        use halod_shared::keyboard::KeyCell;
+        let key = |led_id, id, col| VisualKey {
+            led_id,
+            remap_cid: None,
+            cell: KeyCell::new(id, col, 0.0),
+        };
+        let keys = [key(1, KeyId::A, 0.0), key(2, KeyId::B, 1.0)];
+        let leds = keyboard_led_positions(&keys, &[2, 9, 1]);
+        assert_eq!(leds.iter().map(|l| l.id).collect::<Vec<_>>(), [2, 9, 1]);
+        assert_eq!(leds[0].x, 1.5 / 18.0);
+        assert_eq!(leds[2].x, 0.5 / 18.0);
     }
 
     #[tokio::test(flavor = "multi_thread", worker_threads = 2)]
