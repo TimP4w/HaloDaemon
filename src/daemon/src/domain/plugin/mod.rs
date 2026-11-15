@@ -255,9 +255,9 @@ pub struct Registry {
     /// and a reconcile re-applies device state — so a failure that survives one
     /// would otherwise queue the next retry forever.
     runtime_recovery: Arc<crate::util::backoff::RetryQueue>,
-    /// Failed transport opens in the current plugin-load episode, keyed by the
-    /// stable plugin device id. A successful open, plugin reload, or a USB
-    /// replug resets it.
+    /// Failed transport opens or initializes in the current plugin-load episode,
+    /// keyed by the stable plugin device id. A successful initialize, plugin
+    /// reload, or a USB replug resets it.
     transport_open_failures: RwLock<HashMap<(String, String), crate::util::backoff::FailureStreak>>,
     content_revision: std::sync::atomic::AtomicU64,
 }
@@ -719,7 +719,7 @@ impl Registry {
         self.runtime_recovery.clear_all();
     }
 
-    fn transport_open_blocked(&self, key: &(String, String)) -> bool {
+    pub(crate) fn transport_open_blocked(&self, key: &(String, String)) -> bool {
         read_recover(&self.transport_open_failures)
             .get(key)
             .is_some_and(|streak| {
@@ -1034,13 +1034,23 @@ impl Registry {
     /// Persist a physical plugin device's initialize failure on the owning
     /// plugin card. The generic registration path sends the DeviceInitFailed
     /// toast; this record keeps the failure visible after that toast expires.
+    /// Counts against the same attempt budget as a failed transport open.
     pub(crate) fn report_init_error(&self, plugin_id: &str, device_id: &str, detail: String) {
+        let attempt =
+            self.note_transport_open_failure((plugin_id.to_owned(), device_id.to_owned()));
+        if attempt == TRANSPORT_OPEN_ATTEMPTS {
+            log::warn!(
+                "plugin '{plugin_id}' initialize failed (attempt {attempt}/{TRANSPORT_OPEN_ATTEMPTS}); giving up until a replug, rescan, or plugin reload"
+            );
+        }
         let scope = Self::device_health_scope(plugin_id, device_id);
         self.set_health(&scope, PluginIssueKind::InitFailed, detail);
     }
 
     /// A later successful initialization ends the per-device failure episode.
     pub(crate) fn clear_init_error(&self, plugin_id: &str, device_id: &str) {
+        write_recover(&self.transport_open_failures)
+            .remove(&(plugin_id.to_owned(), device_id.to_owned()));
         let scope = Self::device_health_scope(plugin_id, device_id);
         let should_clear = read_recover(&self.health)
             .get(&scope)
@@ -2312,7 +2322,6 @@ impl Registry {
             }
             None => return None,
         };
-        write_recover(&self.transport_open_failures).remove(&failure_key);
 
         let dev_match = worker::DevMatch {
             transport: spec.transport.kind().to_owned(),

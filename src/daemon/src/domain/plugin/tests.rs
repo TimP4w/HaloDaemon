@@ -70,6 +70,21 @@ fn transport_open_failures_back_off_between_attempts() {
     assert!(registry.transport_open_blocked(&key));
 }
 
+#[test]
+fn init_failures_exhaust_the_attempt_budget_until_an_init_succeeds() {
+    let registry = super::Registry::default();
+    let key = ("plug_a".to_owned(), "plug_a-1".to_owned());
+    for _ in 0..super::TRANSPORT_OPEN_ATTEMPTS {
+        registry.report_init_error(&key.0, &key.1, "boom".into());
+    }
+    let streak = registry.transport_open_failures.read().unwrap()[&key];
+    assert_eq!(streak.failures(), super::TRANSPORT_OPEN_ATTEMPTS);
+    assert!(registry.transport_open_blocked(&key));
+
+    registry.clear_init_error(&key.0, &key.1);
+    assert!(!registry.transport_open_blocked(&key));
+}
+
 /// Queue a recovery for `plugin_id` the way a runtime error would, standing in
 /// for the reconcile the daemon would run.
 fn queue_recovery(registry: &super::Registry, plugin_id: &str) -> bool {

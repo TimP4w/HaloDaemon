@@ -697,6 +697,21 @@ mod tests {
     }
 
     #[tokio::test]
+    async fn repeated_plugin_init_failures_stop_rebuilding_the_device() {
+        let app = app_with(vec![]);
+        let key = ("plug".to_owned(), "plug-1".to_owned());
+        let attempt = || MockDevice::new("plug-1").with_owning_plugin_id("plug");
+
+        for _ in 0..3 {
+            assert!(!register_device(&app, Arc::new(attempt().fail()) as Arc<dyn Device>).await);
+        }
+        assert!(app.registry.transport_open_blocked(&key));
+
+        assert!(register_device(&app, Arc::new(attempt()) as Arc<dyn Device>).await);
+        assert!(!app.registry.transport_open_blocked(&key));
+    }
+
+    #[tokio::test]
     async fn register_device_loads_state_and_pushes_active_device() {
         let app = app_with(vec![]);
         {
