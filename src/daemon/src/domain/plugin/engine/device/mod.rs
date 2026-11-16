@@ -16,8 +16,8 @@ use halod_shared::types::{
     Action, Battery, Boolean, ButtonMapping, CategoryLayout, Choice, ConnectionStatus,
     CoolingChannel, DeviceCapability, DeviceType, DpiStatus, Equalizer, KeyRemapStatus,
     KeyboardFormFactor, KeyboardLayout, LcdDescriptor, LightingChannel, LightingDescriptor,
-    LightingState, NativeEffect, Permission, PluginKind, Range, ScreenRotation, ScreenShape,
-    Sensor, WriteRateStatus,
+    LightingState, NativeEffect, Permission, PluginKind, Range, ScreenRotation, Sensor,
+    WriteRateStatus,
 };
 use halod_shared::zone_transform::build_permutation;
 
@@ -36,10 +36,12 @@ use crate::domain::device::{
 mod dpi;
 mod health;
 mod key_remap;
+mod lcd;
 
 use dpi::DpiFacet;
 use health::Health;
 use key_remap::KeyRemapFacet;
+use lcd::LcdFacet;
 
 use super::chain_leaf::ChainLeaf;
 use super::manifest::{
@@ -48,7 +50,7 @@ use super::manifest::{
 };
 use super::transport::PluginIo;
 use super::worker::{
-    DetectedController, DevMatch, InitControls, InitKeyboard, InitKeyboardVariant, InitLcd,
+    DetectedController, DevMatch, InitControls, InitKeyboard, InitKeyboardVariant,
     InitLightingChannel, PluginHandle,
 };
 use crate::domain::registry::identity::{DeviceIdentity, DeviceOrigin};
@@ -537,12 +539,7 @@ pub struct LuaDevice {
     keyboard_layout: KeyboardLayoutSlot,
     keyboard_descriptor: OnceLock<InitKeyboard>,
 
-    /// LCD panel descriptor, reported by `initialize` (resolution can vary by
-    /// device variant). Absent until initialized.
-    lcd_descriptor: OnceLock<LcdDescriptor>,
-    lcd_slot: LcdStateSlot,
-    /// Re-apply RGB after an LCD image upload (some panels reset their LEDs).
-    lcd_needs_rgb_restore: AtomicBool,
+    lcd: Option<LcdFacet>,
 
     rgb_descriptor: LightingDescriptor,
     /// RGB channels discovered at `initialize()` (dynamic LED counts). Overrides
@@ -1149,9 +1146,9 @@ impl LuaDevice {
             runtime: None,
             allowed_caps: device_caps(manifest, spec),
             caps: Arc::new(RwLock::new(device_caps(manifest, spec))),
-            lcd_descriptor: OnceLock::new(),
-            lcd_slot: LcdStateSlot::default(),
-            lcd_needs_rgb_restore: AtomicBool::new(false),
+            lcd: device_caps(manifest, spec)
+                .contains(&Cap::Lcd)
+                .then(LcdFacet::default),
             dpi: device_caps(manifest, spec)
                 .contains(&Cap::Dpi)
                 .then(DpiFacet::default),
@@ -1759,15 +1756,8 @@ impl Device for LuaDevice {
                     .set(build_dynamic_descriptor(plain, effects, Some(&iso_keys)));
             }
         }
-        if let Some(lcd) = outcome.lcd {
-            self.lcd_slot.set_brightness(lcd.brightness);
-            self.lcd_slot
-                .set_rotation(ScreenRotation::from_degrees(lcd.rotation));
-            self.lcd_slot.set_raw_streaming(lcd.raw_streaming);
-            self.lcd_slot.set_latches_last_frame(lcd.latches);
-            self.lcd_needs_rgb_restore
-                .store(lcd.needs_rgb_restore, Ordering::Relaxed);
-            let _ = self.lcd_descriptor.set(build_lcd_descriptor(&lcd));
+        if let (Some(lcd), Some(facet)) = (outcome.lcd, &self.lcd) {
+            facet.install(&lcd);
         }
         if let Some(accessories) = outcome.accessories {
             let _ = self.dynamic_accessories.set(accessories);
@@ -2476,31 +2466,6 @@ fn integration_root_id(plugin_type: PluginKind, plugin_id: &str, is_child: bool)
     (plugin_type == PluginKind::Integration && !is_child).then(|| plugin_id.to_owned())
 }
 
-/// Build an `LcdDescriptor` from the panel info `initialize` reported.
-fn build_lcd_descriptor(lcd: &InitLcd) -> LcdDescriptor {
-    let shape = if lcd.shape.eq_ignore_ascii_case("square") {
-        ScreenShape::Square
-    } else {
-        ScreenShape::Circle
-    };
-    let supported_rotations = if lcd.rotations.is_empty() {
-        vec![ScreenRotation::R0]
-    } else {
-        lcd.rotations
-            .iter()
-            .map(|d| ScreenRotation::from_degrees(*d))
-            .collect()
-    };
-    LcdDescriptor {
-        shape,
-        width: lcd.width,
-        height: lcd.height,
-        supported_rotations,
-        supported_image_types: lcd.image_types.clone(),
-        latches_last_frame: lcd.latches,
-    }
-}
-
 struct PollPause<'a>(&'a LuaDevice);
 
 impl<'a> PollPause<'a> {
@@ -2519,30 +2484,26 @@ impl Drop for PollPause<'_> {
 #[async_trait]
 impl LcdCapability for LuaDevice {
     fn lcd_descriptor(&self) -> LcdDescriptor {
-        self.lcd_descriptor.get().cloned().unwrap_or(LcdDescriptor {
-            shape: ScreenShape::Circle,
-            width: 0,
-            height: 0,
-            supported_rotations: vec![ScreenRotation::R0],
-            supported_image_types: Vec::new(),
-            latches_last_frame: false,
-        })
+        self.lcd
+            .as_ref()
+            .map(LcdFacet::descriptor)
+            .unwrap_or_else(|| LcdFacet::default().descriptor())
     }
 
     fn lcd_state(&self) -> &LcdStateSlot {
-        &self.lcd_slot
+        LcdFacet::slot(self.lcd.as_ref())
     }
 
     fn needs_rgb_restore_after_upload(&self) -> bool {
-        self.lcd_needs_rgb_restore.load(Ordering::Relaxed)
+        self.lcd.as_ref().is_some_and(LcdFacet::needs_rgb_restore)
     }
 
     /// One rendered engine frame. Rotation/brightness/mode live in the slot and
     /// are passed to the plugin so it can pre-rotate and pick the stream path.
     async fn stream_frame(&self, rgba: &[u8], width: u32, height: u32) -> Result<()> {
-        let rotation = self.lcd_slot.rotation().degrees();
-        let raw = self.lcd_slot.raw_streaming();
-        let brightness = self.lcd_slot.brightness();
+        let rotation = self.lcd_state().rotation().degrees();
+        let raw = self.lcd_state().raw_streaming();
+        let brightness = self.lcd_state().brightness();
         // The bulk transfer owns the transport; silence the status poll meanwhile.
         let _pause = PollPause::new(self);
         let result = self
@@ -2553,28 +2514,28 @@ impl LcdCapability for LuaDevice {
     }
 
     async fn set_image(&self, data: &[u8]) -> Result<()> {
-        let rotation = self.lcd_slot.rotation().degrees();
+        let rotation = self.lcd_state().rotation().degrees();
         let _pause = PollPause::new(self);
         let result = self.worker()?.lcd_set_image(data.to_vec(), rotation).await;
         self.track(result).await
     }
 
     async fn set_brightness(&self, brightness: u8) -> Result<()> {
-        let rotation = self.lcd_slot.rotation().degrees();
+        let rotation = self.lcd_state().rotation().degrees();
         let result = self
             .worker()?
             .lcd_set_brightness(brightness, rotation)
             .await;
         self.track(result).await?;
-        self.lcd_slot.set_brightness(brightness);
+        self.lcd_state().set_brightness(brightness);
         Ok(())
     }
 
     async fn set_rotation(&self, degrees: u32) -> Result<()> {
-        let brightness = self.lcd_slot.brightness();
+        let brightness = self.lcd_state().brightness();
         let result = self.worker()?.lcd_set_rotation(brightness, degrees).await;
         self.track(result).await?;
-        self.lcd_slot
+        self.lcd_state()
             .set_rotation(ScreenRotation::from_degrees(degrees));
         Ok(())
     }
