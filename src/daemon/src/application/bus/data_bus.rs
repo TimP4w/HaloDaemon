@@ -313,10 +313,8 @@ pub struct DataBus {
 }
 
 #[derive(Clone, Debug)]
-#[allow(dead_code)] // `revision` is only asserted by tests.
 pub struct DataChange {
     pub key: String,
-    pub revision: u64,
 }
 
 impl Default for DataBus {
@@ -755,7 +753,6 @@ impl DataBus {
         if notify {
             let _ = self.changes.send(DataChange {
                 key: key.to_owned(),
-                revision,
             });
         } else if let Some(delay) = schedule_after {
             self.schedule_coalesced_notification(key.to_owned(), delay);
@@ -816,7 +813,6 @@ impl DataBus {
         drop(inner);
         let _ = self.changes.send(DataChange {
             key: key.to_owned(),
-            revision,
         });
         Ok(revision)
     }
@@ -836,7 +832,7 @@ impl DataBus {
     }
 
     fn remove(&self, owner: &str, key: &str) {
-        let revision = {
+        {
             let mut inner = self.inner.lock();
             if inner
                 .records
@@ -858,11 +854,9 @@ impl DataBus {
                 }
             }
             inner.revision = inner.revision.wrapping_add(1).max(1);
-            inner.revision
-        };
+        }
         let _ = self.changes.send(DataChange {
             key: key.to_owned(),
-            revision,
         });
     }
 
@@ -874,7 +868,7 @@ impl DataBus {
         let changes = self.changes.clone();
         runtime.spawn(async move {
             tokio::time::sleep(delay).await;
-            let revision = {
+            {
                 let mut inner = inner.lock();
                 let Some(record) = inner.records.get_mut(&key) else {
                     return;
@@ -884,9 +878,8 @@ impl DataBus {
                 }
                 record.pending_notification = false;
                 record.last_notification = Some(Instant::now());
-                record.revision
-            };
-            let _ = changes.send(DataChange { key, revision });
+            }
+            let _ = changes.send(DataChange { key });
         });
     }
 
@@ -905,7 +898,7 @@ impl DataBus {
         let task_key = key.clone();
         let task = runtime.spawn(async move {
             tokio::time::sleep(delay).await;
-            let stale_revision = {
+            {
                 let mut inner = inner.lock();
                 let should_notify = inner.records.get(&task_key).is_some_and(|record| {
                     record.revision == revision
@@ -923,12 +916,8 @@ impl DataBus {
                     record.revision = stale_revision;
                     record.stale_task = None;
                 }
-                stale_revision
-            };
-            let _ = changes.send(DataChange {
-                key: task_key,
-                revision: stale_revision,
-            });
+            }
+            let _ = changes.send(DataChange { key: task_key });
         });
         let abort = task.abort_handle();
         let mut inner = self.inner.lock();
@@ -1324,7 +1313,8 @@ mod tests {
             .await
             .unwrap()
             .unwrap();
-        assert_eq!(change.revision, final_revision);
+        assert_eq!(change.key, "telemetry.current");
+        assert_eq!(bus.read("telemetry.current").revision, final_revision);
     }
 
     #[tokio::test]
@@ -1347,7 +1337,8 @@ mod tests {
             .await
             .unwrap()
             .unwrap();
-        assert!(change.revision > initial_revision);
+        assert_eq!(change.key, "telemetry.current");
+        assert!(bus.read("telemetry.current").revision > initial_revision);
         assert_eq!(bus.read("telemetry.current").status, SnapshotStatus::Stale);
     }
 

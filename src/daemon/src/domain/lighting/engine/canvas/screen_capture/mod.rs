@@ -31,9 +31,7 @@ pub struct RawFrame {
 }
 
 pub struct MonitorInfo {
-    // Set per-monitor on both backends and asserted by the Linux enumerate test,
-    // but not otherwise read; kept as part of the monitor descriptor.
-    #[allow(dead_code)]
+    #[cfg_attr(not(target_os = "windows"), allow(dead_code))]
     pub index: usize,
     /// Human-readable label for the UI dropdown, e.g. "Monitor 0: 1920×1080".
     pub label: String,

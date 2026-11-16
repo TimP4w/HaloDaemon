@@ -156,7 +156,7 @@ impl PluginEffectHandle {
     /// Spawn the worker thread for one live effect instance. `effect_id` is
     /// the plugin-local id (not the namespaced catalog id) — it drives the
     /// `render_effect_<id>` / `led_effect_<id>` callback lookup.
-    #[cfg_attr(not(test), allow(dead_code))]
+    #[cfg(test)]
     pub fn spawn(
         script_source: String,
         module_sources: std::collections::BTreeMap<String, String>,

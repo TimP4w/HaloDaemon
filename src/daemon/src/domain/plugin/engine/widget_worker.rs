@@ -94,7 +94,7 @@ impl super::lua_worker::VmCtx for WidgetCtx {
 pub struct PluginWidgetHandle(LuaWorker<WidgetCall>);
 
 impl PluginWidgetHandle {
-    #[cfg_attr(not(test), allow(dead_code))]
+    #[cfg(test)]
     pub fn spawn(
         source: String,
         modules: BTreeMap<String, String>,

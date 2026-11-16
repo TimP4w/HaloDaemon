@@ -663,7 +663,7 @@ impl PluginHandle {
     /// config values (including decrypted secrets if `SecureStorage` is
     /// granted) — both snapshotted at spawn time.
     #[allow(clippy::too_many_arguments)]
-    #[cfg_attr(not(test), allow(dead_code))]
+    #[cfg(test)]
     pub fn spawn(
         source: String,
         module_sources: std::collections::BTreeMap<String, String>,
