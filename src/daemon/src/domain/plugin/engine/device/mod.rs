@@ -14,8 +14,8 @@ use async_trait::async_trait;
 use halod_shared::keyboard::{KeyId, KeyVariant, KeyboardLayoutStatus, VisualKey};
 use halod_shared::types::{
     Action, Battery, Boolean, ButtonAction, ButtonDescriptor, ButtonMapping, CategoryLayout,
-    Choice, ConnectionStatus, CoolingChannel, DeviceCapability, DeviceType, DpiMode, DpiStatus,
-    Equalizer, KeyRemapStatus, KeyboardFormFactor, KeyboardLayout, LcdDescriptor, LightingChannel,
+    Choice, ConnectionStatus, CoolingChannel, DeviceCapability, DeviceType, DpiStatus, Equalizer,
+    KeyRemapStatus, KeyboardFormFactor, KeyboardLayout, LcdDescriptor, LightingChannel,
     LightingDescriptor, LightingState, NativeEffect, Permission, PluginKind, Range, ScreenRotation,
     ScreenShape, Sensor, WriteRateStatus,
 };
@@ -33,8 +33,10 @@ use crate::domain::device::{
     RangeStateCache, SensorCapability, VisibilitySlot,
 };
 
+mod dpi;
 mod health;
 
+use dpi::DpiFacet;
 use health::Health;
 
 use super::chain_leaf::ChainLeaf;
@@ -44,29 +46,13 @@ use super::manifest::{
 };
 use super::transport::PluginIo;
 use super::worker::{
-    DetectedController, DevMatch, InitControls, InitDpi, InitKeyboard, InitKeyboardVariant,
-    InitLcd, InitLightingChannel, PluginHandle,
+    DetectedController, DevMatch, InitControls, InitKeyboard, InitKeyboardVariant, InitLcd,
+    InitLightingChannel, PluginHandle,
 };
 use crate::domain::registry::identity::{DeviceIdentity, DeviceOrigin};
 use std::collections::{HashMap, HashSet};
 
 const POLL_FAILURE_DEGRADE_THRESHOLD: u8 = 3;
-
-/// Host-side DPI step-cycle state (the plugin only writes the chosen value).
-struct DpiState {
-    steps: Vec<u16>,
-    available_dpis: Vec<u16>,
-    index: usize,
-    current: u16,
-}
-
-#[derive(Clone)]
-struct DpiConfig {
-    min: u16,
-    max: u16,
-    mode: DpiMode,
-    mode_control: Option<String>,
-}
 
 #[derive(Clone, Default)]
 struct KeyRemapDescriptor {
@@ -537,9 +523,7 @@ pub struct LuaDevice {
     allowed_caps: Vec<Cap>,
     caps: Arc<RwLock<Vec<Cap>>>,
 
-    dpi_state: Mutex<DpiState>,
-    dpi_config: Mutex<DpiConfig>,
-    host_dpi_steps: Mutex<Option<Vec<u16>>>,
+    dpi: Option<DpiFacet>,
 
     /// Declared choice/range/boolean/action controls + their value caches.
     controls: Controls,
@@ -1174,19 +1158,9 @@ impl LuaDevice {
             lcd_descriptor: OnceLock::new(),
             lcd_slot: LcdStateSlot::default(),
             lcd_needs_rgb_restore: AtomicBool::new(false),
-            host_dpi_steps: Mutex::new(None),
-            dpi_state: Mutex::new(DpiState {
-                steps: Vec::new(),
-                available_dpis: Vec::new(),
-                index: 0,
-                current: 0,
-            }),
-            dpi_config: Mutex::new(DpiConfig {
-                min: 0,
-                max: 0,
-                mode: DpiMode::Host,
-                mode_control: None,
-            }),
+            dpi: device_caps(manifest, spec)
+                .contains(&Cap::Dpi)
+                .then(DpiFacet::default),
             // Canonical package controls are runtime descriptors returned by
             // initialize. Keep the pre-initialize surface empty.
             controls: Controls::default(),
@@ -1806,21 +1780,8 @@ impl Device for LuaDevice {
         if let Some(controls) = outcome.controls {
             let _ = self.dynamic_controls.set(Controls::from_runtime(controls));
         }
-        if let Some(dpi) = outcome.dpi {
-            if !dpi.onboard && self.host_dpi_steps.lock().is_none() {
-                *self.host_dpi_steps.lock() = Some(dpi.steps.clone());
-            }
-            *self.dpi_config.lock() = DpiConfig {
-                min: dpi.min,
-                max: dpi.max,
-                mode: if dpi.onboard {
-                    DpiMode::Onboard
-                } else {
-                    DpiMode::Host
-                },
-                mode_control: dpi.mode_control.clone(),
-            };
-            *self.dpi_state.lock() = dpi_state_from_runtime(&dpi);
+        if let (Some(dpi), Some(facet)) = (outcome.dpi, &self.dpi) {
+            facet.install(&dpi);
         }
         if let Some(cooling) = outcome.cooling {
             let _ = self.cooling_channels.set(
@@ -2645,76 +2606,24 @@ impl LcdCapability for LuaDevice {
     }
 }
 
-/// Install a runtime DPI descriptor, selecting its midpoint like the native
-/// driver. This is called after the worker has validated `initialize` output.
-fn dpi_state_from_runtime(dpi: &InitDpi) -> DpiState {
-    let steps = dpi.steps.clone();
-    let current = dpi
-        .current
-        .unwrap_or_else(|| steps.get(steps.len() / 2).copied().unwrap_or(dpi.min));
-    let index = steps
-        .iter()
-        .position(|&step| step == current)
-        .unwrap_or(steps.len() / 2);
-    DpiState {
-        steps,
-        available_dpis: dpi.available_dpis.clone(),
-        index,
-        current,
-    }
-}
-
 impl LuaDevice {
+    fn dpi(&self) -> Result<&DpiFacet> {
+        self.dpi
+            .as_ref()
+            .ok_or_else(|| anyhow::anyhow!("'{}' does not declare dpi", self.id))
+    }
+
     async fn refresh_dpi_status(&self) -> Result<()> {
+        let Some(facet) = &self.dpi else {
+            return Ok(());
+        };
         if !self.caps.read().contains(&Cap::Dpi) {
             return Ok(());
         }
         if let Some(dpi) = self.worker()?.dpi_status().await? {
-            if !dpi.onboard {
-                *self.host_dpi_steps.lock() = Some(dpi.steps.clone());
-            }
-            *self.dpi_state.lock() = dpi_state_from_runtime(&dpi);
-            *self.dpi_config.lock() = DpiConfig {
-                min: dpi.min,
-                max: dpi.max,
-                mode: if dpi.onboard {
-                    DpiMode::Onboard
-                } else {
-                    DpiMode::Host
-                },
-                mode_control: dpi.mode_control,
-            };
+            facet.refresh(&dpi);
         }
         Ok(())
-    }
-
-    fn validate_dpi_steps(&self, steps: &[u16]) -> Result<()> {
-        if steps.is_empty() {
-            anyhow::bail!("DPI steps list cannot be empty");
-        }
-        let (min, max) = {
-            let config = self.dpi_config.lock();
-            (config.min, config.max)
-        };
-        let available = self.dpi_state.lock().available_dpis.clone();
-        for &step in steps {
-            anyhow::ensure!(
-                step >= min && step <= max,
-                "DPI {step} is outside {min}..={max}"
-            );
-            if !available.is_empty() {
-                anyhow::ensure!(
-                    available.contains(&step),
-                    "DPI {step} is not supported by this device"
-                );
-            }
-        }
-        Ok(())
-    }
-
-    fn clamp_dpi(&self, dpi: u16) -> u16 {
-        let config = self.dpi_config.lock();
-        dpi.clamp(config.min, config.max)
     }
 }
 
@@ -2725,7 +2634,7 @@ impl DpiCapability for LuaDevice {
     }
 
     fn save_state(&self) -> serde_json::Value {
-        self.host_dpi_steps.lock().as_ref().map_or(
+        self.dpi.as_ref().and_then(DpiFacet::host_steps).map_or(
             serde_json::Value::Null,
             |steps| serde_json::json!({ "steps": steps }),
         )
@@ -2738,11 +2647,14 @@ impl DpiCapability for LuaDevice {
         let Ok(steps) = serde_json::from_value::<Vec<u16>>(steps.clone()) else {
             return false;
         };
-        if self.validate_dpi_steps(&steps).is_err() {
+        let Ok(facet) = self.dpi() else {
+            return false;
+        };
+        if facet.validate_steps(&steps).is_err() {
             return false;
         }
-        if self.dpi_config.lock().mode == DpiMode::Onboard {
-            *self.host_dpi_steps.lock() = Some(steps);
+        if facet.is_onboard() {
+            facet.remember_host_steps(steps);
             return true;
         }
         self.set_dpi_steps(steps).await.is_ok()
@@ -2752,66 +2664,36 @@ impl DpiCapability for LuaDevice {
         if let Err(error) = self.refresh_dpi_status().await {
             log::debug!("[{}] refreshing DPI state: {error:#}", self.id);
         }
-        let dpi = self.dpi_state.lock();
-        let config = self.dpi_config.lock().clone();
-        DpiStatus {
-            steps: dpi.steps.clone(),
-            current_index: dpi.index,
-            current_dpi: dpi.current,
-            available_dpis: if dpi.available_dpis.is_empty() {
-                (config.min..=config.max).step_by(100).collect()
-            } else {
-                dpi.available_dpis.clone()
-            },
-            mode: config.mode,
-        }
+        self.dpi
+            .as_ref()
+            .map(DpiFacet::status)
+            .unwrap_or_else(|| DpiFacet::default().status())
     }
 
     async fn set_dpi_steps(&self, steps: Vec<u16>) -> Result<()> {
-        self.validate_dpi_steps(&steps)?;
+        let facet = self.dpi()?;
+        facet.validate_steps(&steps)?;
         let result = self.worker()?.dpi_set_steps(&steps).await;
         self.track(result).await?;
-        if self.dpi_config.lock().mode == DpiMode::Host {
-            *self.host_dpi_steps.lock() = Some(steps.clone());
-        }
-        {
-            let mut dpi = self.dpi_state.lock();
-            dpi.steps = steps;
-            dpi.index = dpi
-                .steps
-                .iter()
-                .position(|step| *step == dpi.current)
-                .unwrap_or(dpi.index.min(dpi.steps.len() - 1));
-        }
+        facet.record_steps(steps);
         self.refresh_dpi_status().await
     }
 
     async fn set_dpi_index(&self, index: usize) -> Result<()> {
-        let value = {
-            let dpi = self.dpi_state.lock();
-            let &v = dpi
-                .steps
-                .get(index)
-                .ok_or_else(|| anyhow::anyhow!("dpi index {index} out of range"))?;
-            v
-        };
+        let facet = self.dpi()?;
+        let value = facet.step_at(index)?;
         let result = self.worker()?.dpi_set(value).await;
         self.track(result).await?;
-        let mut dpi = self.dpi_state.lock();
-        dpi.index = index;
-        dpi.current = value;
+        facet.record_index(index, value);
         Ok(())
     }
 
     async fn set_dpi_direct(&self, dpi: u16) -> Result<()> {
-        let value = self.clamp_dpi(dpi);
+        let facet = self.dpi()?;
+        let value = facet.clamp(dpi);
         let result = self.worker()?.dpi_set(value).await;
         self.track(result).await?;
-        let mut dpi = self.dpi_state.lock();
-        dpi.current = value;
-        if let Some(index) = dpi.steps.iter().position(|step| *step == value) {
-            dpi.index = index;
-        }
+        facet.record_current(value);
         Ok(())
     }
 }
@@ -2890,24 +2772,13 @@ impl BooleanCapability for LuaDevice {
         {
             current.value = value;
         }
-        let changes_dpi_mode = {
-            let mut config = self.dpi_config.lock();
-            let changes = config.mode_control.as_deref() == Some(key);
-            if changes {
-                config.mode = if value {
-                    DpiMode::Host
-                } else {
-                    DpiMode::Onboard
-                };
-            }
-            changes
-        };
-        if changes_dpi_mode {
-            let host_steps = self.host_dpi_steps.lock().clone();
-            if value {
-                if let Some(steps) = host_steps {
-                    self.set_dpi_steps(steps).await?;
-                }
+        if let Some(reapply) = self
+            .dpi
+            .as_ref()
+            .and_then(|dpi| dpi.switch_mode(key, value))
+        {
+            if let Some(steps) = reapply {
+                self.set_dpi_steps(steps).await?;
             }
             self.refresh_dpi_status().await?;
         }
@@ -3213,6 +3084,7 @@ mod tests {
     use crate::domain::device::LightingCapability;
     use crate::infrastructure::drivers::transports::mock::test_transport::MockTransport;
     use crate::infrastructure::drivers::transports::Transport;
+    use halod_shared::types::DpiMode;
 
     fn test_manifest(
         id: &str,
@@ -3495,7 +3367,7 @@ mod tests {
             !DpiCapability::restore_state(&restarted, &serde_json::json!({ "steps": [70000] }))
                 .await
         );
-        restarted.dpi_config.lock().mode = DpiMode::Onboard;
+        restarted.dpi.as_ref().unwrap().set_mode(DpiMode::Onboard);
         assert_eq!(
             DpiCapability::save_state(&restarted),
             serde_json::json!({"steps": steps})
