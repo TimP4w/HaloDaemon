@@ -426,11 +426,15 @@ impl PluginsUi {
             })
             .collect();
         if visible.is_empty() {
-            ui.label(
-                egui::RichText::new(t!("plugins.empty_title"))
-                    .font(theme::body_md())
-                    .color(theme::TEXT_MUT),
-            );
+            egui::Frame::NONE
+                .inner_margin(egui::Margin::symmetric(10, 8))
+                .show(ui, |ui| {
+                    ui.label(
+                        egui::RichText::new(t!("plugins.empty_title"))
+                            .font(theme::body_md())
+                            .color(theme::TEXT_MUT),
+                    );
+                });
             return;
         }
         ui.spacing_mut().item_spacing.y = 3.0;

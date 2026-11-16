@@ -330,6 +330,7 @@ pub fn empty_state(ui: &mut egui::Ui, title: &str, subtitle: Option<&str>) {
             );
         }
     });
+    ui.add_space(theme::SPACE_16);
 }
 
 #[cfg(test)]
