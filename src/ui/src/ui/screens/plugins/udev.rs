@@ -38,7 +38,7 @@ pub(super) fn udev_rules_banner(
             t!("plugins.udev_outdated"),
             t!(
                 "plugins.udev_outdated_sub",
-                count = status.generated_rule_count,
+                count = status.plugins_requiring_update.len(),
                 path = path
             ),
         )
@@ -247,7 +247,11 @@ pub(super) fn udev_modal_status(ui: &mut egui::Ui, status: &halod_shared::types:
         .show(ui);
     } else {
         let text = match &status.installed_path {
-            Some(path) => t!("plugins.udev_modal_outdated", count = count, path = path),
+            Some(path) => t!(
+                "plugins.udev_modal_outdated",
+                count = status.plugins_requiring_update.len(),
+                path = path
+            ),
             None => t!("plugins.udev_modal_missing", count = count),
         };
         widgets::Banner::warn(&text).dot(theme::STAT_AMBER).show(ui);

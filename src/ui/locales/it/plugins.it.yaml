@@ -41,7 +41,7 @@ plugins:
   udev_missing: L'accesso ai dispositivi Linux non è installato
   udev_missing_sub: "Nessun file udev di HaloDaemon trovato. Genera e installa le %{count} regole dispositivo per abilitare l'accesso."
   udev_outdated: L'accesso ai dispositivi Linux deve essere aggiornato
-  udev_outdated_sub: "%{count} regole dispositivo generate differiscono dal file installato in %{path}. Copia il comando di installazione, eseguilo in un terminale e ricarica udev."
+  udev_outdated_sub: "In %{path} mancano regole dispositivo per %{count} plugin installati. Copia il comando di installazione, eseguilo in un terminale e ricarica udev."
   udev_generate: Genera regole udev
   udev_copied: Comando di installazione copiato
   udev_info: Come funziona
@@ -51,8 +51,8 @@ plugins:
   udev_info_scope: HaloDaemon deriva l'accesso dal manifest di ogni plugin. Le regole HID e USB corrispondono agli ID vendor e prodotto dichiarati. Le regole SMBus sono limitate ai driver chipset o ai vendor PCI delle GPU dichiarati. I plugin senza hardware Linux corrispondente non aggiungono regole.
   udev_info_install_title: Installazione manuale
   udev_info_install: Genera il file deterministico, controllalo, poi installalo a livello di sistema e ricarica udev. Ripeti l'operazione dopo aver aggiunto, rimosso o aggiornato un plugin quando lo stato richiede un intervento.
-  udev_modal_current: "%{count} regole generate corrispondono a %{path}. Accesso aggiornato."
-  udev_modal_outdated: "%{count} regole generate differiscono da %{path}. Intervento necessario."
+  udev_modal_current: "%{path} contiene tutte le %{count} regole necessarie ai tuoi plugin. Accesso aggiornato."
+  udev_modal_outdated: "In %{path} mancano regole per %{count} plugin installati. Intervento necessario."
   udev_modal_missing: "%{count} regole generate non sono installate. Intervento necessario."
   udev_copy_command: Copia comando
   udev_command_copied: Copiato

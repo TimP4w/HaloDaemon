@@ -41,7 +41,7 @@ plugins:
   udev_missing: Linux device access is not installed
   udev_missing_sub: "No HaloDaemon udev file was found. Generate and install the %{count} device rules to enable access."
   udev_outdated: Linux device access needs updating
-  udev_outdated_sub: "%{count} generated device rules differ from the installed file at %{path}. Copy the installation command, run it in a terminal, then reload udev."
+  udev_outdated_sub: "%{path} is missing device rules for %{count} installed plugin(s). Copy the installation command, run it in a terminal, then reload udev."
   udev_generate: Generate udev rules
   udev_copied: Install command copied
   udev_info: How it works
@@ -51,8 +51,8 @@ plugins:
   udev_info_scope: HaloDaemon derives access from each plugin manifest. HID and USB rules match declared vendor and product IDs. SMBus rules are limited to declared chipset drivers or GPU PCI vendors. Plugins without matching Linux hardware declarations add no rule.
   udev_info_install_title: Manual installation
   udev_info_install: Generate the deterministic file, review it, then install it system-wide and reload udev. Repeat this after adding, removing, or updating a plugin when the status says action is needed.
-  udev_modal_current: "%{count} generated rules match %{path}. Access is current."
-  udev_modal_outdated: "%{count} generated rules differ from %{path}. Action needed."
+  udev_modal_current: "%{path} contains all %{count} rules your plugins need. Access is current."
+  udev_modal_outdated: "%{path} is missing rules for %{count} installed plugin(s). Action needed."
   udev_modal_missing: "%{count} generated rules are not installed. Action needed."
   udev_copy_command: Copy command
   udev_command_copied: Copied

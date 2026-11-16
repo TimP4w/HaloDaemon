@@ -174,7 +174,12 @@ fn status_at_paths<'a>(
     match installed {
         Some((path, contents)) => halod_shared::types::UdevRulesStatus {
             supported: true,
-            current: contents == rules.as_bytes(),
+            current: {
+                let installed = String::from_utf8_lossy(&contents);
+                generated_device_rules(rules)
+                    .iter()
+                    .all(|rule| installed.lines().any(|line| line == *rule))
+            },
             installed_path: Some(path),
             generated_rule_count,
             plugins_requiring_update,
@@ -183,7 +188,7 @@ fn status_at_paths<'a>(
         },
         None => halod_shared::types::UdevRulesStatus {
             supported: true,
-            current: false,
+            current: generated_rule_count == 0,
             installed_path: None,
             generated_rule_count,
             plugins_requiring_update,
@@ -329,20 +334,34 @@ mod tests {
     }
 
     #[test]
-    fn status_uses_first_installed_file_and_detects_drift() {
+    fn status_uses_first_installed_file_and_accepts_a_catalog_wide_superset() {
         let temp = tempfile::tempdir().unwrap();
+        let first = plugin(
+            temp.path(),
+            "first",
+            "devices:\n  - vendor: Acme\n    model: One\n    match: { hid: { vid: 1, pid: 2 } }\ntransports: { hid: {} }\n",
+        );
+        let second = plugin(
+            temp.path(),
+            "second",
+            "devices:\n  - vendor: Acme\n    model: Two\n    match: { hid: { vid: 3, pid: 4 } }\ntransports: { hid: {} }\n",
+        );
         let override_path = temp.path().join("etc.rules");
         let vendor_path = temp.path().join("usr.rules");
-        std::fs::write(&override_path, "stale").unwrap();
-        std::fs::write(&vendor_path, "current").unwrap();
+        let catalog_wide = assemble(&[first.clone(), second.clone()]);
+        std::fs::write(&override_path, assemble(&[])).unwrap();
+        std::fs::write(&vendor_path, &catalog_wide).unwrap();
 
+        let installed = [first];
+        let rules = assemble(&installed);
         let paths = [override_path.as_path(), vendor_path.as_path()];
-        let stale = status_at_paths("current", &[], paths);
+        let stale = status_at_paths(&rules, &installed, paths);
         assert!(!stale.current);
         assert_eq!(stale.installed_path.as_deref(), override_path.to_str());
 
-        std::fs::write(&override_path, "current").unwrap();
-        assert!(status_at_paths("current", &[], paths).current);
+        std::fs::write(&override_path, &catalog_wide).unwrap();
+        assert!(status_at_paths(&rules, &installed, paths).current);
+        assert!(status_at_paths(&assemble(&[]), &[], paths).current);
     }
 
     #[test]
