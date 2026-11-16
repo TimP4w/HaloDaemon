@@ -277,28 +277,6 @@ pub(super) fn screen_to_norm(screen: Pos2, canvas_rect: Rect) -> Pos2 {
     )
 }
 
-/// A convex `outline` filled with the canvas texture at the matching UVs, so a
-/// zone shows exactly the slice of the frame it samples.
-pub(super) fn textured_fan(
-    tex: egui::TextureId,
-    outline: &[Pos2],
-    canvas_rect: Rect,
-    tint: egui::Color32,
-) -> egui::Mesh {
-    let mut mesh = egui::Mesh::with_texture(tex);
-    for &pt in outline {
-        mesh.vertices.push(egui::epaint::Vertex {
-            pos: pt,
-            uv: uv_of(pt, canvas_rect),
-            color: tint,
-        });
-    }
-    for i in 1..outline.len().saturating_sub(1) as u32 {
-        mesh.add_triangle(0, i, i + 1);
-    }
-    mesh
-}
-
 fn uv_of(screen: Pos2, canvas_rect: Rect) -> Pos2 {
     Pos2::new(
         (screen.x - canvas_rect.left()) / canvas_rect.width(),
@@ -352,25 +330,6 @@ pub(super) fn point_in_zone(norm: Pos2, zone: &PlacedZone) -> bool {
 mod tests {
     use super::*;
     use crate::ui::screens::canvas::test_fixtures::{drag, r, z};
-
-    #[test]
-    fn textured_fan_samples_the_zone_own_slice_of_the_frame() {
-        let rect = r();
-        let zone = z(0.25, 0.5, 0.5, 0.25);
-        let outline = rounded_zone_outline_sc(&zone, rect, 6.0, 0.0, 1.0);
-        let mesh = textured_fan(
-            egui::TextureId::default(),
-            &outline,
-            rect,
-            egui::Color32::WHITE,
-        );
-        assert_eq!(mesh.indices.len(), (outline.len() - 2) * 3);
-        for v in &mesh.vertices {
-            assert_eq!(v.uv, screen_to_norm(v.pos, rect));
-            assert!((0.25 - 1e-4..=0.75 + 1e-4).contains(&v.uv.x));
-            assert!((0.5 - 1e-4..=0.75 + 1e-4).contains(&v.uv.y));
-        }
-    }
 
     #[test]
     fn point_inside_unrotated_zone() {

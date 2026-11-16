@@ -155,16 +155,6 @@ fn effect_rebuild_due(
     }
 }
 
-fn record_respawn(
-    respawn: &mut Option<crate::util::backoff::FailureStreak>,
-    now: std::time::Instant,
-) {
-    match respawn {
-        Some(streak) => streak.record(now),
-        None => *respawn = Some(crate::util::backoff::FailureStreak::first(now)),
-    }
-}
-
 fn effect_signature(def: Option<&EffectDef>) -> EffectSignature {
     match def {
         Some(def) => EffectSignature {
@@ -554,7 +544,10 @@ impl RgbEngine {
                             log::warn!(
                             "plugin pixmap effect '{key}' worker died: {e:#}; respawning with backoff"
                         );
-                            record_respawn(&mut lp.respawn, std::time::Instant::now());
+                            crate::util::backoff::FailureStreak::record_in(
+                                &mut lp.respawn,
+                                std::time::Instant::now(),
+                            );
                             true
                         }
                         Err(e) => {
@@ -728,7 +721,10 @@ impl RgbEngine {
                                 "plugin direct effect '{id}' worker died on {}: {e:#}; respawning with backoff",
                                 dev.id()
                             );
-                            record_respawn(&mut ld.respawn, std::time::Instant::now());
+                            crate::util::backoff::FailureStreak::record_in(
+                                &mut ld.respawn,
+                                std::time::Instant::now(),
+                            );
                             ld.runtime = DirectRuntime::Off;
                             break;
                         }

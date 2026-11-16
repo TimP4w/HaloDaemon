@@ -39,6 +39,16 @@ impl FailureStreak {
     pub fn failures(&self) -> u32 {
         self.failures
     }
+
+    pub fn record_in(slot: &mut Option<Self>, now: Instant) -> &Self {
+        match slot {
+            Some(streak) => {
+                streak.record(now);
+                streak
+            }
+            None => slot.insert(Self::first(now)),
+        }
+    }
 }
 
 pub fn respawn_wait(streak: &FailureStreak) -> Duration {

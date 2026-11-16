@@ -2,27 +2,29 @@
 use anyhow::Result;
 use std::collections::{HashMap, HashSet};
 use std::sync::Arc;
+use std::time::{Duration, Instant};
 
+use crate::util::backoff::{respawn_wait, FailureStreak};
 use crate::{
     application::state::{AppState, HidTrackingEntry},
     domain::device::Device,
     domain::registry::observers::discovery::{DiscoveryHandle, TransportScanner},
 };
 
-/// Exponential backoff capped at 30 s. After 5+ consecutive failures, promote
-/// logging to warn so operators notice a persistent HID subsystem problem.
-async fn backoff_sleep(failures: u32) {
-    let secs = std::cmp::min(1u64 << failures.min(5), 30);
-    tokio::time::sleep(std::time::Duration::from_secs(secs)).await;
+const MAX_ENUMERATION_BACKOFF: Duration = Duration::from_secs(30);
+
+async fn back_off(streak: &mut Option<FailureStreak>) {
+    let wait = respawn_wait(FailureStreak::record_in(streak, Instant::now()));
+    tokio::time::sleep(wait.min(MAX_ENUMERATION_BACKOFF)).await;
 }
 
 /// Background service driven from `main`: re-enumerates HID devices every 2 s,
 /// adding newly connected devices and removing disconnected ones. Backs off
 /// exponentially after repeated failures (e.g. post-suspend).
 pub async fn hotplug_monitor(app: Arc<AppState>) {
-    let mut failures: u32 = 0;
+    let mut streak: Option<FailureStreak> = None;
     loop {
-        tokio::time::sleep(std::time::Duration::from_secs(2)).await;
+        tokio::time::sleep(Duration::from_secs(2)).await;
 
         let live: Vec<HidDeviceInfo> = match tokio::task::spawn_blocking(|| {
             hidapi::HidApi::new().map(|api| api.device_list().map(HidDeviceInfo::from).collect())
@@ -30,23 +32,21 @@ pub async fn hotplug_monitor(app: Arc<AppState>) {
         .await
         {
             Ok(Ok(v)) => {
-                failures = 0;
+                streak = None;
                 v
             }
             Ok(Err(e)) => {
-                failures += 1;
-                if failures == 1 {
+                if streak.is_none() {
                     log::debug!("Hotplug: HID enumeration failed: {e}");
                 } else {
-                    log::warn!("Hotplug: HID enumeration failed ({failures} consecutive): {e}");
+                    log::warn!("Hotplug: HID enumeration failed again: {e}");
                 }
-                backoff_sleep(failures).await;
+                back_off(&mut streak).await;
                 continue;
             }
             Err(e) => {
-                failures += 1;
-                log::warn!("Hotplug: spawn_blocking panicked ({failures} consecutive): {e}");
-                backoff_sleep(failures).await;
+                log::warn!("Hotplug: spawn_blocking panicked: {e}");
+                back_off(&mut streak).await;
                 continue;
             }
         };

@@ -14,8 +14,8 @@ use crate::ui::theme::{self, a};
 
 use super::geometry::{
     apply_drag, body_move, fill_coords, led_bounds, led_screen_pos, letterbox, norm_to_screen,
-    point_in_zone, rounded_zone_outline_sc, screen_to_norm, textured_fan, zone_corners,
-    zone_corners_sc, zone_key, zones_in_marquee,
+    point_in_zone, rounded_zone_outline_sc, screen_to_norm, zone_corners, zone_corners_sc,
+    zone_key, zones_in_marquee,
 };
 use super::rack::{rgb_zone_descriptor, ring_zone_context_menu};
 use super::{CanvasUi, DragState, Handle, LedMode, MarqueeState, HANDLE_HIT_R, HANDLE_R};
@@ -52,6 +52,16 @@ pub(super) fn canvas_view(
     while y < outer.bottom() {
         gp.hline(outer.x_range(), y, grid);
         y += step;
+    }
+    if canvas_ui.led_mode == LedMode::Frame {
+        if let Some(tex) = &canvas_ui.texture {
+            p.image(
+                tex.id(),
+                canvas_rect,
+                Rect::from_min_max(Pos2::ZERO, Pos2::new(1.0, 1.0)),
+                Color32::WHITE,
+            );
+        }
     }
     theme::round_corners(p, outer, theme::RADIUS_LG, theme::MAIN_BG);
     p.rect_stroke(
@@ -352,22 +362,12 @@ fn draw_zones(p: &egui::Painter, state: &TopicStore, canvas_ui: &CanvasUi, canva
         let corners = zone_corners_sc(display, canvas_rect, sin, cos);
 
         let outline = rounded_zone_outline_sc(display, canvas_rect, 6.0, sin, cos);
-        match (&canvas_ui.texture, canvas_ui.led_mode) {
-            (Some(tex), LedMode::Frame) => {
-                p.add(textured_fan(
-                    tex.id(),
-                    &outline,
-                    canvas_rect,
-                    fade(Color32::WHITE),
-                ));
-            }
-            _ => {
-                p.add(egui::Shape::convex_polygon(
-                    outline.clone(),
-                    fade(theme::INNER_BG),
-                    Stroke::NONE,
-                ));
-            }
+        if canvas_ui.led_mode == LedMode::Leds {
+            p.add(egui::Shape::convex_polygon(
+                outline.clone(),
+                fade(theme::INNER_BG),
+                Stroke::NONE,
+            ));
         }
         let (border_w, border_col) = if selected || in_layer {
             (2.0, theme::CYAN)

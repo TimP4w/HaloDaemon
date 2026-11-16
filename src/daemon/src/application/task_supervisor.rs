@@ -3,11 +3,14 @@ use parking_lot::Mutex;
 use std::future::Future;
 use std::pin::Pin;
 use std::sync::Arc;
-use std::time::Duration;
+use std::time::{Duration, Instant};
 
 use tokio::sync::watch;
 
 use crate::application::state::AppState;
+use crate::util::backoff::{respawn_wait, FailureStreak};
+
+const MAX_FAILURES: u32 = 3;
 
 pub(crate) struct TaskHandle(pub tokio::task::JoinHandle<()>);
 
@@ -79,7 +82,7 @@ impl TaskSupervisor {
         let manager_state = Arc::clone(&state);
         let app = Arc::clone(&self.app);
         let manager = tokio::spawn(async move {
-            let mut failures = 0u32;
+            let mut streak: Option<FailureStreak> = None;
             loop {
                 if *shutdown_rx.borrow() {
                     set_state(&manager_state, TaskState::Stopped);
@@ -122,7 +125,7 @@ impl TaskSupervisor {
                     Err(error) if error.is_panic() => format!("panicked: {error}"),
                     Err(error) => format!("was cancelled unexpectedly: {error}"),
                 };
-                failures += 1;
+                let streak = FailureStreak::record_in(&mut streak, Instant::now());
                 set_state(&manager_state, TaskState::Failed(reason.clone()));
                 log::error!("{name} {reason}");
                 if !failure_detail.is_empty() {
@@ -135,11 +138,11 @@ impl TaskSupervisor {
                     .await;
                 }
 
-                if failures >= 3 {
+                if streak.failures() >= MAX_FAILURES {
                     return;
                 }
                 set_state(&manager_state, TaskState::Restarting);
-                let delay = Duration::from_secs(1 << (failures - 1));
+                let delay = respawn_wait(streak);
                 tokio::select! {
                     _ = tokio::time::sleep(delay) => {}
                     changed = shutdown_rx.changed() => {
