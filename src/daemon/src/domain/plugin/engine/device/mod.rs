@@ -33,6 +33,10 @@ use crate::domain::device::{
     RangeStateCache, SensorCapability, VisibilitySlot,
 };
 
+mod health;
+
+use health::Health;
+
 use super::chain_leaf::ChainLeaf;
 use super::manifest::{
     topology_from, AccessoryManifest, ActionDef, BooleanDef, ChoiceDef, DeviceSpec, PluginManifest,
@@ -519,17 +523,7 @@ pub struct LuaDevice {
     /// The shared HTTP capability runtime (integration roots and their children
     /// hold the same one) so throughput folds HTTP bytes into `write_rate_status`.
     http: Option<crate::infrastructure::http::HttpRuntime>,
-    /// Local registry lifetime. Dynamic children share their root's runtime,
-    /// so closing a child must be tracked separately from closing the root.
-    closed: Arc<AtomicBool>,
-    /// One-shot latch for cleanup/reporting during a failing call episode.
-    call_failed: Arc<AtomicBool>,
-    /// Terminal transport failure for every plugin kind, including plain
-    /// device plugins that do not have an integration runtime.
-    unrecoverable: Arc<AtomicBool>,
-    /// A child's own call failures, kept off the `runtime` it shares with the
-    /// root so one unreachable slot cannot disconnect the root and its siblings.
-    child_degraded: AtomicBool,
+    health: Arc<Health>,
     /// For integration roots only: the manifest each controller child is
     /// reported by the child's own `initialize` callback.
     root_manifest: Option<Arc<PluginManifest>>,
@@ -680,9 +674,9 @@ impl LuaDevice {
     /// writes the shared runtime state.
     fn record_call_outcome(&self, failed: bool, reason: DegradeReason) {
         if self.is_dynamic_child() {
-            self.child_degraded.store(failed, Ordering::Release);
+            self.health.set_child_degraded(failed);
             if failed && self.transport_is_unrecoverable() {
-                self.unrecoverable.store(true, Ordering::Release);
+                self.health.mark_unrecoverable();
             }
             return;
         }
@@ -704,10 +698,10 @@ impl LuaDevice {
     fn set_call_failure_state(&self, reason: DegradeReason) {
         let unrecoverable = self.transport_is_unrecoverable();
         if unrecoverable {
-            self.unrecoverable.store(true, Ordering::Release);
+            self.health.mark_unrecoverable();
         }
         if self.is_dynamic_child() {
-            self.child_degraded.store(true, Ordering::Release);
+            self.health.set_child_degraded(true);
             return;
         }
         if let Some(runtime) = &self.runtime {
@@ -827,8 +821,7 @@ impl LuaDevice {
             dev.event_paused.store(true, Ordering::Relaxed);
             let paused = dev.event_paused.clone();
             let resume = dev.event_resume.clone();
-            let closed = dev.closed.clone();
-            let unrecoverable = dev.unrecoverable.clone();
+            let health = Arc::clone(&dev.health);
             let event_runtime = dev.runtime.clone();
             let event_worker = worker.clone();
             let event_notify = poll_notify.clone();
@@ -843,14 +836,13 @@ impl LuaDevice {
                             }
                         }
                         _ = resume.notified() => {
-                            if closed.load(Ordering::Acquire) {
+                            if health.is_closed() {
                                 break;
                             }
                             continue;
                         }
                     }
-                    if closed.load(Ordering::Acquire)
-                        || unrecoverable.load(Ordering::Acquire)
+                    if health.is_stopped()
                         || event_runtime.as_ref().is_some_and(|runtime| {
                             matches!(*runtime.lock(), RuntimeState::Unrecoverable)
                         })
@@ -859,7 +851,7 @@ impl LuaDevice {
                     }
                     while paused.load(Ordering::Acquire) {
                         resume.notified().await;
-                        if closed.load(Ordering::Acquire) {
+                        if health.is_closed() {
                             return;
                         }
                     }
@@ -953,8 +945,7 @@ impl LuaDevice {
             let dynamic_controls = Arc::clone(&dev.dynamic_controls);
             let cooling_cache = Arc::clone(&dev.cooling_cache);
             let cooling_channels = Arc::clone(&dev.cooling_channels);
-            let closed = dev.closed.clone();
-            let unrecoverable = dev.unrecoverable.clone();
+            let health = Arc::clone(&dev.health);
             let runtime = dev.runtime.clone();
             let poll_transport = dev.transport.clone();
             let poll_plugin_id = dev.plugin_id.clone();
@@ -974,7 +965,7 @@ impl LuaDevice {
                         .as_ref()
                         .and_then(PluginIo::unrecoverable_error)
                     {
-                        unrecoverable.store(true, Ordering::Release);
+                        health.mark_unrecoverable();
                         if let Some(runtime) = &runtime {
                             *runtime.lock() = RuntimeState::Unrecoverable;
                         }
@@ -995,9 +986,7 @@ impl LuaDevice {
                         }
                         break;
                     }
-                    if closed.load(Ordering::Acquire)
-                        || unrecoverable.load(Ordering::Acquire)
-                    {
+                    if health.is_stopped() {
                         break;
                     }
                     if paused.load(Ordering::Relaxed) {
@@ -1068,7 +1057,7 @@ impl LuaDevice {
                                 .and_then(PluginIo::unrecoverable_error)
                                 .is_some()
                             {
-                                unrecoverable.store(true, Ordering::Release);
+                                health.mark_unrecoverable();
                                 if let Some(runtime) = &runtime {
                                     *runtime.lock() = RuntimeState::Unrecoverable;
                                 }
@@ -1177,10 +1166,7 @@ impl LuaDevice {
             worker,
             transport,
             http: None,
-            closed: Arc::new(AtomicBool::new(false)),
-            call_failed: Arc::new(AtomicBool::new(false)),
-            unrecoverable: Arc::new(AtomicBool::new(false)),
-            child_degraded: AtomicBool::new(false),
+            health: Arc::default(),
             root_manifest: None,
             runtime: None,
             allowed_caps: device_caps(manifest, spec),
@@ -1269,16 +1255,16 @@ impl LuaDevice {
     async fn track<T>(&self, result: Result<T>) -> Result<T> {
         let unrecoverable = result.is_err() && self.transport_is_unrecoverable();
         let first_failure = if result.is_err() {
-            !self.call_failed.swap(true, Ordering::AcqRel)
+            self.health.begin_failure()
         } else {
-            self.call_failed.store(false, Ordering::Release);
+            self.health.end_failure();
             false
         };
         if unrecoverable {
-            self.unrecoverable.store(true, Ordering::Release);
+            self.health.mark_unrecoverable();
         }
         // Restore once when an error episode begins. Repeated engine calls can
-        // race with the state broadcast, so `call_failed` is the latch.
+        // race with the state broadcast, so the health failure episode is the latch.
         self.record_call_outcome(result.is_err(), DegradeReason::CallFailed);
         if first_failure {
             if let Some(transport) = &self.transport {
@@ -1367,7 +1353,7 @@ impl LuaDevice {
 
     fn worker(&self) -> Result<&PluginHandle> {
         anyhow::ensure!(
-            !self.closed.load(Ordering::Acquire),
+            !self.health.is_closed(),
             "plugin device '{}' is closed",
             self.id
         );
@@ -1708,10 +1694,7 @@ impl Device for LuaDevice {
     }
 
     fn is_live(&self) -> bool {
-        if self.closed.load(Ordering::Acquire)
-            || self.unrecoverable.load(Ordering::Acquire)
-            || self.child_degraded.load(Ordering::Acquire)
-        {
+        if self.health.blocks_liveness() {
             return false;
         }
         self.runtime.as_ref().is_none_or(|r| match *r.lock() {
@@ -1725,7 +1708,7 @@ impl Device for LuaDevice {
     }
 
     fn is_unrecoverable(&self) -> bool {
-        self.unrecoverable.load(Ordering::Acquire)
+        self.health.is_unrecoverable()
             || self
                 .runtime
                 .as_ref()
@@ -1744,7 +1727,7 @@ impl Device for LuaDevice {
             Ok(outcome) => outcome,
             Err(error) => {
                 self.set_call_failure_state(DegradeReason::CallFailed);
-                if !self.call_failed.swap(true, Ordering::AcqRel) {
+                if self.health.begin_failure() {
                     if let Some(transport) = &self.transport {
                         transport.restore_safety_state();
                     }
@@ -1906,7 +1889,7 @@ impl Device for LuaDevice {
             .and_then(PluginIo::unrecoverable_error)
         {
             self.set_call_failure_state(DegradeReason::CallFailed);
-            if !self.call_failed.swap(true, Ordering::AcqRel) {
+            if self.health.begin_failure() {
                 if let Some(transport) = &self.transport {
                     transport.restore_safety_state();
                 }
@@ -1948,7 +1931,7 @@ impl Device for LuaDevice {
     }
 
     async fn close(&self) {
-        if self.closed.swap(true, Ordering::AcqRel) {
+        if self.health.close() {
             return;
         }
         self.event_resume.notify_one();
