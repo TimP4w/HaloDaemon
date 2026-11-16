@@ -13,11 +13,11 @@ use anyhow::{Context, Result};
 use async_trait::async_trait;
 use halod_shared::keyboard::{KeyId, KeyVariant, KeyboardLayoutStatus, VisualKey};
 use halod_shared::types::{
-    Action, Battery, Boolean, ButtonAction, ButtonDescriptor, ButtonMapping, CategoryLayout,
-    Choice, ConnectionStatus, CoolingChannel, DeviceCapability, DeviceType, DpiStatus, Equalizer,
-    KeyRemapStatus, KeyboardFormFactor, KeyboardLayout, LcdDescriptor, LightingChannel,
-    LightingDescriptor, LightingState, NativeEffect, Permission, PluginKind, Range, ScreenRotation,
-    ScreenShape, Sensor, WriteRateStatus,
+    Action, Battery, Boolean, ButtonMapping, CategoryLayout, Choice, ConnectionStatus,
+    CoolingChannel, DeviceCapability, DeviceType, DpiStatus, Equalizer, KeyRemapStatus,
+    KeyboardFormFactor, KeyboardLayout, LcdDescriptor, LightingChannel, LightingDescriptor,
+    LightingState, NativeEffect, Permission, PluginKind, Range, ScreenRotation, ScreenShape,
+    Sensor, WriteRateStatus,
 };
 use halod_shared::zone_transform::build_permutation;
 
@@ -35,9 +35,11 @@ use crate::domain::device::{
 
 mod dpi;
 mod health;
+mod key_remap;
 
 use dpi::DpiFacet;
 use health::Health;
+use key_remap::KeyRemapFacet;
 
 use super::chain_leaf::ChainLeaf;
 use super::manifest::{
@@ -54,12 +56,6 @@ use std::collections::{HashMap, HashSet};
 
 const POLL_FAILURE_DEGRADE_THRESHOLD: u8 = 3;
 
-#[derive(Clone, Default)]
-struct KeyRemapDescriptor {
-    buttons: Vec<ButtonDescriptor>,
-    requires_host_mode: bool,
-    default_mappings: Vec<ButtonMapping>,
-}
 use crate::infrastructure::drivers::vendors::generic::devices::common::{
     linear_lighting_channel, ring_led_positions,
 };
@@ -537,9 +533,7 @@ pub struct LuaDevice {
     connection_cache: Arc<Mutex<Option<ConnectionStatus>>>,
     cooling_cache: Arc<Mutex<HashMap<String, CoolingChannel>>>,
 
-    key_remap: RwLock<KeyRemapDescriptor>,
-    /// Host-cached mappings that differ from `ButtonAction::Native`.
-    key_remap_mappings: Mutex<HashMap<u16, ButtonMapping>>,
+    key_remap: Option<KeyRemapFacet>,
     keyboard_layout: KeyboardLayoutSlot,
     keyboard_descriptor: OnceLock<InitKeyboard>,
 
@@ -1170,8 +1164,9 @@ impl LuaDevice {
             battery_cache: Arc::new(Mutex::new(Vec::new())),
             connection_cache: Arc::new(Mutex::new(None)),
             cooling_cache: Arc::new(Mutex::new(HashMap::new())),
-            key_remap: RwLock::new(KeyRemapDescriptor::default()),
-            key_remap_mappings: Mutex::new(HashMap::new()),
+            key_remap: device_caps(manifest, spec)
+                .contains(&Cap::KeyRemap)
+                .then(KeyRemapFacet::default),
             keyboard_layout: KeyboardLayoutSlot::default(),
             keyboard_descriptor: OnceLock::new(),
             rgb_descriptor: LightingDescriptor {
@@ -1800,24 +1795,8 @@ impl Device for LuaDevice {
                     .collect(),
             );
         }
-        if let Some(key_remap) = outcome.key_remap {
-            let defaults = key_remap.default_mappings.clone();
-            *self.key_remap.write() = KeyRemapDescriptor {
-                buttons: key_remap.buttons,
-                requires_host_mode: key_remap.requires_host_mode,
-                default_mappings: key_remap.default_mappings,
-            };
-            let to_arm: Vec<ButtonMapping> = {
-                let mut mappings = self.key_remap_mappings.lock();
-                if mappings.is_empty() {
-                    mappings.extend(defaults.into_iter().map(|mapping| (mapping.cid, mapping)));
-                }
-                mappings
-                    .values()
-                    .filter(|m| m.base != ButtonAction::Native || m.shifted != ButtonAction::Native)
-                    .cloned()
-                    .collect()
-            };
+        if let (Some(key_remap), Some(facet)) = (outcome.key_remap, &self.key_remap) {
+            let to_arm = facet.install(key_remap);
             if !to_arm.is_empty() {
                 log::debug!(
                     "[{}] re-arming {} active key mapping(s) on connect",
@@ -2914,6 +2893,14 @@ impl OnboardProfilesCapability for LuaDevice {
     }
 }
 
+impl LuaDevice {
+    fn key_remap(&self) -> Result<&KeyRemapFacet> {
+        self.key_remap
+            .as_ref()
+            .ok_or_else(|| anyhow::anyhow!("'{}' does not declare key_remap", self.id))
+    }
+}
+
 #[async_trait]
 impl KeyRemapCapability for LuaDevice {
     fn state_key(&self) -> &'static str {
@@ -2921,8 +2908,11 @@ impl KeyRemapCapability for LuaDevice {
     }
 
     fn save_state(&self) -> serde_json::Value {
-        let mut mappings: Vec<_> = self.key_remap_mappings.lock().values().cloned().collect();
-        mappings.sort_by_key(|mapping| mapping.cid);
+        let mappings = self
+            .key_remap
+            .as_ref()
+            .map(KeyRemapFacet::saved)
+            .unwrap_or_default();
         serde_json::json!({ "mappings": mappings })
     }
 
@@ -2933,10 +2923,12 @@ impl KeyRemapCapability for LuaDevice {
         let Ok(mappings) = serde_json::from_value::<Vec<ButtonMapping>>(value.clone()) else {
             return false;
         };
-        let buttons = self.key_remap.read().buttons.clone();
+        let Ok(facet) = self.key_remap() else {
+            return false;
+        };
         if mappings
             .iter()
-            .any(|mapping| crate::domain::input::validate::validate_cid(&buttons, mapping).is_err())
+            .any(|mapping| facet.validate(mapping).is_err())
         {
             return false;
         }
@@ -2950,7 +2942,7 @@ impl KeyRemapCapability for LuaDevice {
         {
             return false;
         }
-        self.key_remap_mappings.lock().clear();
+        facet.clear();
         for mapping in mappings {
             if self.set_button_mapping(mapping).await.is_err() {
                 return false;
@@ -2960,53 +2952,50 @@ impl KeyRemapCapability for LuaDevice {
     }
 
     async fn get_key_remap_status(&self) -> KeyRemapStatus {
-        let descriptor = self.key_remap.read().clone();
-        let mappings: Vec<ButtonMapping> =
-            self.key_remap_mappings.lock().values().cloned().collect();
+        let snapshot = self
+            .key_remap
+            .as_ref()
+            .map(KeyRemapFacet::snapshot)
+            .unwrap_or_else(|| KeyRemapFacet::default().snapshot());
         let host_mode_active = match &self.worker {
             Some(w) => w.key_remap_host_mode_active().await,
             None => false,
         };
         KeyRemapStatus {
-            buttons: descriptor.buttons,
-            mappings,
-            requires_host_mode: descriptor.requires_host_mode,
+            buttons: snapshot.buttons,
+            mappings: snapshot.mappings,
+            requires_host_mode: snapshot.requires_host_mode,
             host_mode_active,
         }
     }
 
     async fn set_button_mapping(&self, mapping: ButtonMapping) -> Result<()> {
-        crate::domain::input::validate::validate_cid(&self.key_remap.read().buttons, &mapping)?;
+        let facet = self.key_remap()?;
+        facet.validate(&mapping)?;
         let result = self.worker()?.key_remap_set_mapping(mapping.clone()).await;
         self.track(result).await?;
-        self.key_remap_mappings.lock().insert(mapping.cid, mapping);
+        facet.record(mapping);
         Ok(())
     }
 
     async fn reset_button_mapping(&self, cid: u16) -> Result<()> {
-        let default = self
-            .key_remap
-            .read()
-            .default_mappings
-            .iter()
-            .find(|mapping| mapping.cid == cid)
-            .cloned();
-        if let Some(mapping) = default {
+        let facet = self.key_remap()?;
+        if let Some(mapping) = facet.default_for(cid) {
             self.set_button_mapping(mapping).await
         } else {
             let result = self.worker()?.key_remap_reset(cid).await;
             self.track(result).await?;
-            self.key_remap_mappings.lock().remove(&cid);
+            facet.forget(cid);
             Ok(())
         }
     }
 
     async fn reset_all_button_mappings(&self) -> Result<()> {
+        let facet = self.key_remap()?;
         let result = self.worker()?.key_remap_reset_all().await;
         self.track(result).await?;
-        let defaults = self.key_remap.read().default_mappings.clone();
-        self.key_remap_mappings.lock().clear();
-        for mapping in defaults {
+        facet.clear();
+        for mapping in facet.defaults() {
             self.set_button_mapping(mapping).await?;
         }
         Ok(())
@@ -3084,7 +3073,7 @@ mod tests {
     use crate::domain::device::LightingCapability;
     use crate::infrastructure::drivers::transports::mock::test_transport::MockTransport;
     use crate::infrastructure::drivers::transports::Transport;
-    use halod_shared::types::DpiMode;
+    use halod_shared::types::{ButtonAction, DpiMode};
 
     fn test_manifest(
         id: &str,
