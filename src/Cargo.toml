@@ -10,7 +10,7 @@ repository = "https://github.com/TimP4w/Halod"
 
 [workspace.dependencies]
 tokio      = { version = "1.53.1" }
-serde      = { version = "1.0.229", features = ["derive"] }
+serde      = { version = "1.0.229", features = ["derive", "rc"] }
 serde_json = { version = "1.0.151", features = ["float_roundtrip"] }
 semver     = "1.0.28"
 anyhow     = "1.0.104"

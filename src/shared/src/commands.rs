@@ -304,6 +304,15 @@ pub enum DaemonCommand {
     Shutdown,
 }
 
+/// One client frame: a command and an optional id echoed on its error reply.
+#[derive(Debug, Clone, Serialize, Deserialize)]
+pub struct Request {
+    #[serde(default, skip_serializing_if = "Option::is_none")]
+    pub request_id: Option<String>,
+    #[serde(flatten)]
+    pub command: DaemonCommand,
+}
+
 /// Device-scoped operations, carried by [`DaemonCommand::Device`].
 #[derive(Debug, Clone, Serialize, Deserialize)]
 #[serde(tag = "type", rename_all = "snake_case")]
@@ -924,6 +933,12 @@ mod tests {
             assert_eq!(roundtrip(&cmd), wire);
             let parsed: DaemonCommand = serde_json::from_value(wire.clone()).unwrap();
             assert_eq!(roundtrip(&parsed), wire);
+            let mut framed = wire.clone();
+            framed["request_id"] = json!("req-1");
+            let request: Request = serde_json::from_value(framed.clone()).unwrap();
+            assert_eq!(request.request_id.as_deref(), Some("req-1"));
+            assert_eq!(roundtrip(&request.command), wire);
+            assert_eq!(serde_json::to_value(&request).unwrap(), framed);
         }
     }
 

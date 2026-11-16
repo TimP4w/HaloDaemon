@@ -7,7 +7,7 @@ use std::sync::Arc;
 
 use anyhow::{bail, Context, Result};
 use base64::Engine as _;
-use serde_json::json;
+use halod_shared::messages::DaemonMessage;
 
 use crate::application::ipc::ClientHandle;
 use crate::application::state::AppState;
@@ -103,12 +103,11 @@ pub async fn get_asset(
 ) -> Result<()> {
     let bytes = app.registry.read_asset(&plugin_id, &name)?;
     let data_b64 = base64::engine::general_purpose::STANDARD.encode(&bytes);
-    client.send_json(&json!({
-        "type": "plugin_asset",
-        "plugin_id": plugin_id,
-        "name": name,
-        "data_b64": data_b64,
-    }));
+    client.send(&DaemonMessage::PluginAsset {
+        plugin_id,
+        name,
+        data_b64,
+    });
     Ok(())
 }
 
@@ -118,11 +117,10 @@ pub async fn get_lcd_widget_icon(
     app: Arc<AppState>,
 ) -> Result<()> {
     let bytes = app.registry.read_widget_icon(&catalog_id)?;
-    client.send_json(&json!({
-        "type": "lcd_widget_icon",
-        "catalog_id": catalog_id,
-        "data_b64": base64::engine::general_purpose::STANDARD.encode(bytes),
-    }));
+    client.send(&DaemonMessage::LcdWidgetIcon {
+        catalog_id,
+        data_b64: base64::engine::general_purpose::STANDARD.encode(bytes),
+    });
     Ok(())
 }
 
@@ -132,30 +130,22 @@ pub async fn get_lcd_preset(
     app: Arc<AppState>,
 ) -> Result<()> {
     let def = app.registry.read_lcd_preset(&catalog_id)?;
-    client.send_json(&json!({
-        "type": "lcd_plugin_preset",
-        "catalog_id": catalog_id,
-        "def": def,
-    }));
+    client.send(&DaemonMessage::LcdPluginPreset { catalog_id, def });
     Ok(())
 }
 
 /// Enumerate the host's serial ports for a `serial_port` config-field dropdown.
 pub async fn list_serial_ports(client: ClientHandle) -> Result<()> {
     let ports = crate::infrastructure::drivers::transports::serial::list_ports();
-    client.send_json(&json!({
-        "type": "serial_ports",
-        "ports": ports,
-    }));
+    client.send(&DaemonMessage::SerialPorts { ports });
     Ok(())
 }
 
 /// Return current Linux udev-rule drift without modifying system files.
 pub async fn get_udev_rules_status(client: ClientHandle, app: Arc<AppState>) -> Result<()> {
-    client.send_json(&json!({
-        "type": "udev_rules_status",
-        "data": app.registry.udev_rules_status(),
-    }));
+    client.send(&DaemonMessage::UdevRulesStatus {
+        data: app.registry.udev_rules_status(),
+    });
     Ok(())
 }
 

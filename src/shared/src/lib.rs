@@ -11,6 +11,7 @@ pub mod keycodes;
 pub mod lcd_custom;
 pub mod lcd_geometry;
 pub mod lifecycle;
+pub mod messages;
 pub mod socket;
 pub mod system_fonts;
 pub mod types;

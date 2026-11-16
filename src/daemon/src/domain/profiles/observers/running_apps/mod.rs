@@ -48,10 +48,7 @@ pub async fn list(client: ClientHandle) -> Result<()> {
     })
     .await
     .map_err(|error| anyhow::anyhow!("running-app scan panicked: {error}"))?;
-    client.send_json(&serde_json::json!({
-        "type": "running_apps_list",
-        "apps": apps,
-    }));
+    client.send(&halod_shared::messages::DaemonMessage::RunningAppsList { apps });
     Ok(())
 }
 

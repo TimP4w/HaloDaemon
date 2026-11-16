@@ -1,7 +1,8 @@
 // SPDX-License-Identifier: GPL-3.0-or-later
-use halod_shared::commands::{DaemonCommand, DeviceOp};
-use serde::{Deserialize, Serialize};
-use serde_json::{json, Value};
+use halod_shared::commands::{DaemonCommand, DeviceOp, Request};
+use halod_shared::messages::{DaemonMessage, IpcError};
+use serde::Deserialize;
+use serde_json::Value;
 use std::sync::Arc;
 use std::time::Duration;
 use tokio::sync::broadcast::error::RecvError;
@@ -38,7 +39,7 @@ async fn lcd_preview_forward_loop(app: Arc<AppState>, client: ClientHandle) {
             }
         }
         // Engine may not be set yet at startup — same readiness dance as
-        // engine_subscribe_loop, plus the closed() escape.
+        // canvas_forward_loop, plus the closed() escape.
         let mut ready = app.engines_ready.subscribe();
         let mut rx = loop {
             if let Some(e) = app.lcd.engine() {
@@ -69,25 +70,14 @@ async fn lcd_preview_forward_loop(app: Arc<AppState>, client: ClientHandle) {
     }
 }
 
-async fn engine_subscribe_loop<T, F>(
-    app: Arc<AppState>,
-    client: ClientHandle,
-    get_receiver: F,
-    frame_type: &'static str,
-) where
-    T: Serialize + Send + Sync + 'static,
-    F: Fn(&AppState) -> Option<tokio::sync::broadcast::Receiver<Arc<T>>>,
-{
-    // The domain engine is set once during startup, possibly after this client
-    // subscribes. Wake on the readiness signal rather than polling; re-check
-    // each round so a flip that races the subscribe is never missed.
+async fn canvas_forward_loop(app: Arc<AppState>, client: ClientHandle) {
     let mut ready = app.engines_ready.subscribe();
     let mut rx = loop {
-        if let Some(rx) = get_receiver(&app) {
-            break rx;
+        if let Some(engine) = app.lighting.engine() {
+            break engine.subscribe();
         }
         if ready.changed().await.is_err() {
-            return; // daemon shutting down
+            return;
         }
     };
     loop {
@@ -96,42 +86,41 @@ async fn engine_subscribe_loop<T, F>(
                 if client.tx.is_closed() {
                     break;
                 }
-                client.send_json(&json!({"type": frame_type, "data": *frame}));
+                client.send(&DaemonMessage::CanvasFrame { data: frame });
             }
-            Err(RecvError::Lagged(n)) => log::debug!("{frame_type} subscriber lagged {n} frame(s)"),
+            Err(RecvError::Lagged(n)) => log::debug!("canvas_frame subscriber lagged {n} frame(s)"),
             Err(RecvError::Closed) => break,
         }
     }
 }
 
 pub async fn handle_message(msg: Value, client: ClientHandle, app: Arc<AppState>) {
-    let Some(cmd) = msg["type"].as_str() else {
-        log::warn!("IPC: frame missing string 'type' field");
-        client
-            .send_json(&json!({"type": "error", "message": "missing or non-string 'type' field"}));
-        return;
-    };
-
-    if cmd == "ping" {
-        client.send_json(&json!({"type": "pong"}));
-        return;
-    }
-
-    let req_id = msg["request_id"].as_str();
+    let cmd = msg["type"].as_str().unwrap_or("<untyped>").to_string();
+    let req_id = msg["request_id"].as_str().map(str::to_string);
 
     if let Err(e) = check_ipc_bounds(&msg) {
-        reply_error(&client, cmd, req_id, anyhow::anyhow!("frame rejected: {e}"));
+        reply_error(
+            &client,
+            &cmd,
+            req_id,
+            anyhow::anyhow!("frame rejected: {e}"),
+            false,
+        );
         return;
     }
 
-    let typed = match DaemonCommand::deserialize(&msg) {
-        Ok(typed) => typed,
+    let Request {
+        request_id,
+        command,
+    } = match Request::deserialize(&msg) {
+        Ok(request) => request,
         Err(e) => {
             reply_error(
                 &client,
-                cmd,
+                &cmd,
                 req_id,
                 anyhow::anyhow!("failed to parse: {e}"),
+                false,
             );
             return;
         }
@@ -142,16 +131,14 @@ pub async fn handle_message(msg: Value, client: ClientHandle, app: Arc<AppState>
     // other devices run concurrently. This keeps one slow / timing-out device
     // (e.g. an unreachable wireless controller) from stalling every other
     // command. Global commands run inline in read order.
-    match command_target(&typed) {
+    match command_target(&command) {
         Some(id) => {
-            let writes_device = command_writes_device(&typed);
+            let writes_device = command_writes_device(&command);
             let id = id.to_string();
-            let cmd = cmd.to_string();
-            let req_id = req_id.map(str::to_string);
             tokio::spawn(async move {
                 let lock = app.device_lock(&id).await;
                 let _guard = lock.lock().await;
-                if let Err(e) = dispatch(typed, client.clone(), Arc::clone(&app)).await {
+                if let Err(e) = dispatch(command, client.clone(), Arc::clone(&app)).await {
                     let plugin_handled = e
                         .downcast_ref::<crate::domain::plugin::SurfacedPluginError>()
                         .is_some();
@@ -173,22 +160,16 @@ pub async fn handle_message(msg: Value, client: ClientHandle, app: Arc<AppState>
                         )
                         .await;
                     }
-                    reply_error_with_handled(&client, &cmd, req_id.as_deref(), e, writes_device);
+                    reply_error(&client, &cmd, request_id, e, writes_device);
                 }
             });
         }
         None => {
-            if let Err(e) = dispatch(typed, client.clone(), app).await {
-                reply_error(&client, cmd, req_id, e);
+            if let Err(e) = dispatch(command, client.clone(), app).await {
+                reply_error(&client, &cmd, request_id, e, false);
             }
         }
     }
-}
-
-/// Send an `error` reply frame for a failed command, echoing `request_id` when
-/// the client supplied one so it can correlate the failure.
-fn reply_error(client: &ClientHandle, cmd: &str, req_id: Option<&str>, e: anyhow::Error) {
-    reply_error_with_handled(client, cmd, req_id, e, false);
 }
 
 fn catalog_error_code(
@@ -207,28 +188,24 @@ fn catalog_error_code(
     }
 }
 
-fn reply_error_with_handled(
+fn reply_error(
     client: &ClientHandle,
     cmd: &str,
-    req_id: Option<&str>,
+    request_id: Option<String>,
     e: anyhow::Error,
     handled: bool,
 ) {
     log::warn!("command '{cmd}' failed: {e:#}");
-    let mut reply = json!({"type": "error", "message": e.to_string()});
-    if let Some(error) = e.downcast_ref::<halod_plugin_signing::CatalogError>() {
-        reply["code"] = serde_json::to_value(catalog_error_code(error)).unwrap_or_default();
-    }
-    if handled
-        || e.downcast_ref::<crate::domain::plugin::SurfacedPluginError>()
-            .is_some()
-    {
-        reply["handled"] = true.into();
-    }
-    if let Some(req_id) = req_id {
-        reply["request_id"] = req_id.into();
-    }
-    client.send_json(&reply);
+    client.send(&DaemonMessage::Error(IpcError {
+        message: e.to_string(),
+        code: e
+            .downcast_ref::<halod_plugin_signing::CatalogError>()
+            .map(catalog_error_code),
+        handled: handled
+            || e.downcast_ref::<crate::domain::plugin::SurfacedPluginError>()
+                .is_some(),
+        request_id,
+    }));
 }
 
 fn command_writes_device(cmd: &DaemonCommand) -> bool {
@@ -452,13 +429,7 @@ async fn dispatch(
         }
         DaemonCommand::CanvasSubscribe => {
             if client.try_subscribe_canvas() {
-                let c2 = client.clone();
-                let task = tokio::spawn(engine_subscribe_loop(
-                    app,
-                    c2,
-                    |a| a.lighting.engine().map(|e| e.subscribe()),
-                    "canvas_frame",
-                ));
+                let task = tokio::spawn(canvas_forward_loop(app, client.clone()));
                 client.track_subscription(task);
             }
             Ok(())
@@ -514,7 +485,10 @@ async fn dispatch(
             )
             .await
         }
-        DaemonCommand::Ping => Ok(()),
+        DaemonCommand::Ping => {
+            client.send(&DaemonMessage::Pong);
+            Ok(())
+        }
         DaemonCommand::Shutdown => {
             log::info!("Shutdown requested by a client");
             request_shutdown(&app);
@@ -912,6 +886,7 @@ mod tests {
     use super::ClientHandle;
     use super::*;
     use crate::config::Config;
+    use serde_json::json;
     use std::time::Duration;
     use tokio::sync::mpsc;
 
@@ -972,6 +947,7 @@ mod tests {
             "add_plugin_repo",
             None,
             halod_plugin_signing::CatalogError::SignatureMismatch.into(),
+            false,
         );
 
         let frame = rx.recv().await.unwrap();
@@ -1045,8 +1021,6 @@ mod tests {
     #[test]
     fn command_target_routes_device_commands_and_leaves_globals_unlocked() {
         use halod_shared::types::{LightingState, RgbColor};
-        // Device-scoped commands map to their device id (by whichever field
-        // names it) so same-device work serializes on one lock.
         assert_eq!(
             command_target(&DaemonCommand::Device {
                 device_id: "kbd".into(),

@@ -32,7 +32,7 @@ pub(crate) fn encode_wire_frame(
         preview_b64: preview_b64.to_string(),
     };
     let wire = halod_shared::frames::encode_json_frame(
-        &serde_json::json!({"type": "lcd_engine_frame", "data": frame}),
+        &halod_shared::messages::DaemonMessage::LcdEngineFrame { data: frame },
     )?;
     Some(Arc::new(LcdWireFrame {
         wire: Arc::new(wire),

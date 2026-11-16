@@ -9,7 +9,7 @@
 use crate::domain::events::ChangeSink as _;
 
 use anyhow::Result;
-use serde_json::json;
+use halod_shared::messages::DaemonMessage;
 use std::collections::HashMap;
 use std::sync::Arc;
 
@@ -125,6 +125,6 @@ pub async fn render(
         signatures,
         widgets,
     };
-    client.send_json(&json!({ "type": "lcd_editor_render", "data": render }));
+    client.send(&DaemonMessage::LcdEditorRender { data: render });
     Ok(())
 }

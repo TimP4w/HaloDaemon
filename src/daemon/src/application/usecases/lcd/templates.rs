@@ -7,7 +7,7 @@ use crate::domain::events::ChangeSink as _;
 use std::sync::Arc;
 
 use anyhow::{anyhow, Result};
-use serde_json::json;
+use halod_shared::messages::DaemonMessage;
 
 use crate::application::ipc::ClientHandle;
 use crate::application::state::AppState;
@@ -244,7 +244,7 @@ pub async fn load_template(name: String, client: ClientHandle) -> Result<()> {
     let def: CustomTemplateDef = serde_yaml::from_str(&raw)
         .map_err(|e| anyhow!("failed to parse template '{name}': {e}"))?;
     validate_template(&def)?;
-    client.send_json(&json!({ "type": "lcd_template", "name": name, "def": def }));
+    client.send(&DaemonMessage::LcdTemplate { name, def });
     Ok(())
 }
 

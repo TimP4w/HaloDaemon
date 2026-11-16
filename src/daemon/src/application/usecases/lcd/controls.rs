@@ -3,7 +3,7 @@ use crate::domain::events::ChangeSink as _;
 
 use anyhow::{anyhow, Result};
 use base64::Engine as _;
-use serde_json::{json, Value};
+use halod_shared::messages::{DaemonMessage, LcdImageFile};
 use std::sync::Arc;
 use uuid::Uuid;
 
@@ -112,19 +112,18 @@ fn send_upload_progress(
     stage: LcdUploadStage,
     percent: Option<u8>,
 ) {
-    client.send_json(&json!({
-        "type": "lcd_upload_progress",
-        "data": LcdUploadProgress {
+    client.send(&DaemonMessage::LcdUploadProgress {
+        data: LcdUploadProgress {
             device_id: device_id.to_string(),
             stage,
             percent,
         },
-    }));
+    });
 }
 
 /// A callback for `compress_for_storage` that pushes Processing progress to
 /// the uploading client, deduplicated per percent step. Safe to call from the
-/// blocking compression thread (`send_json` is a non-blocking `try_send`).
+/// blocking compression thread (`send` is a non-blocking `try_send`).
 fn upload_progress_reporter(client: &ClientHandle, device_id: &str) -> impl FnMut(u8) {
     let client = client.clone();
     let device_id = device_id.to_string();
@@ -226,7 +225,7 @@ async fn set_screen_image_inner(
     lcd.lcd_state().set_health(LcdHealth::Stable);
     persist_device_state(app, device.as_ref()).await;
 
-    client.send_json(&json!({ "type": "image_uploaded" }));
+    client.send(&DaemonMessage::ImageUploaded);
 
     // The spawn_blocking decode + upload just freed 1-3 copies of the RGBA
     // frame buffer; ask glibc to return those pages to the OS.
@@ -286,7 +285,7 @@ async fn set_screen_image_from_library_inner(
     lcd.lcd_state().set_health(LcdHealth::Stable);
     persist_device_state(app, device.as_ref()).await;
 
-    client.send_json(&json!({ "type": "image_uploaded" }));
+    client.send(&DaemonMessage::ImageUploaded);
 
     // The read + decode + upload just allocated and freed the file contents
     // plus the RGBA frame buffer; return those pages to the OS.
@@ -502,12 +501,12 @@ pub async fn list_lcd_images(client: ClientHandle) -> Result<()> {
         }
     }
     items.sort_by(|a, b| a.0.cmp(&b.0));
-    let files: Vec<Value> = items
+    let files: Vec<LcdImageFile> = items
         .into_iter()
-        .map(|(name, size)| json!({ "name": name, "size_bytes": size }))
+        .map(|(name, size_bytes)| LcdImageFile { name, size_bytes })
         .collect();
     log::debug!("[LCD] list_lcd_images: {} files", files.len());
-    client.send_json(&json!({ "type": "lcd_images", "files": files }));
+    client.send(&DaemonMessage::LcdImages { files });
     Ok(())
 }
 
@@ -579,7 +578,7 @@ mod tests {
         }
         assert_eq!(frames.len(), 2, "one frame per distinct percent");
         let payload = &frames[0][5..]; // skip the 5-byte frame header
-        let v: Value = serde_json::from_slice(payload).unwrap();
+        let v: serde_json::Value = serde_json::from_slice(payload).unwrap();
         assert_eq!(v["type"], "lcd_upload_progress");
         let p: halod_shared::types::LcdUploadProgress =
             serde_json::from_value(v["data"].clone()).unwrap();
@@ -807,7 +806,7 @@ mod tests {
     ) -> Vec<(String, Option<LcdUploadProgress>)> {
         let mut out = Vec::new();
         while let Ok(f) = rx.try_recv() {
-            let v: Value = serde_json::from_slice(&f[5..]).unwrap();
+            let v: serde_json::Value = serde_json::from_slice(&f[5..]).unwrap();
             let ty = v["type"].as_str().unwrap_or_default().to_string();
             let progress = serde_json::from_value(v["data"].clone()).ok();
             out.push((ty, progress));

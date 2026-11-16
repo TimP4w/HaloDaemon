@@ -3,14 +3,15 @@
 pub mod router;
 
 use anyhow::Result;
-use serde_json::{json, Value};
+use serde_json::Value;
 use std::sync::Arc;
 use tokio::io::{AsyncReadExt, AsyncWriteExt};
 use tokio::sync::{broadcast, mpsc};
 use tokio::time::Duration;
 
-use halod_shared::bus::{BusEvent, BusEventReplay, BusSubscribe, BusTransaction};
+use halod_shared::bus::{BusEvent, BusEventReplay, BusSubscribe, BusTransaction, ClientHello};
 use halod_shared::frames::{decode_header, encode_json_frame, payload_exceeds_max, FRAME_JSON};
+use halod_shared::messages::DaemonMessage;
 
 use crate::application::state::AppState;
 
@@ -71,11 +72,11 @@ pub struct ClientHandle {
 }
 
 impl ClientHandle {
-    pub fn send_json(&self, msg: &Value) {
-        let _ = self.try_send_json(msg);
+    pub fn send(&self, msg: &DaemonMessage) {
+        let _ = self.try_send(msg);
     }
 
-    fn try_send_json(&self, msg: &Value) -> bool {
+    fn try_send(&self, msg: &DaemonMessage) -> bool {
         let Some(frame) = encode_json_frame(msg) else {
             return false;
         };
@@ -96,7 +97,7 @@ impl ClientHandle {
         }
     }
 
-    async fn send_json_when_ready(&self, msg: &Value) -> bool {
+    async fn send_when_ready(&self, msg: &DaemonMessage) -> bool {
         let Some(frame) = encode_json_frame(msg) else {
             return false;
         };
@@ -574,12 +575,9 @@ where
     if payload_len > 0 {
         stream.read_exact(&mut payload).await?;
     }
-    let value: Value = serde_json::from_slice(&payload)?;
-    anyhow::ensure!(
-        value.get("type").and_then(Value::as_str) == Some("bus_subscribe"),
-        "first client frame must be a bus subscription"
-    );
-    Ok(serde_json::from_value(value)?)
+    let ClientHello::BusSubscribe(subscription) = serde_json::from_slice(&payload)
+        .map_err(|e| anyhow::anyhow!("first client frame must be a bus subscription: {e}"))?;
+    Ok(subscription)
 }
 
 fn parse_json_frame(frame_type: u8, payload: &[u8], client_id: u64) -> Option<Value> {
@@ -633,7 +631,7 @@ where
 
 fn send_bus_snapshot(app: &Arc<AppState>, handle: &ClientHandle, prefixes: &[String]) {
     let snapshot = app.data_bus.state_snapshot(prefixes);
-    handle.send_json(&json!({ "type": "bus_snapshot", "data": snapshot }));
+    handle.send(&DaemonMessage::BusSnapshot { data: snapshot });
 }
 
 fn send_event_replay(
@@ -647,7 +645,7 @@ fn send_event_replay(
         .then_some(cursor)
         .flatten();
     let replay: BusEventReplay = app.data_bus.replay_events(cursor);
-    handle.send_json(&json!({ "type": "bus_event_replay", "data": replay }));
+    handle.send(&DaemonMessage::BusEventReplay { data: replay });
 }
 
 async fn bus_forward_loop(
@@ -662,13 +660,11 @@ async fn bus_forward_loop(
             transaction = transactions.recv() => match transaction {
                 Ok(transaction) => {
                     let filtered = filter_transaction(transaction, &prefixes);
-                    if !filtered.upserts.is_empty() || !filtered.tombstones.is_empty() {
-                        let frame = json!({ "type": "bus_transaction", "data": filtered });
-                        if !client.try_send_json(&frame)
-                            && !send_bus_snapshot_when_ready(&app, &client, &prefixes).await
-                        {
-                            return;
-                        }
+                    if (!filtered.upserts.is_empty() || !filtered.tombstones.is_empty())
+                        && !client.try_send(&DaemonMessage::BusTransaction { data: filtered })
+                        && !send_bus_snapshot_when_ready(&app, &client, &prefixes).await
+                    {
+                        return;
                     }
                 }
                 Err(broadcast::error::RecvError::Lagged(_)) => {
@@ -680,8 +676,7 @@ async fn bus_forward_loop(
             },
             event = events.recv() => match event {
                 Ok(event) => {
-                    let frame = json!({ "type": "bus_event", "data": event });
-                    if !client.try_send_json(&frame)
+                    if !client.try_send(&DaemonMessage::BusEvent { data: event })
                         && !send_event_replay_when_ready(&app, &client).await
                     {
                         return;
@@ -708,14 +703,14 @@ async fn send_bus_snapshot_when_ready(
 ) -> bool {
     let snapshot = app.data_bus.state_snapshot(prefixes);
     client
-        .send_json_when_ready(&json!({ "type": "bus_snapshot", "data": snapshot }))
+        .send_when_ready(&DaemonMessage::BusSnapshot { data: snapshot })
         .await
 }
 
 async fn send_event_replay_when_ready(app: &Arc<AppState>, client: &ClientHandle) -> bool {
     let replay = app.data_bus.replay_events(None);
     client
-        .send_json_when_ready(&json!({ "type": "bus_event_replay", "data": replay }))
+        .send_when_ready(&DaemonMessage::BusEventReplay { data: replay })
         .await
 }
 
@@ -776,6 +771,7 @@ mod pipe_security_tests {
 #[cfg(test)]
 mod handle_tests {
     use super::*;
+    use serde_json::json;
 
     struct SlowSnapshotDevice {
         entered: Arc<tokio::sync::Notify>,
@@ -987,16 +983,16 @@ mod handle_tests {
     }
 
     #[tokio::test]
-    async fn send_json_drops_when_queue_full_instead_of_growing() {
+    async fn send_drops_when_queue_full_instead_of_growing() {
         let (tx, rx) = mpsc::channel::<Arc<Vec<u8>>>(1);
         let handle = ClientHandle {
             id: 0,
             tx,
             subs: Arc::default(),
         };
-        handle.send_json(&json!({"n": 1}));
-        handle.send_json(&json!({"n": 2}));
-        handle.send_json(&json!({"n": 3}));
+        handle.send(&DaemonMessage::Pong);
+        handle.send(&DaemonMessage::Pong);
+        handle.send(&DaemonMessage::Pong);
         assert_eq!(
             rx.len(),
             1,
@@ -1018,7 +1014,7 @@ mod handle_tests {
             tx,
             subs: Arc::default(),
         };
-        client.send_json(&json!({"type": "already_queued"}));
+        client.send(&DaemonMessage::ImageUploaded);
 
         let relay = tokio::spawn(bus_forward_loop(
             app.clone(),
@@ -1032,7 +1028,7 @@ mod handle_tests {
 
         let queued = rx.recv().await.unwrap();
         let queued: Value = serde_json::from_slice(&queued[5..]).unwrap();
-        assert_eq!(queued["type"], "already_queued");
+        assert_eq!(queued["type"], "image_uploaded");
 
         let recovered = tokio::time::timeout(Duration::from_secs(1), rx.recv())
             .await

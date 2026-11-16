@@ -5,7 +5,7 @@
 //! `debug_info` channel — not broadcast.
 
 use anyhow::Result;
-use serde_json::json;
+use halod_shared::messages::DaemonMessage;
 use std::sync::Arc;
 
 use crate::application::ipc::ClientHandle;
@@ -18,8 +18,7 @@ use halod_shared::debug_info::{
 
 pub async fn get_debug_info(client: ClientHandle, app: Arc<AppState>) -> Result<()> {
     let info = collect(app).await;
-    let value = serde_json::to_value(&info)?;
-    client.send_json(&json!({ "type": "debug_info", "data": value }));
+    client.send(&DaemonMessage::DebugInfo { data: info });
     Ok(())
 }
 

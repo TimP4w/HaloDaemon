@@ -1,10 +1,8 @@
 // SPDX-License-Identifier: GPL-3.0-or-later
 //! Minimal read-only IPC client for the egui prototype.
 //!
-//! The daemon pushes typed bus snapshots and transactions, so a client only
-//! has to connect and apply inbound records. No subscribe handshake is required
-//! yet (except the LCD engine preview, which is
-//! lease-gated: see `device/lcd.rs`'s keepalive). Each distinct data stream
+//! After its bus subscription the client applies the daemon's typed
+//! [`DaemonMessage`]s. Each distinct data stream
 //! (state, canvas frames, LCD previews, …) lives on its own
 //! [`tokio::sync::watch`] channel so a high-frequency canvas frame never
 //! blocks a state read and the UI can cheaply gate work on `has_changed()`.
@@ -15,12 +13,11 @@ use std::sync::{Arc, Mutex};
 use std::time::Duration;
 
 use crate::domain::topic_store::TopicStore;
-use halod_shared::bus::{
-    BusEvent, BusEventPayload, BusEventReplay, BusSnapshot, BusSubscribe, BusTransaction,
-};
+use halod_shared::bus::{BusEvent, BusEventPayload, BusSubscribe, ClientHello};
 use halod_shared::commands::DaemonCommand;
 use halod_shared::frames::{decode_header, encode_json_frame, payload_exceeds_max, FRAME_JSON};
 use halod_shared::lcd_custom::{CustomTemplateDef, LcdEditorRender, WidgetRenderState};
+use halod_shared::messages::DaemonMessage;
 use halod_shared::socket::socket_path;
 use halod_shared::types::{
     CanvasFrame, LcdEngineFrame, LcdUploadProgress, Notification, NotificationCode, RunningApp,
@@ -142,19 +139,6 @@ impl FrameSinks {
 /// ≈ 300 KiB, bounded in practice by human input rate.
 pub type CommandTx = mpsc::UnboundedSender<DaemonCommand>;
 type CommandRx = mpsc::UnboundedReceiver<DaemonCommand>;
-
-/// Parse `value[field]` into `T`, falling back to `T::default()` when the
-/// field is missing or malformed — the tolerant shape every push-stream
-/// payload field is read with.
-fn field_or_default<T: serde::de::DeserializeOwned + Default>(
-    value: &serde_json::Value,
-    field: &str,
-) -> T {
-    value
-        .get(field)
-        .and_then(|v| serde_json::from_value(v.clone()).ok())
-        .unwrap_or_default()
-}
 
 /// Take a watch channel's new value, if any: `Some` exactly once per change.
 /// Logs once per call under `name` if the channel has closed.
@@ -383,9 +367,7 @@ where
         last_event_id: Some(tx.last_event_id.load(Ordering::Acquire)),
         event_session_id: Some(tx.event_session_id.load(Ordering::Acquire)),
     };
-    let mut subscription = serde_json::to_value(subscription)?;
-    subscription["type"] = serde_json::Value::String("bus_subscribe".into());
-    let frame = encode_json_frame(&subscription)
+    let frame = encode_json_frame(&ClientHello::BusSubscribe(subscription))
         .ok_or_else(|| anyhow::anyhow!("bus subscription exceeds IPC frame limit"))?;
     stream.write_all(&frame).await?;
 
@@ -517,190 +499,75 @@ pub struct Reaction {
 }
 
 fn handle_json(payload: &[u8], tx: &UiTx, repaint: &impl Fn()) -> Reaction {
-    let value = match serde_json::from_slice::<serde_json::Value>(payload) {
-        Ok(v) => v,
+    let message = match serde_json::from_slice::<DaemonMessage>(payload) {
+        Ok(message) => message,
         Err(e) => {
-            log::warn!("dropping malformed daemon frame ({e})");
+            log::debug!("IPC: dropping undecodable daemon frame ({e})");
             return Reaction::default();
         }
     };
-    match value.get("type").and_then(|t| t.as_str()) {
-        Some("bus_snapshot") => {
-            if let Some(snapshot) = value
-                .get("data")
-                .cloned()
-                .and_then(|data| serde_json::from_value::<BusSnapshot>(data).ok())
-            {
-                tx.state
-                    .send_modify(|store| store.replace_snapshot(snapshot));
-                crate::ui::screens::settings::apply_locale(&tx.state.borrow().gui.language);
-                tx.connected.send_replace(true);
-                repaint();
-            }
-            Reaction::default()
+    let hidden = tx.hidden.load(Ordering::Relaxed);
+    match message {
+        DaemonMessage::Pong => {}
+        DaemonMessage::BusSnapshot { data } => {
+            tx.state.send_modify(|store| store.replace_snapshot(data));
+            crate::ui::screens::settings::apply_locale(&tx.state.borrow().gui.language);
+            tx.connected.send_replace(true);
+            repaint();
         }
-        Some("bus_transaction") => {
-            if let Some(transaction) = value
-                .get("data")
-                .cloned()
-                .and_then(|data| serde_json::from_value::<BusTransaction>(data).ok())
-            {
-                tx.state
-                    .send_modify(|store| store.apply_transaction(transaction));
-                crate::ui::screens::settings::apply_locale(&tx.state.borrow().gui.language);
-                repaint();
-            }
-            Reaction::default()
+        DaemonMessage::BusTransaction { data } => {
+            tx.state.send_modify(|store| store.apply_transaction(data));
+            crate::ui::screens::settings::apply_locale(&tx.state.borrow().gui.language);
+            repaint();
         }
-        Some("bus_event") => {
-            if let Some(event) = value
-                .get("data")
-                .cloned()
-                .and_then(|data| serde_json::from_value::<BusEvent>(data).ok())
-            {
+        DaemonMessage::BusEvent { data } => handle_bus_event(tx, data, repaint),
+        DaemonMessage::BusEventReplay { data } => {
+            let previous = tx.event_session_id.swap(data.session_id, Ordering::AcqRel);
+            if previous != data.session_id {
+                tx.last_event_id.store(0, Ordering::Release);
+            }
+            for event in data.events {
                 handle_bus_event(tx, event, repaint);
             }
-            Reaction::default()
         }
-        Some("bus_event_replay") => {
-            if let Some(replay) = value
-                .get("data")
-                .cloned()
-                .and_then(|data| serde_json::from_value::<BusEventReplay>(data).ok())
-            {
-                let previous = tx
-                    .event_session_id
-                    .swap(replay.session_id, Ordering::AcqRel);
-                if previous != replay.session_id {
-                    tx.last_event_id.store(0, Ordering::Release);
-                }
-                for event in replay.events {
-                    handle_bus_event(tx, event, repaint);
-                }
-            }
-            Reaction::default()
+        DaemonMessage::DebugInfo { data } => {
+            tx.debug.send_replace(Some(data));
+            repaint();
         }
-        Some("debug_info") => {
-            if let Some(data) = value.get("data").cloned() {
-                if let Ok(info) =
-                    serde_json::from_value::<halod_shared::debug_info::DebugInfo>(data)
-                {
-                    tx.debug.send_replace(Some(info));
-                    repaint();
-                }
-            }
-            Reaction::default()
-        }
-        Some("image_uploaded") => {
-            // Upload finished; drop any stale progress and trigger a library
-            // refresh on the next read-loop iteration.
+        DaemonMessage::ImageUploaded => {
             tx.lcd_upload.send_replace(None);
-            Reaction {
+            return Reaction {
                 relist_lcd_images: true,
-            }
+            };
         }
-        Some("lcd_upload_progress") => {
-            if let Some(p) = value
-                .get("data")
-                .and_then(|d| serde_json::from_value::<LcdUploadProgress>(d.clone()).ok())
-            {
-                tx.lcd_upload.send_replace(Some(p));
+        DaemonMessage::LcdUploadProgress { data } => {
+            tx.lcd_upload.send_replace(Some(data));
+            repaint();
+        }
+        DaemonMessage::LcdEngineFrame { data } if !hidden => {
+            if let Some(decoded) = decode_lcd_frame(&data) {
+                tx.lcd_frames
+                    .send_replace(HashMap::from([(data.device_id, decoded)]));
                 repaint();
             }
-            Reaction::default()
         }
-        Some("lcd_engine_frame") => {
-            if tx.hidden.load(Ordering::Relaxed) {
+        DaemonMessage::LcdEditorRender { data } if !hidden => {
+            tx.lcd_editor_render
+                .send_replace(Some(decode_editor_render(data)));
+            repaint();
+        }
+        DaemonMessage::CanvasFrame { data } if !hidden => {
+            tx.canvas_frame
+                .send_replace(Some(Arc::unwrap_or_clone(data)));
+            repaint();
+        }
+        DaemonMessage::Error(error) => {
+            if error.handled {
                 return Reaction::default();
             }
-            if let Some(data) = value.get("data").cloned() {
-                if let Ok(frame) = serde_json::from_value::<LcdEngineFrame>(data) {
-                    use base64::Engine as _;
-                    if let Ok(png) =
-                        base64::engine::general_purpose::STANDARD.decode(&frame.preview_b64)
-                    {
-                        if let Ok(img) = image::load_from_memory(&png) {
-                            let rgba = img.into_rgba8();
-                            let decoded = DecodedFrame {
-                                frame_id: frame.frame_id,
-                                width: rgba.width() as usize,
-                                height: rgba.height() as usize,
-                                rgba: rgba.into_raw(),
-                            };
-                            tx.lcd_frames
-                                .send_replace(HashMap::from([(frame.device_id, decoded)]));
-                            repaint();
-                        }
-                    }
-                }
-            }
-            Reaction::default()
-        }
-        Some("lcd_editor_render") => {
-            if tx.hidden.load(Ordering::Relaxed) {
-                return Reaction::default();
-            }
-            if let Some(data) = value.get("data").cloned() {
-                if let Ok(r) = serde_json::from_value::<LcdEditorRender>(data) {
-                    use base64::Engine as _;
-                    let sprites = r
-                        .sprites
-                        .into_iter()
-                        .filter_map(|s| {
-                            let rgba = base64::engine::general_purpose::STANDARD
-                                .decode(&s.rgba_b64)
-                                .ok()?;
-                            Some(DecodedSprite {
-                                id: s.id,
-                                signature: s.signature,
-                                w: s.w as usize,
-                                h: s.h as usize,
-                                rgba,
-                            })
-                        })
-                        .collect();
-                    tx.lcd_editor_render.send_replace(Some(DecodedEditorRender {
-                        device_id: r.device_id,
-                        canvas_w: r.canvas_w,
-                        canvas_h: r.canvas_h,
-                        sprites,
-                        signatures: r.signatures,
-                        widgets: r.widgets,
-                    }));
-                    repaint();
-                }
-            }
-            Reaction::default()
-        }
-        Some("canvas_frame") => {
-            if tx.hidden.load(Ordering::Relaxed) {
-                return Reaction::default();
-            }
-            if let Some(data) = value.get("data").cloned() {
-                if let Ok(frame) = serde_json::from_value::<CanvasFrame>(data) {
-                    tx.canvas_frame.send_replace(Some(frame));
-                    repaint();
-                }
-            }
-            Reaction::default()
-        }
-        Some("error") => {
-            // The plugin layer already sent a structured notification whose
-            // Details modal contains the full callback error.
-            if value.get("handled").and_then(|v| v.as_bool()) == Some(true) {
-                return Reaction::default();
-            }
-            let catalog_error = value
-                .get("code")
-                .and_then(|code| serde_json::from_value(code.clone()).ok());
-            let message = if let Some(code) = catalog_error {
-                catalog_error_message(code)
-            } else {
-                value
-                    .get("message")
-                    .and_then(|m| m.as_str())
-                    .map(|s| s.to_string())
-                    .unwrap_or_else(|| t!("notify.unknown_error").to_string())
+            let message = match error.code {
+                Some(code) => catalog_error_message(code),
+                None => error.message,
             };
             push_notification(
                 tx,
@@ -711,115 +578,107 @@ fn handle_json(payload: &[u8], tx: &UiTx, repaint: &impl Fn()) -> Reaction {
                 },
                 repaint,
             );
-            Reaction::default()
         }
-        Some("running_apps_list") => {
-            let apps: Vec<RunningApp> = value
-                .get("apps")
-                .and_then(|a| serde_json::from_value(a.clone()).ok())
-                .unwrap_or_default();
+        DaemonMessage::RunningAppsList { apps } => {
             tx.running_apps.send_replace(apps);
             repaint();
-            Reaction::default()
         }
-        Some("lcd_images") => {
-            let names: Vec<String> = value
-                .get("files")
-                .and_then(|f| f.as_array())
-                .map(|arr| {
-                    arr.iter()
-                        .filter_map(|f| f["name"].as_str().map(str::to_string))
-                        .filter(|n| !n.is_empty())
-                        .collect()
-                })
-                .unwrap_or_default();
-            tx.lcd_images.send_replace(names);
+        DaemonMessage::LcdImages { files } => {
+            tx.lcd_images.send_replace(
+                files
+                    .into_iter()
+                    .map(|file| file.name)
+                    .filter(|name| !name.is_empty())
+                    .collect(),
+            );
             repaint();
-            Reaction::default()
         }
-        Some("plugin_asset") => {
-            if tx.hidden.load(Ordering::Relaxed) {
-                return Reaction::default();
+        DaemonMessage::PluginAsset {
+            plugin_id,
+            name,
+            data_b64,
+        } if !hidden => {
+            if let Some(bytes) = decode_b64(&data_b64) {
+                tx.plugin_assets.send_modify(|assets| {
+                    assets.insert(plugin_asset_cache_key(&plugin_id, &name), bytes);
+                });
+                repaint();
             }
-            let plugin_id = value.get("plugin_id").and_then(|v| v.as_str());
-            let name = value.get("name").and_then(|v| v.as_str());
-            let data_b64 = value.get("data_b64").and_then(|v| v.as_str());
-            if let (Some(plugin_id), Some(name), Some(data_b64)) = (plugin_id, name, data_b64) {
-                use base64::Engine as _;
-                if let Ok(bytes) = base64::engine::general_purpose::STANDARD.decode(data_b64) {
-                    let key = plugin_asset_cache_key(plugin_id, name);
-                    tx.plugin_assets.send_modify(|m| {
-                        m.insert(key, bytes);
-                    });
-                    repaint();
-                }
-            }
-            Reaction::default()
         }
-        Some("lcd_widget_icon") => {
-            if tx.hidden.load(Ordering::Relaxed) {
-                return Reaction::default();
+        DaemonMessage::LcdWidgetIcon {
+            catalog_id,
+            data_b64,
+        } if !hidden => {
+            if let Some(bytes) = decode_b64(&data_b64) {
+                tx.plugin_assets.send_modify(|assets| {
+                    assets.insert(format!("lcd/{catalog_id}"), bytes);
+                });
+                repaint();
             }
-            let catalog_id = value.get("catalog_id").and_then(|value| value.as_str());
-            let data_b64 = value.get("data_b64").and_then(|value| value.as_str());
-            if let (Some(catalog_id), Some(data_b64)) = (catalog_id, data_b64) {
-                use base64::Engine as _;
-                if let Ok(bytes) = base64::engine::general_purpose::STANDARD.decode(data_b64) {
-                    tx.plugin_assets.send_modify(|assets| {
-                        assets.insert(format!("lcd/{catalog_id}"), bytes);
-                    });
-                    repaint();
-                }
-            }
-            Reaction::default()
         }
-        Some("udev_rules_status") => {
-            tx.udev_rules.send_replace(field_or_default(&value, "data"));
+        DaemonMessage::UdevRulesStatus { data } => {
+            tx.udev_rules.send_replace(Some(data));
             repaint();
-            Reaction::default()
         }
-        Some("serial_ports") => {
-            if let Some(ports) = value.get("ports").and_then(|p| {
-                serde_json::from_value::<Vec<halod_shared::types::SerialPortInfo>>(p.clone()).ok()
-            }) {
-                tx.serial_ports.send_replace(ports);
-                repaint();
-            }
-            Reaction::default()
+        DaemonMessage::SerialPorts { ports } => {
+            tx.serial_ports.send_replace(ports);
+            repaint();
         }
-        Some("lcd_template") => {
-            let name = value
-                .get("name")
-                .and_then(|n| n.as_str())
-                .map(str::to_string);
-            let def = value
-                .get("def")
-                .and_then(|d| serde_json::from_value::<CustomTemplateDef>(d.clone()).ok());
-            if let (Some(name), Some(def)) = (name, def) {
-                tx.lcd_template.send_replace(Some((name, def)));
-                repaint();
-            }
-            Reaction::default()
+        DaemonMessage::LcdTemplate { name, def }
+        | DaemonMessage::LcdPluginPreset {
+            catalog_id: name,
+            def,
+        } => {
+            tx.lcd_template.send_replace(Some((name, def)));
+            repaint();
         }
-        Some("lcd_plugin_preset") => {
-            let name = value
-                .get("catalog_id")
-                .and_then(|name| name.as_str())
-                .map(str::to_owned);
-            let def = value
-                .get("def")
-                .and_then(|def| serde_json::from_value::<CustomTemplateDef>(def.clone()).ok());
-            if let (Some(name), Some(def)) = (name, def) {
-                tx.lcd_template.send_replace(Some((name, def)));
-                repaint();
-            }
-            Reaction::default()
-        }
-        Some(unknown) => {
-            log::debug!("IPC: dropping unknown frame type: {unknown:?}");
-            Reaction::default()
-        }
-        None => Reaction::default(),
+        DaemonMessage::LcdEngineFrame { .. }
+        | DaemonMessage::LcdEditorRender { .. }
+        | DaemonMessage::CanvasFrame { .. }
+        | DaemonMessage::PluginAsset { .. }
+        | DaemonMessage::LcdWidgetIcon { .. } => {}
+    }
+    Reaction::default()
+}
+
+fn decode_b64(data: &str) -> Option<Vec<u8>> {
+    use base64::Engine as _;
+    base64::engine::general_purpose::STANDARD.decode(data).ok()
+}
+
+fn decode_lcd_frame(frame: &LcdEngineFrame) -> Option<DecodedFrame> {
+    let rgba = image::load_from_memory(&decode_b64(&frame.preview_b64)?)
+        .ok()?
+        .into_rgba8();
+    Some(DecodedFrame {
+        frame_id: frame.frame_id,
+        width: rgba.width() as usize,
+        height: rgba.height() as usize,
+        rgba: rgba.into_raw(),
+    })
+}
+
+fn decode_editor_render(render: LcdEditorRender) -> DecodedEditorRender {
+    let sprites = render
+        .sprites
+        .into_iter()
+        .filter_map(|sprite| {
+            Some(DecodedSprite {
+                rgba: decode_b64(&sprite.rgba_b64)?,
+                id: sprite.id,
+                signature: sprite.signature,
+                w: sprite.w as usize,
+                h: sprite.h as usize,
+            })
+        })
+        .collect();
+    DecodedEditorRender {
+        device_id: render.device_id,
+        canvas_w: render.canvas_w,
+        canvas_h: render.canvas_h,
+        sprites,
+        signatures: render.signatures,
+        widgets: render.widgets,
     }
 }
 
@@ -840,6 +699,7 @@ fn catalog_error_message(code: halod_shared::types::CatalogErrorCode) -> String 
 #[cfg(test)]
 mod tests {
     use super::*;
+    use halod_shared::bus::BusEventReplay;
 
     fn test_tx() -> (UiTx, watch::Receiver<Option<LcdUploadProgress>>) {
         let (upload_s, upload_r) = watch::channel(None);
@@ -1082,23 +942,5 @@ mod tests {
         synced.set(0);
         assert!(!synced.poll());
         assert_eq!(*synced.get(), 0);
-    }
-
-    #[test]
-    fn field_or_default_tolerates_missing_and_malformed_fields() {
-        let valid = serde_json::json!({ "repos": ["a", "b"] });
-        assert_eq!(
-            field_or_default::<Vec<String>>(&valid, "repos"),
-            vec!["a".to_string(), "b".to_string()]
-        );
-        assert_eq!(
-            field_or_default::<Vec<String>>(&valid, "missing"),
-            Vec::<String>::new()
-        );
-        let malformed = serde_json::json!({ "repos": 42 });
-        assert_eq!(
-            field_or_default::<Vec<String>>(&malformed, "repos"),
-            Vec::<String>::new()
-        );
     }
 }
