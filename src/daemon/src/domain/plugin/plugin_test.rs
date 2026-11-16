@@ -30,26 +30,11 @@ use halod_shared::types::{
 };
 
 use super::engine::device::{LuaDevice, LuaDeviceParts, LuaDeviceSpawnParts, LuaDeviceWorker};
+use super::engine::ffi::{from_lua_err, to_lua_err};
 use super::engine::transport::{AddrScope, RegisterBus};
 use super::engine::transport::{CommandExecutor, CommandRunResult, PluginIo};
 use super::engine::worker::{DevMatch, PluginHandle};
 use super::manifest::{parse_manifest_from_dir, PluginManifest, TransportSpec, UsbConfig};
-
-/// `mlua::Error` isn't reliably `Send + Sync` (an `ExternalError` may box a
-/// non-Send/Sync inner error), so it can't flow through `anyhow::Result` via
-/// plain `?` — flatten it to a message first.
-trait LuaResultExt<T> {
-    fn anyhow(self) -> Result<T>;
-}
-impl<T> LuaResultExt<T> for mlua::Result<T> {
-    fn anyhow(self) -> Result<T> {
-        self.map_err(|e| anyhow::anyhow!("{e}"))
-    }
-}
-
-fn mlua_err(e: anyhow::Error) -> mlua::Error {
-    mlua::Error::RuntimeError(format!("{e:#}"))
-}
 
 /// One recorded write, tagged with the collection it was routed to so a test
 /// can assert long frames went to the companion and short frames to primary.
@@ -509,9 +494,9 @@ fn attach_udp_methods(lua: &Lua, dev: &Table, recording: Option<Arc<RecordingUdp
             inbound.inbound.lock().push_back(data.as_bytes().to_vec());
             Ok(())
         })
-        .anyhow()?,
+        .map_err(from_lua_err)?,
     )
-    .anyhow()?;
+    .map_err(from_lua_err)?;
     let sent = recording;
     dev.set(
         "udp_sent",
@@ -522,9 +507,9 @@ fn attach_udp_methods(lua: &Lua, dev: &Table, recording: Option<Arc<RecordingUdp
             }
             Ok(out)
         })
-        .anyhow()?,
+        .map_err(from_lua_err)?,
     )
-    .anyhow()?;
+    .map_err(from_lua_err)?;
     Ok(())
 }
 
@@ -616,9 +601,9 @@ fn attach_http_methods(
             });
             Ok(())
         })
-        .anyhow()?,
+        .map_err(from_lua_err)?,
     )
-    .anyhow()?;
+    .map_err(from_lua_err)?;
     let inspect = recording;
     dev.set(
         "http_requests",
@@ -635,9 +620,9 @@ fn attach_http_methods(
             }
             Ok(out)
         })
-        .anyhow()?,
+        .map_err(from_lua_err)?,
     )
-    .anyhow()?;
+    .map_err(from_lua_err)?;
     Ok(())
 }
 
@@ -670,10 +655,10 @@ pub fn run(handle: tokio::runtime::Handle, package: &Path) -> Result<i32> {
 
     let report = Arc::new(Mutex::new(Report::default()));
     let lua = Lua::new();
-    let halod = lua.create_table().anyhow()?;
-    lua.globals().set("halod", halod).anyhow()?;
+    let halod = lua.create_table().map_err(from_lua_err)?;
+    lua.globals().set("halod", halod).map_err(from_lua_err)?;
     super::engine::sandbox::install_package_modules(&lua, &manifest.module_sources)
-        .anyhow()
+        .map_err(from_lua_err)
         .context("installing package-local modules for test.lua")?;
     let harness = build_harness(&lua, &manifest, handle, report.clone())?;
 
@@ -681,11 +666,11 @@ pub fn run(handle: tokio::runtime::Handle, package: &Path) -> Result<i32> {
         .load(&test_src)
         .set_name(test_path.display().to_string())
         .eval()
-        .anyhow()
+        .map_err(from_lua_err)
         .with_context(|| format!("loading {}", test_path.display()))?;
     test_fn
         .call::<()>(harness)
-        .anyhow()
+        .map_err(from_lua_err)
         .with_context(|| format!("running {}", test_path.display()))?;
 
     let report = report.lock();
@@ -776,7 +761,7 @@ fn build_harness(
     handle: tokio::runtime::Handle,
     report: Arc<Mutex<Report>>,
 ) -> Result<Table> {
-    let h = lua.create_table().anyhow()?;
+    let h = lua.create_table().map_err(from_lua_err)?;
     let data_bus = Arc::new(crate::application::bus::data_bus::DataBus::default());
 
     let assert_report = report.clone();
@@ -797,9 +782,9 @@ fn build_harness(
                 Ok(())
             },
         )
-        .anyhow()?,
+        .map_err(from_lua_err)?,
     )
-    .anyhow()?;
+    .map_err(from_lua_err)?;
 
     h.set(
         "sleep_ms",
@@ -812,9 +797,9 @@ fn build_harness(
             std::thread::sleep(std::time::Duration::from_millis(ms));
             Ok(())
         })
-        .anyhow()?,
+        .map_err(from_lua_err)?,
     )
-    .anyhow()?;
+    .map_err(from_lua_err)?;
 
     let eq_report = report.clone();
     h.set(
@@ -833,9 +818,9 @@ fn build_harness(
                 Ok(())
             },
         )
-        .anyhow()?,
+        .map_err(from_lua_err)?,
     )
-    .anyhow()?;
+    .map_err(from_lua_err)?;
 
     let open_manifest = manifest.clone();
     let open_handle = handle.clone();
@@ -850,11 +835,11 @@ fn build_harness(
                 open_bus.clone(),
                 spec,
             )
-            .map_err(mlua_err)
+            .map_err(to_lua_err)
         })
-        .anyhow()?,
+        .map_err(from_lua_err)?,
     )
-    .anyhow()?;
+    .map_err(from_lua_err)?;
 
     let integration_manifest = manifest.clone();
     let integration_bus = data_bus.clone();
@@ -868,11 +853,11 @@ fn build_harness(
                 integration_bus.clone(),
                 spec,
             )
-            .map_err(mlua_err)
+            .map_err(to_lua_err)
         })
-        .anyhow()?,
+        .map_err(from_lua_err)?,
     )
-    .anyhow()?;
+    .map_err(from_lua_err)?;
 
     let inject_bus = data_bus.clone();
     h.set(
@@ -880,7 +865,7 @@ fn build_harness(
         lua.create_function(
             move |_, (_self, key, value, stale_ms): (Table, String, Value, Option<u64>)| {
                 let value = crate::application::bus::data_bus::DataValue::from_lua(value)
-                    .map_err(mlua_err)?;
+                    .map_err(to_lua_err)?;
                 inject_bus
                     .publish(
                         "test-host",
@@ -890,31 +875,31 @@ fn build_harness(
                             std::time::Duration::from_millis(stale_ms.unwrap_or(60_000)),
                         ),
                     )
-                    .map_err(mlua_err)
+                    .map_err(to_lua_err)
             },
         )
-        .anyhow()?,
+        .map_err(from_lua_err)?,
     )
-    .anyhow()?;
+    .map_err(from_lua_err)?;
     let inspect_bus = data_bus.clone();
     h.set(
         "data_record",
         lua.create_function(move |lua, (_self, key): (Table, String)| {
             crate::application::bus::data_bus::snapshot_to_lua(lua, &inspect_bus.read(&key))
         })
-        .anyhow()?,
+        .map_err(from_lua_err)?,
     )
-    .anyhow()?;
+    .map_err(from_lua_err)?;
     h.set(
         "invalidate_data",
         lua.create_function(move |_, (_self, key): (Table, String)| {
             data_bus
                 .invalidate("test-host", &key, "invalidated")
-                .map_err(mlua_err)
+                .map_err(to_lua_err)
         })
-        .anyhow()?,
+        .map_err(from_lua_err)?,
     )
-    .anyhow()?;
+    .map_err(from_lua_err)?;
 
     Ok(h)
 }
@@ -1016,7 +1001,7 @@ fn open_integration(
         http,
         udp,
     );
-    let dev = lua.create_table().anyhow()?;
+    let dev = lua.create_table().map_err(from_lua_err)?;
     attach_http_methods(lua, &dev, http_recording)?;
     attach_udp_methods(lua, &dev, udp_recording)?;
     {
@@ -1025,11 +1010,11 @@ fn open_integration(
         dev.set(
             "initialize",
             lua.create_function(move |_, _self: Table| {
-                Ok(handle.block_on(worker.initialize()).map_err(mlua_err)?.ok)
+                Ok(handle.block_on(worker.initialize()).map_err(to_lua_err)?.ok)
             })
-            .anyhow()?,
+            .map_err(from_lua_err)?,
         )
-        .anyhow()?;
+        .map_err(from_lua_err)?;
     }
     {
         let worker = worker.clone();
@@ -1039,7 +1024,7 @@ fn open_integration(
             lua.create_function(move |lua, _self: Table| {
                 let controllers = handle
                     .block_on(worker.enumerate_controllers())
-                    .map_err(mlua_err)?;
+                    .map_err(to_lua_err)?;
                 let out = lua.create_table()?;
                 for (i, controller) in controllers.iter().enumerate() {
                     let item = lua.create_table()?;
@@ -1063,9 +1048,9 @@ fn open_integration(
                 }
                 Ok(out)
             })
-            .anyhow()?,
+            .map_err(from_lua_err)?,
         )
-        .anyhow()?;
+        .map_err(from_lua_err)?;
     }
     {
         let worker = worker.clone();
@@ -1075,7 +1060,7 @@ fn open_integration(
             lua.create_function(move |lua, (_self, wanted): (Table, u32)| {
                 let controllers = handle
                     .block_on(worker.enumerate_controllers())
-                    .map_err(mlua_err)?;
+                    .map_err(to_lua_err)?;
                 let controller = controllers
                     .into_iter()
                     .find(|controller| controller.index == wanted)
@@ -1090,20 +1075,20 @@ fn open_integration(
                 });
                 integration_child_table(lua, child, handle.clone())
             })
-            .anyhow()?,
+            .map_err(from_lua_err)?,
         )
-        .anyhow()?;
+        .map_err(from_lua_err)?;
     }
     #[cfg(target_os = "linux")]
     if let Some(hwmon) = hwmon {
         dev.set(
             "hwmon_read",
             lua.create_function(move |_, (_self, key, attribute): (Table, String, String)| {
-                hwmon.read(&key, &attribute).map_err(mlua_err)
+                hwmon.read(&key, &attribute).map_err(to_lua_err)
             })
-            .anyhow()?,
+            .map_err(from_lua_err)?,
         )
-        .anyhow()?;
+        .map_err(from_lua_err)?;
     }
     {
         let recording = recording.clone();
@@ -1117,9 +1102,9 @@ fn open_integration(
                 }
                 Ok(out)
             })
-            .anyhow()?,
+            .map_err(from_lua_err)?,
         )
-        .anyhow()?;
+        .map_err(from_lua_err)?;
     }
     Ok(dev)
 }
@@ -1136,7 +1121,7 @@ fn integration_child_table(
         table.set(
             "initialize",
             lua.create_function(move |lua, _self: Table| {
-                let outcome = handle.block_on(child.initialize()).map_err(mlua_err)?;
+                let outcome = handle.block_on(child.initialize()).map_err(to_lua_err)?;
                 let channels = lua.create_table()?;
                 for (i, zone) in outcome.channels.unwrap_or_default().iter().enumerate() {
                     let item = lua.create_table()?;
@@ -1171,7 +1156,7 @@ fn integration_child_table(
                     .collect();
                 handle
                     .block_on(child.write_lighting_frame(&channel, &bytes))
-                    .map_err(mlua_err)
+                    .map_err(to_lua_err)
             })?,
         )?;
     }
@@ -1181,10 +1166,10 @@ fn integration_child_table(
         table.set(
             "apply",
             lua.create_function(move |_, (_self, state): (Table, Table)| {
-                let rgb_state = table_to_rgb_state(&state).map_err(mlua_err)?;
+                let rgb_state = table_to_rgb_state(&state).map_err(to_lua_err)?;
                 handle
                     .block_on(child.rgb_apply(rgb_state))
-                    .map_err(mlua_err)
+                    .map_err(to_lua_err)
             })?,
         )?;
     }
@@ -1194,7 +1179,7 @@ fn integration_child_table(
         table.set(
             "get_sensors",
             lua.create_function(move |lua, _self: Table| {
-                let sensors = handle.block_on(child.get_sensors()).map_err(mlua_err)?;
+                let sensors = handle.block_on(child.get_sensors()).map_err(to_lua_err)?;
                 lua.to_value(&sensors)
             })?,
         )?;
@@ -1207,7 +1192,7 @@ fn integration_child_table(
             lua.create_function(move |lua, (_self, channel_id): (Table, String)| {
                 let status = handle
                     .block_on(child.cooling_status(&channel_id))
-                    .map_err(mlua_err)?;
+                    .map_err(to_lua_err)?;
                 lua.to_value(&status)
             })?,
         )?;
@@ -1220,7 +1205,7 @@ fn integration_child_table(
             lua.create_function(move |_, (_self, channel_id, duty): (Table, String, u8)| {
                 handle
                     .block_on(child.cooling_set_duty(&channel_id, duty))
-                    .map_err(mlua_err)
+                    .map_err(to_lua_err)
             })?,
         )?;
     }
@@ -1247,20 +1232,20 @@ fn hwmon_fixtures_from_spec(
     fixtures
         .sequence_values::<Table>()
         .map(|fixture| {
-            let fixture = fixture.anyhow()?;
-            let stable_id = fixture.get::<String>("stable_id").anyhow()?;
-            let name = fixture.get::<String>("name").anyhow()?;
-            let attributes = fixture.get::<Table>("attributes").anyhow()?;
+            let fixture = fixture.map_err(from_lua_err)?;
+            let stable_id = fixture.get::<String>("stable_id").map_err(from_lua_err)?;
+            let name = fixture.get::<String>("name").map_err(from_lua_err)?;
+            let attributes = fixture.get::<Table>("attributes").map_err(from_lua_err)?;
             let mut values = std::collections::HashMap::new();
             for pair in attributes.pairs::<String, String>() {
-                let (attribute, value) = pair.anyhow()?;
+                let (attribute, value) = pair.map_err(from_lua_err)?;
                 values.insert(attribute, value);
             }
             let writable_attributes = match fixture.get::<Table>("writable_attributes") {
                 Ok(attributes) => attributes
                     .sequence_values::<String>()
                     .collect::<mlua::Result<Vec<_>>>()
-                    .anyhow()?,
+                    .map_err(from_lua_err)?,
                 Err(_) => values
                     .keys()
                     .filter(|attribute| attribute.starts_with("pwm"))
@@ -1324,15 +1309,19 @@ fn command_results_from_spec(spec: &Option<Table>) -> Result<Vec<CommandRunResul
     results
         .sequence_values::<Table>()
         .map(|result| {
-            let result = result.anyhow()?;
-            let stdout = result.get::<mlua::LuaString>("stdout").anyhow()?;
-            let stderr = result.get::<mlua::LuaString>("stderr").anyhow()?;
+            let result = result.map_err(from_lua_err)?;
+            let stdout = result
+                .get::<mlua::LuaString>("stdout")
+                .map_err(from_lua_err)?;
+            let stderr = result
+                .get::<mlua::LuaString>("stderr")
+                .map_err(from_lua_err)?;
             Ok(CommandRunResult {
-                success: result.get::<bool>("success").anyhow()?,
-                exit_code: result.get::<i32>("exit_code").anyhow()?,
+                success: result.get::<bool>("success").map_err(from_lua_err)?,
+                exit_code: result.get::<i32>("exit_code").map_err(from_lua_err)?,
                 stdout: stdout.as_bytes().to_vec(),
                 stderr: stderr.as_bytes().to_vec(),
-                timed_out: result.get::<bool>("timed_out").anyhow()?,
+                timed_out: result.get::<bool>("timed_out").map_err(from_lua_err)?,
             })
         })
         .collect()
@@ -1478,7 +1467,7 @@ fn open_device(
         device.install_chain_host(host);
     }
 
-    let dev_table = lua.create_table().anyhow()?;
+    let dev_table = lua.create_table().map_err(from_lua_err)?;
 
     {
         let device = device.clone();
@@ -1489,16 +1478,16 @@ fn open_device(
                 lua.create_function(move |_, _self: Table| {
                     let initialized = handle
                         .block_on(crate::domain::device::Device::initialize(&*device))
-                        .map_err(mlua_err)?;
+                        .map_err(to_lua_err)?;
                     // Package tests drive status reads explicitly through
                     // `poll_sensors`; a live background ticker would race for
                     // the same scripted reports and make tests nondeterministic.
                     device.set_polling_paused(true);
                     Ok(initialized)
                 })
-                .anyhow()?,
+                .map_err(from_lua_err)?,
             )
-            .anyhow()?;
+            .map_err(from_lua_err)?;
     }
 
     {
@@ -1525,12 +1514,12 @@ fn open_device(
                             .block_on(crate::domain::device::LcdCapability::stream_frame(
                                 &*device, &rgba, width, height,
                             ))
-                            .map_err(mlua_err)
+                            .map_err(to_lua_err)
                     },
                 )
-                .anyhow()?,
+                .map_err(from_lua_err)?,
             )
-            .anyhow()?;
+            .map_err(from_lua_err)?;
     }
 
     {
@@ -1547,9 +1536,9 @@ fn open_device(
                     );
                     lua.to_value(&status)
                 })
-                .anyhow()?,
+                .map_err(from_lua_err)?,
             )
-            .anyhow()?;
+            .map_err(from_lua_err)?;
     }
 
     {
@@ -1562,9 +1551,9 @@ fn open_device(
                     let wire = handle.block_on(crate::domain::device::Device::serialize(&*device));
                     lua.to_value(&wire)
                 })
-                .anyhow()?,
+                .map_err(from_lua_err)?,
             )
-            .anyhow()?;
+            .map_err(from_lua_err)?;
     }
 
     {
@@ -1577,9 +1566,9 @@ fn open_device(
                         &*device,
                     ))
                 })
-                .anyhow()?,
+                .map_err(from_lua_err)?,
             )
-            .anyhow()?;
+            .map_err(from_lua_err)?;
     }
 
     {
@@ -1593,11 +1582,11 @@ fn open_device(
                         .block_on(crate::domain::device::CoolingCapability::set_cooling_duty(
                             &*device, &channel, duty,
                         ))
-                        .map_err(mlua_err)
+                        .map_err(to_lua_err)
                 })
-                .anyhow()?,
+                .map_err(from_lua_err)?,
             )
-            .anyhow()?;
+            .map_err(from_lua_err)?;
     }
 
     {
@@ -1615,11 +1604,11 @@ fn open_device(
                         .block_on(crate::domain::device::LightingCapability::write_frame(
                             &*device, &channel, &bytes,
                         ))
-                        .map_err(mlua_err)
+                        .map_err(to_lua_err)
                 })
-                .anyhow()?,
+                .map_err(from_lua_err)?,
             )
-            .anyhow()?;
+            .map_err(from_lua_err)?;
     }
 
     {
@@ -1633,9 +1622,9 @@ fn open_device(
                         handle.block_on(crate::domain::device::DpiCapability::dpi_status(&*device));
                     lua.to_value(&status)
                 })
-                .anyhow()?,
+                .map_err(from_lua_err)?,
             )
-            .anyhow()?;
+            .map_err(from_lua_err)?;
     }
 
     {
@@ -1650,9 +1639,9 @@ fn open_device(
                     );
                     lua.to_value(&status)
                 })
-                .anyhow()?,
+                .map_err(from_lua_err)?,
             )
-            .anyhow()?;
+            .map_err(from_lua_err)?;
     }
 
     {
@@ -1667,9 +1656,9 @@ fn open_device(
                     );
                     lua.to_value(&status)
                 })
-                .anyhow()?,
+                .map_err(from_lua_err)?,
             )
-            .anyhow()?;
+            .map_err(from_lua_err)?;
     }
 
     {
@@ -1683,12 +1672,12 @@ fn open_device(
                         .block_on(crate::domain::device::EqualizerCapability::get_equalizer(
                             &*device,
                         ))
-                        .map_err(mlua_err)?;
+                        .map_err(to_lua_err)?;
                     lua.to_value(&equalizer)
                 })
-                .anyhow()?,
+                .map_err(from_lua_err)?,
             )
-            .anyhow()?;
+            .map_err(from_lua_err)?;
     }
 
     {
@@ -1705,11 +1694,11 @@ fn open_device(
                         .block_on(crate::domain::device::EqualizerCapability::set_eq_bands(
                             &*device, &values,
                         ))
-                        .map_err(mlua_err)
+                        .map_err(to_lua_err)
                 })
-                .anyhow()?,
+                .map_err(from_lua_err)?,
             )
-            .anyhow()?;
+            .map_err(from_lua_err)?;
     }
 
     {
@@ -1723,11 +1712,11 @@ fn open_device(
                         .block_on(crate::domain::device::BooleanCapability::set_boolean(
                             &*device, &key, value,
                         ))
-                        .map_err(mlua_err)
+                        .map_err(to_lua_err)
                 })
-                .anyhow()?,
+                .map_err(from_lua_err)?,
             )
-            .anyhow()?;
+            .map_err(from_lua_err)?;
     }
 
     {
@@ -1744,11 +1733,11 @@ fn open_device(
                                 &*device, mapping,
                             ),
                         )
-                        .map_err(mlua_err)
+                        .map_err(to_lua_err)
                 })
-                .anyhow()?,
+                .map_err(from_lua_err)?,
             )
-            .anyhow()?;
+            .map_err(from_lua_err)?;
     }
 
     {
@@ -1762,11 +1751,11 @@ fn open_device(
                         .block_on(crate::domain::device::ChoiceCapability::set_choice(
                             &*device, &key, selected,
                         ))
-                        .map_err(mlua_err)
+                        .map_err(to_lua_err)
                 })
-                .anyhow()?,
+                .map_err(from_lua_err)?,
             )
-            .anyhow()?;
+            .map_err(from_lua_err)?;
     }
 
     {
@@ -1791,9 +1780,9 @@ fn open_device(
                     }
                     Ok(out)
                 })
-                .anyhow()?,
+                .map_err(from_lua_err)?,
             )
-            .anyhow()?;
+            .map_err(from_lua_err)?;
     }
 
     {
@@ -1807,11 +1796,11 @@ fn open_device(
                         .block_on(crate::domain::device::DpiCapability::set_dpi_steps(
                             &*device, steps,
                         ))
-                        .map_err(mlua_err)
+                        .map_err(to_lua_err)
                 })
-                .anyhow()?,
+                .map_err(from_lua_err)?,
             )
-            .anyhow()?;
+            .map_err(from_lua_err)?;
     }
     {
         let device = device.clone();
@@ -1826,11 +1815,11 @@ fn open_device(
                                 &*device, slot, enabled,
                             ),
                         )
-                        .map_err(mlua_err)
+                        .map_err(to_lua_err)
                 })
-                .anyhow()?,
+                .map_err(from_lua_err)?,
             )
-            .anyhow()?;
+            .map_err(from_lua_err)?;
     }
 
     {
@@ -1844,11 +1833,11 @@ fn open_device(
                         .block_on(crate::domain::device::DpiCapability::set_dpi_direct(
                             &*device, dpi,
                         ))
-                        .map_err(mlua_err)
+                        .map_err(to_lua_err)
                 })
-                .anyhow()?,
+                .map_err(from_lua_err)?,
             )
-            .anyhow()?;
+            .map_err(from_lua_err)?;
     }
 
     {
@@ -1862,12 +1851,12 @@ fn open_device(
                         .block_on(crate::domain::device::BatteryCapability::get_batteries(
                             &*device,
                         ))
-                        .map_err(mlua_err)?;
+                        .map_err(to_lua_err)?;
                     lua.to_value(&batteries)
                 })
-                .anyhow()?,
+                .map_err(from_lua_err)?,
             )
-            .anyhow()?;
+            .map_err(from_lua_err)?;
     }
 
     {
@@ -1881,11 +1870,11 @@ fn open_device(
                         .block_on(crate::domain::device::RangeCapability::set_range(
                             &*device, &key, value,
                         ))
-                        .map_err(mlua_err)
+                        .map_err(to_lua_err)
                 })
-                .anyhow()?,
+                .map_err(from_lua_err)?,
             )
-            .anyhow()?;
+            .map_err(from_lua_err)?;
     }
 
     {
@@ -1895,12 +1884,12 @@ fn open_device(
             .set(
                 "apply",
                 lua.create_function(move |_, (_self, state): (Table, Table)| {
-                    let rgb_state = table_to_rgb_state(&state).map_err(mlua_err)?;
-                    handle.block_on(device.apply(rgb_state)).map_err(mlua_err)
+                    let rgb_state = table_to_rgb_state(&state).map_err(to_lua_err)?;
+                    handle.block_on(device.apply(rgb_state)).map_err(to_lua_err)
                 })
-                .anyhow()?,
+                .map_err(from_lua_err)?,
             )
-            .anyhow()?;
+            .map_err(from_lua_err)?;
     }
 
     {
@@ -1913,9 +1902,9 @@ fn open_device(
                         &crate::domain::device::CoolingCapability::cached_cooling_status(&*device),
                     )
                 })
-                .anyhow()?,
+                .map_err(from_lua_err)?,
             )
-            .anyhow()?;
+            .map_err(from_lua_err)?;
     }
 
     {
@@ -1934,9 +1923,9 @@ fn open_device(
                     }
                     Ok(out)
                 })
-                .anyhow()?,
+                .map_err(from_lua_err)?,
             )
-            .anyhow()?;
+            .map_err(from_lua_err)?;
     }
 
     {
@@ -1961,9 +1950,9 @@ fn open_device(
                     }
                     Ok(out)
                 })
-                .anyhow()?,
+                .map_err(from_lua_err)?,
             )
-            .anyhow()?;
+            .map_err(from_lua_err)?;
     }
 
     {
@@ -1973,17 +1962,17 @@ fn open_device(
             .set(
                 "poll_sensors",
                 lua.create_function(move |lua, _self: Table| {
-                    handle.block_on(device.poll_once()).map_err(mlua_err)?;
+                    handle.block_on(device.poll_once()).map_err(to_lua_err)?;
                     let sensors = handle
                         .block_on(crate::domain::device::SensorCapability::get_sensors(
                             &*device,
                         ))
-                        .map_err(mlua_err)?;
+                        .map_err(to_lua_err)?;
                     lua.to_value(&sensors)
                 })
-                .anyhow()?,
+                .map_err(from_lua_err)?,
             )
-            .anyhow()?;
+            .map_err(from_lua_err)?;
     }
 
     {
@@ -1998,9 +1987,9 @@ fn open_device(
                     recording.reads.lock().push_back(data);
                     Ok(())
                 })
-                .anyhow()?,
+                .map_err(from_lua_err)?,
             )
-            .anyhow()?;
+            .map_err(from_lua_err)?;
     }
 
     if let Some(usb) = usb_recording.clone() {
@@ -2021,9 +2010,9 @@ fn open_device(
                     }
                     Ok(out)
                 })
-                .anyhow()?,
+                .map_err(from_lua_err)?,
             )
-            .anyhow()?;
+            .map_err(from_lua_err)?;
     }
 
     {
@@ -2039,11 +2028,11 @@ fn open_device(
                         .collect();
                     handle
                         .block_on(device.write_divided_frame(&channel, &composed))
-                        .map_err(mlua_err)
+                        .map_err(to_lua_err)
                 })
-                .anyhow()?,
+                .map_err(from_lua_err)?,
             )
-            .anyhow()?;
+            .map_err(from_lua_err)?;
     }
 
     {
@@ -2061,9 +2050,9 @@ fn open_device(
                     smbus_written.lock().clear();
                     Ok(())
                 })
-                .anyhow()?,
+                .map_err(from_lua_err)?,
             )
-            .anyhow()?;
+            .map_err(from_lua_err)?;
     }
 
     // Push an unsolicited report onto the event queue (as a reader thread
@@ -2080,9 +2069,9 @@ fn open_device(
                     recording.queue_event(data);
                     Ok(())
                 })
-                .anyhow()?,
+                .map_err(from_lua_err)?,
             )
-            .anyhow()?;
+            .map_err(from_lua_err)?;
     }
 
     {
@@ -2092,7 +2081,7 @@ fn open_device(
             .set(
                 "pump_events",
                 lua.create_function(move |lua, _self: Table| {
-                    let outcomes = handle.block_on(device.pump_events()).map_err(mlua_err)?;
+                    let outcomes = handle.block_on(device.pump_events()).map_err(to_lua_err)?;
                     let out = lua.create_table()?;
                     for (i, outcome) in outcomes.iter().enumerate() {
                         let item = lua.create_table()?;
@@ -2117,9 +2106,9 @@ fn open_device(
                     }
                     Ok(out)
                 })
-                .anyhow()?,
+                .map_err(from_lua_err)?,
             )
-            .anyhow()?;
+            .map_err(from_lua_err)?;
     }
 
     Ok(dev_table)
@@ -2150,13 +2139,13 @@ fn value_to_param(v: &Value) -> Option<EffectParamValue> {
 fn table_to_rgb_state(state: &Table) -> Result<LightingState> {
     let mode: String = state
         .get("mode")
-        .anyhow()
+        .map_err(from_lua_err)
         .context("state.mode is required")?;
     match mode.as_str() {
         "static" => {
             let color: Table = state
                 .get("color")
-                .anyhow()
+                .map_err(from_lua_err)
                 .context("static state needs a color")?;
             Ok(LightingState::Static {
                 color: table_to_color(&color),
@@ -2165,14 +2154,14 @@ fn table_to_rgb_state(state: &Table) -> Result<LightingState> {
         "per_led" => {
             let zones_t: Table = state
                 .get("channels")
-                .anyhow()
+                .map_err(from_lua_err)
                 .context("per_led state needs a channels table")?;
             let mut channels = HashMap::new();
             for pair in zones_t.pairs::<String, Table>() {
-                let (channel_id, leds_t) = pair.anyhow()?;
+                let (channel_id, leds_t) = pair.map_err(from_lua_err)?;
                 let mut leds = HashMap::new();
                 for led in leds_t.pairs::<String, Table>() {
-                    let (led_id, c) = led.anyhow()?;
+                    let (led_id, c) = led.map_err(from_lua_err)?;
                     leds.insert(led_id, table_to_color(&c));
                 }
                 channels.insert(channel_id, leds);
@@ -2182,12 +2171,12 @@ fn table_to_rgb_state(state: &Table) -> Result<LightingState> {
         "native_effect" | "direct_effect" => {
             let id: String = state
                 .get("id")
-                .anyhow()
+                .map_err(from_lua_err)
                 .with_context(|| format!("{mode} state needs an id"))?;
             let mut params = HashMap::new();
             if let Ok(params_t) = state.get::<Table>("params") {
                 for pair in params_t.pairs::<String, Value>() {
-                    let (key, v) = pair.anyhow()?;
+                    let (key, v) = pair.map_err(from_lua_err)?;
                     if let Some(pv) = value_to_param(&v) {
                         params.insert(key, pv);
                     }

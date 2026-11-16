@@ -18,6 +18,7 @@ use tokio::sync::oneshot;
 use halod_shared::types::{EffectParamValue, Permission};
 
 use super::bytebuf::ByteBuf;
+use super::ffi::lua_err;
 use super::lua_worker::LuaWorker;
 
 pub const CANVAS_W: u32 = 400;
@@ -265,10 +266,6 @@ impl PluginEffectHandle {
             })
             .await?
     }
-}
-
-fn lua_err(context: &str, e: mlua::Error) -> anyhow::Error {
-    anyhow!("effect {context}: {e}")
 }
 
 /// HSV (h,s,v each 0..1) to sRGB bytes. Used only to back `halod.hsv` for

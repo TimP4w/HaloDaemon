@@ -21,7 +21,7 @@ use crate::domain::device::{
     BooleanCapability, CapabilityRef, ChoiceCapability, ChoiceStateCache, Device, SensorCapability,
     VisibilitySlot,
 };
-use crate::infrastructure::drivers::vendors::generic::devices::common::TaskHandle;
+use crate::util::task::TaskHandle;
 use halod_shared::types::{
     Boolean, Choice, ChoiceDisplay, ChoiceOption, DeviceCapability, DeviceType, Sensor,
 };
@@ -118,7 +118,7 @@ impl Device for ComputerDevice {
                 *cache.lock().await = metrics::to_sensors(&snapshot);
             }
         });
-        *self.poll_task.lock().await = Some(TaskHandle::new(handle));
+        *self.poll_task.lock().await = Some(TaskHandle(handle));
 
         log::info!("[ComputerDevice] initialized ({})", os_label());
         Ok(true)

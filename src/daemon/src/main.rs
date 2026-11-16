@@ -22,6 +22,7 @@ use crate::domain::{cooling, device, input, lcd, lighting, plugin, profiles};
 #[cfg(unix)]
 use crate::infrastructure::platform;
 use crate::infrastructure::secrets;
+use crate::util::task::TaskHandle;
 
 /// How this process was invoked, decided purely from argv.
 ///
@@ -283,9 +284,7 @@ async fn run_daemon(
         "",
         move || {
             let app = Arc::clone(&idle_app);
-            Box::pin(async move {
-                task_supervisor::TaskHandle(lifecycle::spawn_idle_watcher(app, headless))
-            })
+            Box::pin(async move { TaskHandle(lifecycle::spawn_idle_watcher(app, headless)) })
         },
         || {},
     );
@@ -296,9 +295,9 @@ async fn run_daemon(
         move || {
             let app = Arc::clone(&hotplug_app);
             Box::pin(async move {
-                task_supervisor::TaskHandle(tokio::spawn(
-                    application::observers::hid::hotplug_monitor(app),
-                ))
+                TaskHandle(tokio::spawn(application::observers::hid::hotplug_monitor(
+                    app,
+                )))
             })
         },
         || {},
@@ -314,7 +313,7 @@ async fn run_daemon(
         move || {
             let app = Arc::clone(&usb_hotplug_app);
             Box::pin(async move {
-                task_supervisor::TaskHandle(tokio::spawn(
+                TaskHandle(tokio::spawn(
                     crate::application::observers::usb_hotplug::run(app),
                 ))
             })
@@ -329,7 +328,7 @@ async fn run_daemon(
         move || {
             let app = Arc::clone(&retry_app);
             Box::pin(async move {
-                task_supervisor::TaskHandle(tokio::spawn(
+                TaskHandle(tokio::spawn(
                     plugin::observers::host_scan::retry_failed_opens(app),
                 ))
             })
@@ -346,9 +345,7 @@ async fn run_daemon(
         move || {
             let app = Arc::clone(&power_app);
             Box::pin(async move {
-                task_supervisor::TaskHandle(tokio::spawn(
-                    crate::application::observers::power::run(app),
-                ))
+                TaskHandle(tokio::spawn(crate::application::observers::power::run(app)))
             })
         },
         || {},
@@ -364,7 +361,7 @@ async fn run_daemon(
         move || {
             let app = Arc::clone(&integration_app);
             Box::pin(async move {
-                task_supervisor::TaskHandle(tokio::spawn(
+                TaskHandle(tokio::spawn(
                     plugin::observers::integration_monitor::integration_monitor(app),
                 ))
             })
@@ -379,7 +376,7 @@ async fn run_daemon(
         move || {
             let app = Arc::clone(&sensor_app);
             Box::pin(async move {
-                task_supervisor::TaskHandle(tokio::spawn(
+                TaskHandle(tokio::spawn(
                     crate::application::usecases::device::telemetry::run(app),
                 ))
             })
@@ -393,9 +390,9 @@ async fn run_daemon(
         "Plugin data status projection stopped unexpectedly.",
         move || {
             let app = Arc::clone(&plugin_data_app);
-            Box::pin(async move {
-                task_supervisor::TaskHandle(tokio::spawn(plugin::observers::data_status::run(app)))
-            })
+            Box::pin(
+                async move { TaskHandle(tokio::spawn(plugin::observers::data_status::run(app))) },
+            )
         },
         || {},
     );
@@ -407,9 +404,7 @@ async fn run_daemon(
         move || {
             let app = Arc::clone(&battery_app);
             Box::pin(async move {
-                task_supervisor::TaskHandle(tokio::spawn(device::policies::low_battery::watcher(
-                    app,
-                )))
+                TaskHandle(tokio::spawn(device::policies::low_battery::watcher(app)))
             })
         },
         || {},
@@ -436,7 +431,7 @@ async fn run_daemon(
         move || {
             let engine = Arc::clone(&fan_engine);
             let cfg = EngineConfigReceiver::new(fan_bus.clone(), EngineConfigTopic::Cooling);
-            Box::pin(async move { task_supervisor::TaskHandle(engine.start(cfg)) })
+            Box::pin(async move { TaskHandle(engine.start(cfg)) })
         },
         || {},
     );
@@ -448,7 +443,7 @@ async fn run_daemon(
         move || {
             let engine = Arc::clone(&lighting_engine);
             let cfg = EngineConfigReceiver::new(rgb_bus.clone(), EngineConfigTopic::Lighting);
-            Box::pin(async move { task_supervisor::TaskHandle(engine.start(cfg).await) })
+            Box::pin(async move { TaskHandle(engine.start(cfg).await) })
         },
         || {},
     );
@@ -460,7 +455,7 @@ async fn run_daemon(
         move || {
             let engine = Arc::clone(&lcd_engine);
             let cfg = EngineConfigReceiver::new(lcd_bus.clone(), EngineConfigTopic::Lcd);
-            Box::pin(async move { task_supervisor::TaskHandle(engine.start(cfg).await) })
+            Box::pin(async move { TaskHandle(engine.start(cfg).await) })
         },
         || {},
     );
@@ -477,7 +472,7 @@ async fn run_daemon(
                     profiles::observers::active_window::ControlMsg,
                 >(32);
                 app.focus.set_ctrl_tx(tx).await;
-                task_supervisor::TaskHandle(engine.start(rx).await)
+                TaskHandle(engine.start(rx).await)
             })
         },
         || {},
@@ -490,7 +485,7 @@ async fn run_daemon(
         "Key remapping stopped unexpectedly.",
         move || {
             let app = Arc::clone(&remap_app);
-            Box::pin(async move { task_supervisor::TaskHandle(input::engine::startup::start(app)) })
+            Box::pin(async move { TaskHandle(input::engine::startup::start(app)) })
         },
         move || remap_shutdown.input.shutdown(),
     );

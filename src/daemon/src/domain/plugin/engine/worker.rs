@@ -28,7 +28,7 @@ use halod_shared::types::{
 };
 
 use super::bytebuf::ByteBuf;
-use super::ffi::to_lua_err;
+use super::ffi::{lua_err, to_lua_err};
 use super::manifest::{
     check_lcd_dims, check_led_count, check_zone_count, validate_accessories, validate_component,
     validate_short_text, AccessoryManifest, ActionDef, BooleanDef, ChoiceDef, RangeDef,
@@ -580,10 +580,6 @@ fn required(manifest: &Table, name: &str) -> Result<Function> {
             super::contract::active().version
         )
     })
-}
-
-fn lua_err(context: &str, e: mlua::Error) -> anyhow::Error {
-    anyhow!("plugin {context}: {e}")
 }
 
 /// Pace collection of native buffers created during live LCD callbacks.

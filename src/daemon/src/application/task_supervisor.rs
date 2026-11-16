@@ -9,18 +9,9 @@ use tokio::sync::watch;
 
 use crate::application::state::AppState;
 use crate::util::backoff::{respawn_wait, FailureStreak};
+use crate::util::task::TaskHandle;
 
 const MAX_FAILURES: u32 = 3;
-
-pub(crate) struct TaskHandle(pub tokio::task::JoinHandle<()>);
-
-impl Drop for TaskHandle {
-    fn drop(&mut self) {
-        // Tokio detaches a bare JoinHandle on drop. Supervised work must never
-        // outlive its manager, including when the manager itself is aborted.
-        self.0.abort();
-    }
-}
 
 type StartFuture = Pin<Box<dyn Future<Output = TaskHandle> + Send>>;
 type StartTask = Arc<dyn Fn() -> StartFuture + Send + Sync>;

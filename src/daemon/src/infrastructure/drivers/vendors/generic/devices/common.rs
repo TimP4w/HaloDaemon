@@ -104,19 +104,3 @@ mod tests {
         }
     }
 }
-
-/// RAII wrapper around a spawned Tokio task. Aborts the task automatically on
-/// drop so device `close()` implementations never need explicit `abort()` calls.
-pub struct TaskHandle(tokio::task::JoinHandle<()>);
-
-impl TaskHandle {
-    pub fn new(handle: tokio::task::JoinHandle<()>) -> Self {
-        Self(handle)
-    }
-}
-
-impl Drop for TaskHandle {
-    fn drop(&mut self) {
-        self.0.abort();
-    }
-}
