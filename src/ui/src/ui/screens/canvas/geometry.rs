@@ -277,13 +277,6 @@ pub(super) fn screen_to_norm(screen: Pos2, canvas_rect: Rect) -> Pos2 {
     )
 }
 
-fn uv_of(screen: Pos2, canvas_rect: Rect) -> Pos2 {
-    Pos2::new(
-        (screen.x - canvas_rect.left()) / canvas_rect.width(),
-        (screen.y - canvas_rect.top()) / canvas_rect.height(),
-    )
-}
-
 pub(super) fn zone_corners(zone: &PlacedZone, canvas_rect: Rect) -> [Pos2; 4] {
     // Rotate the local corner offsets in *normalized* canvas space (then map to
     // screen) so the box tracks the LEDs and the daemon sampler, which both
