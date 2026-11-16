@@ -17,7 +17,7 @@
 
 use std::io::Read;
 use std::process::{Command, Stdio};
-use std::sync::Arc;
+use std::sync::{Arc, OnceLock};
 use std::time::{Duration, Instant};
 
 use anyhow::Result;
@@ -131,7 +131,7 @@ const MAX_COMMAND_OUTPUT_BYTES: usize = 256 * 1024;
 #[derive(Clone)]
 pub struct CommandExecutor {
     allowed: Arc<[String]>,
-    unrecoverable: Arc<parking_lot::Mutex<Option<String>>>,
+    unrecoverable: Arc<OnceLock<String>>,
     #[cfg(feature = "plugin-test")]
     scripted: Option<Arc<parking_lot::Mutex<std::collections::VecDeque<CommandRunResult>>>>,
 }
@@ -155,7 +155,7 @@ impl CommandExecutor {
         allowed.dedup();
         Self {
             allowed: allowed.into(),
-            unrecoverable: Arc::new(parking_lot::Mutex::new(None)),
+            unrecoverable: Arc::default(),
             #[cfg(feature = "plugin-test")]
             scripted: None,
         }
@@ -174,12 +174,12 @@ impl CommandExecutor {
     }
 
     fn reject<T>(&self, detail: String) -> Result<T> {
-        self.unrecoverable.lock().get_or_insert(detail.clone());
+        let _ = self.unrecoverable.set(detail.clone());
         anyhow::bail!(detail)
     }
 
     fn unrecoverable_error(&self) -> Option<String> {
-        self.unrecoverable.lock().clone()
+        self.unrecoverable.get().cloned()
     }
 
     pub fn run(&self, executable: &str, args: &[String]) -> Result<CommandRunResult> {
@@ -221,7 +221,7 @@ impl CommandExecutor {
         // potentially different PATH lookup between readiness and execution.
         let resolved = super::command_resolve::resolve(executable).ok_or_else(|| {
             let detail = format!("command '{executable}' is not executable on PATH");
-            self.unrecoverable.lock().get_or_insert(detail.clone());
+            let _ = self.unrecoverable.set(detail.clone());
             anyhow::anyhow!(detail)
         })?;
         let mut child = Command::new(&resolved)
@@ -236,7 +236,7 @@ impl CommandExecutor {
                     error.kind(),
                     std::io::ErrorKind::NotFound | std::io::ErrorKind::PermissionDenied
                 ) {
-                    self.unrecoverable.lock().get_or_insert(detail.clone());
+                    let _ = self.unrecoverable.set(detail.clone());
                 }
                 anyhow::anyhow!(detail)
             })?;
@@ -317,7 +317,7 @@ pub fn command_result_table(
 #[derive(Clone)]
 pub struct AddrScope {
     allowed: Arc<[u8]>,
-    unrecoverable: Arc<parking_lot::Mutex<Option<String>>>,
+    unrecoverable: Arc<OnceLock<String>>,
 }
 
 impl AddrScope {
@@ -327,7 +327,7 @@ impl AddrScope {
         v.dedup();
         Self {
             allowed: v.into(),
-            unrecoverable: Arc::new(parking_lot::Mutex::new(None)),
+            unrecoverable: Arc::default(),
         }
     }
 
@@ -346,13 +346,13 @@ impl AddrScope {
             let detail = format!(
                 "plugin SMBus access to address 0x{addr:02x} is outside its declared scope"
             );
-            self.unrecoverable.lock().get_or_insert(detail.clone());
+            let _ = self.unrecoverable.set(detail.clone());
             anyhow::bail!(detail)
         }
     }
 
     fn unrecoverable_error(&self) -> Option<String> {
-        self.unrecoverable.lock().clone()
+        self.unrecoverable.get().cloned()
     }
 }
 

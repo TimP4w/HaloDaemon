@@ -8,7 +8,7 @@ use parking_lot::Mutex;
 use serde::Serialize;
 use std::collections::HashMap;
 use std::path::{Path, PathBuf};
-use std::sync::Arc;
+use std::sync::{Arc, OnceLock};
 
 #[derive(Debug, Clone, PartialEq, Eq, Serialize)]
 pub struct HwmonChipInfo {
@@ -68,7 +68,7 @@ impl HwmonChip {
 pub struct HwmonTransport {
     chips: Metered<HashMap<String, HwmonChip>>,
     original_pwm_enable: Arc<Mutex<HashMap<(String, String), String>>>,
-    unrecoverable: Arc<Mutex<Option<String>>>,
+    unrecoverable: Arc<OnceLock<String>>,
 }
 
 impl HwmonTransport {
@@ -136,7 +136,7 @@ impl HwmonTransport {
         Ok(Self {
             chips: Metered::new(chips, limit),
             original_pwm_enable: Arc::new(Mutex::new(HashMap::new())),
-            unrecoverable: Arc::new(Mutex::new(None)),
+            unrecoverable: Arc::default(),
         })
     }
 
@@ -182,7 +182,7 @@ impl HwmonTransport {
         Self {
             chips: Metered::new(chips, None),
             original_pwm_enable: Arc::new(Mutex::new(HashMap::new())),
-            unrecoverable: Arc::new(Mutex::new(None)),
+            unrecoverable: Arc::default(),
         }
     }
 
@@ -213,7 +213,7 @@ impl HwmonTransport {
             Ok(value) => Ok(Some(value)),
             Err(error) if error.kind() == std::io::ErrorKind::PermissionDenied => {
                 let detail = format!("reading hwmon attribute {attribute}: {error}");
-                self.unrecoverable.lock().get_or_insert(detail);
+                let _ = self.unrecoverable.set(detail);
                 Err(error).with_context(|| format!("reading hwmon attribute {attribute}"))
             }
             // ENODATA from a sleeping sensor, ELOOP from a removed device's stale sysfs link.
@@ -248,7 +248,7 @@ impl HwmonTransport {
                 let original = chip.read(attribute).map_err(|error| {
                     let detail = format!("reading original hwmon attribute {attribute}: {error}");
                     if error.kind() == std::io::ErrorKind::PermissionDenied {
-                        self.unrecoverable.lock().get_or_insert(detail.clone());
+                        let _ = self.unrecoverable.set(detail.clone());
                     }
                     anyhow::anyhow!(detail)
                 })?;
@@ -260,12 +260,12 @@ impl HwmonTransport {
     }
 
     fn reject<T>(&self, detail: String) -> Result<T> {
-        self.unrecoverable.lock().get_or_insert(detail.clone());
+        let _ = self.unrecoverable.set(detail.clone());
         anyhow::bail!(detail)
     }
 
     pub fn unrecoverable_error(&self) -> Option<String> {
-        self.unrecoverable.lock().clone()
+        self.unrecoverable.get().cloned()
     }
 
     /// Convert a failed write without turning a readable hwmon device into an
