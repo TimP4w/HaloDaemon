@@ -108,7 +108,7 @@ Claude code was heavily used. The GUI is exclusively done using claude code, the
 <tr>
 <td width="50%" valign="top">
 
-**Plugin ecosystem** - install device and effect packages from signed repositories; each plugin declares its capabilities and a narrow set of permissions you approve before it runs.
+**Plugin ecosystem** - install and update device and effect plugins one at a time from signed catalogs; each plugin can only reach the hardware and services it declares, and the app shows you what that is.
 
 </td>
 <td width="50%"><img src="./docs/images/plugins.png" alt="Plugin management screen"></td>

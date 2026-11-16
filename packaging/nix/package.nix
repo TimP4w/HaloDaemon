@@ -8,19 +8,6 @@
   buildHash,
   src,
 }:
-let
-  # The release workflow pins these immutable daemon release assets and their
-  # fixed-output hashes. Both were produced from one authenticated plugin release.
-  officialPluginRelease = "v0.12.0";
-  officialPluginBundle = pkgs.fetchurl {
-    url = "https://github.com/TimP4w/HaloDaemon/releases/download/${officialPluginRelease}/official-plugins.bundle";
-    hash = "sha256-ifm67DKb5Ix2ZAQUhZ6XTB+EklQv2X76dBekPR3x4zk=";
-  };
-  officialPluginLicenses = pkgs.fetchurl {
-    url = "https://github.com/TimP4w/HaloDaemon/releases/download/${officialPluginRelease}/official-plugins-licenses.txt";
-    hash = "sha256-J/l1IgIYHDtQgi8dIIsunQlyV3cBlV1BKBwuAxh9IjY=";
-  };
-in
 pkgs.rustPlatform.buildRustPackage {
   pname = "halod";
   inherit version;
@@ -77,31 +64,17 @@ pkgs.rustPlatform.buildRustPackage {
   # `cargo test -p halod` separately.
   doCheck = false;
 
-  # Embed the exact bundle already produced and authenticated by the release job.
   preBuild = ''
     export HALOD_REQUIRE_LICENSES=1
-    mkdir -p plugin-bundle
-    cp ${officialPluginBundle} plugin-bundle/official-plugins.bundle
-    cp ${officialPluginLicenses} plugin-bundle/official-plugins-licenses.txt
-    export HALOD_OFFICIAL_PLUGIN_LICENSES=$PWD/plugin-bundle/official-plugins-licenses.txt
-    export HALOD_REQUIRE_PLUGIN_BUNDLE=1
-    export HALOD_OFFICIAL_PLUGIN_BUNDLE=$PWD/plugin-bundle/official-plugins.bundle
   '';
 
-  # Ship the udev rules so the NixOS module can install them via
-  # services.udev.packages. Generated from the installed binary so it matches the build.
+  # The release workflow generates these rules from the official catalog.
   postInstall = ''
-    mkdir -p $out/lib/udev/rules.d
-    $out/bin/halod udev-rules --embedded \
-      > $out/lib/udev/rules.d/60-halod.rules
+    install -Dm444 udev/60-halod.rules $out/lib/udev/rules.d/60-halod.rules
     install -Dm444 assets/dev.timp4w.Halod.desktop \
       $out/share/applications/dev.timp4w.Halod.desktop
     install -Dm444 assets/icon.svg \
       $out/share/icons/hicolor/scalable/apps/halod.svg
-    if [ -f plugin-bundle/official-plugins-licenses.txt ]; then
-      install -Dm444 plugin-bundle/official-plugins-licenses.txt \
-        $out/share/licenses/halod/plugins/licenses.txt
-    fi
   '';
 
   # eframe/wgpu dlopens libGL and libwayland at runtime; wrap the binary

@@ -39,8 +39,6 @@ pkgs.stdenv.mkDerivation {
     install -Dm755 halod $out/bin/halod
     install -Dm755 halod-gui $out/bin/halod-gui
     install -Dm444 udev/60-halod.rules $out/lib/udev/rules.d/60-halod.rules
-    install -Dm444 ThirdPartyLicenses/Plugins/licenses.txt \
-      $out/share/licenses/halod/plugins/licenses.txt
     install -Dm444 ${assets}/dev.timp4w.Halod.desktop \
       $out/share/applications/dev.timp4w.Halod.desktop
     install -Dm444 ${assets}/icon.svg \
