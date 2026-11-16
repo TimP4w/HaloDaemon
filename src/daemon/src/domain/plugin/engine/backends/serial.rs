@@ -53,14 +53,10 @@ fn open(
     })
 }
 
-// `serial` is config-instantiated (the port comes from config, not a handle),
-// so it carries only `open` — see `integration_scan`, which calls it directly.
 pub(super) const DESCRIPTOR: PluginTransportDescriptor = PluginTransportDescriptor {
     kind: "serial",
-    matches: None,
     open,
-    id_suffix: None,
-    validate: None,
+    discovery: None,
 };
 
 #[cfg(test)]

@@ -1137,8 +1137,8 @@ impl DeviceSpec {
     /// Delegates to `self.transport`'s registered backend (unknown kind → never).
     pub fn matches(&self, handle: &DiscoveryHandle<'_>) -> bool {
         descriptor_for(self.transport.kind())
-            .and_then(|d| d.matches)
-            .is_some_and(|m| m(self, handle))
+            .and_then(|d| d.discovery.as_ref())
+            .is_some_and(|discovery| (discovery.matches)(self, handle))
     }
 
     pub fn hid(&self) -> Option<&HidMatch> {
@@ -1798,8 +1798,8 @@ pub(super) fn validate_manifest(manifest: &PluginManifest) -> Result<()> {
                 validate_control_layout(spec)?;
                 match descriptor_for(spec.transport.kind()) {
                     Some(desc) => {
-                        if let Some(validate) = desc.validate {
-                            validate(spec)?;
+                        if let Some(discovery) = &desc.discovery {
+                            (discovery.validate)(spec)?;
                         }
                     }
                     None => bail!(

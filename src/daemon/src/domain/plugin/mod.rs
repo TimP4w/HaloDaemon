@@ -2017,8 +2017,8 @@ fn device_id(
         return manifest.id_prefix().to_owned();
     }
     let suffix = transport::descriptor_for(spec.transport.kind())
-        .and_then(|d| d.id_suffix)
-        .map(|f| f(handle))
+        .and_then(|d| d.discovery.as_ref())
+        .map(|discovery| (discovery.id_suffix)(handle))
         .unwrap_or_else(|| "0".to_owned());
     format!("{}-{}", manifest.id_prefix(), suffix)
 }

@@ -408,25 +408,25 @@ type PluginOpenFn = fn(
 pub struct PluginTransportDescriptor {
     /// The `match.transport` discriminator (e.g. "hid", "smbus").
     pub kind: &'static str,
-    /// Does this spec (of this kind) accept the discovered handle? `None` for a
-    /// backend that is config-instantiated rather than discovery-matched (the
-    /// `tcp` integration transport), which is reached via `open` directly and
-    /// never through handle matching.
-    pub matches: Option<fn(&DeviceSpec, &DiscoveryHandle<'_>) -> bool>,
-    /// Open the live transport for a matched handle, returning any [`PluginIo`]
-    /// shape (stream, datagram, or request/response). `config` is the plugin's
-    /// resolved non-secure config values (see `plugins::config_for`) — HID/
-    /// SMBus ignore it; the `tcp` backend reads its host/port keys from it,
-    /// since a config-instantiated integration has no real discovery handle.
-    /// `granted` is the plugin's granted permissions — a backend that reaches
-    /// off the matched device (the `tcp` backend) gates on `Permission::Network`.
+    /// Open the live transport. `config` is the plugin's resolved non-secure
+    /// config; `granted` is what the manifest declares, so a backend that
+    /// reaches off the matched device (e.g. `tcp`) gates on `Permission::Network`.
     pub open: PluginOpenFn,
-    /// Stable per-device id suffix from the matched handle. `None` for a
-    /// config-instantiated backend, whose id is built from its config, not a handle.
-    pub id_suffix: Option<fn(&DiscoveryHandle<'_>) -> String>,
-    /// Reject a manifest whose match spec omits a field this kind requires. `None`
-    /// for a config-instantiated backend (an integration declares no device specs).
-    pub validate: Option<fn(&DeviceSpec) -> Result<()>>,
+    /// How discovery matches and names this backend's devices; `None` for a
+    /// backend instantiated from config (see `integration_scan`).
+    pub discovery: Option<Discovery>,
+}
+
+pub struct Discovery {
+    pub matches: fn(&DeviceSpec, &DiscoveryHandle<'_>) -> bool,
+    /// Stable per-device id suffix from the matched handle.
+    pub id_suffix: fn(&DiscoveryHandle<'_>) -> String,
+    /// Reject a match spec that omits a field this kind requires.
+    pub validate: fn(&DeviceSpec) -> Result<()>,
+}
+
+pub fn accept_spec(_: &DeviceSpec) -> Result<()> {
+    Ok(())
 }
 
 /// Resolve a `match.transport` kind to its registered backend.

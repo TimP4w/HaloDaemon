@@ -3,7 +3,7 @@
 //! owns the permission check and typed broker opening.
 
 use super::super::manifest::{DeviceSpec, PluginManifest};
-use super::super::transport::{PluginIo, PluginTransportDescriptor};
+use super::super::transport::{accept_spec, Discovery, PluginIo, PluginTransportDescriptor};
 use crate::domain::registry::observers::discovery::DiscoveryHandle;
 use anyhow::{bail, Result};
 use halod_shared::types::{Permission, WriteRateLimit};
@@ -48,8 +48,10 @@ fn open(
 }
 pub(super) const DESCRIPTOR: PluginTransportDescriptor = PluginTransportDescriptor {
     kind: "amd_smn",
-    matches: Some(matches),
     open,
-    id_suffix: Some(suffix),
-    validate: None,
+    discovery: Some(Discovery {
+        matches,
+        id_suffix: suffix,
+        validate: accept_spec,
+    }),
 };

@@ -5,7 +5,7 @@
 use anyhow::{bail, Result};
 
 use crate::domain::plugin::engine::transport::{
-    AddrScope, PluginIo, PluginTransportDescriptor, RegisterBus,
+    AddrScope, Discovery, PluginIo, PluginTransportDescriptor, RegisterBus,
 };
 use crate::domain::plugin::manifest::{DeviceSpec, PluginManifest};
 use crate::domain::registry::observers::discovery::DiscoveryHandle;
@@ -72,8 +72,10 @@ fn validate(spec: &DeviceSpec) -> Result<()> {
 
 pub(super) const DESCRIPTOR: PluginTransportDescriptor = PluginTransportDescriptor {
     kind: "smbus",
-    matches: Some(matches),
     open,
-    id_suffix: Some(id_suffix),
-    validate: Some(validate),
+    discovery: Some(Discovery {
+        matches,
+        id_suffix,
+        validate,
+    }),
 };

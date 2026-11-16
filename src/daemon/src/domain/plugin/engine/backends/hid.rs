@@ -6,7 +6,9 @@ use std::sync::Arc;
 
 use anyhow::{bail, Result};
 
-use crate::domain::plugin::engine::transport::{PluginIo, PluginTransportDescriptor};
+use crate::domain::plugin::engine::transport::{
+    accept_spec, Discovery, PluginIo, PluginTransportDescriptor,
+};
 use crate::domain::plugin::manifest::{DeviceSpec, PluginManifest};
 use crate::domain::registry::observers::discovery::DiscoveryHandle;
 use crate::infrastructure::drivers::transports::hid::HidTransport;
@@ -138,10 +140,12 @@ fn id_suffix(handle: &DiscoveryHandle<'_>) -> String {
 
 pub(super) const DESCRIPTOR: PluginTransportDescriptor = PluginTransportDescriptor {
     kind: "hid",
-    matches: Some(matches),
     open,
-    id_suffix: Some(id_suffix),
-    validate: None,
+    discovery: Some(Discovery {
+        matches,
+        id_suffix,
+        validate: accept_spec,
+    }),
 };
 
 #[cfg(test)]

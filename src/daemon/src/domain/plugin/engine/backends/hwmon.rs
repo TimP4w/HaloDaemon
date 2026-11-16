@@ -34,8 +34,6 @@ fn open(
 
 pub(super) const DESCRIPTOR: PluginTransportDescriptor = PluginTransportDescriptor {
     kind: "hwmon",
-    matches: None,
     open,
-    id_suffix: None,
-    validate: None,
+    discovery: None,
 };
