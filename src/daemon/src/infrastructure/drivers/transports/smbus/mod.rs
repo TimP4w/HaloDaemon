@@ -97,7 +97,7 @@ impl SmBusDevice {
     where
         F: FnOnce(&mut dyn SmBusSyncOps) -> Result<R>,
     {
-        self.io.write_tallied_local(move |inner, bytes| {
+        self.io.write_tallied(move |inner, bytes| {
             let mut g = inner.lock();
             let mut counting = CountingSmBusOps {
                 inner: &mut **g,
@@ -426,14 +426,7 @@ async fn run_pre_scan(
             let scope = scope.clone();
             let granted = registry.granted_for(plugin_id);
             tokio::task::spawn_blocking(move || {
-                crate::domain::plugin::run_pre_scan(
-                    &source,
-                    &modules,
-                    bus,
-                    scope,
-                    &granted,
-                    tokio::runtime::Handle::current(),
-                )
+                crate::domain::plugin::run_pre_scan(&source, &modules, bus, scope, &granted)
             })
             .await
             .unwrap_or_else(|e| Err(anyhow!("pre_scan task panicked: {e}")))
@@ -552,15 +545,9 @@ mod tests {
             }
         "#;
 
-        let err = crate::domain::plugin::run_pre_scan(
-            source,
-            &Default::default(),
-            bus,
-            vec![0x50],
-            &[],
-            tokio::runtime::Handle::current(),
-        )
-        .unwrap_err();
+        let err =
+            crate::domain::plugin::run_pre_scan(source, &Default::default(), bus, vec![0x50], &[])
+                .unwrap_err();
 
         assert!(err.to_string().contains("requires the `smbus` permission"));
         assert_eq!(accesses.load(Ordering::Relaxed), 0);

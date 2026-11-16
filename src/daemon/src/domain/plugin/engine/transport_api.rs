@@ -3,9 +3,7 @@
 //! the two [`PluginIo`] shapes:
 //!
 //! - **Stream** (HID): `write`/`read`/… — bytes cross as Lua strings or
-//!   `halod.buffer`s. The script sees synchronous calls; each drives the
-//!   daemon's async transport via a captured runtime handle (`block_on`), legal
-//!   because the worker runs on its own `std::thread`.
+//!   `halod.buffer`s. Calls block the worker's own `std::thread`.
 //! - **Register** (SMBus): `batch(fn)` — the callback runs against a scoped
 //!   `ops` object inside one atomic bus-lock hold (`run_local`). `ops` exposes
 //!   addressed register I/O; every op is checked against the plugin's declared
@@ -17,7 +15,6 @@
 #[cfg(target_os = "linux")]
 use mlua::LuaSerdeExt;
 use mlua::{Function, UserData, UserDataMethods, Value};
-use tokio::runtime::Handle;
 
 use crate::infrastructure::drivers::transports::serial::SerialControl;
 use crate::infrastructure::drivers::transports::smbus::SmBusSyncOps;
@@ -32,12 +29,11 @@ use super::transport::{command_result_table, AddrScope, CommandExecutor, PluginI
 /// the real (metered) transport, so a script cannot outrun the hardware.
 pub struct TransportApi {
     io: PluginIo,
-    handle: Handle,
 }
 
 impl TransportApi {
-    pub fn new(io: PluginIo, handle: Handle) -> Self {
-        Self { io, handle }
+    pub fn new(io: PluginIo) -> Self {
+        Self { io }
     }
 
     fn stream(&self) -> mlua::Result<&std::sync::Arc<dyn Transport>> {
@@ -159,23 +155,18 @@ impl UserData for TransportApi {
         // ── Stream (HID) ─────────────────────────────────────────────────
         // The common shapes: `write` (bytes → unit), `read`/`read_nonblocking`
         // (size → string), and `write_then_read`/`feature_exchange`
-        // (bytes+size → string). Each drives the async transport via `block_on`.
+        // (bytes+size → string).
         macro_rules! stream_method {
             (bytes_unit $accessor:ident, $name:literal, $m:ident) => {
                 methods.add_method($name, |_, this, data: Value| {
                     let bytes = bytes_from(&data)?;
-                    this.handle
-                        .block_on(this.$accessor()?.$m(&bytes))
-                        .map_err(to_lua_err)
+                    this.$accessor()?.$m(&bytes).map_err(to_lua_err)
                 });
             };
             (size_str $accessor:ident, $name:literal, $m:ident) => {
                 methods.add_method($name, |lua, this, size: usize| {
                     check_alloc(size)?;
-                    let data = this
-                        .handle
-                        .block_on(this.$accessor()?.$m(size))
-                        .map_err(to_lua_err)?;
+                    let data = this.$accessor()?.$m(size).map_err(to_lua_err)?;
                     lua.create_string(&data)
                 });
             };
@@ -183,10 +174,7 @@ impl UserData for TransportApi {
                 methods.add_method($name, |lua, this, (data, size): (Value, usize)| {
                     check_alloc(size)?;
                     let bytes = bytes_from(&data)?;
-                    let reply = this
-                        .handle
-                        .block_on(this.$accessor()?.$m(&bytes, size))
-                        .map_err(to_lua_err)?;
+                    let reply = this.$accessor()?.$m(&bytes, size).map_err(to_lua_err)?;
                     lua.create_string(&reply)
                 });
             };
@@ -208,8 +196,8 @@ impl UserData for TransportApi {
             |lua, this, (report_id, size): (u8, usize)| {
                 check_alloc(size)?;
                 let data = this
-                    .handle
-                    .block_on(this.hid()?.get_feature_report(report_id, size))
+                    .hid()?
+                    .get_feature_report(report_id, size)
                     .map_err(to_lua_err)?;
                 lua.create_string(&data)
             },
@@ -219,8 +207,8 @@ impl UserData for TransportApi {
             |lua, this, (report_id, size): (u8, usize)| {
                 check_alloc(size)?;
                 let data = this
-                    .handle
-                    .block_on(this.hid()?.get_input_report(report_id, size))
+                    .hid()?
+                    .get_input_report(report_id, size)
                     .map_err(to_lua_err)?;
                 lua.create_string(&data)
             },
@@ -249,9 +237,7 @@ impl UserData for TransportApi {
                 .iter()
                 .map(bytes_from)
                 .collect::<mlua::Result<_>>()?;
-            this.handle
-                .block_on(this.stream()?.write_many(&owned))
-                .map_err(to_lua_err)
+            this.stream()?.write_many(&owned).map_err(to_lua_err)
         });
 
         methods.add_method("write_many_companion", |_, this, packets: Vec<Value>| {
@@ -259,9 +245,7 @@ impl UserData for TransportApi {
                 .iter()
                 .map(bytes_from)
                 .collect::<mlua::Result<_>>()?;
-            this.handle
-                .block_on(this.hid()?.write_many_companion(&owned))
-                .map_err(to_lua_err)
+            this.hid()?.write_many_companion(&owned).map_err(to_lua_err)
         });
 
         methods.add_method(
@@ -518,7 +502,6 @@ mod tests {
         use crate::infrastructure::drivers::transports::mock::test_transport::MockTransport;
         use std::sync::Arc;
 
-        let rt = tokio::runtime::Runtime::new().unwrap();
         let transport = Arc::new(MockTransport::new(vec![
             vec![0x00, 0xAA, 0xBB], // get_feature_report reply
             vec![0x00, 0xCC],       // get_input_report reply
@@ -527,7 +510,7 @@ mod tests {
             transport: transport.clone() as Arc<dyn Transport>,
             usb: None,
         };
-        let api = TransportApi::new(io, rt.handle().clone());
+        let api = TransportApi::new(io);
         let lua = mlua::Lua::new();
         lua.globals().set("t", api).unwrap();
         let out: mlua::Table = lua
@@ -547,7 +530,7 @@ mod tests {
             out.get::<mlua::LuaString>(2).unwrap().as_bytes(),
             &[0x00, 0xCC]
         );
-        let written = rt.block_on(async { transport.written.lock().await.clone() });
+        let written = transport.written.lock().clone();
         assert_eq!(written, vec![vec![0x01u8, 0x02]]);
     }
 

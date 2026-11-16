@@ -46,9 +46,9 @@ impl LpcIoBus {
 
     /// Write one byte to an I/O port. Gated by the write-rate limit — only
     /// call from a thread that's allowed to block (see
-    /// `Metered::write_access_blocking`).
+    /// `Metered::write_access`).
     pub fn write_port(&self, port: u16, value: u8) -> Result<()> {
-        self.io.write_access_blocking(1)?.write_port(port, value)
+        self.io.write_access(1)?.write_port(port, value)
     }
 
     /// Read a SuperIO configuration register (chip must be in extended-function
@@ -60,11 +60,9 @@ impl LpcIoBus {
 
     /// Write a SuperIO configuration register. Gated by the write-rate limit —
     /// only call from a thread that's allowed to block (see
-    /// `Metered::write_access_blocking`).
+    /// `Metered::write_access`).
     pub fn superio_outb(&self, register: u8, value: u8) -> Result<()> {
-        self.io
-            .write_access_blocking(1)?
-            .superio_outb(register, value)
+        self.io.write_access(1)?.superio_outb(register, value)
     }
 
     pub fn rate_status(&self) -> WriteRateStatus {

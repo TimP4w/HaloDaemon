@@ -7,8 +7,6 @@ use std::sync::atomic::{AtomicU32, AtomicU64, AtomicUsize, Ordering};
 use std::sync::Arc;
 use std::time::{Duration, Instant};
 
-#[cfg(test)]
-use anyhow::anyhow;
 use anyhow::{bail, Result};
 use halod_shared::types::{WriteRateLimit, WriteRateStatus};
 
@@ -108,8 +106,7 @@ impl WriteRateLimiter {
 
     /// One gating decision for a write of `len` bytes: whether it's admitted
     /// now, must wait `Duration` before retrying, or the safety valve has
-    /// already been tripped by other queued waiters. Shared by the async and
-    /// blocking `acquire` variants so both sleep flavors gate identically.
+    /// already been tripped by other queued waiters.
     fn gate_once(&self, len: usize, rate: u32) -> GateOutcome {
         let outcome = {
             let mut bucket = self.bucket.lock();
@@ -129,38 +126,10 @@ impl WriteRateLimiter {
         }
     }
 
-    /// Admit one write of `len` bytes, delaying until the rate allows it.
-    /// With no limit, admits immediately. Errors only when the safety valve
-    /// is exceeded.
-    pub async fn acquire(&self, len: usize) -> Result<()> {
-        let rate = self.limit_bytes_per_sec.load(Ordering::Relaxed);
-        if rate == 0 {
-            // Unthrottled: still record the write so bytes/sec stays visible.
-            self.record(len);
-            return Ok(());
-        }
-
-        loop {
-            match self.gate_once(len, rate) {
-                GateOutcome::Ready => break,
-                GateOutcome::Rejected => bail!("write rate limit exceeded ({rate} bytes/sec)"),
-                GateOutcome::Wait(d) => {
-                    tokio::time::sleep(d).await;
-                    self.queued_bytes.fetch_sub(len as u64, Ordering::Relaxed);
-                }
-            }
-        }
-
-        self.record(len);
-        Ok(())
-    }
-
-    /// Blocking twin of [`Self::acquire`] for transports whose write path is
-    /// synchronous (USB bulk/control transfers): sleeps the calling thread
-    /// rather than awaiting. Only call this from a thread that's allowed to
-    /// block — a `spawn_blocking` worker, or a transport whose contract
-    /// already documents blocking I/O on the caller's thread.
-    pub fn acquire_blocking(&self, len: usize) -> Result<()> {
+    /// Admit one write of `len` bytes, sleeping the calling thread until the
+    /// rate allows it. With no limit, admits immediately. Errors only when the
+    /// safety valve is exceeded.
+    pub fn acquire(&self, len: usize) -> Result<()> {
         let rate = self.limit_bytes_per_sec.load(Ordering::Relaxed);
         if rate == 0 {
             self.record(len);
@@ -257,24 +226,16 @@ impl<T> Metered<T> {
         }
     }
 
-    /// Meter `len` bytes, delaying (or rejecting a sustained flood) as the
-    /// declared limit demands, then grant access to the raw I/O for the write.
-    pub async fn write_access(&self, len: usize) -> Result<&T> {
-        self.inner.limiter.acquire(len).await?;
-        Ok(&self.inner.io)
-    }
-
-    /// Blocking twin of [`Self::write_access`]: sleeps the calling thread
-    /// instead of awaiting. Only call from a `spawn_blocking` worker, or a
-    /// transport whose contract already documents blocking I/O on the
-    /// caller's thread.
-    pub fn write_access_blocking(&self, len: usize) -> Result<&T> {
-        self.inner.limiter.acquire_blocking(len)?;
+    /// Meter `len` bytes, sleeping the calling thread (or rejecting a
+    /// sustained flood) as the declared limit demands, then grant access to the
+    /// raw I/O for the write. Transports run on their plugin worker's thread.
+    pub fn write_access(&self, len: usize) -> Result<&T> {
+        self.inner.limiter.acquire(len)?;
         Ok(&self.inner.io)
     }
 
     /// Unmetered access for reads — reads are never rate-limited. Any write
-    /// issued through this instead of `write_access`/`write_access_blocking`
+    /// issued through this instead of `write_access`
     /// is a bug; the name is deliberately greppable.
     pub fn read_access(&self) -> &T {
         &self.inner.io
@@ -299,43 +260,16 @@ impl<T> Metered<T> {
 impl<T: Send + Sync + 'static> Metered<T> {
     /// Post-hoc gate for batch transports whose written-byte count is only
     /// known after the operations run (e.g. SMBus, where individual register
-    /// ops don't know the batch total up front): runs `f` on a blocking
+    /// ops don't know the batch total up front): runs `f` on the calling
     /// thread with a byte tally, then meters the tallied bytes. A meter
     /// rejection takes precedence over `f`'s own result.
-    #[cfg(test)]
-    pub async fn write_tallied<R, F>(&self, f: F) -> Result<R>
-    where
-        F: FnOnce(&T, &AtomicUsize) -> Result<R> + Send + 'static,
-        R: Send + 'static,
-    {
-        let inner = Arc::clone(&self.inner);
-        let bytes = Arc::new(AtomicUsize::new(0));
-        let counter = Arc::clone(&bytes);
-        let result = tokio::task::spawn_blocking(move || f(&inner.io, &counter))
-            .await
-            .map_err(|e| anyhow!("spawn_blocking panicked: {e}"))?;
-        self.inner
-            .limiter
-            .acquire(bytes.load(Ordering::Relaxed))
-            .await?;
-        result
-    }
-
-    /// Inline twin of [`Self::write_tallied`]: runs `f` on the calling thread
-    /// (no `spawn_blocking`, no `Send`/`'static` bound) and meters the tallied
-    /// bytes through the blocking gate. Use when the batch must call back into
-    /// non-`Send` state (e.g. a plugin's Lua VM) and the caller is already on a
-    /// thread allowed to block. A meter rejection takes precedence over `f`'s
-    /// own result.
-    pub fn write_tallied_local<R, F>(&self, f: F) -> Result<R>
+    pub fn write_tallied<R, F>(&self, f: F) -> Result<R>
     where
         F: FnOnce(&T, &AtomicUsize) -> Result<R>,
     {
         let bytes = AtomicUsize::new(0);
         let result = f(&self.inner.io, &bytes);
-        self.inner
-            .limiter
-            .acquire_blocking(bytes.load(Ordering::Relaxed))?;
+        self.inner.limiter.acquire(bytes.load(Ordering::Relaxed))?;
         result
     }
 }
@@ -474,58 +408,6 @@ mod tests {
         }
     }
 
-    #[tokio::test]
-    async fn unthrottled_when_no_limit_is_set() {
-        let limiter = WriteRateLimiter::new(None);
-        for _ in 0..1000 {
-            limiter.acquire(1_000_000).await.unwrap();
-        }
-        let status = limiter.status();
-        assert_eq!(status.limit, None);
-        assert_eq!(status.rejected_total, 0);
-        assert!(status.current_bytes_per_sec > 0.0, "stats still tracked");
-    }
-
-    #[tokio::test(start_paused = true)]
-    async fn acquire_delays_rather_than_rejects_under_the_safety_valve() {
-        let limiter = WriteRateLimiter::new(Some(WriteRateLimit {
-            max_bytes_per_sec: 2,
-        }));
-        limiter.acquire(1).await.unwrap();
-        let before = Instant::now();
-        limiter.acquire(1).await.unwrap();
-        assert!(Instant::now() >= before + Duration::from_millis(400));
-    }
-
-    #[tokio::test(start_paused = true)]
-    async fn sustained_flood_eventually_rejects_without_growing_forever() {
-        let limiter = std::sync::Arc::new(WriteRateLimiter::new(Some(WriteRateLimit {
-            max_bytes_per_sec: 1,
-        })));
-        let mut handles = Vec::new();
-        for _ in 0..50 {
-            let limiter = limiter.clone();
-            handles.push(tokio::spawn(async move { limiter.acquire(1).await }));
-        }
-
-        let mut ok = 0;
-        let mut err = 0;
-        for h in handles {
-            match h.await.unwrap() {
-                Ok(()) => ok += 1,
-                Err(_) => err += 1,
-            }
-        }
-
-        assert!(ok > 0, "at least one write should be admitted");
-        assert!(
-            err > 0,
-            "a sustained flood should eventually be rejected rather than queueing forever"
-        );
-        assert_eq!(ok + err, 50);
-        assert_eq!(limiter.status().rejected_total, err as u64);
-    }
-
     #[test]
     fn combine_status_sums_counters_and_keeps_the_declared_limit() {
         let hid = WriteRateStatus {
@@ -601,24 +483,22 @@ mod tests {
         assert_eq!(status.current_bytes_per_sec, 60.0);
     }
 
-    // ── acquire_blocking ────────────────────────────────────────────────
-
     #[test]
-    fn acquire_blocking_delays_between_writes_when_limited() {
+    fn acquire_delays_between_writes_when_limited() {
         let limiter = WriteRateLimiter::new(Some(WriteRateLimit {
             max_bytes_per_sec: 20,
         }));
-        limiter.acquire_blocking(1).unwrap(); // consumes the initial burst credit
+        limiter.acquire(1).unwrap(); // consumes the initial burst credit
         let before = Instant::now();
-        limiter.acquire_blocking(1).unwrap();
+        limiter.acquire(1).unwrap();
         assert!(Instant::now() >= before + Duration::from_millis(30));
     }
 
     #[test]
-    fn acquire_blocking_is_unthrottled_and_still_records_without_a_limit() {
+    fn acquire_is_unthrottled_and_still_records_without_a_limit() {
         let limiter = WriteRateLimiter::new(None);
         for _ in 0..1000 {
-            limiter.acquire_blocking(1_000_000).unwrap();
+            limiter.acquire(1_000_000).unwrap();
         }
         let status = limiter.status();
         assert_eq!(status.limit, None);
@@ -627,77 +507,52 @@ mod tests {
     }
 
     #[test]
-    fn acquire_blocking_rejects_when_the_safety_valve_is_tripped() {
+    fn acquire_rejects_when_the_safety_valve_is_tripped() {
         let limiter = WriteRateLimiter::new(Some(WriteRateLimit {
             max_bytes_per_sec: 1,
         }));
-        limiter.acquire_blocking(1).unwrap(); // consumes the initial burst credit
+        limiter.acquire(1).unwrap(); // consumes the initial burst credit
         limiter.queued_bytes.store(2, Ordering::Relaxed); // already at the rate=1 safety-valve threshold
-        let err = limiter.acquire_blocking(1).unwrap_err();
+        let err = limiter.acquire(1).unwrap_err();
         assert!(err.to_string().contains("write rate limit exceeded"));
         assert_eq!(limiter.status().rejected_total, 1);
     }
 
     // ── Metered<T> ──────────────────────────────────────────────────────
 
-    #[tokio::test(start_paused = true)]
-    async fn metered_write_access_delays_when_a_limit_is_set() {
-        let gate = Metered::new(
-            (),
-            Some(WriteRateLimit {
-                max_bytes_per_sec: 2,
-            }),
-        );
-        gate.write_access(1).await.unwrap();
-        let before = Instant::now();
-        gate.write_access(1).await.unwrap();
-        assert!(Instant::now() >= before + Duration::from_millis(400));
-    }
-
-    #[tokio::test]
-    async fn metered_write_access_is_unthrottled_but_counted_without_a_limit() {
-        let gate = Metered::new((), None);
-        for _ in 0..100 {
-            gate.write_access(1_000).await.unwrap();
-        }
-        let status = gate.status();
-        assert_eq!(status.limit, None);
-        assert!(status.current_bytes_per_sec > 0.0, "stats still tracked");
-    }
-
     #[test]
-    fn metered_write_access_blocking_delays_when_a_limit_is_set() {
+    fn metered_write_access_delays_when_a_limit_is_set() {
         let gate = Metered::new(
             (),
             Some(WriteRateLimit {
                 max_bytes_per_sec: 20,
             }),
         );
-        gate.write_access_blocking(1).unwrap();
+        gate.write_access(1).unwrap();
         let before = Instant::now();
-        gate.write_access_blocking(1).unwrap();
+        gate.write_access(1).unwrap();
         assert!(Instant::now() >= before + Duration::from_millis(30));
     }
 
-    #[tokio::test(start_paused = true)]
-    async fn metered_set_limit_then_clear_round_trips_through_status() {
+    #[test]
+    fn metered_set_limit_then_clear_round_trips_through_status() {
         let gate = Metered::new((), None);
         assert_eq!(gate.status().limit, None);
 
         gate.set_limit(Some(WriteRateLimit {
-            max_bytes_per_sec: 5,
+            max_bytes_per_sec: 50,
         }));
         assert_eq!(
             gate.status().limit,
             Some(WriteRateLimit {
-                max_bytes_per_sec: 5
+                max_bytes_per_sec: 50
             })
         );
-        gate.write_access(5).await.unwrap();
+        gate.write_access(5).unwrap();
         let before = Instant::now();
-        gate.write_access(5).await.unwrap();
+        gate.write_access(5).unwrap();
         assert!(
-            Instant::now() >= before + Duration::from_millis(400),
+            Instant::now() >= before + Duration::from_millis(50),
             "limit is enforced once set"
         );
 
@@ -705,47 +560,44 @@ mod tests {
         assert_eq!(gate.status().limit, None);
     }
 
-    #[tokio::test(start_paused = true)]
-    async fn metered_write_tallied_delays_the_next_write_by_the_tallied_bytes() {
+    #[test]
+    fn metered_write_tallied_delays_the_next_write_by_the_tallied_bytes() {
         let gate = Metered::new(
             (),
             Some(WriteRateLimit {
-                max_bytes_per_sec: 2,
+                max_bytes_per_sec: 20,
             }),
         );
         gate.write_tallied(|_io, bytes| {
             bytes.fetch_add(2, Ordering::Relaxed);
             Ok(())
         })
-        .await
         .unwrap();
 
         let before = Instant::now();
-        gate.write_access(2).await.unwrap();
+        gate.write_access(2).unwrap();
         assert!(
-            Instant::now() >= before + Duration::from_millis(400),
+            Instant::now() >= before + Duration::from_millis(50),
             "the tallied bytes from the batch feed the same limiter as write_access"
         );
     }
 
-    #[tokio::test]
-    async fn metered_write_tallied_meters_the_bytes_the_batch_counted() {
+    #[test]
+    fn metered_write_tallied_meters_the_bytes_the_batch_counted() {
         let gate = Metered::new((), None);
         gate.write_tallied(|_io, bytes| {
             bytes.fetch_add(7, Ordering::Relaxed);
             Ok(())
         })
-        .await
         .unwrap();
         assert_eq!(gate.status().current_bytes_per_sec, 7.0);
     }
 
-    #[tokio::test]
-    async fn metered_write_tallied_propagates_the_closures_error() {
+    #[test]
+    fn metered_write_tallied_propagates_the_closures_error() {
         let gate = Metered::new((), None);
         let err = gate
             .write_tallied(|_io: &(), _bytes| -> Result<()> { bail!("closure failed") })
-            .await
             .unwrap_err();
         assert!(err.to_string().contains("closure failed"));
     }

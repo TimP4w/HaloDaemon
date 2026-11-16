@@ -9,7 +9,6 @@
 //! collections against the first declared device without opening host hardware.
 
 use anyhow::{Context, Result};
-use async_trait::async_trait;
 use mlua::{Function, Lua, LuaSerdeExt, Table, Value};
 use parking_lot::Mutex;
 use std::path::Path;
@@ -158,18 +157,17 @@ impl RecordingStream {
     }
 }
 
-#[async_trait]
 impl Transport for RecordingStream {
-    async fn write(&self, data: &[u8]) -> Result<()> {
+    fn write(&self, data: &[u8]) -> Result<()> {
         if let Some(error) = &self.write_error {
             anyhow::bail!(error.clone());
         }
-        self.rate.write_access(data.len()).await?;
+        self.rate.write_access(data.len())?;
         self.record("primary", data);
         Ok(())
     }
 
-    async fn read(&self, _size: usize) -> Result<Vec<u8>> {
+    fn read(&self, _size: usize) -> Result<Vec<u8>> {
         self.reads
             .lock()
             .pop_front()
@@ -194,7 +192,7 @@ impl Transport for RecordingStream {
         self.rate.set_limit(limit);
     }
 
-    async fn drain_events(&self, limit: usize) -> Result<Vec<TransportEvent>> {
+    fn drain_events(&self, limit: usize) -> Result<Vec<TransportEvent>> {
         let mut deferred = self.deferred.lock();
         let count = deferred.len().min(limit);
         Ok(deferred
@@ -207,42 +205,41 @@ impl Transport for RecordingStream {
     }
 }
 
-#[async_trait]
 impl HidTransport for RecordingStream {
-    async fn feature_exchange(&self, data: &[u8], size: usize) -> Result<Vec<u8>> {
-        self.write_then_read(data, size).await
+    fn feature_exchange(&self, data: &[u8], size: usize) -> Result<Vec<u8>> {
+        self.write_then_read(data, size)
     }
 
-    async fn send_feature_report(&self, data: &[u8]) -> Result<()> {
+    fn send_feature_report(&self, data: &[u8]) -> Result<()> {
         if let Some(error) = &self.write_error {
             anyhow::bail!(error.clone());
         }
-        self.rate.write_access(data.len()).await?;
+        self.rate.write_access(data.len())?;
         self.record("feature", data);
         Ok(())
     }
 
-    async fn get_feature_report(&self, _report_id: u8, size: usize) -> Result<Vec<u8>> {
-        self.read(size).await
+    fn get_feature_report(&self, _report_id: u8, size: usize) -> Result<Vec<u8>> {
+        self.read(size)
     }
 
-    async fn get_input_report(&self, _report_id: u8, size: usize) -> Result<Vec<u8>> {
-        self.read(size).await
+    fn get_input_report(&self, _report_id: u8, size: usize) -> Result<Vec<u8>> {
+        self.read(size)
     }
 
-    async fn write_companion(&self, data: &[u8]) -> Result<()> {
+    fn write_companion(&self, data: &[u8]) -> Result<()> {
         if !self.companion {
             anyhow::bail!("companion collection not available on this recording stream");
         }
         if let Some(error) = &self.write_error {
             anyhow::bail!(error.clone());
         }
-        self.rate.write_access(data.len()).await?;
+        self.rate.write_access(data.len())?;
         self.record("companion", data);
         Ok(())
     }
 
-    async fn defer_event(&self, data: &[u8]) -> Result<()> {
+    fn defer_event(&self, data: &[u8]) -> Result<()> {
         self.queue_event(data.to_vec());
         Ok(())
     }
@@ -251,8 +248,8 @@ impl HidTransport for RecordingStream {
         self.companion
     }
 
-    async fn read_companion(&self, size: usize) -> Result<Vec<u8>> {
-        self.read(size).await
+    fn read_companion(&self, size: usize) -> Result<Vec<u8>> {
+        self.read(size)
     }
 }
 
@@ -344,7 +341,7 @@ impl UsbCollection for RecordingUsb {
         {
             anyhow::bail!("USB recording write exceeds endpoint policy");
         }
-        self.rate.write_access_blocking(data.len())?;
+        self.rate.write_access(data.len())?;
         self.written.lock().push(UsbWriteRecord {
             device: device.id.clone(),
             endpoint: Some(endpoint),
@@ -402,7 +399,7 @@ impl UsbCollection for RecordingUsb {
         if request_type & 0x80 != 0 {
             return Ok(UsbControlResult::Read(self.scripted_read(read_length)?));
         }
-        self.rate.write_access_blocking(bytes.len())?;
+        self.rate.write_access(bytes.len())?;
         self.written.lock().push(UsbWriteRecord {
             device: device.id.clone(),
             endpoint: None,
@@ -2227,16 +2224,14 @@ mod tests {
         ));
     }
 
-    #[tokio::test]
-    async fn recording_stream_injects_write_failures_without_recording_data() {
+    #[test]
+    fn recording_stream_injects_write_failures_without_recording_data() {
         let stream =
             RecordingStream::with_options(Vec::new(), true, Some("simulated write failure".into()));
 
-        assert!(Transport::write(&stream, &[1]).await.is_err());
-        assert!(HidTransport::send_feature_report(&stream, &[2])
-            .await
-            .is_err());
-        assert!(HidTransport::write_companion(&stream, &[3]).await.is_err());
+        assert!(Transport::write(&stream, &[1]).is_err());
+        assert!(HidTransport::send_feature_report(&stream, &[2]).is_err());
+        assert!(HidTransport::write_companion(&stream, &[3]).is_err());
         assert!(stream.written.lock().is_empty());
     }
 

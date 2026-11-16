@@ -149,7 +149,7 @@ impl UsbEndpointTransport {
             .endpoint(endpoint, data.len(), timeout_ms, Direction::Out)?
             .clone();
         let _guard = self.transfer_lock.lock();
-        let claim = self.io.write_access_blocking(data.len())?;
+        let claim = self.io.write_access(data.len())?;
         let timeout = Duration::from_millis(timeout_ms);
         let mut sent = 0;
         while sent < data.len() {
@@ -240,7 +240,7 @@ impl UsbEndpointTransport {
             data.truncate(n.min(data.len()));
             Ok(UsbControlResult::Read(data))
         } else {
-            let claim = self.io.write_access_blocking(bytes.len())?;
+            let claim = self.io.write_access(bytes.len())?;
             let n = claim
                 .handle
                 .write_control(request_type, request, value, index, bytes, timeout)

@@ -232,7 +232,7 @@ impl HwmonTransport {
         {
             return self.reject("hwmon value must be a bounded unsigned integer".into());
         }
-        let chips = self.chips.write_access_blocking(value.len())?;
+        let chips = self.chips.write_access(value.len())?;
         let chip = chips
             .get(key)
             .ok_or_else(|| anyhow::anyhow!("unknown hwmon device key"))?;

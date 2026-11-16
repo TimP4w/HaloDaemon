@@ -1,12 +1,9 @@
 // SPDX-License-Identifier: GPL-3.0-or-later
 use anyhow::{Context, Result};
-use async_trait::async_trait;
-use parking_lot::Mutex as SyncMutex;
+use parking_lot::Mutex;
 use std::collections::VecDeque;
 use std::sync::{Arc, Weak};
 use std::time::{Duration, Instant};
-use tokio::sync::Mutex;
-use tokio::time::timeout;
 
 use crate::infrastructure::drivers::transports::{
     HidTransport as HidTransportTrait, Transport, TransportEvent,
@@ -108,20 +105,16 @@ fn write_one(dev: &hidapi::HidDevice, pkt: &[u8], use_feature_report: bool) -> R
 }
 
 /// Write a batch of already-framed packets back-to-back under a single lock.
-async fn write_batch(
-    dev: Arc<Mutex<hidapi::HidDevice>>,
-    packets: Vec<Vec<u8>>,
+fn write_batch(
+    dev: &Mutex<hidapi::HidDevice>,
+    packets: &[Vec<u8>],
     use_feature_report: bool,
 ) -> Result<()> {
-    tokio::task::spawn_blocking(move || {
-        let guard = dev.blocking_lock();
-        for pkt in &packets {
-            write_one(&guard, pkt, use_feature_report)?;
-        }
-        Ok(())
-    })
-    .await
-    .context("spawn_blocking panicked")?
+    let guard = dev.lock();
+    for pkt in packets {
+        write_one(&guard, pkt, use_feature_report)?;
+    }
+    Ok(())
 }
 
 const EVENT_QUEUE_CAPACITY: usize = 256;
@@ -170,7 +163,7 @@ impl InputEndpoint {
 /// handles directly and never consume this queue. Event listeners are opened
 /// lazily only after the plugin advertises an `event()` callback.
 struct HidEvents {
-    reports: SyncMutex<VecDeque<TransportEvent>>,
+    reports: Mutex<VecDeque<TransportEvent>>,
     wake: tokio::sync::watch::Sender<u64>,
 }
 
@@ -178,7 +171,7 @@ impl HidEvents {
     fn new() -> Self {
         let (wake, _) = tokio::sync::watch::channel(0);
         Self {
-            reports: SyncMutex::new(VecDeque::with_capacity(EVENT_QUEUE_CAPACITY)),
+            reports: Mutex::new(VecDeque::with_capacity(EVENT_QUEUE_CAPACITY)),
             wake,
         }
     }
@@ -251,52 +244,40 @@ fn spawn_event_reader(dev: hidapi::HidDevice, endpoint: InputEndpoint, events: W
         });
 }
 
-async fn read_io(
-    dev: Arc<Mutex<hidapi::HidDevice>>,
-    size: usize,
-    timeout_ms: i32,
-) -> Result<Vec<u8>> {
-    tokio::task::spawn_blocking(move || {
-        let guard = dev.blocking_lock();
-        let mut buf = vec![0u8; size];
-        let n = guard
-            .read_timeout(&mut buf, timeout_ms)
-            .map_err(|e| anyhow::anyhow!("HID read error: {e}"))?;
-        buf.truncate(n);
-        Ok(buf)
-    })
-    .await
-    .context("spawn_blocking panicked")?
+fn read_io(dev: &Mutex<hidapi::HidDevice>, size: usize, timeout_ms: i32) -> Result<Vec<u8>> {
+    let guard = dev.lock();
+    let mut buf = vec![0u8; size];
+    let n = guard
+        .read_timeout(&mut buf, timeout_ms)
+        .map_err(|e| anyhow::anyhow!("HID read error: {e}"))?;
+    buf.truncate(n);
+    Ok(buf)
 }
 
-async fn read_any_io(
-    primary: Arc<Mutex<hidapi::HidDevice>>,
-    companion: Option<Arc<Mutex<hidapi::HidDevice>>>,
+fn read_any_io(
+    primary: &Mutex<hidapi::HidDevice>,
+    companion: Option<&Mutex<hidapi::HidDevice>>,
     size: usize,
     timeout_ms: i32,
 ) -> Result<Vec<u8>> {
-    tokio::task::spawn_blocking(move || {
-        let deadline = Instant::now() + Duration::from_millis(timeout_ms.max(0) as u64);
-        loop {
-            for dev in std::iter::once(&primary).chain(companion.iter()) {
-                let guard = dev.blocking_lock();
-                let mut buf = vec![0u8; size];
-                let n = guard
-                    .read_timeout(&mut buf, 0)
-                    .map_err(|e| anyhow::anyhow!("HID read error: {e}"))?;
-                if n != 0 {
-                    buf.truncate(n);
-                    return Ok(buf);
-                }
+    let deadline = Instant::now() + Duration::from_millis(timeout_ms.max(0) as u64);
+    loop {
+        for dev in std::iter::once(primary).chain(companion) {
+            let guard = dev.lock();
+            let mut buf = vec![0u8; size];
+            let n = guard
+                .read_timeout(&mut buf, 0)
+                .map_err(|e| anyhow::anyhow!("HID read error: {e}"))?;
+            if n != 0 {
+                buf.truncate(n);
+                return Ok(buf);
             }
-            if timeout_ms <= 0 || Instant::now() >= deadline {
-                return Ok(Vec::new());
-            }
-            std::thread::sleep(Duration::from_millis(1));
         }
-    })
-    .await
-    .context("spawn_blocking panicked")?
+        if timeout_ms <= 0 || Instant::now() >= deadline {
+            return Ok(Vec::new());
+        }
+        std::thread::sleep(Duration::from_millis(1));
+    }
 }
 
 /// The raw HID handles gated behind [`Metered`]: a `short` handle and, for
@@ -307,7 +288,7 @@ struct HidState {
     companion: Option<HidIo>,
 }
 
-/// Async HID transport with optional platform-aware padding.
+/// HID transport with optional platform-aware padding.
 ///
 /// The primary and optional companion collections are addressed explicitly;
 /// protocol code decides which one to use.
@@ -317,7 +298,7 @@ pub struct HidTransport {
     events: Arc<HidEvents>,
     primary_path: Arc<str>,
     companion_path: Option<Arc<str>>,
-    event_listener_started: Arc<SyncMutex<bool>>,
+    event_listener_started: Arc<Mutex<bool>>,
     report_size: Option<usize>,
     timeout_ms: i32,
     /// When true, writes use `send_feature_report()` (HIDIOCSFEATURE) instead of
@@ -337,27 +318,18 @@ impl HidTransport {
     /// Read a feature or input report for `report_id`. Shares the write handle
     /// under the write lock (a GET_REPORT ioctl must not race a concurrent
     /// write on the same fd) and the same hang timeout as `feature_exchange`.
-    async fn get_report(&self, report_id: u8, size: usize, kind: ReportKind) -> Result<Vec<u8>> {
-        let state = self.io.write_access(0).await?;
-        let dev = Arc::clone(&state.primary.write_dev);
-        timeout(Duration::from_millis(500), async {
-            tokio::task::spawn_blocking(move || {
-                let mut buf = vec![0u8; size + 1];
-                buf[0] = report_id;
-                let guard = dev.blocking_lock();
-                let n = match kind {
-                    ReportKind::Feature => guard.get_feature_report(&mut buf),
-                    ReportKind::Input => guard.get_input_report(&mut buf),
-                }
-                .map_err(|e| anyhow::anyhow!("HID report read error: {}", e))?;
-                buf.truncate(n);
-                Ok(buf)
-            })
-            .await
-            .context("spawn_blocking panicked")?
-        })
-        .await
-        .map_err(|_| anyhow::anyhow!("get report timed out"))?
+    fn get_report(&self, report_id: u8, size: usize, kind: ReportKind) -> Result<Vec<u8>> {
+        let state = self.io.write_access(0)?;
+        let mut buf = vec![0u8; size + 1];
+        buf[0] = report_id;
+        let guard = state.primary.write_dev.lock();
+        let n = match kind {
+            ReportKind::Feature => guard.get_feature_report(&mut buf),
+            ReportKind::Input => guard.get_input_report(&mut buf),
+        }
+        .map_err(|e| anyhow::anyhow!("HID report read error: {}", e))?;
+        buf.truncate(n);
+        Ok(buf)
     }
 
     /// Open a HID device by path.
@@ -388,7 +360,7 @@ impl HidTransport {
             events: Arc::new(HidEvents::new()),
             primary_path: Arc::from(path),
             companion_path: None,
-            event_listener_started: Arc::new(SyncMutex::new(false)),
+            event_listener_started: Arc::new(Mutex::new(false)),
             report_size,
             timeout_ms,
             use_feature_report,
@@ -422,7 +394,7 @@ impl HidTransport {
             primary_path: Arc::from(primary_path),
             companion_path: (!companion_path.is_empty() && companion_path != primary_path)
                 .then(|| Arc::from(companion_path)),
-            event_listener_started: Arc::new(SyncMutex::new(false)),
+            event_listener_started: Arc::new(Mutex::new(false)),
             report_size,
             timeout_ms,
             use_feature_report,
@@ -433,39 +405,29 @@ impl HidTransport {
         build_frame(data, self.report_size)
     }
 
-    async fn begin_write(&self, len: usize) -> Result<&HidState> {
-        let state = self.io.write_access(len).await?;
-        let handles: Vec<_> = std::iter::once(&state.primary)
-            .chain(state.companion.iter())
-            .map(|io| Arc::clone(&io.read_dev))
-            .collect();
+    fn begin_write(&self, len: usize) -> Result<&HidState> {
+        let state = self.io.write_access(len)?;
         let listener_started = *self.event_listener_started.lock();
-        let events = (!listener_started).then(|| Arc::clone(&self.events));
-        let drained = tokio::task::spawn_blocking(move || -> Result<usize> {
-            let mut buf = vec![0u8; INPUT_REPORT_MAX];
-            let mut total = 0;
-            for dev in handles {
-                let Ok(guard) = dev.try_lock() else {
-                    continue;
-                };
-                total += drain_stale_reports(
-                    || {
-                        let n = guard
-                            .read_timeout(&mut buf, 0)
-                            .map_err(|e| anyhow::anyhow!("HID read error: {e}"))?;
-                        Ok(buf[..n].to_vec())
-                    },
-                    |report| {
-                        if let Some(events) = &events {
-                            events.defer(report);
-                        }
-                    },
-                )?;
-            }
-            Ok(total)
-        })
-        .await
-        .context("spawn_blocking panicked")??;
+        let mut buf = vec![0u8; INPUT_REPORT_MAX];
+        let mut drained = 0;
+        for io in std::iter::once(&state.primary).chain(state.companion.iter()) {
+            let Some(guard) = io.read_dev.try_lock() else {
+                continue;
+            };
+            drained += drain_stale_reports(
+                || {
+                    let n = guard
+                        .read_timeout(&mut buf, 0)
+                        .map_err(|e| anyhow::anyhow!("HID read error: {e}"))?;
+                    Ok(buf[..n].to_vec())
+                },
+                |report| {
+                    if !listener_started {
+                        self.events.defer(report);
+                    }
+                },
+            )?;
+        }
         if drained > 0 {
             log::trace!(
                 "[HidTransport] dropped {drained} stale input reports before a write on {}",
@@ -508,54 +470,30 @@ impl HidTransport {
     }
 }
 
-#[async_trait]
 impl Transport for HidTransport {
-    async fn write(&self, data: &[u8]) -> Result<()> {
+    fn write(&self, data: &[u8]) -> Result<()> {
         let framed = self.frame(data);
-        let state = self.begin_write(framed.len()).await?;
-        let dev = Arc::clone(&state.primary.write_dev);
-        let use_feature_report = self.use_feature_report;
-        tokio::task::spawn_blocking(move || {
-            write_one(&dev.blocking_lock(), &framed, use_feature_report)
-        })
-        .await
-        .context("spawn_blocking panicked")?
+        let state = self.begin_write(framed.len())?;
+        write_one(
+            &state.primary.write_dev.lock(),
+            &framed,
+            self.use_feature_report,
+        )
     }
 
-    async fn read(&self, size: usize) -> Result<Vec<u8>> {
+    fn read(&self, size: usize) -> Result<Vec<u8>> {
         read_io(
-            Arc::clone(&self.io.read_access().primary.read_dev),
+            &self.io.read_access().primary.read_dev,
             size,
             self.timeout_ms,
         )
-        .await
     }
 
-    async fn write_then_read(&self, data: &[u8], size: usize) -> Result<Vec<u8>> {
-        let framed = self.frame(data);
-        let state = self.begin_write(framed.len()).await?;
-        let use_feature_report = self.use_feature_report;
-        let write_dev = Arc::clone(&state.primary.write_dev);
-        tokio::task::spawn_blocking(move || {
-            let wguard = write_dev.blocking_lock();
-            write_one(&wguard, &framed, use_feature_report)
-        })
-        .await
-        .context("spawn_blocking panicked")??;
-        self.read(size).await
-    }
-
-    async fn write_many(&self, packets: &[Vec<u8>]) -> Result<()> {
+    fn write_many(&self, packets: &[Vec<u8>]) -> Result<()> {
         let total_len: usize = packets.iter().map(Vec::len).sum();
-        let state = self.begin_write(total_len).await?;
-
-        let framed = packets.iter().map(|packet| self.frame(packet)).collect();
-        write_batch(
-            Arc::clone(&state.primary.write_dev),
-            framed,
-            self.use_feature_report,
-        )
-        .await
+        let state = self.begin_write(total_len)?;
+        let framed: Vec<_> = packets.iter().map(|packet| self.frame(packet)).collect();
+        write_batch(&state.primary.write_dev, &framed, self.use_feature_report)
     }
 
     fn as_hid(&self) -> Option<&dyn HidTransportTrait> {
@@ -574,7 +512,7 @@ impl Transport for HidTransport {
         Some(self.events.wake.subscribe())
     }
 
-    async fn drain_events(&self, limit: usize) -> Result<Vec<TransportEvent>> {
+    fn drain_events(&self, limit: usize) -> Result<Vec<TransportEvent>> {
         Ok(self.events.drain(limit))
     }
 
@@ -583,63 +521,36 @@ impl Transport for HidTransport {
     }
 }
 
-#[async_trait]
+impl HidTransport {
+    fn companion(state: &HidState) -> Result<&HidIo> {
+        state
+            .companion
+            .as_ref()
+            .context("companion HID collection is not available")
+    }
+}
+
 impl HidTransportTrait for HidTransport {
-    async fn write_companion(&self, data: &[u8]) -> Result<()> {
+    fn write_companion(&self, data: &[u8]) -> Result<()> {
         let framed = self.frame(data);
-        let state = self.begin_write(framed.len()).await?;
-        let companion = state
-            .companion
-            .as_ref()
-            .context("companion HID collection is not available")?;
-        let dev = Arc::clone(&companion.write_dev);
-        let use_feature_report = self.use_feature_report;
-        tokio::task::spawn_blocking(move || {
-            write_one(&dev.blocking_lock(), &framed, use_feature_report)
-        })
-        .await
-        .context("spawn_blocking panicked")?
+        let companion = Self::companion(self.begin_write(framed.len())?)?;
+        write_one(
+            &companion.write_dev.lock(),
+            &framed,
+            self.use_feature_report,
+        )
     }
 
-    async fn read_companion(&self, size: usize) -> Result<Vec<u8>> {
-        let dev = self
-            .io
-            .read_access()
-            .companion
-            .as_ref()
-            .map(|io| Arc::clone(&io.read_dev))
-            .context("companion HID collection is not available")?;
-        read_io(dev, size, self.timeout_ms).await
+    fn read_companion(&self, size: usize) -> Result<Vec<u8>> {
+        let companion = Self::companion(self.io.read_access())?;
+        read_io(&companion.read_dev, size, self.timeout_ms)
     }
 
-    async fn write_then_read_companion(&self, data: &[u8], size: usize) -> Result<Vec<u8>> {
-        let framed = self.frame(data);
-        let state = self.begin_write(framed.len()).await?;
-        let companion = state
-            .companion
-            .as_ref()
-            .context("companion HID collection is not available")?;
-        let write_dev = Arc::clone(&companion.write_dev);
-        let use_feature_report = self.use_feature_report;
-        tokio::task::spawn_blocking(move || {
-            let wguard = write_dev.blocking_lock();
-            write_one(&wguard, &framed, use_feature_report)
-        })
-        .await
-        .context("spawn_blocking panicked")??;
-        self.read_companion(size).await
-    }
-
-    async fn write_many_companion(&self, packets: &[Vec<u8>]) -> Result<()> {
+    fn write_many_companion(&self, packets: &[Vec<u8>]) -> Result<()> {
         let total_len: usize = packets.iter().map(Vec::len).sum();
-        let state = self.begin_write(total_len).await?;
-        let companion = state
-            .companion
-            .as_ref()
-            .context("companion HID collection is not available")?;
-        let write_dev = Arc::clone(&companion.write_dev);
-        let framed = packets.iter().map(|packet| self.frame(packet)).collect();
-        write_batch(write_dev, framed, self.use_feature_report).await
+        let companion = Self::companion(self.begin_write(total_len)?)?;
+        let framed: Vec<_> = packets.iter().map(|packet| self.frame(packet)).collect();
+        write_batch(&companion.write_dev, &framed, self.use_feature_report)
     }
 
     /// Send a feature report and read back the response via `get_feature_report`.
@@ -647,79 +558,56 @@ impl HidTransportTrait for HidTransport {
     /// For drivers whose vendor interface answers `HIDIOCSFEATURE` via
     /// `HIDIOCGFEATURE` rather than the interrupt-IN endpoint. Both ioctls share
     /// the fd under the write lock, with a 1 ms gap for the device to process.
-    ///
-    /// The blocking ioctl is wrapped in a 500 ms timeout so a hung device
-    /// doesn't permanently tie up a Tokio blocking thread (UH31). The rate
-    /// gate runs before the timeout so a configured delay never reads as a
-    /// hung device.
-    async fn feature_exchange(&self, data: &[u8], response_size: usize) -> Result<Vec<u8>> {
+    fn feature_exchange(&self, data: &[u8], response_size: usize) -> Result<Vec<u8>> {
         let framed = self.frame(data);
-        let state = self.begin_write(framed.len()).await?;
-        let dev = Arc::clone(&state.primary.write_dev);
-        timeout(Duration::from_millis(500), async {
-            tokio::task::spawn_blocking(move || {
-                let guard = dev.blocking_lock();
-                guard
-                    .send_feature_report(&framed)
-                    .map_err(|e| anyhow::anyhow!("feature write error: {}", e))?;
-                std::thread::sleep(Duration::from_millis(1));
-                let mut buf = vec![0u8; response_size + 1];
-                buf[0] = 0x00;
-                let n = guard
-                    .get_feature_report(&mut buf)
-                    .map_err(|e| anyhow::anyhow!("feature read error: {}", e))?;
-                buf.truncate(n);
-                Ok(buf)
-            })
-            .await
-            .context("spawn_blocking panicked")?
-        })
-        .await
-        .map_err(|_| anyhow::anyhow!("feature exchange timed out"))?
+        let state = self.begin_write(framed.len())?;
+        let guard = state.primary.write_dev.lock();
+        guard
+            .send_feature_report(&framed)
+            .map_err(|e| anyhow::anyhow!("feature write error: {}", e))?;
+        std::thread::sleep(Duration::from_millis(1));
+        let mut buf = vec![0u8; response_size + 1];
+        let n = guard
+            .get_feature_report(&mut buf)
+            .map_err(|e| anyhow::anyhow!("feature read error: {}", e))?;
+        buf.truncate(n);
+        Ok(buf)
     }
 
-    async fn send_feature_report(&self, data: &[u8]) -> Result<()> {
+    fn send_feature_report(&self, data: &[u8]) -> Result<()> {
         let framed = self.frame(data);
-        let state = self.begin_write(framed.len()).await?;
-        let dev = Arc::clone(&state.primary.write_dev);
-        timeout(Duration::from_millis(500), async {
-            tokio::task::spawn_blocking(move || {
-                dev.blocking_lock()
-                    .send_feature_report(&framed)
-                    .map(|_| ())
-                    .map_err(|e| anyhow::anyhow!("feature write error: {}", e))
-            })
-            .await
-            .context("spawn_blocking panicked")?
-        })
-        .await
-        .map_err(|_| anyhow::anyhow!("send_feature_report timed out"))?
+        let state = self.begin_write(framed.len())?;
+        state
+            .primary
+            .write_dev
+            .lock()
+            .send_feature_report(&framed)
+            .map_err(|e| anyhow::anyhow!("feature write error: {}", e))
     }
 
-    async fn get_feature_report(&self, report_id: u8, size: usize) -> Result<Vec<u8>> {
-        self.get_report(report_id, size, ReportKind::Feature).await
+    fn get_feature_report(&self, report_id: u8, size: usize) -> Result<Vec<u8>> {
+        self.get_report(report_id, size, ReportKind::Feature)
     }
 
-    async fn get_input_report(&self, report_id: u8, size: usize) -> Result<Vec<u8>> {
-        self.get_report(report_id, size, ReportKind::Input).await
+    fn get_input_report(&self, report_id: u8, size: usize) -> Result<Vec<u8>> {
+        self.get_report(report_id, size, ReportKind::Input)
     }
 
-    async fn read_nonblocking(&self, size: usize) -> Result<Vec<u8>> {
-        read_io(Arc::clone(&self.io.read_access().primary.read_dev), size, 0).await
+    fn read_nonblocking(&self, size: usize) -> Result<Vec<u8>> {
+        read_io(&self.io.read_access().primary.read_dev, size, 0)
     }
 
-    async fn read_any(&self, size: usize) -> Result<Vec<u8>> {
+    fn read_any(&self, size: usize) -> Result<Vec<u8>> {
         let state = self.io.read_access();
         read_any_io(
-            Arc::clone(&state.primary.read_dev),
-            state.companion.as_ref().map(|io| Arc::clone(&io.read_dev)),
+            &state.primary.read_dev,
+            state.companion.as_ref().map(|io| &*io.read_dev),
             size,
             self.timeout_ms,
         )
-        .await
     }
 
-    async fn defer_event(&self, data: &[u8]) -> Result<()> {
+    fn defer_event(&self, data: &[u8]) -> Result<()> {
         // Before the independent listener starts (notably during initialize),
         // preserve an unsolicited report encountered by a request read. Once
         // active, the listener receives its own copy; deferring the request

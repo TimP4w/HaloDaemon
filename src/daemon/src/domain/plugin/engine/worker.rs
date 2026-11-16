@@ -465,7 +465,6 @@ fn default_true() -> bool {
 struct WorkerCtx {
     lua: Lua,
     transport: PluginIo,
-    handle: Handle,
     /// The `dev` argument every callback receives: exposes the transport and the
     /// matched-spec identity (`dev.match`), and caches `read_status` as `dev.status`.
     dev: Table,
@@ -1048,9 +1047,8 @@ impl PluginHandle {
                 PluginIo::Stream { transport, .. } => transport,
                 _ => return Ok(Vec::new()),
             };
-            let events = ctx
-                .handle
-                .block_on(transport.drain_events(EVENT_DISPATCH_BATCH))
+            let events = transport
+                .drain_events(EVENT_DISPATCH_BATCH)
                 .map_err(|e| anyhow!("draining transport events: {e:#}"))?;
             if !events.is_empty() {
                 log::trace!(
@@ -1531,7 +1529,7 @@ fn build_ctx(
     // The `dev` argument every callback receives: exposes the transport and the
     // matched-spec identity (`dev.match`).
     let dev = lua.create_table().map_err(|e| lua_err("dev table", e))?;
-    let api = TransportApi::new(transport.clone(), handle.clone());
+    let api = TransportApi::new(transport.clone());
     let api_ud = lua
         .create_userdata(api)
         .map_err(|e| lua_err("transport userdata", e))?;
@@ -1547,7 +1545,7 @@ fn build_ctx(
             &lua,
             dev_match.vid,
             dev_match.pid,
-            handle.clone(),
+            handle,
             audio_registry.clone(),
         )
         .map_err(|e| lua_err("dev.audio", e))?;
@@ -1557,7 +1555,6 @@ fn build_ctx(
     Ok(WorkerCtx {
         lua,
         transport,
-        handle,
         dev,
         child_devs: RefCell::new(HashMap::new()),
         stub_children: RefCell::new(std::collections::HashSet::new()),
@@ -1586,7 +1583,6 @@ pub fn run_pre_scan(
     bus: Arc<SmBusDevice>,
     scope_addrs: Vec<u8>,
     granted: &[Permission],
-    handle: Handle,
 ) -> Result<()> {
     let source = source.to_owned();
     let module_sources = module_sources.clone();
@@ -1601,7 +1597,6 @@ pub fn run_pre_scan(
                 bus,
                 scope_addrs,
                 &granted,
-                handle,
             ));
         })
         .map_err(|e| anyhow!("spawning pre_scan thread failed: {e}"))?;
@@ -1620,7 +1615,6 @@ fn run_pre_scan_inner(
     bus: Arc<SmBusDevice>,
     scope_addrs: Vec<u8>,
     granted: &[Permission],
-    handle: Handle,
 ) -> Result<()> {
     if !granted.contains(&Permission::Smbus) {
         bail!("pre_scan requires the `smbus` permission");
@@ -1648,7 +1642,7 @@ fn run_pre_scan_inner(
     let io = PluginIo::Register(RegisterBus::new(bus, AddrScope::new(scope_addrs)));
     let dev = lua.create_table().map_err(|e| lua_err("dev table", e))?;
     let api_ud = lua
-        .create_userdata(TransportApi::new(io, handle))
+        .create_userdata(TransportApi::new(io))
         .map_err(|e| lua_err("transport userdata", e))?;
     dev.set("transport", api_ud)
         .map_err(|e| lua_err("dev.transport", e))?;
@@ -1790,12 +1784,11 @@ mod tests {
         events: parking_lot::Mutex<Vec<TransportEvent>>,
     }
 
-    #[async_trait::async_trait]
     impl Transport for TestEventTransport {
-        async fn write(&self, _data: &[u8]) -> Result<()> {
+        fn write(&self, _data: &[u8]) -> Result<()> {
             Ok(())
         }
-        async fn read(&self, _size: usize) -> Result<Vec<u8>> {
+        fn read(&self, _size: usize) -> Result<Vec<u8>> {
             Ok(Vec::new())
         }
         fn as_hid(&self) -> Option<&dyn HidTransport> {
@@ -1805,25 +1798,24 @@ mod tests {
             Default::default()
         }
         fn set_write_rate_limit(&self, _limit: Option<halod_shared::types::WriteRateLimit>) {}
-        async fn drain_events(&self, limit: usize) -> Result<Vec<TransportEvent>> {
+        fn drain_events(&self, limit: usize) -> Result<Vec<TransportEvent>> {
             let mut events = self.events.lock();
             let count = events.len().min(limit);
             Ok(events.drain(..count).collect())
         }
     }
 
-    #[async_trait::async_trait]
     impl HidTransport for TestEventTransport {
-        async fn feature_exchange(&self, _data: &[u8], _size: usize) -> Result<Vec<u8>> {
+        fn feature_exchange(&self, _data: &[u8], _size: usize) -> Result<Vec<u8>> {
             Ok(Vec::new())
         }
-        async fn defer_event(&self, _data: &[u8]) -> Result<()> {
+        fn defer_event(&self, _data: &[u8]) -> Result<()> {
             Ok(())
         }
-        async fn write_companion(&self, _data: &[u8]) -> Result<()> {
+        fn write_companion(&self, _data: &[u8]) -> Result<()> {
             Ok(())
         }
-        async fn read_companion(&self, _size: usize) -> Result<Vec<u8>> {
+        fn read_companion(&self, _size: usize) -> Result<Vec<u8>> {
             Ok(Vec::new())
         }
     }

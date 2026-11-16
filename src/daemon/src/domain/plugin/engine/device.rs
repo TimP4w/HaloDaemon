@@ -3561,15 +3561,15 @@ mod tests {
             restarted.get_key_remap_status().await.mappings[0].base,
             ButtonAction::Native
         ));
-        assert_eq!(*mock.written.lock().await, vec![vec![1], vec![2], vec![0]]);
+        assert_eq!(*mock.written.lock(), vec![vec![1], vec![2], vec![0]]);
         restarted.reset_button_mapping(5).await.unwrap();
         assert!(matches!(
             restarted.get_key_remap_status().await.mappings[0].base,
             ButtonAction::DpiCycle { .. }
         ));
-        assert_eq!(mock.written.lock().await.last(), Some(&vec![1]));
+        assert_eq!(mock.written.lock().last(), Some(&vec![1]));
         restarted.reset_all_button_mappings().await.unwrap();
-        assert_eq!(&mock.written.lock().await[4..], &[vec![2], vec![1]]);
+        assert_eq!(&mock.written.lock()[4..], &[vec![2], vec![1]]);
         restarted.close().await;
     }
 
@@ -4140,7 +4140,7 @@ mod tests {
         assert!(!dev.is_live());
         assert!(dev.initialize().await.unwrap());
         assert!(dev.is_live());
-        assert_eq!(*mock.written.lock().await, vec![vec![0xEE, 5]]);
+        assert_eq!(*mock.written.lock(), vec![vec![0xEE, 5]]);
         dev.close().await;
     }
 
@@ -4169,7 +4169,7 @@ mod tests {
         let dev = hid_device("rearm-0", &manifest, mock.clone());
         assert!(dev.initialize().await.unwrap());
         assert_eq!(
-            *mock.written.lock().await,
+            *mock.written.lock(),
             vec![vec![0xEE, 5]],
             "the seeded active default must be re-armed on the hardware at connect"
         );
@@ -4194,10 +4194,7 @@ mod tests {
         let dev = hid_device("rgb_write-0", &manifest, mock.clone());
         assert!(dev.initialize().await.unwrap());
         dev.write_frame("ring", &[1, 2, 3, 4, 5, 6]).await.unwrap();
-        assert_eq!(
-            *mock.written.lock().await,
-            vec![vec![0xAB, 1, 2, 3, 4, 5, 6]]
-        );
+        assert_eq!(*mock.written.lock(), vec![vec![0xAB, 1, 2, 3, 4, 5, 6]]);
         dev.close().await;
     }
 

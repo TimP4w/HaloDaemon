@@ -38,7 +38,7 @@ fn open(
             serial.port_key
         );
     }
-    let transport = SerialTransport::open_blocking(&port, &serial)
+    let transport = SerialTransport::open_port(&port, &serial)
         .with_context(|| format!("plugin '{}': opening serial port", manifest.plugin_id))?;
     // A manifest write ceiling overrides the config's own, matching every other
     // backend where the declared per-device limit wins.

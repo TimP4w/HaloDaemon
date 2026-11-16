@@ -56,13 +56,12 @@ fn open(
     })?;
     let addr = resolve_vetted_addr(&host, port, tcp.allow_private)?;
 
-    let transport =
-        TcpTransport::connect_addr_blocking(addr, tcp.timeout_ms).with_context(|| {
-            format!(
-                "plugin '{}': connecting to {host}:{port} ({addr})",
-                manifest.plugin_id
-            )
-        })?;
+    let transport = TcpTransport::connect(addr, tcp.timeout_ms).with_context(|| {
+        format!(
+            "plugin '{}': connecting to {host}:{port} ({addr})",
+            manifest.plugin_id
+        )
+    })?;
     crate::infrastructure::drivers::transports::Transport::set_write_rate_limit(&transport, limit);
     Ok(PluginIo::Stream {
         transport: std::sync::Arc::new(transport),

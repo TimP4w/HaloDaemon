@@ -22,7 +22,6 @@ use std::sync::{Arc, Weak};
 use std::time::Duration;
 
 use anyhow::{bail, Context, Result};
-use async_trait::async_trait;
 use halod_shared::types::{WriteRateLimit, WriteRateStatus};
 use serialport::SerialPort;
 
@@ -233,7 +232,7 @@ pub struct SerialTransport {
 impl SerialTransport {
     /// Open the configured port with the manifest's line settings. Blocking — a
     /// real open can stall, so callers run it off the async runtime.
-    pub fn open_blocking(path: &str, config: &SerialConfig) -> Result<Self> {
+    pub fn open_port(path: &str, config: &SerialConfig) -> Result<Self> {
         let settings = SerialSettings::from_config(path, config);
         let port = settings.open()?;
         Ok(Self {
@@ -281,7 +280,7 @@ impl SerialTransport {
         }
     }
 
-    fn read_exact_blocking(&self, size: usize) -> Result<Vec<u8>> {
+    fn read_exact(&self, size: usize) -> Result<Vec<u8>> {
         let timeout = self.read_timeout;
         let mut guard = self.port.read_access().lock();
         let mut buf = vec![0u8; size];
@@ -326,15 +325,10 @@ fn is_disconnect(error: &std::io::Error) -> bool {
     matches!(error.raw_os_error(), Some(5 | 6 | 19))
 }
 
-#[async_trait]
 impl Transport for SerialTransport {
-    async fn write(&self, data: &[u8]) -> Result<()> {
+    fn write(&self, data: &[u8]) -> Result<()> {
         self.check_len(data.len())?;
-        // Apply the write-rate gate, then do blocking I/O on the worker's own
-        // thread (the caller `block_on`s this), mirroring the USB transport's
-        // documented blocking write contract.
-        self.port.write_access(data.len()).await?;
-        let mut guard = self.port.read_access().lock();
+        let mut guard = self.port.write_access(data.len())?.lock();
         let result = match guard.write_all(data) {
             Ok(()) => guard.flush(),
             Err(e) => Err(e),
@@ -349,9 +343,9 @@ impl Transport for SerialTransport {
         Ok(())
     }
 
-    async fn read(&self, size: usize) -> Result<Vec<u8>> {
+    fn read(&self, size: usize) -> Result<Vec<u8>> {
         self.check_len(size)?;
-        self.read_exact_blocking(size)
+        self.read_exact(size)
     }
 
     fn as_serial(&self) -> Option<&dyn SerialControl> {
@@ -372,7 +366,7 @@ impl Transport for SerialTransport {
         self.events_enabled.then(|| self.events.wake.subscribe())
     }
 
-    async fn drain_events(&self, limit: usize) -> Result<Vec<TransportEvent>> {
+    fn drain_events(&self, limit: usize) -> Result<Vec<TransportEvent>> {
         Ok(self.events.drain(limit))
     }
 
