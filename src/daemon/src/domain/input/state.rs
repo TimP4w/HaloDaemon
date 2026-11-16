@@ -1,8 +1,8 @@
 // SPDX-License-Identifier: GPL-3.0-or-later
-use std::collections::HashSet;
-use std::sync::{Arc, Mutex, OnceLock};
-
 use crate::domain::input::engine::action_executor::ActionExecutor;
+use parking_lot::Mutex;
+use std::collections::HashSet;
+use std::sync::{Arc, OnceLock};
 
 /// A button press or release event from a diverted HID++ button.
 #[derive(Debug, Clone)]
@@ -42,14 +42,13 @@ impl InputState {
     }
 
     pub fn layer_shift_active(&self) -> bool {
-        !self.layer_shift_held.lock().unwrap().is_empty()
+        !self.layer_shift_held.lock().is_empty()
     }
 
     /// Hold a Layer Shift token; idempotent if already held.
     pub fn layer_shift_press(&self, device_id: &str, cid: u16) {
         self.layer_shift_held
             .lock()
-            .unwrap()
             .insert((device_id.to_owned(), cid));
     }
 
@@ -57,16 +56,12 @@ impl InputState {
     pub fn layer_shift_release(&self, device_id: &str, cid: u16) {
         self.layer_shift_held
             .lock()
-            .unwrap()
             .remove(&(device_id.to_owned(), cid));
     }
 
     /// Direct disconnect cleanup, not just the synthetic-release broadcast.
     pub fn layer_shift_clear_device(&self, device_id: &str) {
-        self.layer_shift_held
-            .lock()
-            .unwrap()
-            .retain(|(d, _)| d != device_id);
+        self.layer_shift_held.lock().retain(|(d, _)| d != device_id);
     }
 
     pub(crate) fn shutdown(&self) {

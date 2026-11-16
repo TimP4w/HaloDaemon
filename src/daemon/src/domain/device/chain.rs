@@ -12,8 +12,9 @@
 //!
 //! See `docs/chainable-argb.md` for the end-to-end walkthrough.
 
+use parking_lot::Mutex;
 use std::collections::{HashMap, HashSet};
-use std::sync::{Arc, Mutex};
+use std::sync::Arc;
 use std::time::Duration;
 
 use anyhow::Result;
@@ -208,7 +209,7 @@ pub trait LightingDivisionHub: Send + Sync + 'static {
 /// [`super::Device::chain_host`].
 pub struct LightingDivisionHost {
     adapter: Arc<dyn LightingDivisionAdapter>,
-    /// `std::sync::Mutex`: operations never cross `.await` while holding it.
+    /// `parking_lot::Mutex`: operations never cross `.await` while holding it.
     pub(crate) state: Mutex<HashMap<String, ChannelChainState>>,
     /// Every device the host knows about; `TokioMutex` since `serialize()` reads it async.
     children: TokioMutex<Vec<Arc<dyn Device>>>,
@@ -239,7 +240,7 @@ impl LightingDivisionHost {
     /// called from the device serializer.
     pub fn lighting_channels(&self) -> Vec<LightingChannel> {
         let channels = self.adapter.channels();
-        let state = self.state.lock().unwrap_or_else(|e| e.into_inner());
+        let state = self.state.lock();
         channels
             .into_iter()
             .map(|d| {
@@ -264,7 +265,7 @@ impl LightingDivisionHost {
     /// Snapshot only user-created links. Hardware-discovered links are probed
     /// again on startup and must not be written to configuration.
     pub fn persistent_links(&self) -> HashMap<String, Vec<ChainLinkRuntime>> {
-        let state = self.state.lock().unwrap_or_else(|e| e.into_inner());
+        let state = self.state.lock();
         state
             .iter()
             .filter_map(|(channel_id, chain)| {
@@ -282,7 +283,7 @@ impl LightingDivisionHost {
     /// Chain channels that currently hold a hardware-detected link. A parent
     /// uses this to tell which of its cooling channels a child has taken over.
     pub fn detected_channels(&self) -> HashSet<String> {
-        let state = self.state.lock().unwrap_or_else(|e| e.into_inner());
+        let state = self.state.lock();
         state
             .iter()
             .filter(|(_, chain)| chain.links.iter().any(|link| link.locked))
@@ -317,7 +318,7 @@ impl LightingDivisionHost {
             /* locked */ true,
         );
         let displaced = {
-            let mut state = self.state.lock().unwrap_or_else(|e| e.into_inner());
+            let mut state = self.state.lock();
             let chain = state.entry(channel_id.to_string()).or_default();
             if chain.links.first().map(|l| l.locked).unwrap_or(false) {
                 let old = chain.links[0].child_id.clone();
@@ -387,7 +388,7 @@ impl LightingDivisionHost {
         spec: ChainLinkSpec,
     ) -> Result<Arc<dyn Device>> {
         {
-            let state = self.state.lock().unwrap_or_else(|e| e.into_inner());
+            let state = self.state.lock();
             if state
                 .get(channel_id)
                 .and_then(|chain| chain.find_index(child_id))
@@ -433,7 +434,7 @@ impl LightingDivisionHost {
         child.initialize().await?;
 
         {
-            let mut state = self.state.lock().unwrap_or_else(|e| e.into_inner());
+            let mut state = self.state.lock();
             let chain = state.entry(channel_id.to_string()).or_default();
             let used = chain.used_leds();
             if used.saturating_add(led_count) > max_leds {
@@ -458,7 +459,7 @@ impl LightingDivisionHost {
 
     pub async fn remove_link(&self, channel_id: &str, child_id: &str) -> Result<String> {
         {
-            let mut state = self.state.lock().unwrap_or_else(|e| e.into_inner());
+            let mut state = self.state.lock();
             let chain = state
                 .get_mut(channel_id)
                 .ok_or_else(|| anyhow::anyhow!("unknown channel: {channel_id}"))?;
@@ -469,7 +470,7 @@ impl LightingDivisionHost {
     }
 
     pub fn rename_link(&self, channel_id: &str, child_id: &str, new_name: &str) -> Result<()> {
-        let mut state = self.state.lock().unwrap_or_else(|e| e.into_inner());
+        let mut state = self.state.lock();
         let chain = state
             .get_mut(channel_id)
             .ok_or_else(|| anyhow::anyhow!("unknown channel: {channel_id}"))?;
@@ -480,7 +481,7 @@ impl LightingDivisionHost {
     }
 
     pub fn reorder_link(&self, channel_id: &str, child_id: &str, new_index: usize) -> Result<()> {
-        let mut state = self.state.lock().unwrap_or_else(|e| e.into_inner());
+        let mut state = self.state.lock();
         let chain = state
             .get_mut(channel_id)
             .ok_or_else(|| anyhow::anyhow!("unknown channel: {channel_id}"))?;
@@ -499,7 +500,7 @@ impl LightingDivisionHost {
             .ok_or_else(|| anyhow::anyhow!("unknown channel: {channel_id}"))?;
 
         let saved = {
-            let mut state = self.state.lock().unwrap_or_else(|e| e.into_inner());
+            let mut state = self.state.lock();
             let chain = state.entry(channel_id.to_string()).or_default();
             let saved = chain.composed_frame();
             chain.discovery_active = true;
@@ -509,7 +510,7 @@ impl LightingDivisionHost {
         let result = self.run_detect_flash(channel_id, max_leds, &saved).await;
 
         {
-            let mut state = self.state.lock().unwrap_or_else(|e| e.into_inner());
+            let mut state = self.state.lock();
             if let Some(chain) = state.get_mut(channel_id) {
                 chain.discovery_active = false;
             }
@@ -623,7 +624,7 @@ impl LightingDivisionHub for LightingDivisionHost {
         colors: &[RgbColor],
     ) -> Result<()> {
         let outcome = {
-            let mut state = self.state.lock().unwrap_or_else(|e| e.into_inner());
+            let mut state = self.state.lock();
             let chain = state
                 .get_mut(channel_id)
                 .ok_or_else(|| anyhow::anyhow!("unknown channel: {channel_id}"))?;
@@ -650,7 +651,7 @@ impl LightingDivisionHub for LightingDivisionHost {
     }
 
     fn link_name(&self, channel_id: &str, child_device_id: &str) -> Option<String> {
-        let state = self.state.lock().unwrap_or_else(|e| e.into_inner());
+        let state = self.state.lock();
         let chain = state.get(channel_id)?;
         let idx = chain.find_index(child_device_id)?;
         Some(chain.links[idx].name.clone())
@@ -862,7 +863,6 @@ mod tests {
         async fn write_divided_frame(&self, channel_id: &str, composed: &[u8]) -> Result<()> {
             self.last_written
                 .lock()
-                .unwrap()
                 .push((channel_id.to_string(), composed.to_vec()));
             Ok(())
         }
@@ -911,10 +911,7 @@ mod tests {
         }
         task.await.unwrap();
 
-        let written = adapter
-            .last_written
-            .lock()
-            .unwrap_or_else(|e| e.into_inner());
+        let written = adapter.last_written.lock();
         // 3 on + 3 off = 6 writes; no restore (no links → saved frame is empty)
         assert_eq!(written.len(), 6);
         for (i, (ch, colors)) in written.iter().enumerate() {
@@ -944,7 +941,7 @@ mod tests {
         // so a channel the user never linked to has no state-map entry. Detect
         // must still work (it did `unknown channel` before).
         let (host, adapter) = stub_parts();
-        host.state.lock().unwrap_or_else(|e| e.into_inner()).clear();
+        host.state.lock().clear();
 
         let task = tokio::spawn({
             let host = host.clone();
@@ -958,14 +955,7 @@ mod tests {
             .unwrap()
             .expect("detect on empty channel succeeds");
 
-        assert_eq!(
-            adapter
-                .last_written
-                .lock()
-                .unwrap_or_else(|e| e.into_inner())
-                .len(),
-            6
-        );
+        assert_eq!(adapter.last_written.lock().len(), 6);
     }
 
     #[test]
@@ -973,7 +963,7 @@ mod tests {
         let (host, adapter) = stub_parts();
 
         {
-            let mut state = host.state.lock().unwrap_or_else(|e| e.into_inner());
+            let mut state = host.state.lock();
             let chain = state.get_mut("a").unwrap();
             chain.discovery_active = true;
             chain.links.push(ChainLinkRuntime::new(
@@ -993,11 +983,7 @@ mod tests {
                 .unwrap();
         });
 
-        assert!(adapter
-            .last_written
-            .lock()
-            .unwrap_or_else(|e| e.into_inner())
-            .is_empty());
+        assert!(adapter.last_written.lock().is_empty());
     }
 
     #[tokio::test]
@@ -1030,7 +1016,7 @@ mod tests {
         // Exactly one locked link, and `children()` must mirror it — not the
         // stale first Arc, not both.
         {
-            let state = host.state.lock().unwrap_or_else(|e| e.into_inner());
+            let state = host.state.lock();
             let links = &state.get("a").unwrap().links;
             assert_eq!(links.len(), 1);
             assert_eq!(links[0].child_id, "hw_b");

@@ -1,9 +1,10 @@
 // SPDX-License-Identifier: GPL-3.0-or-later
+use parking_lot::Mutex;
 use std::{
     os::fd::{FromRawFd, IntoRawFd, OwnedFd},
     sync::{
         atomic::{AtomicBool, AtomicU32, Ordering},
-        Arc, Mutex,
+        Arc,
     },
 };
 
@@ -501,7 +502,7 @@ fn run_pipewire(
                     log::warn!("PipeWire: DmaBuf frame has no fd, skipping");
                     return;
                 }
-                let mut cache = mmap_cache.lock().unwrap();
+                let mut cache = mmap_cache.lock();
                 let ptr = match cache.ensure(fd, expected) {
                     Ok(p) => p,
                     Err(e) => {
@@ -538,7 +539,7 @@ fn run_pipewire(
                 "PipeWire: stored frame {width}x{height} stride={stride} ({} bytes)",
                 raw.len()
             );
-            *frame_slot_c.lock().unwrap_or_else(|e| e.into_inner()) = Some(RawFrame {
+            *frame_slot_c.lock() = Some(RawFrame {
                 width,
                 height,
                 stride,
@@ -593,7 +594,7 @@ fn run_pipewire(
             // main thread clears ml_ptr to None before `ml` drops, and we hold
             // the lock here while dereferencing the pointer, so the two
             // operations cannot interleave.
-            let guard = ml_ptr_watcher.lock().unwrap_or_else(|e| e.into_inner());
+            let guard = ml_ptr_watcher.lock();
             if let Some(MainLoopPtr(ptr)) = *guard {
                 unsafe {
                     pipewire::sys::pw_main_loop_quit(ptr);
@@ -607,7 +608,7 @@ fn run_pipewire(
 
     // Clear the pointer under the lock before `ml` drops so the watcher
     // thread cannot call pw_main_loop_quit on freed memory.
-    *ml_ptr.lock().unwrap_or_else(|e| e.into_inner()) = None;
+    *ml_ptr.lock() = None;
 
     log::info!("Screen capture PipeWire thread exiting");
 }

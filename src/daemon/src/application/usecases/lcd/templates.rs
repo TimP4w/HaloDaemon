@@ -321,8 +321,7 @@ mod tests {
             // Serialize against the tests that mutate `HALOD_CONFIG_DIR`, so the
             // config dir can't change between the two reads below.
             let _guard = crate::test_support::HALOD_CONFIG_DIR_LOCK
-                .lock()
-                .unwrap_or_else(|e| e.into_inner());
+                .lock();
             if validate_template_name(&name).is_ok() {
                 let path = template_path(&name);
                 assert!(path.starts_with(lcd_templates_dir()));
@@ -333,9 +332,7 @@ mod tests {
     #[tokio::test]
     #[allow(clippy::await_holding_lock)]
     async fn save_list_load_delete_cycle() {
-        let _guard = crate::test_support::HALOD_CONFIG_DIR_LOCK
-            .lock()
-            .unwrap_or_else(|e| e.into_inner());
+        let _guard = crate::test_support::HALOD_CONFIG_DIR_LOCK.lock();
         let dir = tempfile::tempdir().unwrap();
         unsafe { std::env::set_var("HALOD_CONFIG_DIR", dir.path()) };
 
@@ -369,9 +366,7 @@ mod tests {
     #[tokio::test]
     #[allow(clippy::await_holding_lock)]
     async fn delete_template_noop_when_missing() {
-        let _guard = crate::test_support::HALOD_CONFIG_DIR_LOCK
-            .lock()
-            .unwrap_or_else(|e| e.into_inner());
+        let _guard = crate::test_support::HALOD_CONFIG_DIR_LOCK.lock();
         let dir = tempfile::tempdir().unwrap();
         unsafe { std::env::set_var("HALOD_CONFIG_DIR", dir.path()) };
 

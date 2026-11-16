@@ -1,6 +1,7 @@
 // SPDX-License-Identifier: GPL-3.0-or-later
+use parking_lot::Mutex;
 use std::collections::HashMap;
-use std::sync::{Arc, Mutex, OnceLock};
+use std::sync::{Arc, OnceLock};
 use tokio::sync::RwLock;
 
 use halod_shared::types::EffectParamValue;
@@ -20,12 +21,6 @@ pub struct LcdEngineState {
     /// Sorted names of saved LCD templates, cached off the broadcast hot path.
     /// Refreshed via `refresh_templates` after a save/delete touches disk.
     pub templates: RwLock<Vec<String>>,
-    /// The one live editor preview session, if the editor is open somewhere.
-    /// A `std::sync::Mutex` because it's only ever locked synchronously inside
-    /// `spawn_blocking` (render) or a quick non-blocking op (invalidate/evict);
-    /// never held across an `.await`. Poison is recoverable: a panic cannot
-    /// invalidate `EditorSession`'s safe Rust invariants, so callers retain and
-    /// repair the inner value rather than taking down the daemon.
     pub editor_session: Mutex<Option<EditorSession>>,
     pub editor_rendering: std::sync::atomic::AtomicBool,
     editor_generation: std::sync::atomic::AtomicU64,
@@ -41,13 +36,6 @@ impl LcdEngineState {
             editor_generation: std::sync::atomic::AtomicU64::new(0),
             engine: OnceLock::new(),
         }
-    }
-
-    pub fn editor_session(&self) -> std::sync::MutexGuard<'_, Option<EditorSession>> {
-        self.editor_session.lock().unwrap_or_else(|poisoned| {
-            log::warn!("LCD editor-session lock poisoned; recovering state");
-            poisoned.into_inner()
-        })
     }
 
     pub fn editor_generation(&self) -> u64 {
@@ -117,19 +105,6 @@ mod tests {
             wire.engine.device_templates.get("dev1").map(String::as_str),
             Some("tmpl_a")
         );
-    }
-
-    #[test]
-    fn editor_session_recovers_after_poison() {
-        let state = Arc::new(LcdEngineState::new());
-        let poisoner = Arc::clone(&state);
-        let _ = std::thread::spawn(move || {
-            let _guard = poisoner.editor_session.lock().unwrap();
-            panic!("poison editor-session lock for policy test");
-        })
-        .join();
-
-        assert!(state.editor_session().is_none());
     }
 
     #[test]

@@ -8,12 +8,12 @@
 //! Covers HID/TCP streams, SMBus registers, and scoped USB endpoint/control
 //! collections against the first declared device without opening host hardware.
 
-use std::path::Path;
-use std::sync::{Arc, Mutex};
-
 use anyhow::{Context, Result};
 use async_trait::async_trait;
 use mlua::{Function, Lua, LuaSerdeExt, Table, Value};
+use parking_lot::Mutex;
+use std::path::Path;
+use std::sync::Arc;
 
 use crate::domain::device::chain::LightingDivisionAdapter;
 use crate::domain::device::LightingCapability;
@@ -84,7 +84,7 @@ impl crate::infrastructure::drivers::transports::smbus::SmBusSyncOps for Recordi
             .context("no more scripted SMBus reads")
     }
     fn write_quick(&mut self, addr: u8) -> Result<bool> {
-        self.written.lock().unwrap().push(SmbusWriteRecord {
+        self.written.lock().push(SmbusWriteRecord {
             operation: "write_quick",
             addr,
             cmd: None,
@@ -94,7 +94,7 @@ impl crate::infrastructure::drivers::transports::smbus::SmBusSyncOps for Recordi
         Ok(true)
     }
     fn write_byte_data(&mut self, addr: u8, cmd: u8, value: u8) -> Result<()> {
-        self.written.lock().unwrap().push(SmbusWriteRecord {
+        self.written.lock().push(SmbusWriteRecord {
             operation: "write_byte_data",
             addr,
             cmd: Some(cmd),
@@ -104,7 +104,7 @@ impl crate::infrastructure::drivers::transports::smbus::SmBusSyncOps for Recordi
         Ok(())
     }
     fn write_word_data(&mut self, addr: u8, cmd: u8, value: u16) -> Result<()> {
-        self.written.lock().unwrap().push(SmbusWriteRecord {
+        self.written.lock().push(SmbusWriteRecord {
             operation: "write_word_data",
             addr,
             cmd: Some(cmd),
@@ -114,7 +114,7 @@ impl crate::infrastructure::drivers::transports::smbus::SmBusSyncOps for Recordi
         Ok(())
     }
     fn write_block_data(&mut self, addr: u8, cmd: u8, data: &[u8]) -> Result<()> {
-        self.written.lock().unwrap().push(SmbusWriteRecord {
+        self.written.lock().push(SmbusWriteRecord {
             operation: "write_block_data",
             addr,
             cmd: Some(cmd),
@@ -160,22 +160,16 @@ impl RecordingStream {
     }
 
     fn record(&self, endpoint: &'static str, data: &[u8]) {
-        self.written
-            .lock()
-            .expect("recording stream poisoned")
-            .push(WriteRecord {
-                endpoint,
-                data: data.to_vec(),
-            });
+        self.written.lock().push(WriteRecord {
+            endpoint,
+            data: data.to_vec(),
+        });
     }
 
     /// Push a report onto the event queue as if a reader thread had received it
     /// unsolicited — lets a test drive `event()` without a real device.
     fn queue_event(&self, data: Vec<u8>) {
-        self.deferred
-            .lock()
-            .expect("recording stream poisoned")
-            .push_back(data);
+        self.deferred.lock().push_back(data);
     }
 }
 
@@ -193,7 +187,6 @@ impl Transport for RecordingStream {
     async fn read(&self, _size: usize) -> Result<Vec<u8>> {
         self.reads
             .lock()
-            .expect("recording stream poisoned")
             .pop_front()
             .ok_or_else(|| anyhow::anyhow!("no more scripted reads queued for this device"))
     }
@@ -217,7 +210,7 @@ impl Transport for RecordingStream {
     }
 
     async fn drain_events(&self, limit: usize) -> Result<Vec<TransportEvent>> {
-        let mut deferred = self.deferred.lock().expect("recording stream poisoned");
+        let mut deferred = self.deferred.lock();
         let count = deferred.len().min(limit);
         Ok(deferred
             .drain(..count)
@@ -280,34 +273,24 @@ impl HidTransport for RecordingStream {
 
 impl crate::infrastructure::drivers::transports::serial::SerialControl for RecordingStream {
     fn set_dtr(&self, level: bool) -> Result<()> {
-        self.serial_ops
-            .lock()
-            .expect("recording stream poisoned")
-            .push(format!("set_dtr({level})"));
+        self.serial_ops.lock().push(format!("set_dtr({level})"));
         Ok(())
     }
 
     fn set_rts(&self, level: bool) -> Result<()> {
-        self.serial_ops
-            .lock()
-            .expect("recording stream poisoned")
-            .push(format!("set_rts({level})"));
+        self.serial_ops.lock().push(format!("set_rts({level})"));
         Ok(())
     }
 
     fn send_break(&self, duration_ms: u64) -> Result<()> {
         self.serial_ops
             .lock()
-            .expect("recording stream poisoned")
             .push(format!("send_break({duration_ms})"));
         Ok(())
     }
 
     fn flush_input(&self) -> Result<()> {
-        self.serial_ops
-            .lock()
-            .expect("recording stream poisoned")
-            .push("flush_input".to_owned());
+        self.serial_ops.lock().push("flush_input".to_owned());
         Ok(())
     }
 }
@@ -348,7 +331,6 @@ impl RecordingUsb {
         let mut data = self
             .reads
             .lock()
-            .expect("recording USB poisoned")
             .pop_front()
             .ok_or_else(|| anyhow::anyhow!("no more scripted USB reads"))?;
         data.truncate(length);
@@ -378,16 +360,13 @@ impl UsbCollection for RecordingUsb {
             anyhow::bail!("USB recording write exceeds endpoint policy");
         }
         self.rate.write_access_blocking(data.len())?;
-        self.written
-            .lock()
-            .expect("recording USB poisoned")
-            .push(UsbWriteRecord {
-                device: device.id.clone(),
-                endpoint: Some(endpoint),
-                request_type: None,
-                request: None,
-                data: data.to_vec(),
-            });
+        self.written.lock().push(UsbWriteRecord {
+            device: device.id.clone(),
+            endpoint: Some(endpoint),
+            request_type: None,
+            request: None,
+            data: data.to_vec(),
+        });
         Ok(data.len())
     }
     fn read(
@@ -439,16 +418,13 @@ impl UsbCollection for RecordingUsb {
             return Ok(UsbControlResult::Read(self.scripted_read(read_length)?));
         }
         self.rate.write_access_blocking(bytes.len())?;
-        self.written
-            .lock()
-            .expect("recording USB poisoned")
-            .push(UsbWriteRecord {
-                device: device.id.clone(),
-                endpoint: None,
-                request_type: Some(request_type),
-                request: Some(request),
-                data: bytes.to_vec(),
-            });
+        self.written.lock().push(UsbWriteRecord {
+            device: device.id.clone(),
+            endpoint: None,
+            request_type: Some(request_type),
+            request: Some(request),
+            data: bytes.to_vec(),
+        });
         Ok(UsbControlResult::Written(bytes.len()))
     }
     fn rate_status(&self) -> WriteRateStatus {
@@ -475,20 +451,12 @@ impl HttpBackend for RecordingHttp {
         req: &HttpRequest,
         _max_response_bytes: usize,
     ) -> anyhow::Result<HttpResponse> {
-        self.requests
-            .lock()
-            .expect("recording http poisoned")
-            .push(req.clone());
-        Ok(self
-            .responses
-            .lock()
-            .expect("recording http poisoned")
-            .pop_front()
-            .unwrap_or(HttpResponse {
-                status: 200,
-                headers: Vec::new(),
-                body: Vec::new(),
-            }))
+        self.requests.lock().push(req.clone());
+        Ok(self.responses.lock().pop_front().unwrap_or(HttpResponse {
+            status: 200,
+            headers: Vec::new(),
+            body: Vec::new(),
+        }))
     }
 }
 
@@ -502,22 +470,14 @@ struct RecordingUdp {
 
 impl crate::infrastructure::udp::UdpBackend for RecordingUdp {
     fn send(&self, data: &[u8]) -> Result<usize> {
-        self.sent
-            .lock()
-            .expect("recording udp poisoned")
-            .push(data.to_vec());
+        self.sent.lock().push(data.to_vec());
         Ok(data.len())
     }
     fn receive(&self, _timeout: std::time::Duration, max_bytes: usize) -> Result<Option<Vec<u8>>> {
-        Ok(self
-            .inbound
-            .lock()
-            .expect("recording udp poisoned")
-            .pop_front()
-            .map(|mut d| {
-                d.truncate(max_bytes);
-                d
-            }))
+        Ok(self.inbound.lock().pop_front().map(|mut d| {
+            d.truncate(max_bytes);
+            d
+        }))
     }
 }
 
@@ -546,11 +506,7 @@ fn attach_udp_methods(lua: &Lua, dev: &Table, recording: Option<Arc<RecordingUdp
     dev.set(
         "queue_udp_datagram",
         lua.create_function(move |_, (_self, data): (Table, mlua::LuaString)| {
-            inbound
-                .inbound
-                .lock()
-                .expect("recording udp poisoned")
-                .push_back(data.as_bytes().to_vec());
+            inbound.inbound.lock().push_back(data.as_bytes().to_vec());
             Ok(())
         })
         .anyhow()?,
@@ -561,13 +517,7 @@ fn attach_udp_methods(lua: &Lua, dev: &Table, recording: Option<Arc<RecordingUdp
         "udp_sent",
         lua.create_function(move |lua, _self: Table| {
             let out = lua.create_table()?;
-            for (i, datagram) in sent
-                .sent
-                .lock()
-                .expect("recording udp poisoned")
-                .iter()
-                .enumerate()
-            {
+            for (i, datagram) in sent.sent.lock().iter().enumerate() {
                 out.set(i + 1, lua.create_string(datagram)?)?;
             }
             Ok(out)
@@ -659,15 +609,11 @@ fn attach_http_methods(
                     ))
                 }
             };
-            queue
-                .responses
-                .lock()
-                .expect("recording http poisoned")
-                .push_back(HttpResponse {
-                    status,
-                    headers: Vec::new(),
-                    body,
-                });
+            queue.responses.lock().push_back(HttpResponse {
+                status,
+                headers: Vec::new(),
+                body,
+            });
             Ok(())
         })
         .anyhow()?,
@@ -677,7 +623,7 @@ fn attach_http_methods(
     dev.set(
         "http_requests",
         lua.create_function(move |lua, _self: Table| {
-            let requests = inspect.requests.lock().expect("recording http poisoned");
+            let requests = inspect.requests.lock();
             let out = lua.create_table()?;
             for (i, req) in requests.iter().enumerate() {
                 let item = lua.create_table()?;
@@ -742,7 +688,7 @@ pub fn run(handle: tokio::runtime::Handle, package: &Path) -> Result<i32> {
         .anyhow()
         .with_context(|| format!("running {}", test_path.display()))?;
 
-    let report = report.lock().expect("report poisoned");
+    let report = report.lock();
     println!(
         "{}: {} passed, {} failed",
         manifest.plugin_id, report.passed, report.failed
@@ -839,7 +785,7 @@ fn build_harness(
         // `h:assert(...)` passes `h` itself as the leading self argument.
         lua.create_function(
             move |_, (_self, cond, msg): (Table, bool, Option<String>)| {
-                let mut r = assert_report.lock().expect("report poisoned");
+                let mut r = assert_report.lock();
                 let msg = msg.unwrap_or_default();
                 if cond {
                     r.passed += 1;
@@ -875,7 +821,7 @@ fn build_harness(
         "assert_eq",
         lua.create_function(
             move |_, (_self, a, b, msg): (Table, Value, Value, Option<String>)| {
-                let mut r = eq_report.lock().expect("report poisoned");
+                let mut r = eq_report.lock();
                 let msg = msg.unwrap_or_default();
                 if lua_values_equal(&a, &b) {
                     r.passed += 1;
@@ -1164,7 +1110,7 @@ fn open_integration(
         dev.set(
             "writes",
             lua.create_function(move |lua, _self: Table| {
-                let written = recording.written.lock().expect("recording poisoned");
+                let written = recording.written.lock();
                 let out = lua.create_table()?;
                 for (i, rec) in written.iter().enumerate() {
                     out.set(i + 1, lua.create_sequence_from(rec.data.iter().copied())?)?;
@@ -1499,7 +1445,7 @@ fn open_device(
             manifest,
             spec: Some(spec),
             notify: std::sync::Weak::new(),
-            runtime: Some(Arc::new(std::sync::Mutex::new(
+            runtime: Some(Arc::new(parking_lot::Mutex::new(
                 super::engine::device::RuntimeState::OpeningTransport,
             ))),
             worker: LuaDeviceWorker::Spawn(Box::new(LuaDeviceSpawnParts {
@@ -1978,7 +1924,7 @@ fn open_device(
             .set(
                 "writes",
                 lua.create_function(move |lua, _self: Table| {
-                    let written = recording.written.lock().expect("recording poisoned");
+                    let written = recording.written.lock();
                     let out = lua.create_table()?;
                     for (i, rec) in written.iter().enumerate() {
                         let entry = lua.create_table()?;
@@ -1999,7 +1945,7 @@ fn open_device(
             .set(
                 "smbus_writes",
                 lua.create_function(move |lua, _self: Table| {
-                    let records = written.lock().expect("recording SMBus poisoned");
+                    let records = written.lock();
                     let out = lua.create_table()?;
                     for (i, record) in records.iter().enumerate() {
                         let entry = lua.create_table()?;
@@ -2049,11 +1995,7 @@ fn open_device(
                     let data = bytes
                         .sequence_values::<u8>()
                         .collect::<mlua::Result<Vec<_>>>()?;
-                    recording
-                        .reads
-                        .lock()
-                        .expect("recording poisoned")
-                        .push_back(data);
+                    recording.reads.lock().push_back(data);
                     Ok(())
                 })
                 .anyhow()?,
@@ -2066,7 +2008,7 @@ fn open_device(
             .set(
                 "usb_writes",
                 lua.create_function(move |lua, _self: Table| {
-                    let written = usb.written.lock().expect("recording USB poisoned");
+                    let written = usb.written.lock();
                     let out = lua.create_table()?;
                     for (i, rec) in written.iter().enumerate() {
                         let entry = lua.create_table()?;
@@ -2112,18 +2054,11 @@ fn open_device(
             .set(
                 "clear",
                 lua.create_function(move |_, _self: Table| {
-                    recording
-                        .written
-                        .lock()
-                        .expect("recording poisoned")
-                        .clear();
+                    recording.written.lock().clear();
                     if let Some(usb) = &usb {
-                        usb.written.lock().expect("recording USB poisoned").clear();
+                        usb.written.lock().clear();
                     }
-                    smbus_written
-                        .lock()
-                        .expect("recording SMBus poisoned")
-                        .clear();
+                    smbus_written.lock().clear();
                     Ok(())
                 })
                 .anyhow()?,
@@ -2314,7 +2249,7 @@ mod tests {
             .await
             .is_err());
         assert!(HidTransport::write_companion(&stream, &[3]).await.is_err());
-        assert!(stream.written.lock().unwrap().is_empty());
+        assert!(stream.written.lock().is_empty());
     }
 
     fn write_fixture(dir: &Path, test_lua: &str) {

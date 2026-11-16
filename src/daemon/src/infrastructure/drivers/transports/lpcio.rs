@@ -7,12 +7,11 @@
 //! to the fixed `LpcIO.bin` PawnIO functions and keeps each module handle's
 //! `select_slot`/`find_bars` state isolated.
 
-use anyhow::Result;
-use std::sync::Mutex;
-
 use crate::infrastructure::drivers::transports::register_ops;
 use crate::infrastructure::drivers::Metered;
+use anyhow::Result;
 use halod_shared::types::{WriteRateLimit, WriteRateStatus};
+use parking_lot::Mutex;
 
 pub struct LpcIoBus {
     io: Metered<register_ops::LpcIoBrokerClient>,
@@ -102,15 +101,15 @@ impl LpcIoTransport {
     }
 
     pub fn select_slot(&self, slot: u8) -> Result<()> {
-        self.state.lock().unwrap().bus.select_slot(slot)
+        self.state.lock().bus.select_slot(slot)
     }
 
     pub fn find_bars(&self) -> Result<()> {
-        self.state.lock().unwrap().bus.find_bars()
+        self.state.lock().bus.find_bars()
     }
 
     pub fn prepare_hwm(&self, slot: u8, unlock: bool) -> Result<()> {
-        let state = self.state.lock().unwrap();
+        let state = self.state.lock();
         let bus = &state.bus;
         bus.select_slot(slot)?;
         let config_port = if slot == 0 { 0x2e } else { 0x4e };
@@ -133,19 +132,19 @@ impl LpcIoTransport {
     }
 
     pub fn read_port(&self, port: u16) -> Result<u8> {
-        self.state.lock().unwrap().bus.read_port(port)
+        self.state.lock().bus.read_port(port)
     }
 
     pub fn write_port(&self, port: u16, value: u8) -> Result<()> {
-        self.state.lock().unwrap().bus.write_port(port, value)
+        self.state.lock().bus.write_port(port, value)
     }
 
     pub fn superio_inb(&self, register: u8) -> Result<u8> {
-        self.state.lock().unwrap().bus.superio_inb(register)
+        self.state.lock().bus.superio_inb(register)
     }
 
     pub fn superio_outb(&self, register: u8, value: u8) -> Result<()> {
-        self.state.lock().unwrap().bus.superio_outb(register, value)
+        self.state.lock().bus.superio_outb(register, value)
     }
 
     fn hwm_read_raw(bus: &LpcIoBus, base: u16, register: u16) -> Result<u8> {
@@ -167,12 +166,12 @@ impl LpcIoTransport {
     }
 
     pub fn hwm_read(&self, base: u16, register: u16) -> Result<u8> {
-        let state = self.state.lock().unwrap();
+        let state = self.state.lock();
         Self::hwm_read_raw(&state.bus, base, register)
     }
 
     pub fn hwm_write(&self, base: u16, register: u16, value: u8) -> Result<()> {
-        let mut state = self.state.lock().unwrap();
+        let mut state = self.state.lock();
         if !state
             .originals
             .iter()
@@ -189,7 +188,7 @@ impl LpcIoTransport {
     }
 
     pub fn restore(&self) -> Result<()> {
-        let mut state = self.state.lock().unwrap();
+        let mut state = self.state.lock();
         let originals = std::mem::take(&mut state.originals);
         let mut first_error = None;
         for entry in originals.into_iter().rev() {
@@ -212,7 +211,7 @@ impl LpcIoTransport {
     }
 
     pub fn rate_status(&self) -> WriteRateStatus {
-        self.state.lock().unwrap().bus.rate_status()
+        self.state.lock().bus.rate_status()
     }
 }
 

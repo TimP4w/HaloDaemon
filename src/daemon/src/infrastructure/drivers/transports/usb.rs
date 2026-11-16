@@ -1,9 +1,9 @@
 // SPDX-License-Identifier: GPL-3.0-or-later
 //! Endpoint-oriented, scoped USB transport used by plugins.
 
+use parking_lot::Mutex;
 use std::{
     collections::{HashMap, HashSet},
-    sync::Mutex,
     time::Duration,
 };
 
@@ -148,10 +148,7 @@ impl UsbEndpointTransport {
         let policy = self
             .endpoint(endpoint, data.len(), timeout_ms, Direction::Out)?
             .clone();
-        let _guard = self
-            .transfer_lock
-            .lock()
-            .map_err(|_| anyhow!("USB transfer mutex poisoned"))?;
+        let _guard = self.transfer_lock.lock();
         let claim = self.io.write_access_blocking(data.len())?;
         let timeout = Duration::from_millis(timeout_ms);
         let mut sent = 0;
@@ -180,10 +177,7 @@ impl UsbEndpointTransport {
         let policy = self
             .endpoint(endpoint, length, timeout_ms, Direction::In)?
             .clone();
-        let _guard = self
-            .transfer_lock
-            .lock()
-            .map_err(|_| anyhow!("USB transfer mutex poisoned"))?;
+        let _guard = self.transfer_lock.lock();
         let mut data = vec![0; length];
         let claim = self.io.read_access();
         let timeout = Duration::from_millis(timeout_ms);
@@ -230,10 +224,7 @@ impl UsbEndpointTransport {
         if !input && read_length != 0 {
             bail!("USB control OUT transfer cannot request input bytes");
         }
-        let _guard = self
-            .transfer_lock
-            .lock()
-            .map_err(|_| anyhow!("USB transfer mutex poisoned"))?;
+        let _guard = self.transfer_lock.lock();
         let timeout = Duration::from_millis(timeout_ms);
         if input {
             let mut data = vec![0; read_length];

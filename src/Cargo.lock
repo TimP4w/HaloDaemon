@@ -2577,6 +2577,7 @@ dependencies = [
  "mdns-sd",
  "mlua",
  "netlink-sys",
+ "parking_lot",
  "pipewire",
  "proptest",
  "q565",

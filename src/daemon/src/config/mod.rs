@@ -525,9 +525,7 @@ mod tests {
     #[test]
     fn load_handles_missing_valid_and_malformed_config() {
         let dir = tempfile::tempdir().unwrap();
-        let _guard = crate::test_support::HALOD_CONFIG_DIR_LOCK
-            .lock()
-            .unwrap_or_else(|e| e.into_inner());
+        let _guard = crate::test_support::HALOD_CONFIG_DIR_LOCK.lock();
         unsafe { std::env::set_var("HALOD_CONFIG_DIR", dir.path()) };
 
         // Missing files -> defaults.
@@ -555,9 +553,7 @@ mod tests {
     #[test]
     fn save_then_load_round_trips_every_section() {
         let dir = tempfile::tempdir().unwrap();
-        let _guard = crate::test_support::HALOD_CONFIG_DIR_LOCK
-            .lock()
-            .unwrap_or_else(|e| e.into_inner());
+        let _guard = crate::test_support::HALOD_CONFIG_DIR_LOCK.lock();
         unsafe { std::env::set_var("HALOD_CONFIG_DIR", dir.path()) };
 
         let mut cfg = Config {
@@ -679,9 +675,7 @@ mod tests {
     #[test]
     fn save_prunes_a_removed_profiles_file() {
         let dir = tempfile::tempdir().unwrap();
-        let _guard = crate::test_support::HALOD_CONFIG_DIR_LOCK
-            .lock()
-            .unwrap_or_else(|e| e.into_inner());
+        let _guard = crate::test_support::HALOD_CONFIG_DIR_LOCK.lock();
         unsafe { std::env::set_var("HALOD_CONFIG_DIR", dir.path()) };
 
         let mut cfg = Config::default();
@@ -756,9 +750,7 @@ mod tests {
     #[test]
     fn plugin_repos_round_trip_through_save_and_load() {
         let dir = tempfile::tempdir().unwrap();
-        let _guard = crate::test_support::HALOD_CONFIG_DIR_LOCK
-            .lock()
-            .unwrap_or_else(|e| e.into_inner());
+        let _guard = crate::test_support::HALOD_CONFIG_DIR_LOCK.lock();
         unsafe { std::env::set_var("HALOD_CONFIG_DIR", dir.path()) };
 
         let mut cfg = Config::default();

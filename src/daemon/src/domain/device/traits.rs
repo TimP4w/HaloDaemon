@@ -384,7 +384,7 @@ mod tests {
         .await;
 
         assert_eq!(
-            *dev.write_order.lock().unwrap(),
+            *dev.write_order.lock(),
             vec!["onboard", "choice", "lighting"],
             "a control write can hand the LEDs back to firmware, so the restored \
              colour has to be the last thing that reaches the device"
@@ -417,7 +417,7 @@ mod tests {
         }))
         .await;
 
-        assert_eq!(*dev.write_order.lock().unwrap(), vec!["choice", "lighting"]);
+        assert_eq!(*dev.write_order.lock(), vec!["choice", "lighting"]);
     }
 
     #[test]

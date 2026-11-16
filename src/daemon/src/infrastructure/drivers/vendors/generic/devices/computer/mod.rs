@@ -241,7 +241,7 @@ mod tests {
     use super::*;
 
     struct MockPower {
-        applied: std::sync::Mutex<Vec<String>>,
+        applied: parking_lot::Mutex<Vec<String>>,
         current: Option<&'static str>,
     }
 
@@ -251,7 +251,7 @@ mod tests {
             self.current
         }
         async fn apply(&self, id: &str) -> Result<()> {
-            self.applied.lock().unwrap().push(id.to_string());
+            self.applied.lock().push(id.to_string());
             Ok(())
         }
     }
@@ -287,7 +287,7 @@ mod tests {
         ComputerDevice::new(
             power.map(|c| {
                 Box::new(MockPower {
-                    applied: std::sync::Mutex::new(Vec::new()),
+                    applied: parking_lot::Mutex::new(Vec::new()),
                     current: Some(c),
                 }) as Box<dyn PowerProfileBackend>
             }),

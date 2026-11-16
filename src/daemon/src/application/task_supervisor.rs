@@ -1,7 +1,8 @@
 // SPDX-License-Identifier: GPL-3.0-or-later
+use parking_lot::Mutex;
 use std::future::Future;
 use std::pin::Pin;
-use std::sync::{Arc, Mutex};
+use std::sync::Arc;
 use std::time::Duration;
 
 use tokio::sync::watch;
@@ -180,9 +181,7 @@ impl TaskSupervisor {
 
 fn set_state(state: &Mutex<TaskState>, next: TaskState) {
     log::trace!("task supervisor transition -> {}", next.summary());
-    *state
-        .lock()
-        .unwrap_or_else(|poisoned| poisoned.into_inner()) = next;
+    *state.lock() = next;
 }
 
 #[cfg(test)]
@@ -218,7 +217,7 @@ mod tests {
         }
         assert!(starts.load(Ordering::SeqCst) >= 2);
         supervisor.shutdown().await;
-        assert!(matches!(*state.lock().unwrap(), TaskState::Stopped));
+        assert!(matches!(*state.lock(), TaskState::Stopped));
     }
 
     #[tokio::test]
@@ -242,6 +241,6 @@ mod tests {
         );
         tokio::task::yield_now().await;
         supervisor.shutdown().await;
-        assert!(matches!(*state.lock().unwrap(), TaskState::Stopped));
+        assert!(matches!(*state.lock(), TaskState::Stopped));
     }
 }

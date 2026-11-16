@@ -40,14 +40,14 @@ use manifest::{requirements, udev};
 /// release tooling, and [`manifest::contract::PLUGIN_API_CONTRACT`] share this value.
 pub const PLUGIN_API: u32 = halod_plugin_signing::PLUGIN_API;
 
-use std::collections::{HashMap, HashSet};
-use std::path::Path;
-use std::sync::{Arc, RwLock, RwLockReadGuard, RwLockWriteGuard};
-
 use halod_shared::types::{
     Animation, EffectParamValue, HealthState, HealthStatus, Permission, PluginInfo, PluginIssue,
     PluginIssueContext, PluginIssueKind, PluginKind, SkippedPlugin, WriteRateLimit,
 };
+use parking_lot::RwLock;
+use std::collections::{HashMap, HashSet};
+use std::path::Path;
+use std::sync::Arc;
 
 use crate::domain::device::Device;
 use crate::domain::registry::observers::discovery::DiscoveryHandle;
@@ -263,23 +263,6 @@ pub struct Registry {
     content_revision: std::sync::atomic::AtomicU64,
 }
 
-/// Recover the guard if a panicked plugin poisoned the lock, so one bad plugin
-/// can't cascade into a daemon crash. Safe here: the guarded data stays
-/// structurally consistent even if a mutator panicked mid-update.
-fn read_recover<T>(lock: &RwLock<T>) -> RwLockReadGuard<'_, T> {
-    lock.read().unwrap_or_else(|e| {
-        log::warn!("recovered poisoned plugin lock");
-        e.into_inner()
-    })
-}
-
-fn write_recover<T>(lock: &RwLock<T>) -> RwLockWriteGuard<'_, T> {
-    lock.write().unwrap_or_else(|e| {
-        log::warn!("recovered poisoned plugin lock");
-        e.into_inner()
-    })
-}
-
 impl Registry {
     fn integration_manifest_eligible(
         &self,
@@ -319,14 +302,14 @@ impl Registry {
     /// The current registry snapshot. The lock is held only for the `Arc` clone,
     /// never across the caller's use of the data — so re-entrant reads can't deadlock.
     fn snapshot(&self) -> Arc<PluginState> {
-        read_recover(&self.plugins).clone()
+        self.plugins.read().clone()
     }
 
     /// Swap in a new snapshot by applying `f` to a clone of the current one. Held
     /// under the write lock so concurrent mutators can't lose each other's edits;
     /// `f` only mutates fields (never re-locks), so it cannot deadlock.
     fn update(&self, f: impl FnOnce(&mut PluginState)) {
-        let mut guard = write_recover(&self.plugins);
+        let mut guard = self.plugins.write();
         let mut next = (**guard).clone();
         f(&mut next);
         *guard = Arc::new(next);
@@ -709,7 +692,8 @@ impl Registry {
     /// Start a fresh transport-open episode for one plugin. Used when its
     /// enable state changes so disabling and re-enabling is an explicit retry.
     fn reset_transport_open_failures_for(&self, plugin_id: &str) {
-        write_recover(&self.transport_open_failures)
+        self.transport_open_failures
+            .write()
             .retain(|(failed_plugin_id, _), _| failed_plugin_id != plugin_id);
         self.runtime_recovery.clear(plugin_id);
     }
@@ -735,14 +719,16 @@ impl Registry {
 
     /// A user-requested full discovery is another explicit retry boundary.
     pub(crate) fn reset_transport_open_failures(&self) {
-        write_recover(&self.transport_open_failures).clear();
+        self.transport_open_failures.write().clear();
         self.runtime_recovery.clear_all();
     }
 
     /// Transport kinds of plugins with an open or init failure that still has
     /// attempts left, so a retry loop can rescan only the buses that need it.
     pub(crate) fn retryable_open_failure_kinds(&self) -> HashSet<&'static str> {
-        let plugins: HashSet<String> = read_recover(&self.transport_open_failures)
+        let plugins: HashSet<String> = self
+            .transport_open_failures
+            .read()
             .iter()
             .filter(|(_, streak)| streak.failures() < TRANSPORT_OPEN_ATTEMPTS)
             .map(|((plugin_id, _), _)| plugin_id.clone())
@@ -756,7 +742,8 @@ impl Registry {
     }
 
     fn transport_open_blocked(&self, key: &(String, String)) -> bool {
-        read_recover(&self.transport_open_failures)
+        self.transport_open_failures
+            .read()
             .get(key)
             .is_some_and(|streak| {
                 streak.failures() >= TRANSPORT_OPEN_ATTEMPTS
@@ -766,7 +753,8 @@ impl Registry {
 
     fn note_transport_open_failure(&self, key: (String, String)) -> u32 {
         let now = std::time::Instant::now();
-        write_recover(&self.transport_open_failures)
+        self.transport_open_failures
+            .write()
             .entry(key)
             .and_modify(|streak| streak.record(now))
             .or_insert_with(|| crate::util::backoff::FailureStreak::first(now))
@@ -781,9 +769,7 @@ impl Registry {
         &self,
         plugin_id: &str,
     ) -> Option<halod_shared::types::IntegrationSetupStatus> {
-        read_recover(&self.integration_setups)
-            .get(plugin_id)
-            .cloned()
+        self.integration_setups.read().get(plugin_id).cloned()
     }
 
     pub fn set_integration_setup_status(
@@ -791,11 +777,11 @@ impl Registry {
         plugin_id: String,
         status: halod_shared::types::IntegrationSetupStatus,
     ) {
-        write_recover(&self.integration_setups).insert(plugin_id, status);
+        self.integration_setups.write().insert(plugin_id, status);
     }
 
     pub fn clear_integration_setup_status(&self, plugin_id: &str) {
-        write_recover(&self.integration_setups).remove(plugin_id);
+        self.integration_setups.write().remove(plugin_id);
     }
 
     fn is_integration_disabled(&self, plugin_id: &str) -> bool {
@@ -919,7 +905,7 @@ impl Registry {
             | PluginIssueKind::RuntimeError => HealthStatus::Failed,
             PluginIssueKind::LoadFailed | PluginIssueKind::LoadWarning => HealthStatus::Degraded,
         };
-        let mut health = write_recover(&self.health);
+        let mut health = self.health.write();
         let notification_sent = health
             .get(scope)
             .is_some_and(|state| state.notification_sent);
@@ -940,7 +926,7 @@ impl Registry {
     }
 
     fn clear_health(&self, scope: &str) -> bool {
-        write_recover(&self.health).remove(scope).is_some()
+        self.health.write().remove(scope).is_some()
     }
 
     /// Aggregate direct plugin and per-device health records. Failed wins over
@@ -953,7 +939,7 @@ impl Registry {
             HealthStatus::Degraded => 1,
             HealthStatus::Failed => 2,
         };
-        for (scope, state) in read_recover(&self.health).iter() {
+        for (scope, state) in self.health.read().iter() {
             if scope != plugin_id && !scope.starts_with(&prefix) {
                 continue;
             }
@@ -1022,7 +1008,7 @@ impl Registry {
         detail: String,
     ) {
         let scope = Self::device_health_scope(plugin_id, device_id);
-        if !read_recover(&self.health).contains_key(&scope) {
+        if !self.health.read().contains_key(&scope) {
             return;
         }
         if self.is_disabled(plugin_id) || self.is_integration_disabled(plugin_id) {
@@ -1112,10 +1098,13 @@ impl Registry {
 
     /// A later successful initialization ends the per-device failure episode.
     pub(crate) fn clear_init_error(&self, plugin_id: &str, device_id: &str) {
-        write_recover(&self.transport_open_failures)
+        self.transport_open_failures
+            .write()
             .remove(&(plugin_id.to_owned(), device_id.to_owned()));
         let scope = Self::device_health_scope(plugin_id, device_id);
-        let should_clear = read_recover(&self.health)
+        let should_clear = self
+            .health
+            .read()
             .get(&scope)
             .and_then(|state| state.issue.as_ref())
             .is_some_and(|issue| issue.kind == PluginIssueKind::InitFailed);
@@ -1174,7 +1163,7 @@ impl Registry {
     pub(crate) fn clear_operational_errors(&self, plugin_id: &str, device_ids: &[String]) {
         let prefix = format!("{plugin_id}::");
         let devices: HashSet<_> = device_ids.iter().collect();
-        write_recover(&self.health).retain(|scope, _| {
+        self.health.write().retain(|scope, _| {
             scope != plugin_id
                 && !(scope.starts_with(&prefix)
                     && devices
@@ -1190,7 +1179,7 @@ impl Registry {
     /// retained because reconnecting cannot resolve package-content problems.
     pub(crate) fn clear_integration_operational_errors(&self, plugin_id: &str) {
         let prefix = format!("{plugin_id}::");
-        write_recover(&self.health).retain(|scope, state| {
+        self.health.write().retain(|scope, state| {
             let belongs_to_integration = scope == plugin_id || scope.starts_with(&prefix);
             let operational = state.issue.as_ref().is_some_and(|issue| {
                 matches!(
@@ -1214,7 +1203,7 @@ impl Registry {
     /// warning the user has since fixed doesn't linger. Runtime/connect issues
     /// (a different `kind`) are untouched.
     fn clear_load_warnings(&self) {
-        write_recover(&self.health).retain(|_, state| {
+        self.health.write().retain(|_, state| {
             state
                 .issue
                 .as_ref()
@@ -1470,7 +1459,7 @@ impl Registry {
             .iter()
             .map(|m| m.plugin_id.as_str())
             .collect();
-        for (m, issue) in read_recover(&self.invalid_manifests).iter() {
+        for (m, issue) in self.invalid_manifests.read().iter() {
             if loaded.contains(m.plugin_id.as_str()) {
                 continue;
             }
@@ -1514,11 +1503,13 @@ impl Registry {
         &self,
         m: &PluginManifest,
     ) -> Vec<halod_shared::types::PluginRequirementStatus> {
-        if let Some(cached) = read_recover(&self.requirement_cache).get(&m.plugin_id) {
+        if let Some(cached) = self.requirement_cache.read().get(&m.plugin_id) {
             return cached.clone();
         }
         let statuses = requirements::evaluate(m);
-        write_recover(&self.requirement_cache).insert(m.plugin_id.clone(), statuses.clone());
+        self.requirement_cache
+            .write()
+            .insert(m.plugin_id.clone(), statuses.clone());
         statuses
     }
 
@@ -1532,7 +1523,7 @@ impl Registry {
             .iter()
             .map(|m| (m.plugin_id.clone(), requirements::evaluate(m)))
             .collect();
-        *write_recover(&self.requirement_cache) = fresh;
+        *self.requirement_cache.write() = fresh;
     }
 
     /// Whether every blocking host requirement for `m` is currently satisfied.
@@ -1560,12 +1551,12 @@ impl Registry {
             gpu_smbus,
             &|executable| command_resolve::resolve(executable).is_some(),
         );
-        *write_recover(&self.recommendations) = recs;
+        *self.recommendations.write() = recs;
     }
 
     /// The cached host recommendations (see [`refresh_recommendations`]).
     pub fn recommendations(&self) -> Vec<halod_shared::types::PluginRecommendation> {
-        read_recover(&self.recommendations).clone()
+        self.recommendations.read().clone()
     }
 
     fn build_plugin_info(
@@ -2277,8 +2268,8 @@ impl Registry {
                 )
             })
             .collect();
-        *write_recover(&self.invalid_manifests) = invalid;
-        *write_recover(&self.skipped) = scan.skipped;
+        *self.invalid_manifests.write() = invalid;
+        *self.skipped.write() = scan.skipped;
         self.update(|s| {
             s.manifests = scan.manifests;
             s.effects = effects;
@@ -2286,13 +2277,13 @@ impl Registry {
             s.presets = presets;
             s.provenance = provenance;
         });
-        write_recover(&self.transport_open_failures).clear();
+        self.transport_open_failures.write().clear();
         self.content_revision
             .fetch_add(1, std::sync::atomic::Ordering::AcqRel);
     }
 
     pub fn skipped(&self) -> Vec<SkippedPlugin> {
-        read_recover(&self.skipped).clone()
+        self.skipped.read().clone()
     }
 }
 
@@ -2382,7 +2373,7 @@ impl Registry {
         // produced this `ReadyPlugin` — reuse them rather than re-resolving.
         let ReadyPlugin { granted, config } = ready;
         let write_rate_limit = declared_write_rate_limit(spec.max_bytes_per_sec());
-        let runtime_state = Arc::new(std::sync::Mutex::new(
+        let runtime_state = Arc::new(parking_lot::Mutex::new(
             device::RuntimeState::OpeningTransport,
         ));
         let transport = match transport::descriptor_for(spec.transport.kind())
@@ -2390,7 +2381,7 @@ impl Registry {
         {
             Some(Ok(t)) => t,
             Some(Err(e)) => {
-                *runtime_state.lock().unwrap() = device::RuntimeState::Closed;
+                *runtime_state.lock() = device::RuntimeState::Closed;
                 let attempt = self.note_transport_open_failure(failure_key);
                 if attempt == TRANSPORT_OPEN_ATTEMPTS {
                     log::warn!(

@@ -403,9 +403,7 @@ mod tests {
     #[tokio::test]
     #[allow(clippy::await_holding_lock)]
     async fn save_worker_eventually_writes_config_to_disk() {
-        let _guard = crate::test_support::HALOD_CONFIG_DIR_LOCK
-            .lock()
-            .unwrap_or_else(|e| e.into_inner());
+        let _guard = crate::test_support::HALOD_CONFIG_DIR_LOCK.lock();
         let dir = tempfile::tempdir().expect("tempdir");
         unsafe { std::env::set_var("HALOD_CONFIG_DIR", dir.path()) };
 
@@ -431,9 +429,7 @@ mod tests {
     #[tokio::test]
     #[allow(clippy::await_holding_lock)]
     async fn save_worker_debounces_rapid_signals_into_single_save() {
-        let _guard = crate::test_support::HALOD_CONFIG_DIR_LOCK
-            .lock()
-            .unwrap_or_else(|e| e.into_inner());
+        let _guard = crate::test_support::HALOD_CONFIG_DIR_LOCK.lock();
         let dir = tempfile::tempdir().expect("tempdir");
         unsafe { std::env::set_var("HALOD_CONFIG_DIR", dir.path()) };
 

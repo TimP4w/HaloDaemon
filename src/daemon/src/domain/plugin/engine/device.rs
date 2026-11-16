@@ -4,8 +4,9 @@
 //! Lua worker. The manifest defines the maximum capability set; `initialize`
 //! may narrow it to the subset supported by one physical device.
 
+use parking_lot::{Mutex, RwLock};
 use std::sync::atomic::{AtomicBool, Ordering};
-use std::sync::{Arc, Mutex, MutexGuard, OnceLock, RwLock, Weak};
+use std::sync::{Arc, OnceLock, Weak};
 use std::time::Duration;
 
 use anyhow::{Context, Result};
@@ -46,16 +47,6 @@ use crate::domain::registry::identity::{DeviceIdentity, DeviceOrigin};
 use std::collections::{HashMap, HashSet};
 
 const POLL_FAILURE_DEGRADE_THRESHOLD: u8 = 3;
-
-trait MutexRecover<T> {
-    fn lock_recover(&self) -> MutexGuard<'_, T>;
-}
-
-impl<T> MutexRecover<T> for Mutex<T> {
-    fn lock_recover(&self) -> MutexGuard<'_, T> {
-        self.lock().unwrap_or_else(|poisoned| poisoned.into_inner())
-    }
-}
 
 /// Host-side DPI step-cycle state (the plugin only writes the chosen value).
 struct DpiState {
@@ -310,7 +301,7 @@ async fn sample_status(
 }
 
 fn replace_if_changed<T: serde::Serialize>(cache: &Mutex<T>, next: T) -> bool {
-    let mut current = cache.lock_recover();
+    let mut current = cache.lock();
     let changed = match (serde_json::to_value(&*current), serde_json::to_value(&next)) {
         (Ok(current), Ok(next)) => current != next,
         _ => true,
@@ -697,7 +688,7 @@ impl LuaDevice {
         }
         if !failed {
             if let Some(runtime) = &self.runtime {
-                let mut state = runtime.lock_recover();
+                let mut state = runtime.lock();
                 if !matches!(
                     *state,
                     RuntimeState::Unrecoverable | RuntimeState::Closing | RuntimeState::Closed
@@ -720,7 +711,7 @@ impl LuaDevice {
             return;
         }
         if let Some(runtime) = &self.runtime {
-            let mut state = runtime.lock_recover();
+            let mut state = runtime.lock();
             if !matches!(*state, RuntimeState::Closing | RuntimeState::Closed) {
                 *state = if unrecoverable {
                     RuntimeState::Unrecoverable
@@ -785,7 +776,7 @@ impl LuaDevice {
             .map(|descriptor| descriptor.kind)
             .unwrap_or("tcp");
         if let Some(runtime) = &runtime {
-            *runtime.lock_recover() = RuntimeState::Initializing;
+            *runtime.lock() = RuntimeState::Initializing;
         }
         let has_controller_identity = dev_match.index.is_some() || dev_match.key.is_some();
         // Keep a handle to the (metered) transport so the device can report
@@ -796,7 +787,7 @@ impl LuaDevice {
             _ => None,
         };
         let audio_registry: super::audio_api::SinkRegistry =
-            std::sync::Arc::new(std::sync::Mutex::new(Vec::new()));
+            std::sync::Arc::new(parking_lot::Mutex::new(Vec::new()));
         let http = super::worker::http_runtime_for(manifest, &granted, &config);
         let http_meter = http.clone();
         let udp = super::worker::udp_runtime_for(manifest, &granted, &config);
@@ -861,7 +852,7 @@ impl LuaDevice {
                     if closed.load(Ordering::Acquire)
                         || unrecoverable.load(Ordering::Acquire)
                         || event_runtime.as_ref().is_some_and(|runtime| {
-                            matches!(*runtime.lock_recover(), RuntimeState::Unrecoverable)
+                            matches!(*runtime.lock(), RuntimeState::Unrecoverable)
                         })
                     {
                         break;
@@ -887,7 +878,7 @@ impl LuaDevice {
                     for outcome in outcomes {
                         let device_id = outcome
                             .child_index
-                            .and_then(|index| child_ids.read().unwrap().get(&index).cloned())
+                            .and_then(|index| child_ids.read().get(&index).cloned())
                             .unwrap_or_else(|| root_id.clone());
                         if outcome.children_changed {
                             if let Some(root) = app.find_device_by_id(&root_id).await {
@@ -945,7 +936,7 @@ impl LuaDevice {
         // plugin device is constructed before central registration checks the
         // persisted Disabled state.
         if should_start_status_poll(
-            &dev.caps.read().unwrap(),
+            &dev.caps.read(),
             manifest.plugin_type,
             spec.is_some(),
             has_controller_identity,
@@ -985,7 +976,7 @@ impl LuaDevice {
                     {
                         unrecoverable.store(true, Ordering::Release);
                         if let Some(runtime) = &runtime {
-                            *runtime.lock_recover() = RuntimeState::Unrecoverable;
+                            *runtime.lock() = RuntimeState::Unrecoverable;
                         }
                         if let Some(app) = poll_notify.upgrade() {
                             app.registry
@@ -1039,7 +1030,7 @@ impl LuaDevice {
                             consecutive_failures = 0;
                             if recovered {
                                 if let Some(runtime) = &runtime {
-                                    let mut state = runtime.lock_recover();
+                                    let mut state = runtime.lock();
                                     if !matches!(
                                         *state,
                                         RuntimeState::Unrecoverable
@@ -1079,7 +1070,7 @@ impl LuaDevice {
                             {
                                 unrecoverable.store(true, Ordering::Release);
                                 if let Some(runtime) = &runtime {
-                                    *runtime.lock_recover() = RuntimeState::Unrecoverable;
+                                    *runtime.lock() = RuntimeState::Unrecoverable;
                                 }
                                 let detail = format!("{error:#}");
                                 if let Some(app) = poll_notify.upgrade() {
@@ -1105,7 +1096,7 @@ impl LuaDevice {
                                     "plugin read_status failed {POLL_FAILURE_DEGRADE_THRESHOLD} consecutive times for '{poll_device_id}': {error:#}"
                                 );
                                 if let Some(runtime) = &runtime {
-                                    let mut state = runtime.lock_recover();
+                                    let mut state = runtime.lock();
                                     if !matches!(*state, RuntimeState::Closing | RuntimeState::Closed)
                                     {
                                         *state = RuntimeState::Degraded(DegradeReason::CallFailed);
@@ -1123,7 +1114,7 @@ impl LuaDevice {
                         }
                     }
                     let current_poll_caps = {
-                        let caps = poll_caps.read().unwrap();
+                        let caps = poll_caps.read();
                         StatusPollCaps::from_caps(&caps)
                     };
                     observed_changed |= sample_status(
@@ -1324,7 +1315,7 @@ impl LuaDevice {
     /// status poll (and `poll_once`); serialization never calls this.
     async fn refresh_status_cache(&self) {
         let Some(worker) = &self.worker else { return };
-        let caps = StatusPollCaps::from_caps(&self.caps.read().unwrap());
+        let caps = StatusPollCaps::from_caps(&self.caps.read());
         sample_status(
             worker,
             caps,
@@ -1723,23 +1714,22 @@ impl Device for LuaDevice {
         {
             return false;
         }
-        self.runtime
-            .as_ref()
-            .is_none_or(|r| match *r.lock_recover() {
-                RuntimeState::OpeningTransport
-                | RuntimeState::Initializing
-                | RuntimeState::Online => true,
-                RuntimeState::Degraded(_) => false,
-                RuntimeState::Unrecoverable => false,
-                RuntimeState::Closing | RuntimeState::Closed => false,
-            })
+        self.runtime.as_ref().is_none_or(|r| match *r.lock() {
+            RuntimeState::OpeningTransport | RuntimeState::Initializing | RuntimeState::Online => {
+                true
+            }
+            RuntimeState::Degraded(_) => false,
+            RuntimeState::Unrecoverable => false,
+            RuntimeState::Closing | RuntimeState::Closed => false,
+        })
     }
 
     fn is_unrecoverable(&self) -> bool {
         self.unrecoverable.load(Ordering::Acquire)
-            || self.runtime.as_ref().is_some_and(|runtime| {
-                matches!(*runtime.lock_recover(), RuntimeState::Unrecoverable)
-            })
+            || self
+                .runtime
+                .as_ref()
+                .is_some_and(|runtime| matches!(*runtime.lock(), RuntimeState::Unrecoverable))
     }
 
     fn wire_device_connected(&self) -> bool {
@@ -1779,7 +1769,7 @@ impl Device for LuaDevice {
                     declared
                 })
                 .collect();
-            *self.caps.write().unwrap() = accepted;
+            *self.caps.write() = accepted;
         }
         if let Some(model) = outcome.model {
             let _ = self.dynamic_model.set(model);
@@ -1834,10 +1824,10 @@ impl Device for LuaDevice {
             let _ = self.dynamic_controls.set(Controls::from_runtime(controls));
         }
         if let Some(dpi) = outcome.dpi {
-            if !dpi.onboard && self.host_dpi_steps.lock_recover().is_none() {
-                *self.host_dpi_steps.lock_recover() = Some(dpi.steps.clone());
+            if !dpi.onboard && self.host_dpi_steps.lock().is_none() {
+                *self.host_dpi_steps.lock() = Some(dpi.steps.clone());
             }
-            *self.dpi_config.lock_recover() = DpiConfig {
+            *self.dpi_config.lock() = DpiConfig {
                 min: dpi.min,
                 max: dpi.max,
                 mode: if dpi.onboard {
@@ -1847,7 +1837,7 @@ impl Device for LuaDevice {
                 },
                 mode_control: dpi.mode_control.clone(),
             };
-            *self.dpi_state.lock_recover() = dpi_state_from_runtime(&dpi);
+            *self.dpi_state.lock() = dpi_state_from_runtime(&dpi);
         }
         if let Some(cooling) = outcome.cooling {
             let _ = self.cooling_channels.set(
@@ -1868,13 +1858,13 @@ impl Device for LuaDevice {
         }
         if let Some(key_remap) = outcome.key_remap {
             let defaults = key_remap.default_mappings.clone();
-            *self.key_remap.write().unwrap() = KeyRemapDescriptor {
+            *self.key_remap.write() = KeyRemapDescriptor {
                 buttons: key_remap.buttons,
                 requires_host_mode: key_remap.requires_host_mode,
                 default_mappings: key_remap.default_mappings,
             };
             let to_arm: Vec<ButtonMapping> = {
-                let mut mappings = self.key_remap_mappings.lock_recover();
+                let mut mappings = self.key_remap_mappings.lock();
                 if mappings.is_empty() {
                     mappings.extend(defaults.into_iter().map(|mapping| (mapping.cid, mapping)));
                 }
@@ -1965,7 +1955,7 @@ impl Device for LuaDevice {
         let owns_root_resources = self.worker.as_ref().is_none_or(|worker| !worker.is_child());
         if owns_root_resources {
             if let Some(r) = &self.runtime {
-                *r.lock_recover() = RuntimeState::Closing;
+                *r.lock() = RuntimeState::Closing;
             }
         }
         if let Some(w) = &self.worker {
@@ -1990,7 +1980,7 @@ impl Device for LuaDevice {
         }
         if owns_root_resources {
             if let Some(r) = &self.runtime {
-                *r.lock_recover() = RuntimeState::Closed;
+                *r.lock() = RuntimeState::Closed;
             }
         }
     }
@@ -2012,7 +2002,7 @@ impl Device for LuaDevice {
 
     fn capabilities(&self) -> Vec<CapabilityRef<'_>> {
         let mut caps = Vec::new();
-        let active = self.caps.read().unwrap().clone();
+        let active = self.caps.read().clone();
         for cap in &active {
             match cap {
                 Cap::Lighting => caps.push(CapabilityRef::Lighting(self)),
@@ -2141,7 +2131,7 @@ impl CoolingCapability for LuaDevice {
         let mut channels = self.cooling_channels.get().cloned().unwrap_or_default();
         let claimed = self.claimed_cooling_channels();
         channels.retain(|channel| !claimed.contains(&channel.id));
-        let observed = self.cooling_cache.lock_recover();
+        let observed = self.cooling_cache.lock();
         for channel in &mut channels {
             if let Some(current) = observed.get(&channel.id) {
                 *channel = current.clone();
@@ -2160,11 +2150,11 @@ impl CoolingCapability for LuaDevice {
             self.track(polled).await?;
             let channel = self.track(worker.cooling_status(channel_id).await).await?;
             self.cooling_cache
-                .lock_recover()
+                .lock()
                 .insert(channel_id.to_owned(), channel.clone());
             return Ok(channel);
         }
-        if let Some(channel) = self.cooling_cache.lock_recover().get(channel_id).cloned() {
+        if let Some(channel) = self.cooling_cache.lock().get(channel_id).cloned() {
             return Ok(channel);
         }
         self.track(self.worker()?.cooling_status(channel_id).await)
@@ -2205,12 +2195,7 @@ impl CoolingCapability for LuaDevice {
     }
 
     fn cached_cooling_status(&self) -> Vec<CoolingChannel> {
-        let mut channels: Vec<_> = self
-            .cooling_cache
-            .lock_recover()
-            .values()
-            .cloned()
-            .collect();
+        let mut channels: Vec<_> = self.cooling_cache.lock().values().cloned().collect();
         let claimed = self.claimed_cooling_channels();
         channels.retain(|channel| !claimed.contains(&channel.id));
         channels
@@ -2232,7 +2217,7 @@ impl SensorCapability for LuaDevice {
             replace_if_changed(&self.sensor_cache, sensors.clone());
             return Ok(sensors);
         }
-        Ok(self.sensor_cache.lock_recover().clone())
+        Ok(self.sensor_cache.lock().clone())
     }
 }
 
@@ -2285,7 +2270,7 @@ impl Controller for LuaDevice {
             .map(|c| child_device_id(&self.id, c))
             .collect();
         {
-            let mut routes = self.dynamic_child_ids.write().unwrap();
+            let mut routes = self.dynamic_child_ids.write();
             routes.retain(|_, id| live_ids.contains(id));
             for controller in &detected {
                 routes.insert(controller.index, child_device_id(&self.id, controller));
@@ -2509,7 +2494,6 @@ impl LuaDevice {
     ) -> Option<Arc<dyn Device>> {
         self.dynamic_child_ids
             .write()
-            .unwrap()
             .insert(controller.index, child_device_id(&self.id, controller));
         // `new_cyclic` so a controller that itself declares `chain` can hand its
         // accessories a `FanHub` back-reference (nested chain).
@@ -2699,15 +2683,15 @@ fn dpi_state_from_runtime(dpi: &InitDpi) -> DpiState {
 
 impl LuaDevice {
     async fn refresh_dpi_status(&self) -> Result<()> {
-        if !self.caps.read().unwrap().contains(&Cap::Dpi) {
+        if !self.caps.read().contains(&Cap::Dpi) {
             return Ok(());
         }
         if let Some(dpi) = self.worker()?.dpi_status().await? {
             if !dpi.onboard {
-                *self.host_dpi_steps.lock_recover() = Some(dpi.steps.clone());
+                *self.host_dpi_steps.lock() = Some(dpi.steps.clone());
             }
-            *self.dpi_state.lock_recover() = dpi_state_from_runtime(&dpi);
-            *self.dpi_config.lock_recover() = DpiConfig {
+            *self.dpi_state.lock() = dpi_state_from_runtime(&dpi);
+            *self.dpi_config.lock() = DpiConfig {
                 min: dpi.min,
                 max: dpi.max,
                 mode: if dpi.onboard {
@@ -2726,10 +2710,10 @@ impl LuaDevice {
             anyhow::bail!("DPI steps list cannot be empty");
         }
         let (min, max) = {
-            let config = self.dpi_config.lock_recover();
+            let config = self.dpi_config.lock();
             (config.min, config.max)
         };
-        let available = self.dpi_state.lock_recover().available_dpis.clone();
+        let available = self.dpi_state.lock().available_dpis.clone();
         for &step in steps {
             anyhow::ensure!(
                 step >= min && step <= max,
@@ -2746,7 +2730,7 @@ impl LuaDevice {
     }
 
     fn clamp_dpi(&self, dpi: u16) -> u16 {
-        let config = self.dpi_config.lock_recover();
+        let config = self.dpi_config.lock();
         dpi.clamp(config.min, config.max)
     }
 }
@@ -2758,7 +2742,7 @@ impl DpiCapability for LuaDevice {
     }
 
     fn save_state(&self) -> serde_json::Value {
-        self.host_dpi_steps.lock_recover().as_ref().map_or(
+        self.host_dpi_steps.lock().as_ref().map_or(
             serde_json::Value::Null,
             |steps| serde_json::json!({ "steps": steps }),
         )
@@ -2774,8 +2758,8 @@ impl DpiCapability for LuaDevice {
         if self.validate_dpi_steps(&steps).is_err() {
             return false;
         }
-        if self.dpi_config.lock_recover().mode == DpiMode::Onboard {
-            *self.host_dpi_steps.lock_recover() = Some(steps);
+        if self.dpi_config.lock().mode == DpiMode::Onboard {
+            *self.host_dpi_steps.lock() = Some(steps);
             return true;
         }
         self.set_dpi_steps(steps).await.is_ok()
@@ -2785,8 +2769,8 @@ impl DpiCapability for LuaDevice {
         if let Err(error) = self.refresh_dpi_status().await {
             log::debug!("[{}] refreshing DPI state: {error:#}", self.id);
         }
-        let dpi = self.dpi_state.lock_recover();
-        let config = self.dpi_config.lock_recover().clone();
+        let dpi = self.dpi_state.lock();
+        let config = self.dpi_config.lock().clone();
         DpiStatus {
             steps: dpi.steps.clone(),
             current_index: dpi.index,
@@ -2804,11 +2788,11 @@ impl DpiCapability for LuaDevice {
         self.validate_dpi_steps(&steps)?;
         let result = self.worker()?.dpi_set_steps(&steps).await;
         self.track(result).await?;
-        if self.dpi_config.lock_recover().mode == DpiMode::Host {
-            *self.host_dpi_steps.lock_recover() = Some(steps.clone());
+        if self.dpi_config.lock().mode == DpiMode::Host {
+            *self.host_dpi_steps.lock() = Some(steps.clone());
         }
         {
-            let mut dpi = self.dpi_state.lock_recover();
+            let mut dpi = self.dpi_state.lock();
             dpi.steps = steps;
             dpi.index = dpi
                 .steps
@@ -2821,7 +2805,7 @@ impl DpiCapability for LuaDevice {
 
     async fn set_dpi_index(&self, index: usize) -> Result<()> {
         let value = {
-            let dpi = self.dpi_state.lock_recover();
+            let dpi = self.dpi_state.lock();
             let &v = dpi
                 .steps
                 .get(index)
@@ -2830,7 +2814,7 @@ impl DpiCapability for LuaDevice {
         };
         let result = self.worker()?.dpi_set(value).await;
         self.track(result).await?;
-        let mut dpi = self.dpi_state.lock_recover();
+        let mut dpi = self.dpi_state.lock();
         dpi.index = index;
         dpi.current = value;
         Ok(())
@@ -2840,7 +2824,7 @@ impl DpiCapability for LuaDevice {
         let value = self.clamp_dpi(dpi);
         let result = self.worker()?.dpi_set(value).await;
         self.track(result).await?;
-        let mut dpi = self.dpi_state.lock_recover();
+        let mut dpi = self.dpi_state.lock();
         dpi.current = value;
         if let Some(index) = dpi.steps.iter().position(|step| *step == value) {
             dpi.index = index;
@@ -2906,7 +2890,7 @@ impl BooleanCapability for LuaDevice {
     }
 
     async fn get_booleans(&self) -> Result<Vec<Boolean>> {
-        let mut live = self.boolean_cache.lock_recover().clone();
+        let mut live = self.boolean_cache.lock().clone();
         self.active_controls().backfill_booleans(&mut live);
         Ok(live)
     }
@@ -2917,14 +2901,14 @@ impl BooleanCapability for LuaDevice {
         self.active_controls().bool_cache.record(key, value);
         if let Some(current) = self
             .boolean_cache
-            .lock_recover()
+            .lock()
             .iter_mut()
             .find(|boolean| boolean.key == key)
         {
             current.value = value;
         }
         let changes_dpi_mode = {
-            let mut config = self.dpi_config.lock_recover();
+            let mut config = self.dpi_config.lock();
             let changes = config.mode_control.as_deref() == Some(key);
             if changes {
                 config.mode = if value {
@@ -2936,7 +2920,7 @@ impl BooleanCapability for LuaDevice {
             changes
         };
         if changes_dpi_mode {
-            let host_steps = self.host_dpi_steps.lock_recover().clone();
+            let host_steps = self.host_dpi_steps.lock().clone();
             if value {
                 if let Some(steps) = host_steps {
                     self.set_dpi_steps(steps).await?;
@@ -2970,14 +2954,14 @@ impl ActionCapability for LuaDevice {
 #[async_trait]
 impl BatteryCapability for LuaDevice {
     async fn get_batteries(&self) -> Result<Vec<Battery>> {
-        Ok(self.battery_cache.lock_recover().clone())
+        Ok(self.battery_cache.lock().clone())
     }
 }
 
 #[async_trait]
 impl ConnectionCapability for LuaDevice {
     async fn connection_status(&self) -> Option<ConnectionStatus> {
-        self.connection_cache.lock_recover().clone()
+        self.connection_cache.lock().clone()
     }
 }
 
@@ -2985,7 +2969,7 @@ impl ConnectionCapability for LuaDevice {
 impl EqualizerCapability for LuaDevice {
     async fn get_equalizer(&self) -> Result<Equalizer> {
         self.eq_cache
-            .lock_recover()
+            .lock()
             .clone()
             .ok_or_else(|| anyhow::anyhow!("equalizer not sampled yet"))
     }
@@ -2995,9 +2979,9 @@ impl EqualizerCapability for LuaDevice {
         let result = worker.equalizer_set_preset(preset_index).await;
         self.track(result).await?;
         match worker.equalizer_get().await {
-            Ok(equalizer) => *self.eq_cache.lock_recover() = Some(equalizer),
+            Ok(equalizer) => *self.eq_cache.lock() = Some(equalizer),
             Err(_) => {
-                if let Some(equalizer) = self.eq_cache.lock_recover().as_mut() {
+                if let Some(equalizer) = self.eq_cache.lock().as_mut() {
                     equalizer.selected_preset = preset_index;
                 }
             }
@@ -3010,13 +2994,13 @@ impl EqualizerCapability for LuaDevice {
         let result = worker.equalizer_set_bands(values).await;
         self.track(result).await?;
         if let Ok(equalizer) = worker.equalizer_get().await {
-            *self.eq_cache.lock_recover() = Some(equalizer);
+            *self.eq_cache.lock() = Some(equalizer);
         }
         Ok(())
     }
 
     fn current_state(&self) -> Option<Equalizer> {
-        self.eq_cache.lock_recover().clone()
+        self.eq_cache.lock().clone()
     }
 }
 
@@ -3083,12 +3067,7 @@ impl KeyRemapCapability for LuaDevice {
     }
 
     fn save_state(&self) -> serde_json::Value {
-        let mut mappings: Vec<_> = self
-            .key_remap_mappings
-            .lock_recover()
-            .values()
-            .cloned()
-            .collect();
+        let mut mappings: Vec<_> = self.key_remap_mappings.lock().values().cloned().collect();
         mappings.sort_by_key(|mapping| mapping.cid);
         serde_json::json!({ "mappings": mappings })
     }
@@ -3100,7 +3079,7 @@ impl KeyRemapCapability for LuaDevice {
         let Ok(mappings) = serde_json::from_value::<Vec<ButtonMapping>>(value.clone()) else {
             return false;
         };
-        let buttons = self.key_remap.read().unwrap().buttons.clone();
+        let buttons = self.key_remap.read().buttons.clone();
         if mappings
             .iter()
             .any(|mapping| crate::domain::input::validate::validate_cid(&buttons, mapping).is_err())
@@ -3117,7 +3096,7 @@ impl KeyRemapCapability for LuaDevice {
         {
             return false;
         }
-        self.key_remap_mappings.lock_recover().clear();
+        self.key_remap_mappings.lock().clear();
         for mapping in mappings {
             if self.set_button_mapping(mapping).await.is_err() {
                 return false;
@@ -3127,13 +3106,9 @@ impl KeyRemapCapability for LuaDevice {
     }
 
     async fn get_key_remap_status(&self) -> KeyRemapStatus {
-        let descriptor = self.key_remap.read().unwrap().clone();
-        let mappings: Vec<ButtonMapping> = self
-            .key_remap_mappings
-            .lock_recover()
-            .values()
-            .cloned()
-            .collect();
+        let descriptor = self.key_remap.read().clone();
+        let mappings: Vec<ButtonMapping> =
+            self.key_remap_mappings.lock().values().cloned().collect();
         let host_mode_active = match &self.worker {
             Some(w) => w.key_remap_host_mode_active().await,
             None => false,
@@ -3147,15 +3122,10 @@ impl KeyRemapCapability for LuaDevice {
     }
 
     async fn set_button_mapping(&self, mapping: ButtonMapping) -> Result<()> {
-        crate::domain::input::validate::validate_cid(
-            &self.key_remap.read().unwrap().buttons,
-            &mapping,
-        )?;
+        crate::domain::input::validate::validate_cid(&self.key_remap.read().buttons, &mapping)?;
         let result = self.worker()?.key_remap_set_mapping(mapping.clone()).await;
         self.track(result).await?;
-        self.key_remap_mappings
-            .lock_recover()
-            .insert(mapping.cid, mapping);
+        self.key_remap_mappings.lock().insert(mapping.cid, mapping);
         Ok(())
     }
 
@@ -3163,7 +3133,6 @@ impl KeyRemapCapability for LuaDevice {
         let default = self
             .key_remap
             .read()
-            .unwrap()
             .default_mappings
             .iter()
             .find(|mapping| mapping.cid == cid)
@@ -3173,7 +3142,7 @@ impl KeyRemapCapability for LuaDevice {
         } else {
             let result = self.worker()?.key_remap_reset(cid).await;
             self.track(result).await?;
-            self.key_remap_mappings.lock_recover().remove(&cid);
+            self.key_remap_mappings.lock().remove(&cid);
             Ok(())
         }
     }
@@ -3181,8 +3150,8 @@ impl KeyRemapCapability for LuaDevice {
     async fn reset_all_button_mappings(&self) -> Result<()> {
         let result = self.worker()?.key_remap_reset_all().await;
         self.track(result).await?;
-        let defaults = self.key_remap.read().unwrap().default_mappings.clone();
-        self.key_remap_mappings.lock_recover().clear();
+        let defaults = self.key_remap.read().default_mappings.clone();
+        self.key_remap_mappings.lock().clear();
         for mapping in defaults {
             self.set_button_mapping(mapping).await?;
         }
@@ -3240,7 +3209,7 @@ impl LightingDivisionAdapter for LuaDevice {
 #[async_trait]
 impl CoolingHub for LuaDevice {
     async fn get_cooling_status(&self, channel: &str) -> Result<CoolingChannel> {
-        if let Some(status) = self.cooling_cache.lock_recover().get(channel).cloned() {
+        if let Some(status) = self.cooling_cache.lock().get(channel).cloned() {
             return Ok(status);
         }
         self.track(self.worker()?.cooling_status(channel).await)
@@ -3251,7 +3220,7 @@ impl CoolingHub for LuaDevice {
             .await
     }
     fn cached_cooling_status(&self, channel: &str) -> Option<CoolingChannel> {
-        self.cooling_cache.lock_recover().get(channel).cloned()
+        self.cooling_cache.lock().get(channel).cloned()
     }
 }
 
@@ -3543,7 +3512,7 @@ mod tests {
             !DpiCapability::restore_state(&restarted, &serde_json::json!({ "steps": [70000] }))
                 .await
         );
-        restarted.dpi_config.lock_recover().mode = DpiMode::Onboard;
+        restarted.dpi_config.lock().mode = DpiMode::Onboard;
         assert_eq!(
             DpiCapability::save_state(&restarted),
             serde_json::json!({"steps": steps})
@@ -4063,7 +4032,7 @@ mod tests {
         assert!(!children[0].is_live(), "the failing child is degraded");
         assert!(children[1].is_live(), "its sibling is untouched");
         assert!(root.is_live(), "the receiver is untouched");
-        assert_eq!(*runtime.lock_recover(), RuntimeState::Online);
+        assert_eq!(*runtime.lock(), RuntimeState::Online);
 
         assert!(unreachable.apply(color).await.is_ok());
         assert!(children[0].is_live(), "a successful call revives the child");
@@ -4244,11 +4213,11 @@ mod tests {
         dev.runtime = Some(runtime.clone());
         assert!(dev.initialize().await.is_err());
         assert_eq!(
-            *runtime.lock_recover(),
+            *runtime.lock(),
             RuntimeState::Degraded(DegradeReason::CallFailed)
         );
         dev.close().await;
-        assert_eq!(*runtime.lock_recover(), RuntimeState::Closed);
+        assert_eq!(*runtime.lock(), RuntimeState::Closed);
         assert!(!dev.is_live());
         assert!(dev.initialize().await.is_err());
     }
@@ -4288,7 +4257,7 @@ mod tests {
 
         assert!(dev.initialize().await.is_err());
         assert!(dev.is_unrecoverable());
-        assert_eq!(*runtime.lock_recover(), RuntimeState::Unrecoverable);
+        assert_eq!(*runtime.lock(), RuntimeState::Unrecoverable);
         dev.close().await;
     }
 
@@ -4305,7 +4274,7 @@ mod tests {
 
         assert!(!dev.initialize().await.unwrap());
         assert_eq!(
-            *runtime.lock_recover(),
+            *runtime.lock(),
             RuntimeState::Degraded(DegradeReason::CallFailed)
         );
         assert!(!dev.is_live());
@@ -4340,13 +4309,10 @@ mod tests {
         assert!(dev.initialize().await.unwrap());
 
         dev.refresh_status_cache().await;
-        assert_eq!(
-            dev.eq_cache.lock_recover().as_ref().unwrap().bands[0].value,
-            0.0
-        );
+        assert_eq!(dev.eq_cache.lock().as_ref().unwrap().bands[0].value, 0.0);
 
         dev.set_eq_preset(1).await.unwrap();
-        let eq = dev.eq_cache.lock_recover().clone().unwrap();
+        let eq = dev.eq_cache.lock().clone().unwrap();
         assert_eq!(eq.selected_preset, 1);
         assert_eq!(eq.bands[0].value, 5.0);
         dev.close().await;
@@ -4381,10 +4347,7 @@ mod tests {
         dev.refresh_status_cache().await;
 
         dev.set_eq_bands(&[-20.0]).await.unwrap();
-        assert_eq!(
-            dev.eq_cache.lock_recover().as_ref().unwrap().bands[0].value,
-            -10.0
-        );
+        assert_eq!(dev.eq_cache.lock().as_ref().unwrap().bands[0].value, -10.0);
         dev.close().await;
     }
 
@@ -4490,38 +4453,17 @@ mod tests {
 
         assert!(dev.set_choice("mode", 1).await.is_err());
         assert!(matches!(
-            *dev.runtime.as_ref().unwrap().lock_recover(),
+            *dev.runtime.as_ref().unwrap().lock(),
             RuntimeState::Degraded(DegradeReason::CallFailed)
         ));
         assert!(!dev.is_live());
 
         assert!(dev.set_range("hz", 500).await.is_ok());
         assert!(matches!(
-            *dev.runtime.as_ref().unwrap().lock_recover(),
+            *dev.runtime.as_ref().unwrap().lock(),
             RuntimeState::Online
         ));
         assert!(dev.is_live());
         dev.close().await;
-    }
-
-    #[tokio::test(flavor = "multi_thread", worker_threads = 2)]
-    async fn key_remap_status_survives_a_poisoned_mappings_lock() {
-        let (_tmp, manifest) = test_manifest("poisoned_remap", &["lighting"], "return {}");
-        let dev = LuaDevice::new(LuaDeviceParts {
-            id: "poisoned_remap-0".into(),
-            manifest: &manifest,
-            spec: Some(&manifest.devices[0]),
-            notify: Weak::new(),
-            runtime: None,
-            worker: LuaDeviceWorker::None,
-        });
-
-        let _ = std::panic::catch_unwind(std::panic::AssertUnwindSafe(|| {
-            let _guard = dev.key_remap_mappings.lock().unwrap();
-            panic!("poison the mappings lock");
-        }));
-
-        let status = dev.get_key_remap_status().await;
-        assert!(status.mappings.is_empty());
     }
 }

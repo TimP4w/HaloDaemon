@@ -11,23 +11,23 @@ use std::collections::HashMap;
 /// A `Mutex`-backed state cell shared by the device state slots below, so each
 /// slot type avoids hand-rolling the same lock dance.
 #[derive(Default)]
-pub struct Slot<T>(std::sync::Mutex<T>);
+pub struct Slot<T>(parking_lot::Mutex<T>);
 
 impl<T> Slot<T> {
     pub fn with<R>(&self, f: impl FnOnce(&T) -> R) -> R {
-        f(&self.0.lock().unwrap())
+        f(&self.0.lock())
     }
     pub fn update<R>(&self, f: impl FnOnce(&mut T) -> R) -> R {
-        f(&mut self.0.lock().unwrap())
+        f(&mut self.0.lock())
     }
 }
 
 impl<T: Clone> Slot<T> {
     pub fn get(&self) -> T {
-        self.0.lock().unwrap().clone()
+        self.0.lock().clone()
     }
     pub fn set(&self, value: T) {
-        *self.0.lock().unwrap() = value;
+        *self.0.lock() = value;
     }
 }
 
@@ -82,11 +82,11 @@ impl KeyboardLayoutSlot {
     }
 }
 
-pub struct KvStateCache<V>(std::sync::Mutex<std::collections::HashMap<String, V>>);
+pub struct KvStateCache<V>(parking_lot::Mutex<std::collections::HashMap<String, V>>);
 
 impl<V> Default for KvStateCache<V> {
     fn default() -> Self {
-        KvStateCache(std::sync::Mutex::new(std::collections::HashMap::new()))
+        KvStateCache(parking_lot::Mutex::new(std::collections::HashMap::new()))
     }
 }
 
@@ -95,22 +95,18 @@ impl<V: Clone + Serialize + DeserializeOwned> KvStateCache<V> {
     where
         V: PartialEq,
     {
-        self.0
-            .lock()
-            .unwrap()
-            .insert(key.to_string(), value.clone())
-            != Some(value)
+        self.0.lock().insert(key.to_string(), value.clone()) != Some(value)
     }
 
     pub fn get(&self, key: &str) -> Option<V>
     where
         V: Copy,
     {
-        self.0.lock().unwrap().get(key).copied()
+        self.0.lock().get(key).copied()
     }
 
     pub fn save(&self) -> serde_json::Value {
-        let map = self.0.lock().unwrap();
+        let map = self.0.lock();
         if map.is_empty() {
             return serde_json::Value::Null;
         }

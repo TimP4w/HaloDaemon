@@ -9,14 +9,14 @@
 //! and other users on the machine — not against another process already
 //! running as this user, which could read the key file itself.
 
-use std::collections::HashMap;
-use std::path::PathBuf;
-use std::sync::{OnceLock, RwLock};
-
 use anyhow::{anyhow, Context, Result};
 use chacha20poly1305::aead::{Aead, Generate, KeyInit};
 use chacha20poly1305::{Key, XChaCha20Poly1305, XNonce};
+use parking_lot::RwLock;
 use serde::{Deserialize, Serialize};
+use std::collections::HashMap;
+use std::path::PathBuf;
+use std::sync::OnceLock;
 
 use super::SecretStore;
 
@@ -106,7 +106,7 @@ impl Default for FileKeyStore {
 impl SecretStore for FileKeyStore {
     fn set(&self, plugin_id: &str, key: &str, plaintext: &str) -> Result<()> {
         let token = self.encrypt(plaintext)?;
-        let mut state = self.state.write().expect("secrets state poisoned");
+        let mut state = self.state.write();
         state
             .secrets
             .entry(plugin_id.to_owned())
@@ -117,7 +117,7 @@ impl SecretStore for FileKeyStore {
 
     fn get(&self, plugin_id: &str, key: &str) -> Result<Option<String>> {
         let token = {
-            let state = self.state.read().expect("secrets state poisoned");
+            let state = self.state.read();
             state
                 .secrets
                 .get(plugin_id)
@@ -128,7 +128,7 @@ impl SecretStore for FileKeyStore {
     }
 
     fn delete(&self, plugin_id: &str, key: &str) -> Result<()> {
-        let mut state = self.state.write().expect("secrets state poisoned");
+        let mut state = self.state.write();
         let mut changed = false;
         if let Some(m) = state.secrets.get_mut(plugin_id) {
             changed = m.remove(key).is_some();
@@ -195,9 +195,7 @@ mod tests {
 
     fn with_tmp_config<R>(f: impl FnOnce() -> R) -> R {
         let dir = tempfile::tempdir().unwrap();
-        let _guard = crate::test_support::HALOD_CONFIG_DIR_LOCK
-            .lock()
-            .unwrap_or_else(|e| e.into_inner());
+        let _guard = crate::test_support::HALOD_CONFIG_DIR_LOCK.lock();
         unsafe { std::env::set_var("HALOD_CONFIG_DIR", dir.path()) };
         let result = f();
         unsafe { std::env::remove_var("HALOD_CONFIG_DIR") };

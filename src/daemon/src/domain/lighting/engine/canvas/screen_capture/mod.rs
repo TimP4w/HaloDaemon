@@ -1,7 +1,8 @@
 // SPDX-License-Identifier: GPL-3.0-or-later
+use parking_lot::Mutex;
 use std::sync::{
     atomic::{AtomicBool, Ordering},
-    Arc, Mutex,
+    Arc,
 };
 
 /// How the buffer's pixels are oriented relative to the monitor. The buffer stays in
@@ -45,7 +46,7 @@ pub struct CaptureHandle {
 
 impl CaptureHandle {
     pub fn latest_frame(&self) -> Option<RawFrame> {
-        let guard = self.frame_slot.lock().unwrap_or_else(|e| e.into_inner());
+        let guard = self.frame_slot.lock();
         guard.clone()
     }
 }
@@ -135,7 +136,7 @@ mod tests {
     fn latest_frame_arc_clone_shares_data_with_stored_frame() {
         let frame_slot = Arc::new(Mutex::new(Some(make_frame(4, 4))));
         let stored_ptr = {
-            let guard = frame_slot.lock().unwrap();
+            let guard = frame_slot.lock();
             Arc::as_ptr(&guard.as_ref().unwrap().data)
         };
         let handle = CaptureHandle {

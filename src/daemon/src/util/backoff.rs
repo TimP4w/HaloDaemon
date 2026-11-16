@@ -6,10 +6,11 @@
 //! [`RetryQueue`] owns the waiting for callers that just want an action
 //! retried.
 
+use parking_lot::Mutex;
 use std::collections::HashMap;
 use std::future::Future;
 use std::sync::atomic::{AtomicBool, Ordering};
-use std::sync::{Arc, Mutex, MutexGuard};
+use std::sync::Arc;
 use std::time::{Duration, Instant};
 
 #[derive(Debug, Clone, Copy)]
@@ -78,13 +79,13 @@ struct RetryState {
 impl RetryQueue {
     /// End the episode: drop a queued attempt and forget the streak.
     pub fn clear(&self, key: &str) {
-        if let Some(cancelled) = lock(self).remove(key).and_then(|state| state.running) {
+        if let Some(cancelled) = self.keys.lock().remove(key).and_then(|state| state.running) {
             cancelled.store(true, Ordering::Release);
         }
     }
 
     pub fn clear_all(&self) {
-        for (_, state) in lock(self).drain() {
+        for (_, state) in self.keys.lock().drain() {
             if let Some(cancelled) = state.running {
                 cancelled.store(true, Ordering::Release);
             }
@@ -101,7 +102,7 @@ where
     F: Fn(u32) -> Fut + Send + 'static,
     Fut: Future<Output = Retry> + Send + 'static,
 {
-    let mut keys = lock(queue);
+    let mut keys = queue.keys.lock();
     if keys.get(key).is_some_and(|state| state.running.is_some()) {
         return false;
     }
@@ -147,12 +148,12 @@ async fn retry_loop<F, Fut>(
         if cancelled.load(Ordering::Acquire) {
             break;
         }
-        let Some(next) = note_retry(&mut lock(&queue), &key, max_attempts, &cancelled) else {
+        let Some(next) = note_retry(&mut queue.keys.lock(), &key, max_attempts, &cancelled) else {
             break;
         };
         (attempt, wait) = next;
     }
-    if let Some(state) = lock(&queue).get_mut(&key).filter(|state| {
+    if let Some(state) = queue.keys.lock().get_mut(&key).filter(|state| {
         state
             .running
             .as_ref()
@@ -177,13 +178,6 @@ fn note_retry(
         return None;
     }
     note_failure(keys, key, max_attempts)
-}
-
-fn lock(queue: &RetryQueue) -> MutexGuard<'_, HashMap<String, RetryState>> {
-    queue.keys.lock().unwrap_or_else(|poisoned| {
-        log::warn!("recovered poisoned retry queue");
-        poisoned.into_inner()
-    })
 }
 
 fn note_failure(
@@ -234,7 +228,7 @@ mod tests {
         move |attempt| {
             let seen = Arc::clone(&seen);
             Box::pin(async move {
-                seen.lock().unwrap().push(attempt);
+                seen.lock().push(attempt);
                 answer()
             })
         }
@@ -258,7 +252,7 @@ mod tests {
 
         drain().await;
 
-        assert_eq!(*seen.lock().unwrap(), [1, 2, 3]);
+        assert_eq!(*seen.lock(), [1, 2, 3]);
         assert!(
             !schedule(&queue, "plug", 3, recorder(&seen, || Retry::Stop)),
             "a spent budget refuses further attempts until the key is cleared"
@@ -273,12 +267,12 @@ mod tests {
         drain().await;
         assert!(schedule(&queue, "plug", 3, recorder(&seen, || Retry::Stop)));
         drain().await;
-        assert_eq!(*seen.lock().unwrap(), [1, 2], "the streak survives a stop");
+        assert_eq!(*seen.lock(), [1, 2], "the streak survives a stop");
 
         queue.clear("plug");
         assert!(schedule(&queue, "plug", 3, recorder(&seen, || Retry::Stop)));
         drain().await;
-        assert_eq!(*seen.lock().unwrap(), [1, 2, 1]);
+        assert_eq!(*seen.lock(), [1, 2, 1]);
     }
 
     #[tokio::test(start_paused = true)]
@@ -294,7 +288,7 @@ mod tests {
         queue.clear("plug");
         drain().await;
 
-        assert!(seen.lock().unwrap().is_empty());
+        assert!(seen.lock().is_empty());
     }
 
     #[tokio::test(start_paused = true)]

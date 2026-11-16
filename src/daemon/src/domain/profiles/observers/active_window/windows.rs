@@ -1,11 +1,12 @@
 // SPDX-License-Identifier: GPL-3.0-or-later
 #![cfg(windows)]
 
+use parking_lot::Mutex;
 use std::ffi::OsString;
 use std::os::windows::ffi::OsStringExt;
 use std::path::Path;
 use std::sync::atomic::{AtomicU32, AtomicU64, Ordering};
-use std::sync::{Arc, Mutex, OnceLock};
+use std::sync::{Arc, OnceLock};
 use tokio::sync::mpsc;
 use windows::Win32::Foundation::{CloseHandle, HWND};
 use windows::Win32::System::Threading::{
@@ -127,7 +128,7 @@ pub async fn spawn() -> anyhow::Result<mpsc::Receiver<FocusEvent>> {
     let (bridge_tx, bridge_rx) = std::sync::mpsc::sync_channel::<FocusEvent>(32);
     let (tx, rx) = mpsc::channel::<FocusEvent>(32);
     let generation = BRIDGE_GENERATION.fetch_add(1, Ordering::AcqRel) + 1;
-    *BRIDGE.get_or_init(|| Mutex::new(None)).lock().unwrap() = Some(bridge_tx);
+    *BRIDGE.get_or_init(|| Mutex::new(None)).lock() = Some(bridge_tx);
     let hook_thread_id = Arc::new(AtomicU32::new(0));
     let hook_thread_id_for_hook = Arc::clone(&hook_thread_id);
 
@@ -204,7 +205,7 @@ pub async fn spawn() -> anyhow::Result<mpsc::Receiver<FocusEvent>> {
         }
         if BRIDGE_GENERATION.load(Ordering::Acquire) == generation {
             if let Some(bridge) = BRIDGE.get() {
-                *bridge.lock().unwrap() = None;
+                *bridge.lock() = None;
             }
         }
         let thread_id = hook_thread_id.load(Ordering::Acquire);

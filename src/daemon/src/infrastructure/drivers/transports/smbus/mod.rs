@@ -10,17 +10,17 @@
 // below. This module hosts the daemon-side transport: discovery/scan jobs, the
 // PCI gate, write-rate metering, and the `SmBusDevice` handle.
 
-use anyhow::{anyhow, Result};
-use serde::{Deserialize, Serialize};
-use std::sync::atomic::{AtomicUsize, Ordering};
-use std::sync::{Arc, Mutex};
-
 use crate::{
     application::state::AppState,
     domain::registry::observers::discovery::{DiscoveryHandle, TransportScanner},
     infrastructure::drivers::Metered,
 };
+use anyhow::{anyhow, Result};
 use halod_shared::types::{WriteRateLimit, WriteRateStatus};
+use parking_lot::Mutex;
+use serde::{Deserialize, Serialize};
+use std::sync::atomic::{AtomicUsize, Ordering};
+use std::sync::Arc;
 
 // The raw SMBus primitives — the ops trait, `BusInfo`, and the platform
 // backends — now live in `halod-hwaccess` (shared with the elevated broker).
@@ -98,7 +98,7 @@ impl SmBusDevice {
         F: FnOnce(&mut dyn SmBusSyncOps) -> Result<R>,
     {
         self.io.write_tallied_local(move |inner, bytes| {
-            let mut g = inner.lock().map_err(|_| anyhow!("smbus lock poisoned"))?;
+            let mut g = inner.lock();
             let mut counting = CountingSmBusOps {
                 inner: &mut **g,
                 bytes,
@@ -469,9 +469,9 @@ mod tests {
     };
     use crate::infrastructure::drivers::Metered;
     use halod_shared::types::Permission;
+    use parking_lot::Mutex;
     use std::sync::atomic::{AtomicUsize, Ordering};
-    use std::sync::{Arc, Mutex};
-
+    use std::sync::Arc;
     struct FakeOps {
         fail_writes: bool,
     }

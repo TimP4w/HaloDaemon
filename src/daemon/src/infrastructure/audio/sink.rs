@@ -23,8 +23,9 @@ pub use windows_stub::*;
 mod linux {
     use super::Sink;
     use anyhow::Result;
+    use parking_lot::Mutex;
     use std::collections::HashSet;
-    use std::sync::{LazyLock, Mutex, MutexGuard};
+    use std::sync::LazyLock;
     use std::time::Duration;
     use tokio::process::Command;
     use tokio::time::sleep;
@@ -44,10 +45,6 @@ mod linux {
     /// Module ids held by live sinks. Sink names are not unique across devices,
     /// so name-keyed sweeps must skip these.
     static OWNED_MODULES: LazyLock<Mutex<HashSet<u32>>> = LazyLock::new(Mutex::default);
-
-    fn owned_modules() -> MutexGuard<'static, HashSet<u32>> {
-        OWNED_MODULES.lock().unwrap_or_else(|e| e.into_inner())
-    }
 
     async fn pactl_output(cmd: &mut Command) -> std::io::Result<std::process::Output> {
         match tokio::time::timeout(PACTL_TIMEOUT, cmd.output()).await {
@@ -263,7 +260,7 @@ mod linux {
             let strays = poll_listing(&["list", "modules", "short"], STRAY_BUDGET, |out| {
                 let strays: Vec<u32> = parse_sink_module_ids(out, sink_name)
                     .into_iter()
-                    .filter(|id| !owned_modules().contains(id))
+                    .filter(|id| !OWNED_MODULES.lock().contains(id))
                     .collect();
                 (!strays.is_empty()).then_some(strays)
             })
@@ -413,7 +410,7 @@ mod linux {
         let id = id_str
             .parse::<u32>()
             .map_err(|_| anyhow::anyhow!("pactl returned non-numeric module ID: {id_str}"))?;
-        owned_modules().insert(id);
+        OWNED_MODULES.lock().insert(id);
         Ok(id)
     }
 
@@ -434,7 +431,7 @@ mod linux {
                 Err(e) => log::warn!("audio: failed to run pactl to unload module {id}: {e}"),
                 _ => {}
             }
-            owned_modules().remove(&id);
+            OWNED_MODULES.lock().remove(&id);
         }
     }
 
@@ -608,14 +605,14 @@ mod linux {
             assert_eq!(parse_orphan_module_ids(short), vec![9, 5]);
         }
 
-        async fn scripted(outcomes: &std::sync::Mutex<Vec<Listing>>) -> Listing {
-            outcomes.lock().unwrap().pop().unwrap()
+        async fn scripted(outcomes: &parking_lot::Mutex<Vec<Listing>>) -> Listing {
+            outcomes.lock().pop().unwrap()
         }
 
         #[tokio::test(start_paused = true)]
         async fn poll_returns_the_extracted_value_once_ready() {
             // Popped back-to-front: NotReady first, then the match.
-            let outcomes = std::sync::Mutex::new(vec![
+            let outcomes = parking_lot::Mutex::new(vec![
                 Listing::Ready("match".into()),
                 Listing::NotReady("booting".into()),
             ]);

@@ -50,19 +50,19 @@ mod tests {
     use super::*;
     use crate::infrastructure::udp::UdpBackend;
     use anyhow::Result;
-    use std::sync::{Arc, Mutex};
-
+    use parking_lot::Mutex;
+    use std::sync::Arc;
     struct StubBackend {
         sent: Mutex<Vec<Vec<u8>>>,
         inbound: Mutex<std::collections::VecDeque<Vec<u8>>>,
     }
     impl UdpBackend for StubBackend {
         fn send(&self, data: &[u8]) -> Result<usize> {
-            self.sent.lock().unwrap().push(data.to_vec());
+            self.sent.lock().push(data.to_vec());
             Ok(data.len())
         }
         fn receive(&self, _t: Duration, _max: usize) -> Result<Option<Vec<u8>>> {
-            Ok(self.inbound.lock().unwrap().pop_front())
+            Ok(self.inbound.lock().pop_front())
         }
     }
 
@@ -91,7 +91,7 @@ mod tests {
             .eval()
             .unwrap();
         assert_eq!(got.as_bytes(), &[9, 8, 7]);
-        assert_eq!(*backend.sent.lock().unwrap(), vec![vec![1u8, 2, 3]]);
+        assert_eq!(*backend.sent.lock(), vec![vec![1u8, 2, 3]]);
     }
 
     #[test]

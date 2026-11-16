@@ -199,7 +199,7 @@ impl LcdEngine {
     /// Drop the editor session if it's been idle past the timeout.
     async fn evict_idle_editor_session(&self) {
         let mut expired_device = None;
-        if let Ok(mut session) = self.app_state.lcd.editor_session.try_lock() {
+        if let Some(mut session) = self.app_state.lcd.editor_session.try_lock() {
             if session
                 .as_ref()
                 .is_some_and(|s| s.is_idle(Instant::now(), custom::EDITOR_SESSION_IDLE_TIMEOUT))
@@ -907,7 +907,7 @@ mod tests {
     #[tokio::test]
     async fn editor_session_evictor_runs_independent_of_the_render_tick() {
         let app = Arc::new(AppState::new(Config::default()));
-        *app.lcd.editor_session() = Some(custom::EditorSession::new_idle_for_test("dev1"));
+        *app.lcd.editor_session.lock() = Some(custom::EditorSession::new_idle_for_test("dev1"));
         let engine = LcdEngine::new(Arc::clone(&app));
         assert!(
             !engine.has_active_content().await,
@@ -925,7 +925,7 @@ mod tests {
 
         tokio::time::timeout(std::time::Duration::from_millis(200), async {
             loop {
-                if app.lcd.editor_session().is_none() {
+                if app.lcd.editor_session.lock().is_none() {
                     return;
                 }
                 tokio::time::sleep(std::time::Duration::from_millis(5)).await;

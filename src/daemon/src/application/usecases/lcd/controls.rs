@@ -25,7 +25,7 @@ fn transition_failed(lcd: &dyn crate::domain::device::LcdCapability, error: &any
 /// changes underneath it (upload/delete), so a stale decode isn't served
 /// until an unrelated prune happens to evict it.
 fn invalidate_editor_image_cache(app: &Arc<AppState>) {
-    if let Some(session) = app.lcd.editor_session().as_ref() {
+    if let Some(session) = app.lcd.editor_session.lock().as_ref() {
         session.invalidate_image_cache();
     }
 }
@@ -66,7 +66,7 @@ async fn deactivate_engine_for_device(
     // CustomTemplate holds decoded image caches (up to 64 MB per image) which
     // would otherwise persist for the 30-second idle timeout, causing apparent
     // memory growth when switching between Editor and other modes.
-    if let Ok(mut session) = app.lcd.editor_session.try_lock() {
+    if let Some(mut session) = app.lcd.editor_session.try_lock() {
         if session.as_ref().is_some_and(|s| s.device_id == device_id) {
             *session = None;
             #[cfg(target_os = "linux")]
@@ -645,22 +645,22 @@ mod tests {
     async fn mode_switch_drops_editor_session_for_device() {
         use crate::domain::lcd::engine::custom::EditorSession;
         let (app, _) = make_app_with_lcd_device("lcd_dev");
-        *app.lcd.editor_session() = Some(EditorSession::new_idle_for_test("lcd_dev"));
+        *app.lcd.editor_session.lock() = Some(EditorSession::new_idle_for_test("lcd_dev"));
         set_screen_default("lcd_dev".into(), app.clone())
             .await
             .unwrap();
-        assert!(app.lcd.editor_session().is_none());
+        assert!(app.lcd.editor_session.lock().is_none());
     }
 
     #[tokio::test]
     async fn mode_switch_keeps_other_devices_editor_session() {
         use crate::domain::lcd::engine::custom::EditorSession;
         let (app, _) = make_app_with_lcd_device("lcd_dev");
-        *app.lcd.editor_session() = Some(EditorSession::new_idle_for_test("other_dev"));
+        *app.lcd.editor_session.lock() = Some(EditorSession::new_idle_for_test("other_dev"));
         set_screen_default("lcd_dev".into(), app.clone())
             .await
             .unwrap();
-        assert!(app.lcd.editor_session().is_some());
+        assert!(app.lcd.editor_session.lock().is_some());
     }
 
     /// Selecting "None" (reset to default) must clear the tracked active image
@@ -756,9 +756,7 @@ mod tests {
     #[tokio::test]
     #[allow(clippy::await_holding_lock)]
     async fn delete_lcd_image_removes_existing_file() {
-        let _guard = crate::test_support::HALOD_CONFIG_DIR_LOCK
-            .lock()
-            .unwrap_or_else(|e| e.into_inner());
+        let _guard = crate::test_support::HALOD_CONFIG_DIR_LOCK.lock();
         let dir = tempfile::tempdir().unwrap();
         unsafe { std::env::set_var("HALOD_CONFIG_DIR", dir.path()) };
         let lcd_dir = crate::config::lcd_images_dir();
@@ -775,9 +773,7 @@ mod tests {
     #[tokio::test]
     #[allow(clippy::await_holding_lock)]
     async fn delete_lcd_image_noop_when_file_does_not_exist() {
-        let _guard = crate::test_support::HALOD_CONFIG_DIR_LOCK
-            .lock()
-            .unwrap_or_else(|e| e.into_inner());
+        let _guard = crate::test_support::HALOD_CONFIG_DIR_LOCK.lock();
         let dir = tempfile::tempdir().unwrap();
         unsafe { std::env::set_var("HALOD_CONFIG_DIR", dir.path()) };
         std::fs::create_dir_all(crate::config::lcd_images_dir()).unwrap();
@@ -822,9 +818,7 @@ mod tests {
     #[tokio::test]
     #[allow(clippy::await_holding_lock)]
     async fn set_screen_image_from_library_emits_done_after_image_uploaded() {
-        let _guard = crate::test_support::HALOD_CONFIG_DIR_LOCK
-            .lock()
-            .unwrap_or_else(|e| e.into_inner());
+        let _guard = crate::test_support::HALOD_CONFIG_DIR_LOCK.lock();
         let dir = tempfile::tempdir().unwrap();
         unsafe { std::env::set_var("HALOD_CONFIG_DIR", dir.path()) };
         let lcd_dir = crate::config::lcd_images_dir();
@@ -859,9 +853,7 @@ mod tests {
     #[tokio::test]
     #[allow(clippy::await_holding_lock)]
     async fn set_screen_image_from_library_emits_failed_on_missing_file() {
-        let _guard = crate::test_support::HALOD_CONFIG_DIR_LOCK
-            .lock()
-            .unwrap_or_else(|e| e.into_inner());
+        let _guard = crate::test_support::HALOD_CONFIG_DIR_LOCK.lock();
         let dir = tempfile::tempdir().unwrap();
         unsafe { std::env::set_var("HALOD_CONFIG_DIR", dir.path()) };
         std::fs::create_dir_all(crate::config::lcd_images_dir()).unwrap();
@@ -917,9 +909,7 @@ mod tests {
     #[tokio::test]
     #[allow(clippy::await_holding_lock)]
     async fn delete_lcd_image_rejects_path_traversal() {
-        let _guard = crate::test_support::HALOD_CONFIG_DIR_LOCK
-            .lock()
-            .unwrap_or_else(|e| e.into_inner());
+        let _guard = crate::test_support::HALOD_CONFIG_DIR_LOCK.lock();
         let dir = tempfile::tempdir().unwrap();
         unsafe { std::env::set_var("HALOD_CONFIG_DIR", dir.path()) };
         std::fs::create_dir_all(crate::config::lcd_images_dir()).unwrap();

@@ -131,9 +131,9 @@ const MAX_COMMAND_OUTPUT_BYTES: usize = 256 * 1024;
 #[derive(Clone)]
 pub struct CommandExecutor {
     allowed: Arc<[String]>,
-    unrecoverable: Arc<std::sync::Mutex<Option<String>>>,
+    unrecoverable: Arc<parking_lot::Mutex<Option<String>>>,
     #[cfg(feature = "plugin-test")]
-    scripted: Option<Arc<std::sync::Mutex<std::collections::VecDeque<CommandRunResult>>>>,
+    scripted: Option<Arc<parking_lot::Mutex<std::collections::VecDeque<CommandRunResult>>>>,
 }
 
 /// The bounded outcome of one allowlisted command invocation. Failures before
@@ -155,7 +155,7 @@ impl CommandExecutor {
         allowed.dedup();
         Self {
             allowed: allowed.into(),
-            unrecoverable: Arc::new(std::sync::Mutex::new(None)),
+            unrecoverable: Arc::new(parking_lot::Mutex::new(None)),
             #[cfg(feature = "plugin-test")]
             scripted: None,
         }
@@ -167,22 +167,19 @@ impl CommandExecutor {
         results: impl IntoIterator<Item = CommandRunResult>,
     ) -> Self {
         let mut executor = Self::new(commands);
-        executor.scripted = Some(Arc::new(std::sync::Mutex::new(
+        executor.scripted = Some(Arc::new(parking_lot::Mutex::new(
             results.into_iter().collect(),
         )));
         executor
     }
 
     fn reject<T>(&self, detail: String) -> Result<T> {
-        self.unrecoverable
-            .lock()
-            .unwrap()
-            .get_or_insert(detail.clone());
+        self.unrecoverable.lock().get_or_insert(detail.clone());
         anyhow::bail!(detail)
     }
 
     fn unrecoverable_error(&self) -> Option<String> {
-        self.unrecoverable.lock().unwrap().clone()
+        self.unrecoverable.lock().clone()
     }
 
     pub fn run(&self, executable: &str, args: &[String]) -> Result<CommandRunResult> {
@@ -207,7 +204,6 @@ impl CommandExecutor {
         if let Some(results) = &self.scripted {
             return results
                 .lock()
-                .unwrap()
                 .pop_front()
                 .ok_or_else(|| anyhow::anyhow!("no more scripted command results queued"));
         }
@@ -225,10 +221,7 @@ impl CommandExecutor {
         // potentially different PATH lookup between readiness and execution.
         let resolved = super::command_resolve::resolve(executable).ok_or_else(|| {
             let detail = format!("command '{executable}' is not executable on PATH");
-            self.unrecoverable
-                .lock()
-                .unwrap()
-                .get_or_insert(detail.clone());
+            self.unrecoverable.lock().get_or_insert(detail.clone());
             anyhow::anyhow!(detail)
         })?;
         let mut child = Command::new(&resolved)
@@ -243,10 +236,7 @@ impl CommandExecutor {
                     error.kind(),
                     std::io::ErrorKind::NotFound | std::io::ErrorKind::PermissionDenied
                 ) {
-                    self.unrecoverable
-                        .lock()
-                        .unwrap()
-                        .get_or_insert(detail.clone());
+                    self.unrecoverable.lock().get_or_insert(detail.clone());
                 }
                 anyhow::anyhow!(detail)
             })?;
@@ -327,7 +317,7 @@ pub fn command_result_table(
 #[derive(Clone)]
 pub struct AddrScope {
     allowed: Arc<[u8]>,
-    unrecoverable: Arc<std::sync::Mutex<Option<String>>>,
+    unrecoverable: Arc<parking_lot::Mutex<Option<String>>>,
 }
 
 impl AddrScope {
@@ -337,7 +327,7 @@ impl AddrScope {
         v.dedup();
         Self {
             allowed: v.into(),
-            unrecoverable: Arc::new(std::sync::Mutex::new(None)),
+            unrecoverable: Arc::new(parking_lot::Mutex::new(None)),
         }
     }
 
@@ -356,16 +346,13 @@ impl AddrScope {
             let detail = format!(
                 "plugin SMBus access to address 0x{addr:02x} is outside its declared scope"
             );
-            self.unrecoverable
-                .lock()
-                .unwrap()
-                .get_or_insert(detail.clone());
+            self.unrecoverable.lock().get_or_insert(detail.clone());
             anyhow::bail!(detail)
         }
     }
 
     fn unrecoverable_error(&self) -> Option<String> {
-        self.unrecoverable.lock().unwrap().clone()
+        self.unrecoverable.lock().clone()
     }
 }
 

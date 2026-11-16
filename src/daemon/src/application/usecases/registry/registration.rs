@@ -519,7 +519,6 @@ mod tests {
     use crate::test_support::{app_with, MockDevice};
     use halod_shared::types::VisibilityState;
     use std::sync::{atomic::Ordering, Arc};
-
     fn transport(id: &str, connection_type: ConnectionType) -> Arc<MockDevice> {
         Arc::new(
             MockDevice::new(id)
@@ -1097,7 +1096,7 @@ mod tests {
 
         restore_saved_state(&app, &(device.clone() as Arc<dyn Device>)).await;
 
-        let scoped = device.restore_scoped.lock().unwrap().clone();
+        let scoped = device.restore_scoped.lock().clone();
         assert_eq!(scoped, vec![true], "the restore write was not scoped");
     }
 
@@ -1123,7 +1122,7 @@ mod tests {
 
         restore_saved_state(&app, &(device.clone() as Arc<dyn Device>)).await;
         assert_eq!(
-            *device.choice_last_set.as_ref().unwrap().lock().unwrap(),
+            *device.choice_last_set.as_ref().unwrap().lock(),
             None,
             "the sleeping device acknowledged nothing"
         );
@@ -1131,7 +1130,7 @@ mod tests {
         tokio::time::sleep(std::time::Duration::from_secs(300)).await;
 
         assert_eq!(
-            *device.choice_last_set.as_ref().unwrap().lock().unwrap(),
+            *device.choice_last_set.as_ref().unwrap().lock(),
             Some(("dpi".to_string(), 3)),
             "the retry must land the state once the device answers"
         );

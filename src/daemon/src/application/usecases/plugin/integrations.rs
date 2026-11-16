@@ -747,7 +747,7 @@ mod tests {
     async fn resolving_secure_config_does_not_block_the_async_runtime() {
         struct BlockingSecrets {
             entered: std::sync::mpsc::Sender<()>,
-            release: std::sync::Mutex<std::sync::mpsc::Receiver<()>>,
+            release: parking_lot::Mutex<std::sync::mpsc::Receiver<()>>,
         }
 
         impl crate::infrastructure::secrets::SecretStore for BlockingSecrets {
@@ -757,7 +757,7 @@ mod tests {
 
             fn get(&self, _plugin_id: &str, _key: &str) -> Result<Option<String>> {
                 self.entered.send(()).unwrap();
-                self.release.lock().unwrap().recv().unwrap();
+                self.release.lock().recv().unwrap();
                 Ok(Some("secret".into()))
             }
 
@@ -788,7 +788,7 @@ mod tests {
             AppState::new(crate::config::Config::default()).with_secret_store(Arc::new(
                 BlockingSecrets {
                     entered: entered_tx,
-                    release: std::sync::Mutex::new(release_rx),
+                    release: parking_lot::Mutex::new(release_rx),
                 },
             )),
         );

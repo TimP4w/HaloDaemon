@@ -7,9 +7,10 @@
 //! started via the SCM (no UAC); a dev run with no service installed falls back
 //! to a single `runas` UAC prompt.
 
+use parking_lot::Mutex;
 use std::fs::{File, OpenOptions};
 use std::sync::atomic::{AtomicBool, Ordering};
-use std::sync::{Mutex, OnceLock};
+use std::sync::OnceLock;
 use std::time::{Duration, Instant};
 
 use anyhow::{anyhow, bail, Context, Result};
@@ -500,7 +501,7 @@ pub struct AmdSmnBrokerClient {
 
 impl AmdSmnBrokerClient {
     pub fn read_smn(&self, offset: u32) -> Result<u32> {
-        let mut pipe = self.pipe.lock().unwrap_or_else(|e| e.into_inner());
+        let mut pipe = self.pipe.lock();
         match pipe.request(&Request::ReadSmn {
             handle: self.handle,
             offset,
@@ -532,10 +533,7 @@ pub struct LpcIoBrokerClient {
 
 impl LpcIoBrokerClient {
     fn request(&self, request: Request) -> Result<Response> {
-        self.pipe
-            .lock()
-            .unwrap_or_else(|e| e.into_inner())
-            .request(&request)
+        self.pipe.lock().request(&request)
     }
 
     fn unit(&self, request: Request) -> Result<()> {

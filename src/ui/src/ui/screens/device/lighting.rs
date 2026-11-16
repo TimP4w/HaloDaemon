@@ -1412,6 +1412,7 @@ fn rainbow(t: f32) -> Color32 {
 #[cfg(test)]
 mod tests {
     use super::*;
+
     use halod_shared::types::LedPosition;
 
     fn zone(topology: ZoneTopology, n: u32) -> LightingChannel {

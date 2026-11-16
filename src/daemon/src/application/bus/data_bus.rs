@@ -1,9 +1,10 @@
 // SPDX-License-Identifier: GPL-3.0-or-later
 //! Bounded, namespaced latest-value snapshots shared by plugin runtimes.
 
+use parking_lot::Mutex;
 use std::collections::{BTreeMap, HashMap, VecDeque};
 use std::hash::{DefaultHasher, Hash, Hasher};
-use std::sync::{Arc, Mutex};
+use std::sync::Arc;
 use std::time::{Duration, Instant, SystemTime, UNIX_EPOCH};
 
 use anyhow::{anyhow, bail, ensure, Context, Result};
@@ -339,7 +340,7 @@ impl DataBus {
         upserts: Vec<(String, BusValue)>,
         tombstones: Vec<String>,
     ) -> Result<BusTransaction> {
-        let mut inner = self.inner.lock().unwrap_or_else(|error| error.into_inner());
+        let mut inner = self.inner.lock();
         for (key, _) in &upserts {
             ensure!(!key.is_empty(), "state topic is empty");
             if let Some(record) = inner.state_records.get(key) {
@@ -390,7 +391,7 @@ impl DataBus {
     }
 
     pub fn state_snapshot(&self, prefixes: &[String]) -> BusSnapshot {
-        let inner = self.inner.lock().unwrap_or_else(|error| error.into_inner());
+        let inner = self.inner.lock();
         let mut records: Vec<_> = inner
             .state_records
             .iter()
@@ -413,7 +414,7 @@ impl DataBus {
         &self,
         keys: impl IntoIterator<Item = &'a str>,
     ) -> HashMap<String, BusValue> {
-        let inner = self.inner.lock().unwrap_or_else(|error| error.into_inner());
+        let inner = self.inner.lock();
         keys.into_iter()
             .filter_map(|key| {
                 inner
@@ -427,14 +428,13 @@ impl DataBus {
     pub fn state_revision(&self, key: &str) -> Option<u64> {
         self.inner
             .lock()
-            .unwrap_or_else(|error| error.into_inner())
             .state_records
             .get(key)
             .map(|record| record.revision)
     }
 
     pub fn publish_event(&self, payload: BusEventPayload) -> BusEvent {
-        let mut inner = self.inner.lock().unwrap_or_else(|error| error.into_inner());
+        let mut inner = self.inner.lock();
         inner.next_event_id = inner.next_event_id.wrapping_add(1).max(1);
         let event = BusEvent {
             id: inner.next_event_id,
@@ -450,7 +450,7 @@ impl DataBus {
     }
 
     pub fn replay_events(&self, last_event_id: Option<u64>) -> BusEventReplay {
-        let inner = self.inner.lock().unwrap_or_else(|error| error.into_inner());
+        let inner = self.inner.lock();
         BusEventReplay {
             session_id: inner.event_session_id,
             oldest_available_id: inner.events.front().map(|event| event.id),
@@ -590,7 +590,7 @@ impl DataBus {
     /// bounded `host.sensors.*` scope.
     pub fn scope_state(&self, scope: &str) -> (u64, bool) {
         let mut keys = {
-            let inner = self.inner.lock().unwrap_or_else(|error| error.into_inner());
+            let inner = self.inner.lock();
             inner
                 .records
                 .keys()
@@ -636,7 +636,7 @@ impl DataBus {
         );
         let value_bytes = value.validate()?;
         let now = Instant::now();
-        let mut inner = self.inner.lock().unwrap_or_else(|error| error.into_inner());
+        let mut inner = self.inner.lock();
         if let Some(record) = inner.records.get(key) {
             ensure!(
                 record.owner == owner,
@@ -769,7 +769,7 @@ impl DataBus {
             !key.is_empty() && key.len() <= MAX_RECORD_KEY_BYTES,
             "data record key is empty or exceeds {MAX_RECORD_KEY_BYTES} bytes"
         );
-        let mut inner = self.inner.lock().unwrap_or_else(|error| error.into_inner());
+        let mut inner = self.inner.lock();
         if let Some(record) = inner.records.get(key) {
             ensure!(
                 record.owner == owner,
@@ -825,7 +825,6 @@ impl DataBus {
         let keys: Vec<String> = self
             .inner
             .lock()
-            .unwrap_or_else(|error| error.into_inner())
             .records
             .iter()
             .filter(|(_, record)| record.owner == owner)
@@ -838,7 +837,7 @@ impl DataBus {
 
     fn remove(&self, owner: &str, key: &str) {
         let revision = {
-            let mut inner = self.inner.lock().unwrap_or_else(|error| error.into_inner());
+            let mut inner = self.inner.lock();
             if inner
                 .records
                 .get(key)
@@ -876,7 +875,7 @@ impl DataBus {
         runtime.spawn(async move {
             tokio::time::sleep(delay).await;
             let revision = {
-                let mut inner = inner.lock().unwrap_or_else(|error| error.into_inner());
+                let mut inner = inner.lock();
                 let Some(record) = inner.records.get_mut(&key) else {
                     return;
                 };
@@ -907,7 +906,7 @@ impl DataBus {
         let task = runtime.spawn(async move {
             tokio::time::sleep(delay).await;
             let stale_revision = {
-                let mut inner = inner.lock().unwrap_or_else(|error| error.into_inner());
+                let mut inner = inner.lock();
                 let should_notify = inner.records.get(&task_key).is_some_and(|record| {
                     record.revision == revision
                         && record.value.is_some()
@@ -932,7 +931,7 @@ impl DataBus {
             });
         });
         let abort = task.abort_handle();
-        let mut inner = self.inner.lock().unwrap_or_else(|error| error.into_inner());
+        let mut inner = self.inner.lock();
         if let Some(record) = inner.records.get_mut(&key) {
             if record.revision == revision && record.published_instant == Some(published) {
                 record.stale_task = Some(abort);
@@ -943,7 +942,7 @@ impl DataBus {
     }
 
     pub fn read(&self, key: &str) -> DataSnapshot {
-        let inner = self.inner.lock().unwrap_or_else(|error| error.into_inner());
+        let inner = self.inner.lock();
         let Some(record) = inner.records.get(key) else {
             return DataSnapshot {
                 status: SnapshotStatus::Unavailable,
@@ -979,7 +978,6 @@ impl DataBus {
         let keys: Vec<String> = self
             .inner
             .lock()
-            .unwrap_or_else(|error| error.into_inner())
             .records
             .iter()
             .filter(|(_, record)| record.owner == owner)

@@ -1,8 +1,8 @@
 // SPDX-License-Identifier: GPL-3.0-or-later
-use std::collections::HashMap;
-use std::sync::{Arc, Mutex, OnceLock, RwLock, Weak};
-
 use image::RgbaImage;
+use parking_lot::{Mutex, RwLock};
+use std::collections::HashMap;
+use std::sync::{Arc, OnceLock, Weak};
 
 #[cfg(target_os = "linux")]
 mod linux;
@@ -76,26 +76,18 @@ pub struct MediaHandle {
 
 impl MediaHandle {
     pub fn latest(&self) -> Option<MediaInfo> {
-        self.latest
-            .read()
-            .unwrap_or_else(|e| e.into_inner())
-            .clone()
+        self.latest.read().clone()
     }
 
     fn publish(&self, info: Option<MediaInfo>) {
-        if let Some(publisher) = self
-            .publisher
-            .read()
-            .unwrap_or_else(|error| error.into_inner())
-            .as_ref()
-        {
+        if let Some(publisher) = self.publisher.read().as_ref() {
             if let Some(current) = &info {
                 publisher.publish_media(current);
             } else {
                 publisher.invalidate_media();
             }
         }
-        *self.latest.write().unwrap_or_else(|e| e.into_inner()) = info;
+        *self.latest.write() = info;
     }
 }
 
@@ -106,12 +98,9 @@ impl MediaHandle {
 pub fn shared_with_publisher(publisher: Arc<dyn MediaPublisher>) -> Arc<MediaHandle> {
     static SLOT: OnceLock<Mutex<Weak<MediaHandle>>> = OnceLock::new();
     let slot = SLOT.get_or_init(|| Mutex::new(Weak::new()));
-    let mut guard = slot.lock().unwrap_or_else(|e| e.into_inner());
+    let mut guard = slot.lock();
     if let Some(existing) = guard.upgrade() {
-        *existing
-            .publisher
-            .write()
-            .unwrap_or_else(|error| error.into_inner()) = Some(publisher);
+        *existing.publisher.write() = Some(publisher);
         return existing;
     }
     let handle = Arc::new(MediaHandle {

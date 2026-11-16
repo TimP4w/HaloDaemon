@@ -1,9 +1,10 @@
 // SPDX-License-Identifier: GPL-3.0-or-later
 //! Per-device write-rate enforcement, generic over any transport.
 
+use parking_lot::Mutex;
 use std::collections::VecDeque;
 use std::sync::atomic::{AtomicU32, AtomicU64, AtomicUsize, Ordering};
-use std::sync::{Arc, Mutex};
+use std::sync::Arc;
 use std::time::{Duration, Instant};
 
 #[cfg(test)]
@@ -111,7 +112,7 @@ impl WriteRateLimiter {
     /// blocking `acquire` variants so both sleep flavors gate identically.
     fn gate_once(&self, len: usize, rate: u32) -> GateOutcome {
         let outcome = {
-            let mut bucket = self.bucket.lock().unwrap_or_else(|e| e.into_inner());
+            let mut bucket = self.bucket.lock();
             bucket.try_acquire(rate as f64, rate as f64, len as f64, Instant::now())
         };
         match outcome {
@@ -184,7 +185,7 @@ impl WriteRateLimiter {
     /// Record a write for live stats without rate-gating it.
     pub fn record(&self, len: usize) {
         let now = Instant::now();
-        let mut recent = self.recent.lock().unwrap_or_else(|e| e.into_inner());
+        let mut recent = self.recent.lock();
         recent.push_back((now, len));
         while let Some(&(t, _)) = recent.front() {
             if is_stale(t, now, STATS_WINDOW) {
@@ -207,7 +208,7 @@ impl WriteRateLimiter {
 
     pub fn status(&self) -> WriteRateStatus {
         let now = Instant::now();
-        let recent = self.recent.lock().unwrap_or_else(|e| e.into_inner());
+        let recent = self.recent.lock();
         let (writes, bytes) = recent
             .iter()
             .filter(|(t, _)| !is_stale(*t, now, STATS_WINDOW))

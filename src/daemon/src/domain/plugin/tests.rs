@@ -20,7 +20,7 @@ async fn transport_open_attempt_resets_have_the_right_scope() {
 
     registry.reset_transport_open_failures_for("plug_a");
     {
-        let failures = registry.transport_open_failures.read().unwrap();
+        let failures = registry.transport_open_failures.read();
         assert!(!failures.keys().any(|(plugin_id, _)| plugin_id == "plug_a"));
         assert!(failures.contains_key(&("other".into(), "other-1".into())));
     }
@@ -34,7 +34,7 @@ async fn transport_open_attempt_resets_have_the_right_scope() {
     );
 
     registry.reset_transport_open_failures();
-    assert!(registry.transport_open_failures.read().unwrap().is_empty());
+    assert!(registry.transport_open_failures.read().is_empty());
     assert!(queue_recovery(&registry, "other"));
 }
 
@@ -50,7 +50,7 @@ fn transport_open_failures_back_off_between_attempts() {
 
     // ...but only until the backoff elapses.
     let age = |registry: &super::Registry| {
-        let mut failures = registry.transport_open_failures.write().unwrap();
+        let mut failures = registry.transport_open_failures.write();
         let streak = failures.get_mut(&key).unwrap();
         let then = std::time::Instant::now() - super::TRANSPORT_OPEN_BACKOFF;
         let mut aged = crate::util::backoff::FailureStreak::first(then);

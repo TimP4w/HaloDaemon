@@ -110,7 +110,6 @@ mod tests {
             .as_ref()
             .unwrap()
             .lock()
-            .unwrap()
             .clone()
             .unwrap();
         assert_eq!(last.cid, 1);
@@ -189,14 +188,7 @@ mod tests {
         set_software_dpi_steps("dev1".into(), vec![800, 1600], app)
             .await
             .unwrap();
-        let steps = dev
-            .dpi_last_steps
-            .as_ref()
-            .unwrap()
-            .lock()
-            .unwrap()
-            .clone()
-            .unwrap();
+        let steps = dev.dpi_last_steps.as_ref().unwrap().lock().clone().unwrap();
         assert_eq!(steps, vec![800u16, 1600u16]);
     }
 

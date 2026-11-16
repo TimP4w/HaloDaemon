@@ -1819,7 +1819,7 @@ mod tests {
     }
 
     struct TestEventTransport {
-        events: std::sync::Mutex<Vec<TransportEvent>>,
+        events: parking_lot::Mutex<Vec<TransportEvent>>,
     }
 
     #[async_trait::async_trait]
@@ -1838,7 +1838,7 @@ mod tests {
         }
         fn set_write_rate_limit(&self, _limit: Option<halod_shared::types::WriteRateLimit>) {}
         async fn drain_events(&self, limit: usize) -> Result<Vec<TransportEvent>> {
-            let mut events = self.events.lock().unwrap();
+            let mut events = self.events.lock();
             let count = events.len().min(limit);
             Ok(events.drain(..count).collect())
         }
@@ -1921,7 +1921,7 @@ mod tests {
             granted,
             HashMap::new(),
             Handle::current(),
-            std::sync::Arc::new(std::sync::Mutex::new(Vec::new())),
+            std::sync::Arc::new(parking_lot::Mutex::new(Vec::new())),
         )
     }
 
@@ -1938,7 +1938,7 @@ mod tests {
             vec![],
             HashMap::new(),
             Handle::current(),
-            std::sync::Arc::new(std::sync::Mutex::new(Vec::new())),
+            std::sync::Arc::new(parking_lot::Mutex::new(Vec::new())),
         )
     }
 
@@ -1998,7 +1998,7 @@ mod tests {
     #[tokio::test]
     async fn transport_events_route_to_a_child_on_the_root_worker() {
         let transport = Arc::new(TestEventTransport {
-            events: std::sync::Mutex::new(vec![TransportEvent {
+            events: parking_lot::Mutex::new(vec![TransportEvent {
                 endpoint: "primary",
                 data: vec![0x10, 2, 0xaa],
             }]),
@@ -2028,7 +2028,7 @@ mod tests {
             vec![],
             HashMap::new(),
             Handle::current(),
-            std::sync::Arc::new(std::sync::Mutex::new(Vec::new())),
+            std::sync::Arc::new(parking_lot::Mutex::new(Vec::new())),
         );
         let child = root.child(DevMatch {
             transport: "hid".into(),
@@ -2047,7 +2047,7 @@ mod tests {
     #[tokio::test]
     async fn transport_events_reach_a_child_never_touched_by_a_routed_call() {
         let transport = Arc::new(TestEventTransport {
-            events: std::sync::Mutex::new(vec![TransportEvent {
+            events: parking_lot::Mutex::new(vec![TransportEvent {
                 endpoint: "primary",
                 data: vec![0x10, 3, 0xaa],
             }]),
@@ -2077,7 +2077,7 @@ mod tests {
             vec![],
             HashMap::new(),
             Handle::current(),
-            std::sync::Arc::new(std::sync::Mutex::new(Vec::new())),
+            std::sync::Arc::new(parking_lot::Mutex::new(Vec::new())),
         );
         let outcomes = root.on_transport_events().await.unwrap();
         assert_eq!(outcomes.len(), 1);
@@ -2112,7 +2112,7 @@ mod tests {
     #[tokio::test]
     async fn event_source_outside_u32_is_dropped() {
         let transport = Arc::new(TestEventTransport {
-            events: std::sync::Mutex::new(vec![TransportEvent {
+            events: parking_lot::Mutex::new(vec![TransportEvent {
                 endpoint: "primary",
                 data: vec![0x10],
             }]),
@@ -2135,7 +2135,7 @@ mod tests {
             vec![],
             HashMap::new(),
             Handle::current(),
-            std::sync::Arc::new(std::sync::Mutex::new(Vec::new())),
+            std::sync::Arc::new(parking_lot::Mutex::new(Vec::new())),
         );
         assert!(root.on_transport_events().await.unwrap().is_empty());
         root.close().await.unwrap();
@@ -2157,7 +2157,7 @@ mod tests {
             vec![],
             HashMap::new(),
             Handle::current(),
-            std::sync::Arc::new(std::sync::Mutex::new(Vec::new())),
+            std::sync::Arc::new(parking_lot::Mutex::new(Vec::new())),
         );
         assert_eq!(h.initialize().await.unwrap().model.as_deref(), Some("7"));
         h.close().await.unwrap();

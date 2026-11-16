@@ -166,14 +166,7 @@ mod tests {
         )
         .await
         .unwrap();
-        let last = dev
-            .bool_last_set
-            .as_ref()
-            .unwrap()
-            .lock()
-            .unwrap()
-            .clone()
-            .unwrap();
+        let last = dev.bool_last_set.as_ref().unwrap().lock().clone().unwrap();
         assert_eq!(last, ("sidetone".to_string(), true));
     }
 
@@ -250,12 +243,7 @@ mod tests {
         .unwrap_err();
         assert!(err.to_string().contains("read-only"), "got: {err}");
         assert!(
-            dev.bool_last_set
-                .as_ref()
-                .unwrap()
-                .lock()
-                .unwrap()
-                .is_none(),
+            dev.bool_last_set.as_ref().unwrap().lock().is_none(),
             "set_boolean should not have been called"
         );
     }
@@ -278,14 +266,7 @@ mod tests {
         .await
         .unwrap();
 
-        let last = dev
-            .range_last_set
-            .as_ref()
-            .unwrap()
-            .lock()
-            .unwrap()
-            .clone()
-            .unwrap();
+        let last = dev.range_last_set.as_ref().unwrap().lock().clone().unwrap();
         assert_eq!(last, ("nc_level".to_string(), 50));
     }
 
@@ -354,7 +335,6 @@ mod tests {
             .as_ref()
             .unwrap()
             .lock()
-            .unwrap()
             .clone()
             .unwrap();
         assert_eq!(last, ("nc_mode".to_string(), 2));
@@ -420,12 +400,7 @@ mod tests {
         .unwrap();
 
         assert_eq!(
-            dev.action_last_key
-                .as_ref()
-                .unwrap()
-                .lock()
-                .unwrap()
-                .as_deref(),
+            dev.action_last_key.as_ref().unwrap().lock().as_deref(),
             Some("pixel_refresh")
         );
     }
@@ -447,7 +422,7 @@ mod tests {
         .await
         .unwrap();
 
-        let recorded = dev.dpi_last_steps.as_ref().unwrap().lock().unwrap().clone();
+        let recorded = dev.dpi_last_steps.as_ref().unwrap().lock().clone();
         assert_eq!(recorded, Some(vec![400u16, 800, 1600]));
     }
 
@@ -514,10 +489,7 @@ mod tests {
         .await
         .unwrap();
 
-        assert_eq!(
-            *dev.eq_last_preset.as_ref().unwrap().lock().unwrap(),
-            Some(2)
-        );
+        assert_eq!(*dev.eq_last_preset.as_ref().unwrap().lock(), Some(2));
     }
 
     #[tokio::test]
@@ -586,13 +558,7 @@ mod tests {
             .await
             .unwrap();
 
-        assert!(dev
-            .eq_last_bands
-            .as_ref()
-            .unwrap()
-            .lock()
-            .unwrap()
-            .is_some());
+        assert!(dev.eq_last_bands.as_ref().unwrap().lock().is_some());
     }
 
     #[tokio::test]

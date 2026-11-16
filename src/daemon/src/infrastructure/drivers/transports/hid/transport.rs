@@ -1,8 +1,9 @@
 // SPDX-License-Identifier: GPL-3.0-or-later
 use anyhow::{Context, Result};
 use async_trait::async_trait;
+use parking_lot::Mutex as SyncMutex;
 use std::collections::VecDeque;
-use std::sync::{Arc, Mutex as StdMutex, Weak};
+use std::sync::{Arc, Weak};
 use std::time::{Duration, Instant};
 use tokio::sync::Mutex;
 use tokio::time::timeout;
@@ -169,7 +170,7 @@ impl InputEndpoint {
 /// handles directly and never consume this queue. Event listeners are opened
 /// lazily only after the plugin advertises an `event()` callback.
 struct HidEvents {
-    reports: StdMutex<VecDeque<TransportEvent>>,
+    reports: SyncMutex<VecDeque<TransportEvent>>,
     wake: tokio::sync::watch::Sender<u64>,
 }
 
@@ -177,7 +178,7 @@ impl HidEvents {
     fn new() -> Self {
         let (wake, _) = tokio::sync::watch::channel(0);
         Self {
-            reports: StdMutex::new(VecDeque::with_capacity(EVENT_QUEUE_CAPACITY)),
+            reports: SyncMutex::new(VecDeque::with_capacity(EVENT_QUEUE_CAPACITY)),
             wake,
         }
     }
@@ -188,7 +189,7 @@ impl HidEvents {
     }
 
     fn push(&self, endpoint: &'static str, data: Vec<u8>) {
-        let mut reports = self.reports.lock().unwrap();
+        let mut reports = self.reports.lock();
         if reports.len() == EVENT_QUEUE_CAPACITY {
             reports.pop_front();
             log::debug!("[HidTransport] event queue full; dropping oldest event");
@@ -208,7 +209,7 @@ impl HidEvents {
     }
 
     fn drain(&self, limit: usize) -> Vec<TransportEvent> {
-        let mut reports = self.reports.lock().unwrap();
+        let mut reports = self.reports.lock();
         let count = reports.len().min(limit);
         let events = reports.drain(..count).collect();
         let reports_remaining = !reports.is_empty();
@@ -316,7 +317,7 @@ pub struct HidTransport {
     events: Arc<HidEvents>,
     primary_path: Arc<str>,
     companion_path: Option<Arc<str>>,
-    event_listener_started: Arc<StdMutex<bool>>,
+    event_listener_started: Arc<SyncMutex<bool>>,
     report_size: Option<usize>,
     timeout_ms: i32,
     /// When true, writes use `send_feature_report()` (HIDIOCSFEATURE) instead of
@@ -387,7 +388,7 @@ impl HidTransport {
             events: Arc::new(HidEvents::new()),
             primary_path: Arc::from(path),
             companion_path: None,
-            event_listener_started: Arc::new(StdMutex::new(false)),
+            event_listener_started: Arc::new(SyncMutex::new(false)),
             report_size,
             timeout_ms,
             use_feature_report,
@@ -421,7 +422,7 @@ impl HidTransport {
             primary_path: Arc::from(primary_path),
             companion_path: (!companion_path.is_empty() && companion_path != primary_path)
                 .then(|| Arc::from(companion_path)),
-            event_listener_started: Arc::new(StdMutex::new(false)),
+            event_listener_started: Arc::new(SyncMutex::new(false)),
             report_size,
             timeout_ms,
             use_feature_report,
@@ -438,7 +439,7 @@ impl HidTransport {
             .chain(state.companion.iter())
             .map(|io| Arc::clone(&io.read_dev))
             .collect();
-        let listener_started = *self.event_listener_started.lock().unwrap();
+        let listener_started = *self.event_listener_started.lock();
         let events = (!listener_started).then(|| Arc::clone(&self.events));
         let drained = tokio::task::spawn_blocking(move || -> Result<usize> {
             let mut buf = vec![0u8; INPUT_REPORT_MAX];
@@ -475,7 +476,7 @@ impl HidTransport {
     }
 
     fn start_event_listener(&self) -> Result<()> {
-        let mut started = self.event_listener_started.lock().unwrap();
+        let mut started = self.event_listener_started.lock();
         if *started {
             log::trace!(
                 "[HidTransport] event listener already started for {}",
@@ -723,7 +724,7 @@ impl HidTransportTrait for HidTransport {
         // preserve an unsolicited report encountered by a request read. Once
         // active, the listener receives its own copy; deferring the request
         // handle's copy would dispatch the same event twice.
-        if !*self.event_listener_started.lock().unwrap() {
+        if !*self.event_listener_started.lock() {
             self.events.defer(data.to_vec());
         }
         Ok(())

@@ -151,7 +151,7 @@ async fn build_and_register(app: &Arc<AppState>, manifest: PluginManifest) -> Di
 
     // Created before the transport opens, so `OpeningTransport` is real — if
     // connect fails, this Arc is simply dropped unobserved.
-    let runtime_state = Arc::new(std::sync::Mutex::new(
+    let runtime_state = Arc::new(parking_lot::Mutex::new(
         crate::domain::plugin::engine::device::RuntimeState::OpeningTransport,
     ));
 

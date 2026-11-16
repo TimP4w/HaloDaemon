@@ -45,19 +45,19 @@ struct SubscriptionState {
 /// Per-client one-shot subscription flags, shared across clones of a handle so a
 /// re-subscribe to the same engine topic doesn't spawn a duplicate forwarder.
 pub struct Subscriptions {
-    lifecycle: std::sync::Mutex<SubscriptionState>,
+    lifecycle: parking_lot::Mutex<SubscriptionState>,
     lcd_lease: tokio::sync::watch::Sender<LeaseState>,
     lcd_preview: tokio::sync::watch::Sender<Option<Arc<Vec<u8>>>>,
-    tasks: std::sync::Mutex<Vec<tokio::task::JoinHandle<()>>>,
+    tasks: parking_lot::Mutex<Vec<tokio::task::JoinHandle<()>>>,
 }
 
 impl Default for Subscriptions {
     fn default() -> Self {
         Self {
-            lifecycle: std::sync::Mutex::new(SubscriptionState::default()),
+            lifecycle: parking_lot::Mutex::new(SubscriptionState::default()),
             lcd_lease: tokio::sync::watch::channel(LeaseState::Unsubscribed).0,
             lcd_preview: tokio::sync::watch::channel(None).0,
-            tasks: std::sync::Mutex::new(Vec::new()),
+            tasks: parking_lot::Mutex::new(Vec::new()),
         }
     }
 }
@@ -114,7 +114,7 @@ impl ClientHandle {
 
     /// Claim the canvas subscription; returns `true` only on the first call.
     pub fn try_subscribe_canvas(&self) -> bool {
-        let mut lifecycle = self.subs.lifecycle.lock().unwrap();
+        let mut lifecycle = self.subs.lifecycle.lock();
         if lifecycle.canvas_task || lifecycle.closing {
             return false;
         }
@@ -124,7 +124,7 @@ impl ClientHandle {
 
     /// Claim the LCD-engine subscription; returns `true` only on the first call.
     pub fn try_subscribe_lcd(&self) -> bool {
-        let mut lifecycle = self.subs.lifecycle.lock().unwrap();
+        let mut lifecycle = self.subs.lifecycle.lock();
         if lifecycle.lcd_task || lifecycle.closing {
             return false;
         }
@@ -137,7 +137,7 @@ impl ClientHandle {
         let active = LeaseState::Active {
             last_keepalive: tokio::time::Instant::now(),
         };
-        if self.subs.lifecycle.lock().unwrap().closing {
+        if self.subs.lifecycle.lock().closing {
             return;
         }
         self.subs.lcd_lease.send_replace(active);
@@ -162,23 +162,23 @@ impl ClientHandle {
 
     /// Register a spawned engine-subscription forwarder as owned by this client.
     pub fn track_subscription(&self, task: tokio::task::JoinHandle<()>) {
-        let lifecycle = self.subs.lifecycle.lock().unwrap();
+        let lifecycle = self.subs.lifecycle.lock();
         if lifecycle.closing {
             task.abort();
             return;
         }
-        self.subs.tasks.lock().unwrap().push(task);
+        self.subs.tasks.lock().push(task);
     }
 
     fn track_task(&self, task: tokio::task::JoinHandle<()>) {
-        self.subs.tasks.lock().unwrap().push(task);
+        self.subs.tasks.lock().push(task);
     }
 
     /// Abort every tracked subscription task; called once at client teardown.
     pub async fn close(&self) {
-        self.subs.lifecycle.lock().unwrap().closing = true;
+        self.subs.lifecycle.lock().closing = true;
         self.subs.lcd_lease.send_replace(LeaseState::Expired);
-        let tasks: Vec<_> = self.subs.tasks.lock().unwrap().drain(..).collect();
+        let tasks: Vec<_> = self.subs.tasks.lock().drain(..).collect();
         for task in &tasks {
             task.abort();
         }
@@ -1111,7 +1111,7 @@ mod handle_tests {
 
         handle.close().await;
 
-        assert!(handle.subs.tasks.lock().unwrap().is_empty());
+        assert!(handle.subs.tasks.lock().is_empty());
         assert!(!handle.try_subscribe_canvas());
         assert!(!handle.try_subscribe_lcd());
         let late = tokio::spawn(std::future::pending::<()>());

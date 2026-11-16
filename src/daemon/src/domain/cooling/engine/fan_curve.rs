@@ -141,7 +141,7 @@ const SENSOR_GRACE: std::time::Duration = std::time::Duration::from_secs(10);
 
 pub struct FanCurveEngine {
     app_state: Arc<AppState>,
-    per_fan: std::sync::Mutex<HashMap<String, PerFanState>>,
+    per_fan: parking_lot::Mutex<HashMap<String, PerFanState>>,
 }
 
 #[derive(Clone)]
@@ -193,14 +193,9 @@ fn log_status_changes(
     }
 }
 
-// Non-async lock helpers — MutexGuard must not cross .await.
 impl FanCurveEngine {
-    fn lock_mutex<T>(mu: &std::sync::Mutex<T>) -> std::sync::MutexGuard<'_, T> {
-        mu.lock().unwrap_or_else(|e| e.into_inner())
-    }
-
     fn update_control_temp(&self, fan_id: &str, sensor_value: f32) -> f32 {
-        let mut map = Self::lock_mutex(&self.per_fan);
+        let mut map = self.per_fan.lock();
         let state = map.entry(fan_id.to_string()).or_default();
         state.sensor_missing_since = None;
         let eff = hysteresis_temp(state.control_temp, sensor_value);
@@ -210,21 +205,22 @@ impl FanCurveEngine {
 
     fn sensor_missing_within_grace(&self, fan_id: &str) -> bool {
         let now = std::time::Instant::now();
-        let mut map = Self::lock_mutex(&self.per_fan);
+        let mut map = self.per_fan.lock();
         let state = map.entry(fan_id.to_string()).or_default();
         let since = *state.sensor_missing_since.get_or_insert(now);
         now.duration_since(since) < SENSOR_GRACE
     }
 
     fn clear_missing_device(&self, fan_id: &str) {
-        Self::lock_mutex(&self.per_fan)
+        self.per_fan
+            .lock()
             .entry(fan_id.to_string())
             .or_default()
             .missing_device_ticks = 0;
     }
 
     fn record_missing_device(&self, fan_id: &str) {
-        let mut map = Self::lock_mutex(&self.per_fan);
+        let mut map = self.per_fan.lock();
         let state = map.entry(fan_id.to_string()).or_default();
         state.missing_device_ticks += 1;
         if should_log_missing_device(state.missing_device_ticks) {
@@ -235,7 +231,7 @@ impl FanCurveEngine {
     /// Record a stall tick; returns `(should_notify, elapsed_secs)`.
     fn record_stall(&self, fan_id: &str) -> (bool, u64) {
         const STALL_SECS: u64 = 10;
-        let mut map = Self::lock_mutex(&self.per_fan);
+        let mut map = self.per_fan.lock();
         let entry = map
             .entry(fan_id.to_string())
             .or_default()
@@ -253,13 +249,13 @@ impl FanCurveEngine {
     }
 
     fn clear_stall(&self, fan_id: &str) {
-        if let Some(state) = Self::lock_mutex(&self.per_fan).get_mut(fan_id) {
+        if let Some(state) = self.per_fan.lock().get_mut(fan_id) {
             state.stall = None;
         }
     }
 
     fn clear_failsafe_error(&self, fan_id: &str) {
-        if let Some(state) = Self::lock_mutex(&self.per_fan).get_mut(fan_id) {
+        if let Some(state) = self.per_fan.lock().get_mut(fan_id) {
             state.failsafe_error_logged = false;
         }
     }
@@ -267,7 +263,7 @@ impl FanCurveEngine {
     /// Returns `true` if this is the first error of the current episode
     /// (caller should log the warning).
     fn mark_failsafe_error(&self, fan_id: &str) -> bool {
-        let mut map = Self::lock_mutex(&self.per_fan);
+        let mut map = self.per_fan.lock();
         let state = map.entry(fan_id.to_string()).or_default();
         let first = !state.failsafe_error_logged;
         state.failsafe_error_logged = true;
@@ -275,7 +271,8 @@ impl FanCurveEngine {
     }
 
     fn presence_snapshot(&self, key: &str) -> (Presence, Option<ProbeState>) {
-        Self::lock_mutex(&self.per_fan)
+        self.per_fan
+            .lock()
             .get(key)
             .map_or((Presence::Unknown, None), |state| {
                 (state.presence, state.probe)
@@ -283,14 +280,14 @@ impl FanCurveEngine {
     }
 
     fn set_presence(&self, key: &str, presence: Presence) {
-        let mut map = Self::lock_mutex(&self.per_fan);
+        let mut map = self.per_fan.lock();
         let state = map.entry(key.to_string()).or_default();
         state.presence = presence;
         state.probe = None;
     }
 
     fn begin_probe(&self, key: &str, saved_duty: u8) {
-        let mut map = Self::lock_mutex(&self.per_fan);
+        let mut map = self.per_fan.lock();
         let state = map.entry(key.to_string()).or_default();
         state.presence = Presence::Probing;
         state.probe = Some(ProbeState {
@@ -301,7 +298,7 @@ impl FanCurveEngine {
 
     #[cfg(test)]
     fn seed_presence(&self, fan_id: &str, presence: Presence, probe: Option<ProbeState>) {
-        let mut map = Self::lock_mutex(&self.per_fan);
+        let mut map = self.per_fan.lock();
         let state = map.entry(curve_key(fan_id, "default")).or_default();
         state.presence = presence;
         state.probe = probe;
@@ -309,7 +306,8 @@ impl FanCurveEngine {
 
     #[cfg(test)]
     fn seed_stall(&self, fan_id: &str, since: std::time::Instant, notified: bool) {
-        Self::lock_mutex(&self.per_fan)
+        self.per_fan
+            .lock()
             .entry(fan_id.to_string())
             .or_default()
             .stall = Some(StallState { since, notified });
@@ -317,7 +315,8 @@ impl FanCurveEngine {
 
     #[cfg(test)]
     fn expire_sensor_grace(&self, fan_id: &str) {
-        Self::lock_mutex(&self.per_fan)
+        self.per_fan
+            .lock()
             .entry(fan_id.to_string())
             .or_default()
             .sensor_missing_since = std::time::Instant::now().checked_sub(SENSOR_GRACE);
@@ -325,7 +324,8 @@ impl FanCurveEngine {
 
     #[cfg(test)]
     fn missing_ticks(&self, fan_id: &str) -> u32 {
-        Self::lock_mutex(&self.per_fan)
+        self.per_fan
+            .lock()
             .get(fan_id)
             .map_or(0, |state| state.missing_device_ticks)
     }
@@ -341,7 +341,7 @@ impl FanCurveEngine {
     pub fn new(app_state: Arc<AppState>) -> Arc<Self> {
         Arc::new(Self {
             app_state,
-            per_fan: std::sync::Mutex::new(HashMap::new()),
+            per_fan: parking_lot::Mutex::new(HashMap::new()),
         })
     }
 
@@ -1408,7 +1408,7 @@ mod tests {
         // target = 10% ≤ 20% → not considered a stall
         let status = engine.check_stall("fan_0", &device, 10.0).await;
         assert_eq!(status, FanCurveStatus::Ok);
-        assert!(engine.per_fan.lock().unwrap()["fan_0"].stall.is_none());
+        assert!(engine.per_fan.lock()["fan_0"].stall.is_none());
     }
 
     #[tokio::test]
@@ -1430,7 +1430,7 @@ mod tests {
         assert_eq!(status, FanCurveStatus::FanStalled);
         // notified flag must stay true
         assert!(
-            engine.per_fan.lock().unwrap()["fan_0"]
+            engine.per_fan.lock()["fan_0"]
                 .stall
                 .as_ref()
                 .unwrap()
@@ -1456,7 +1456,7 @@ mod tests {
         let device: Arc<dyn crate::domain::device::Device> = fan;
         let status = engine.check_stall("fan_0", &device, 50.0).await;
         assert_eq!(status, FanCurveStatus::Ok);
-        assert!(engine.per_fan.lock().unwrap()["fan_0"].stall.is_none());
+        assert!(engine.per_fan.lock()["fan_0"].stall.is_none());
     }
 
     #[tokio::test]
@@ -1478,7 +1478,7 @@ mod tests {
         let device: Arc<dyn crate::domain::device::Device> = fan;
         let status = engine.check_stall("fan_0", &device, 20.0).await;
         assert_eq!(status, FanCurveStatus::Ok);
-        assert!(engine.per_fan.lock().unwrap()["fan_0"].stall.is_none());
+        assert!(engine.per_fan.lock()["fan_0"].stall.is_none());
     }
 
     #[tokio::test]
@@ -1500,7 +1500,7 @@ mod tests {
         let device: Arc<dyn crate::domain::device::Device> = fan;
         let _ = engine.check_stall("fan_0", &device, 50.0).await;
         assert!(
-            engine.per_fan.lock().unwrap()["fan_0"]
+            engine.per_fan.lock()["fan_0"]
                 .stall
                 .as_ref()
                 .unwrap()
@@ -1524,7 +1524,7 @@ mod tests {
         let status = engine.check_stall("fan_0", &device, 50.0).await;
         assert_eq!(status, FanCurveStatus::Ok);
         assert!(
-            !engine.per_fan.lock().unwrap()["fan_0"]
+            !engine.per_fan.lock()["fan_0"]
                 .stall
                 .as_ref()
                 .unwrap()

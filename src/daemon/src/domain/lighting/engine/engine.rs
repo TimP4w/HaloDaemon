@@ -88,7 +88,7 @@ pub struct RgbEngine {
     /// One in-flight write task per device. A device whose previous write is
     /// still running has its frame dropped this tick rather than queued, so a
     /// slow (e.g. rate-limited) device never paces the rest of the canvas.
-    write_slots: std::sync::Mutex<HashMap<WriteSlotKey, tokio::task::JoinHandle<()>>>,
+    write_slots: parking_lot::Mutex<HashMap<WriteSlotKey, tokio::task::JoinHandle<()>>>,
     tick_cache: Mutex<Option<TickStateCache>>,
     wake: Notify,
 }
@@ -324,7 +324,7 @@ impl RgbEngine {
             frame_tx,
             engine_mode_intent: Mutex::new(HashMap::new()),
             preview_srgb_buf: Mutex::new(Vec::new()),
-            write_slots: std::sync::Mutex::new(HashMap::new()),
+            write_slots: parking_lot::Mutex::new(HashMap::new()),
             tick_cache: Mutex::new(None),
             wake: Notify::new(),
         })
@@ -969,7 +969,7 @@ impl RgbEngine {
     /// than queued, so awaiting a slow (e.g. rate-limited) device never paces
     /// the rest of the canvas — the freshest frame always wins.
     fn dispatch_writes(&self, pending: PendingWrites) {
-        let mut slots = self.write_slots.lock().expect("write slots poisoned");
+        let mut slots = self.write_slots.lock();
         slots.retain(|_, handle| !handle.is_finished());
         let mut groups: WriteGroups = HashMap::new();
         for (id, (dev, guard, channels)) in pending {
@@ -1029,7 +1029,6 @@ impl RgbEngine {
         let handles: Vec<_> = self
             .write_slots
             .lock()
-            .expect("write slots poisoned")
             .drain()
             .map(|(_, handle)| handle)
             .collect();
@@ -1067,8 +1066,8 @@ mod tests {
     use halod_shared::types::{
         EffectParamValue, LedPosition, LightingChannel, LightingDescriptor, ZoneTopology,
     };
+    use parking_lot::Mutex as StdMutex;
     use std::sync::atomic::{AtomicBool, AtomicUsize, Ordering};
-    use std::sync::Mutex as StdMutex;
 
     struct MockRgbDevice {
         device_id: String,
@@ -1129,7 +1128,7 @@ mod tests {
 
         fn new_engine_mode(device_id: &str, channel_id: &str, fail_revert: bool) -> Arc<Self> {
             let dev = Self::new(device_id, channel_id, 3, false);
-            *dev.rgb_state.lock().unwrap() = Some(LightingState::Engine);
+            *dev.rgb_state.lock() = Some(LightingState::Engine);
             dev.fail_static_apply.store(fail_revert, Ordering::SeqCst);
             dev
         }
@@ -1189,7 +1188,7 @@ mod tests {
             let fail = matches!(state, LightingState::Static { .. })
                 && self.fail_static_apply.load(Ordering::SeqCst);
             if !(fail && self.skip_record_on_fail.load(Ordering::SeqCst)) {
-                *self.rgb_state.lock().unwrap() = Some(state);
+                *self.rgb_state.lock() = Some(state);
             }
             if fail {
                 anyhow::bail!("simulated static apply error");
@@ -1197,7 +1196,7 @@ mod tests {
             Ok(())
         }
         fn current_state(&self) -> Option<LightingState> {
-            self.rgb_state.lock().unwrap().clone()
+            self.rgb_state.lock().clone()
         }
         async fn write_frame(&self, _zone_id: &str, bytes: &[u8]) -> Result<()> {
             let colors: Vec<RgbColor> = bytes
@@ -1211,8 +1210,8 @@ mod tests {
                 })
                 .collect();
             self.write_count.fetch_add(1, Ordering::SeqCst);
-            *self.last_colors.lock().unwrap() = Some(colors.to_vec());
-            *self.last_frame.lock().unwrap() = colors.to_vec();
+            *self.last_colors.lock() = Some(colors.to_vec());
+            *self.last_frame.lock() = colors.to_vec();
             if self.fail_write {
                 anyhow::bail!("simulated write error");
             }
@@ -1563,7 +1562,7 @@ mod tests {
         );
         canvas.live.store(false, Ordering::SeqCst);
         let direct_dev = MockRgbDevice::new("dead1", "ring", 3, false);
-        *direct_dev.rgb_state.lock().unwrap() = Some(LightingState::DirectEffect {
+        *direct_dev.rgb_state.lock() = Some(LightingState::DirectEffect {
             id: "breathing".into(),
             params: HashMap::new(),
         });
@@ -1613,7 +1612,7 @@ mod tests {
     #[tokio::test]
     async fn sync_tick_state_collects_direct_effect_devices() {
         let dev = MockRgbDevice::new("dev0", "ring", 3, false);
-        *dev.rgb_state.lock().unwrap() = Some(LightingState::DirectEffect {
+        *dev.rgb_state.lock() = Some(LightingState::DirectEffect {
             id: "breathing".into(),
             params: HashMap::new(),
         });
@@ -1647,7 +1646,7 @@ mod tests {
     #[tokio::test]
     async fn disabled_direct_effect_device_is_never_collected_or_written() {
         let dev = MockRgbDevice::new("dev0", "ring", 3, false);
-        *dev.rgb_state.lock().unwrap() = Some(LightingState::DirectEffect {
+        *dev.rgb_state.lock() = Some(LightingState::DirectEffect {
             id: "breathing".into(),
             params: HashMap::new(),
         });
@@ -1673,7 +1672,7 @@ mod tests {
     #[tokio::test]
     async fn tick_direct_effect_writes_frame() {
         let dev = MockRgbDevice::new("dev0", "ring", 4, false);
-        *dev.rgb_state.lock().unwrap() = Some(LightingState::DirectEffect {
+        *dev.rgb_state.lock() = Some(LightingState::DirectEffect {
             id: "breathing".into(),
             params: HashMap::new(),
         });
@@ -1757,7 +1756,7 @@ mod tests {
         let dev = MockRgbDevice::new("dev0", "ring", 2, false);
         let mut params = HashMap::new();
         params.insert("sensor".into(), EffectParamValue::Str("temp1".into()));
-        *dev.rgb_state.lock().unwrap() = Some(LightingState::DirectEffect {
+        *dev.rgb_state.lock() = Some(LightingState::DirectEffect {
             id: "engine_sensor_fx:probe".to_string(),
             params,
         });
@@ -1771,7 +1770,7 @@ mod tests {
         engine.tick(0.1, 1.0, 0).await;
         engine.drain_writes().await;
 
-        let colors = dev.last_colors.lock().unwrap().clone().unwrap();
+        let colors = dev.last_colors.lock().clone().unwrap();
         // 80.0 / 100.0 = 0.8, gamma-encoded on the way out.
         let expected_r = linear_to_led(0.8, LED_GAMMA);
         assert!(
@@ -1783,7 +1782,7 @@ mod tests {
     #[tokio::test]
     async fn tick_unknown_direct_effect_falls_back_to_off_and_caches() {
         let dev = MockRgbDevice::new("dev0", "ring", 4, false);
-        *dev.rgb_state.lock().unwrap() = Some(LightingState::DirectEffect {
+        *dev.rgb_state.lock() = Some(LightingState::DirectEffect {
             id: "sensor_gradient".into(),
             params: HashMap::new(),
         });
@@ -1796,7 +1795,7 @@ mod tests {
         engine.drain_writes().await;
 
         assert!(dev.write_count.load(Ordering::SeqCst) >= 2);
-        let frame = dev.last_frame.lock().unwrap().clone();
+        let frame = dev.last_frame.lock().clone();
         assert_eq!(frame.len(), 4);
         assert!(frame.iter().all(|c| (c.r, c.g, c.b) == (0, 0, 0)));
         // Cached under the same key, so the unknown id is built (and warned) once.
@@ -1807,7 +1806,7 @@ mod tests {
     #[tokio::test]
     async fn tick_prunes_direct_effect_when_reverted() {
         let dev = MockRgbDevice::new("dev0", "ring", 4, false);
-        *dev.rgb_state.lock().unwrap() = Some(LightingState::DirectEffect {
+        *dev.rgb_state.lock() = Some(LightingState::DirectEffect {
             id: "breathing".into(),
             params: HashMap::new(),
         });
@@ -1819,7 +1818,7 @@ mod tests {
         let after_first = dev.write_count.load(Ordering::SeqCst);
         assert!(after_first >= 1);
 
-        *dev.rgb_state.lock().unwrap() = Some(LightingState::Static {
+        *dev.rgb_state.lock() = Some(LightingState::Static {
             color: RgbColor { r: 1, g: 2, b: 3 },
         });
         engine.tick(0.2, 0.05, 1).await;
@@ -1857,7 +1856,7 @@ mod tests {
         placed.placed_zones.push(make_zone("dev0", "ring"));
         engine.reconcile_engine_mode(&placed).await;
 
-        *dev.rgb_state.lock().unwrap() = Some(LightingState::DirectEffect {
+        *dev.rgb_state.lock() = Some(LightingState::DirectEffect {
             id: "breathing".into(),
             params: HashMap::new(),
         });
@@ -1935,7 +1934,7 @@ mod tests {
         engine.drain_writes().await;
         assert_eq!(dev.batch_count.load(Ordering::SeqCst), 1);
         assert_eq!(dev.write_count.load(Ordering::SeqCst), 1);
-        assert_eq!(dev.last_frame.lock().unwrap().len(), 3);
+        assert_eq!(dev.last_frame.lock().len(), 3);
     }
 
     #[tokio::test]
@@ -1951,7 +1950,7 @@ mod tests {
                 vec![("ring".into(), solid_colors(3))],
             ),
         );
-        *dev.rgb_state.lock().unwrap() = Some(LightingState::Static {
+        *dev.rgb_state.lock() = Some(LightingState::Static {
             color: RgbColor::default(),
         });
 
@@ -1971,7 +1970,7 @@ mod tests {
                 .into_iter()
                 .collect(),
         };
-        *dev.rgb_state.lock().unwrap() = Some(LightingState::DirectEffect {
+        *dev.rgb_state.lock() = Some(LightingState::DirectEffect {
             id: original.effect_id.clone(),
             params: original.params.clone(),
         });
@@ -1984,7 +1983,7 @@ mod tests {
                 vec![("ring".into(), solid_colors(3))],
             ),
         );
-        *dev.rgb_state.lock().unwrap() = Some(LightingState::DirectEffect {
+        *dev.rgb_state.lock() = Some(LightingState::DirectEffect {
             id: "breathing".into(),
             params: [("speed".into(), EffectParamValue::Float(2.0))]
                 .into_iter()
@@ -2009,7 +2008,6 @@ mod tests {
         engine
             .write_slots
             .lock()
-            .unwrap()
             .insert(WriteSlotKey::Device("dev0".into()), handle);
 
         let mut pending: PendingWrites = HashMap::new();
@@ -2045,7 +2043,6 @@ mod tests {
         engine
             .write_slots
             .lock()
-            .unwrap()
             .insert(WriteSlotKey::Shared(42), handle);
 
         let mut pending: PendingWrites = HashMap::new();
@@ -2116,7 +2113,7 @@ mod tests {
         tokio::task::yield_now().await;
         tokio::time::advance(IDLE_GRACE + Duration::from_secs(1)).await;
         tokio::task::yield_now().await;
-        *dev.rgb_state.lock().unwrap() = Some(LightingState::DirectEffect {
+        *dev.rgb_state.lock() = Some(LightingState::DirectEffect {
             id: "breathing".into(),
             params: HashMap::new(),
         });
@@ -2155,7 +2152,7 @@ mod tests {
     #[tokio::test]
     async fn tick_reports_work_with_a_direct_effect_device() {
         let dev = MockRgbDevice::new("dev0", "ring", 4, false);
-        *dev.rgb_state.lock().unwrap() = Some(LightingState::DirectEffect {
+        *dev.rgb_state.lock() = Some(LightingState::DirectEffect {
             id: "breathing".into(),
             params: HashMap::new(),
         });
@@ -2251,7 +2248,7 @@ mod tests {
         engine.tick(0.0, 0.016, 0).await;
         engine.drain_writes().await;
 
-        let colors = dev.last_colors.lock().unwrap().clone().unwrap();
+        let colors = dev.last_colors.lock().clone().unwrap();
         // The pixmap buffer holds linear-light bytes; the sampler gamma-encodes
         // on read (`linear_to_led`), so the raw fill (9,8,7) comes out as this.
         let expected = RgbColor {
@@ -2270,7 +2267,7 @@ mod tests {
         let app = app_with(vec![]);
         let _tmp = load_test_effect_plugin(&app);
         let dev = MockRgbDevice::new("dev0", "ring", 3, false);
-        *dev.rgb_state.lock().unwrap() = Some(LightingState::DirectEffect {
+        *dev.rgb_state.lock() = Some(LightingState::DirectEffect {
             id: "engine_test_fx:ramp".to_string(),
             params: HashMap::new(),
         });
@@ -2283,7 +2280,7 @@ mod tests {
         engine.tick(0.0, 0.016, 0).await;
         engine.drain_writes().await;
 
-        let colors = dev.last_colors.lock().unwrap().clone().unwrap();
+        let colors = dev.last_colors.lock().clone().unwrap();
         assert_eq!(colors.len(), 3);
         // led_effect_ramp returns r=p (chain fraction), gamma-encoded on the way out.
         assert_eq!(colors[0].r, 0);

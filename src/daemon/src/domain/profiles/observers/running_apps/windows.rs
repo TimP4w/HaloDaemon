@@ -124,8 +124,9 @@ fn process_icon_map_path() -> Option<PathBuf> {
 
 /// In-process `process_name -> icon_path` cache, seeded from disk on first use
 /// so `resolve_icons` (called per broadcast) avoids re-parsing the JSON file.
-fn process_icon_cache() -> &'static std::sync::Mutex<std::collections::HashMap<String, String>> {
-    use std::sync::{Mutex, OnceLock};
+fn process_icon_cache() -> &'static parking_lot::Mutex<std::collections::HashMap<String, String>> {
+    use parking_lot::Mutex;
+    use std::sync::OnceLock;
     static CACHE: OnceLock<Mutex<std::collections::HashMap<String, String>>> = OnceLock::new();
     CACHE.get_or_init(|| {
         let map = process_icon_map_path()
@@ -139,7 +140,7 @@ fn process_icon_cache() -> &'static std::sync::Mutex<std::collections::HashMap<S
 /// Upsert non-empty process -> icon entries into the in-memory cache, persisting
 /// to disk only when something changed.
 fn cache_process_icons(apps: &[RunningApp]) {
-    let mut map = process_icon_cache().lock().unwrap();
+    let mut map = process_icon_cache().lock();
     let mut changed = false;
     for a in apps {
         if a.icon_name.is_empty() {
@@ -159,7 +160,7 @@ fn cache_process_icons(apps: &[RunningApp]) {
 
 /// Resolve icons for the given process names from the in-memory cache.
 pub(super) fn resolve_icons(process_names: &[String]) -> std::collections::HashMap<String, String> {
-    let map = process_icon_cache().lock().unwrap();
+    let map = process_icon_cache().lock();
     process_names
         .iter()
         .filter_map(|name| map.get(name).map(|icon| (name.clone(), icon.clone())))

@@ -2,13 +2,12 @@
 //! Rotating daemon file logger. Mirrors the broker's bounded policy while
 //! writing to the daemon's user-writable config directory.
 
+use log::{Level, LevelFilter, Metadata, Record};
+use parking_lot::Mutex;
 use std::fs::{File, OpenOptions};
 use std::io::Write;
 use std::path::{Path, PathBuf};
 use std::sync::atomic::{AtomicBool, Ordering};
-use std::sync::Mutex;
-
-use log::{Level, LevelFilter, Metadata, Record};
 
 /// Diagnostic escape hatch: `HALOD_TRACE=1` lifts the Debug clamp for one run so
 /// `trace!` records reach the file/stderr. Off by default; never set in normal use.
@@ -93,15 +92,13 @@ impl log::Log for FileLogger {
             record.target(),
             record.args()
         );
-        if let Ok(mut guard) = self.state.lock() {
-            if let Some(state) = guard.as_mut() {
-                let _ = state.file.write_all(line.as_bytes());
-                let _ = state.file.flush();
-                state.written += line.len() as u64;
-                if should_rotate(state.written, MAX_LOG_BYTES) {
-                    if let Some(fresh) = self.rotate() {
-                        *state = fresh;
-                    }
+        if let Some(state) = self.state.lock().as_mut() {
+            let _ = state.file.write_all(line.as_bytes());
+            let _ = state.file.flush();
+            state.written += line.len() as u64;
+            if should_rotate(state.written, MAX_LOG_BYTES) {
+                if let Some(fresh) = self.rotate() {
+                    *state = fresh;
                 }
             }
         }
@@ -109,10 +106,8 @@ impl log::Log for FileLogger {
     }
 
     fn flush(&self) {
-        if let Ok(mut guard) = self.state.lock() {
-            if let Some(state) = guard.as_mut() {
-                let _ = state.file.flush();
-            }
+        if let Some(state) = self.state.lock().as_mut() {
+            let _ = state.file.flush();
         }
     }
 }

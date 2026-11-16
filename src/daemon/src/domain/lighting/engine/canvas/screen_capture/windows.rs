@@ -1,7 +1,8 @@
 // SPDX-License-Identifier: GPL-3.0-or-later
+use parking_lot::Mutex;
 use std::sync::{
     atomic::{AtomicBool, Ordering},
-    Arc, Mutex,
+    Arc,
 };
 
 use super::{FrameRotation, MonitorInfo, RawFrame};
@@ -268,14 +269,13 @@ fn run_dxgi_capture(
                                 std::slice::from_raw_parts(mapped.pData as *const u8, byte_len)
                                     .to_vec();
                             context.Unmap(staging_ref, 0);
-                            *frame_slot.lock().unwrap_or_else(|e| e.into_inner()) =
-                                Some(RawFrame {
-                                    width: staging_w,
-                                    height: staging_h,
-                                    stride,
-                                    data: Arc::new(raw),
-                                    rotation,
-                                });
+                            *frame_slot.lock() = Some(RawFrame {
+                                width: staging_w,
+                                height: staging_h,
+                                stride,
+                                data: Arc::new(raw),
+                                rotation,
+                            });
                             last = now;
                         }
                     }

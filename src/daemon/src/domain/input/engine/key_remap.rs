@@ -444,7 +444,7 @@ mod tests {
             "restore point must be the initial DPI"
         );
         assert_eq!(
-            *dev.dpi_direct_last.as_ref().unwrap().lock().unwrap(),
+            *dev.dpi_direct_last.as_ref().unwrap().lock(),
             Some(1600),
             "set_dpi_direct must have been called with the target DPI"
         );
@@ -477,7 +477,7 @@ mod tests {
 
         assert!(held.is_empty(), "held entry must be removed on release");
         assert_eq!(
-            *dev.dpi_direct_last.as_ref().unwrap().lock().unwrap(),
+            *dev.dpi_direct_last.as_ref().unwrap().lock(),
             Some(800),
             "set_dpi_direct must restore the saved DPI"
         );
@@ -522,7 +522,7 @@ mod tests {
             .await;
 
         // External change to the "live" hardware DPI after the press.
-        *dev.dpi_direct_last.as_ref().unwrap().lock().unwrap() = Some(3200);
+        *dev.dpi_direct_last.as_ref().unwrap().lock() = Some(3200);
 
         engine
             .handle_button(
@@ -535,7 +535,7 @@ mod tests {
             .await;
 
         assert_eq!(
-            *dev.dpi_direct_last.as_ref().unwrap().lock().unwrap(),
+            *dev.dpi_direct_last.as_ref().unwrap().lock(),
             Some(800),
             "release must restore the held app-state value, not the live hardware value"
         );
@@ -594,10 +594,7 @@ mod tests {
             held.is_empty(),
             "retry must succeed and clear the pending entry"
         );
-        assert_eq!(
-            *dev.dpi_direct_last.as_ref().unwrap().lock().unwrap(),
-            Some(800)
-        );
+        assert_eq!(*dev.dpi_direct_last.as_ref().unwrap().lock(), Some(800));
     }
 
     #[tokio::test]
