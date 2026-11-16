@@ -1,12 +1,10 @@
 // SPDX-License-Identifier: GPL-3.0-or-later
-//! Plugin-declared config-field editing, shared by the Plugins screen (a
-//! device/effect plugin's own settings) and the Integrations screen (an
-//! integration's host/port/token, the only place those are editable — see
-//! `screens::integrations`).
+//! Plugin-declared config-field editing for an integration's detail pane on
+//! the Plugins screen (host/port/token), shared by its setup flow and its
+//! connection section.
 
 use std::collections::HashMap;
 
-use egui::Stroke;
 use halod_shared::types::{PluginConfigField, PluginConfigFieldKind, PluginInfo, SerialPortInfo};
 
 use crate::ui::components::{self as widgets, ButtonKind};
@@ -92,28 +90,20 @@ pub fn config_section(
     p: &PluginInfo,
     edits: &mut HashMap<String, String>,
     serial_ports: &[SerialPortInfo],
+    save_label: &str,
     mut on_save: impl FnMut(HashMap<String, String>),
 ) {
-    widgets::caps_label(ui, &t!("plugins.settings"));
-    ui.add_space(theme::SPACE_4);
-
     config_fields_editor(ui, p, edits, serial_ports);
-
     ui.add_space(theme::SPACE_6);
-    let save = ui
-        .with_layout(egui::Layout::right_to_left(egui::Align::Center), |ui| {
-            widgets::button(
-                ui,
-                &t!("plugins.save_settings"),
-                ButtonKind::Primary,
-                egui::Vec2::new(140.0, 30.0),
-            )
-            .clicked()
-        })
-        .inner;
-    if save {
-        let values = config_values_to_send(edits, &p.config_fields);
-        on_save(values);
+    if widgets::button(
+        ui,
+        save_label,
+        ButtonKind::Secondary,
+        egui::Vec2::new(140.0, 30.0),
+    )
+    .clicked()
+    {
+        on_save(config_values_to_send(edits, &p.config_fields));
         for f in &p.config_fields {
             if f.secure {
                 edits.insert(f.key.clone(), String::new());
@@ -122,8 +112,40 @@ pub fn config_section(
     }
 }
 
-/// Render only the manifest fields. Setup modals reuse this and own their
-/// navigation buttons separately.
+const ROW_WEIGHT: usize = 3;
+
+fn field_weight(kind: PluginConfigFieldKind) -> usize {
+    match config_editor(kind) {
+        ConfigEditor::Port
+        | ConfigEditor::Number
+        | ConfigEditor::DurationMs
+        | ConfigEditor::Boolean => 1,
+        _ => 2,
+    }
+}
+
+/// Greedy packing of field weights into rows of at most [`ROW_WEIGHT`], so a
+/// host and its port share one line.
+fn pack_rows(weights: &[usize]) -> Vec<std::ops::Range<usize>> {
+    let mut rows = Vec::new();
+    let mut start = 0;
+    let mut used = 0;
+    for (i, w) in weights.iter().enumerate() {
+        if i > start && used + w > ROW_WEIGHT {
+            rows.push(start..i);
+            start = i;
+            used = 0;
+        }
+        used += w;
+    }
+    if start < weights.len() {
+        rows.push(start..weights.len());
+    }
+    rows
+}
+
+/// Render only the manifest fields as labelled inputs. Setup flows reuse this
+/// and own their navigation buttons separately.
 pub fn config_fields_editor(
     ui: &mut egui::Ui,
     p: &PluginInfo,
@@ -135,191 +157,121 @@ pub fn config_fields_editor(
     for f in &p.config_fields {
         groups.entry(f.category.clone()).or_default().push(f);
     }
-    egui::Frame::NONE
-        .fill(theme::INNER_BG)
-        .stroke(Stroke::new(1.0, theme::BORDER))
-        .corner_radius(theme::RADIUS_MD)
-        .inner_margin(egui::Margin::symmetric(14, 4))
-        .show(ui, |ui| {
-            let mut first = true;
-            for (category, fields) in &groups {
-                let visible: Vec<_> = fields
-                    .iter()
-                    .copied()
-                    .filter(|field| config_field_visible(field, edits))
-                    .collect();
-                if visible.is_empty() {
-                    continue;
+    for (category, fields) in &groups {
+        let visible: Vec<_> = fields
+            .iter()
+            .copied()
+            .filter(|field| config_field_visible(field, edits))
+            .collect();
+        if visible.is_empty() {
+            continue;
+        }
+        if !category.is_empty() {
+            widgets::section_label(ui, category);
+            ui.add_space(theme::SPACE_4);
+        }
+        let weights: Vec<usize> = visible.iter().map(|f| field_weight(f.kind)).collect();
+        for row in pack_rows(&weights) {
+            let total: usize = weights[row.clone()].iter().sum();
+            let gaps = (row.len() - 1) as f32 * theme::SPACE_6;
+            let unit = (ui.available_width() - gaps) / total as f32;
+            ui.horizontal_top(|ui| {
+                ui.spacing_mut().item_spacing.x = theme::SPACE_6;
+                for i in row {
+                    let width = unit * weights[i] as f32;
+                    ui.allocate_ui_with_layout(
+                        egui::vec2(width, 0.0),
+                        egui::Layout::top_down(egui::Align::Min),
+                        |ui| {
+                            ui.set_width(width);
+                            config_field(ui, p, visible[i], edits, serial_ports);
+                        },
+                    );
                 }
-                if !category.is_empty() {
-                    if !first {
-                        field_separator(ui);
-                    }
-                    ui.add_space(theme::SPACE_4);
-                    widgets::caps_label(ui, category);
-                }
-                for f in visible {
-                    if !first {
-                        field_separator(ui);
-                    }
-                    first = false;
-                    config_field_row(ui, p, f, edits, serial_ports);
-                }
-            }
-        });
+            });
+            ui.add_space(theme::SPACE_6);
+        }
+    }
 }
 
-/// One field laid out as a row: label on the left, padded input on the right.
-fn config_field_row(
+fn config_field(
     ui: &mut egui::Ui,
     p: &PluginInfo,
     f: &PluginConfigField,
     edits: &mut HashMap<String, String>,
     serial_ports: &[SerialPortInfo],
 ) {
-    let secret_set = f.secure && p.secret_set.get(&f.key).copied().unwrap_or(false);
-    const INPUT_COL: f32 = 220.0;
-    let height = if f.help.is_some() { 52.0 } else { 40.0 };
-    let (rect, _) = ui.allocate_exact_size(
-        egui::vec2(ui.available_width(), height),
-        egui::Sense::hover(),
-    );
-
-    let label_w = (rect.width() - INPUT_COL).max(120.0);
-    let measure = |ui: &egui::Ui, text: &str, font: egui::FontId| {
-        ui.painter()
-            .layout(text.to_owned(), font, theme::TEXT, label_w)
-            .size()
-            .y
-    };
-    let block_h = match &f.help {
-        Some(help) => {
-            measure(ui, &f.label, theme::body_md())
-                + theme::SPACE_1
-                + measure(ui, help, theme::body_sm())
+    widgets::field_label(ui, &f.label);
+    let width = ui.available_width();
+    let buf = edits.entry(f.key.clone()).or_default();
+    match (f.secure, config_editor(f.kind)) {
+        (false, ConfigEditor::Boolean) => {
+            let on = buf == "true";
+            if widgets::toggle(ui, on) != on {
+                *buf = (!on).to_string();
+            }
         }
-        None => measure(ui, &f.label, theme::body_md()),
-    };
-    let label_rect = egui::Rect::from_min_size(
-        egui::pos2(rect.left(), rect.center().y - block_h / 2.0),
-        egui::vec2(label_w, block_h),
-    );
-    let mut left = ui.new_child(
-        egui::UiBuilder::new()
-            .max_rect(label_rect)
-            .layout(egui::Layout::top_down(egui::Align::Min)),
-    );
-    left.label(
-        egui::RichText::new(&f.label)
-            .font(theme::body_md())
-            .color(theme::TEXT),
-    );
+        (false, ConfigEditor::Enum) => {
+            let options: Vec<(String, String)> =
+                f.options.iter().map(|o| (o.clone(), o.clone())).collect();
+            if let Some(v) =
+                widgets::combo_picker_full(ui, ("plugin_config", &f.key), &options, buf, None)
+            {
+                *buf = v;
+            }
+        }
+        (false, ConfigEditor::SerialPort) => {
+            // The current value stays the selected text so a stale/hand-typed
+            // by-id path survives an unplug; the free-text field covers ports
+            // that were never enumerated.
+            let selected = serial_ports
+                .iter()
+                .find(|port| &port.value == buf)
+                .map(|port| port.label.clone())
+                .unwrap_or_else(|| buf.clone());
+            egui::ComboBox::from_id_salt(("plugin_config", &f.key))
+                .selected_text(selected)
+                .width(width)
+                .show_ui(ui, |ui| {
+                    ui.add(
+                        egui::TextEdit::singleline(buf).hint_text("/dev/serial/by-id/… or COM3"),
+                    );
+                    if !serial_ports.is_empty() {
+                        ui.separator();
+                    }
+                    for port in serial_ports {
+                        ui.selectable_value(buf, port.value.clone(), &port.label);
+                    }
+                });
+        }
+        (secure, editor) => {
+            let secret_set = secure && p.secret_set.get(&f.key).copied().unwrap_or(false);
+            let hint = if secret_set {
+                t!("plugins.secret_set_hint").to_string()
+            } else if let Some(placeholder) = &f.placeholder {
+                placeholder.clone()
+            } else {
+                match editor {
+                    ConfigEditor::Number => "0",
+                    ConfigEditor::Host => "example.com",
+                    ConfigEditor::Port => "1–65535",
+                    ConfigEditor::Url => "https://example.com",
+                    ConfigEditor::DurationMs => "milliseconds",
+                    _ => "",
+                }
+                .to_owned()
+            };
+            widgets::text_field_ex(ui, buf, &hint, width, secure);
+        }
+    }
     if let Some(help) = &f.help {
-        left.add_space(theme::SPACE_1);
-        left.label(
+        ui.add_space(theme::SPACE_3);
+        ui.label(
             egui::RichText::new(help)
                 .font(theme::body_sm())
-                .color(theme::TEXT_FAINT),
+                .color(theme::TEXT_MUT),
         );
     }
-
-    let mut right = ui.new_child(
-        egui::UiBuilder::new()
-            .max_rect(rect)
-            .layout(egui::Layout::right_to_left(egui::Align::Center)),
-    );
-    let buf = edits.entry(f.key.clone()).or_default();
-    if !f.secure {
-        match config_editor(f.kind) {
-            ConfigEditor::Boolean => {
-                let mut checked = buf == "true";
-                if right.checkbox(&mut checked, "").changed() {
-                    *buf = checked.to_string();
-                }
-                return;
-            }
-            ConfigEditor::Enum => {
-                egui::ComboBox::from_id_salt(("plugin_config", &f.key))
-                    .selected_text(buf.as_str())
-                    .width(200.0)
-                    .show_ui(&mut right, |ui| {
-                        for option in &f.options {
-                            ui.selectable_value(buf, option.clone(), option);
-                        }
-                    });
-                return;
-            }
-            ConfigEditor::SerialPort => {
-                // Dropdown of enumerated host ports; the current value stays the
-                // selected text so a stale/hand-typed by-id path survives an
-                // unplug, and the popup carries a free-text field so a path that
-                // was never enumerated (or an empty list) can still be entered.
-                let selected = serial_ports
-                    .iter()
-                    .find(|port| &port.value == buf)
-                    .map(|port| port.label.clone())
-                    .unwrap_or_else(|| buf.clone());
-                egui::ComboBox::from_id_salt(("plugin_config", &f.key))
-                    .selected_text(selected)
-                    .width(200.0)
-                    .show_ui(&mut right, |ui| {
-                        ui.add(
-                            egui::TextEdit::singleline(buf)
-                                .hint_text("/dev/serial/by-id/… or COM3"),
-                        );
-                        if !serial_ports.is_empty() {
-                            ui.separator();
-                        }
-                        for port in serial_ports {
-                            ui.selectable_value(buf, port.value.clone(), &port.label);
-                        }
-                    });
-                return;
-            }
-            _ => {}
-        }
-    }
-    let mut edit = egui::TextEdit::singleline(buf)
-        .desired_width(200.0)
-        .margin(egui::Margin::symmetric(9, 6))
-        .horizontal_align(egui::Align::RIGHT);
-    if f.secure {
-        edit = edit.password(true);
-    }
-    if secret_set {
-        // A secure field always starts blank; the hint tells the user a secret
-        // is already stored so an untouched field leaves it be.
-        edit = edit.hint_text(t!("plugins.secret_set_hint"));
-    } else if let Some(placeholder) = &f.placeholder {
-        edit = edit.hint_text(placeholder);
-    } else {
-        let hint = match config_editor(f.kind) {
-            ConfigEditor::Number => Some("0"),
-            ConfigEditor::Host => Some("example.com"),
-            ConfigEditor::Port => Some("1–65535"),
-            ConfigEditor::Url => Some("https://example.com"),
-            ConfigEditor::DurationMs => Some("milliseconds"),
-            ConfigEditor::Text
-            | ConfigEditor::Boolean
-            | ConfigEditor::Enum
-            | ConfigEditor::SerialPort => None,
-        };
-        if let Some(hint) = hint {
-            edit = edit.hint_text(hint);
-        }
-    }
-    right.add(edit);
-}
-
-/// A hairline divider between config rows, inset to the panel's content width.
-fn field_separator(ui: &mut egui::Ui) {
-    let (rect, _) =
-        ui.allocate_exact_size(egui::vec2(ui.available_width(), 1.0), egui::Sense::hover());
-    ui.painter().hline(
-        rect.x_range(),
-        rect.center().y,
-        Stroke::new(1.0, theme::BORDER_SOFT),
-    );
 }
 
 #[cfg(test)]
@@ -357,6 +309,15 @@ mod tests {
         for (kind, expected) in cases {
             assert_eq!(config_editor(kind), expected);
         }
+    }
+
+    #[test]
+    fn host_and_port_share_a_row_and_wide_fields_wrap() {
+        let host = field_weight(PluginConfigFieldKind::Host);
+        let port = field_weight(PluginConfigFieldKind::Port);
+        assert_eq!(pack_rows(&[host, port]), vec![0..2]);
+        assert_eq!(pack_rows(&[host, host, port]), vec![0..1, 1..3]);
+        assert!(pack_rows(&[]).is_empty());
     }
 
     #[test]

@@ -11,6 +11,7 @@ mod viewport;
 
 use std::collections::{HashMap, HashSet};
 
+use crate::domain::state::Debouncer;
 use crate::domain::topic_store::TopicStore;
 use base64::{engine::general_purpose::STANDARD as B64, Engine as _};
 use egui::{Pos2, Rect, Vec2};
@@ -23,24 +24,14 @@ use rack::right_panel;
 use viewport::canvas_view;
 
 // ── Constants ─────────────────────────────────────────────────────────────────
-/// Total right-panel width (card column + inner margins + scrollbar).
-const SIDEBAR_W: f32 = 292.0;
-/// Minimum canvas edge; the stage never shrinks below this in either axis.
-const MIN_CANVAS_H: f32 = 600.0;
-/// Fixed gap between the canvas's right edge and the sidebar column.
-const CANVAS_SIDEBAR_GAP: f32 = 20.0;
-/// Page margins around the canvas/sidebar region.
-const CANVAS_LEFT: f32 = 36.0;
-const CANVAS_TOP: f32 = 26.0;
-const CANVAS_BOTTOM: f32 = 26.0;
-/// Padding kept to the right of the sidebar so it isn't flush to the window edge.
-const CANVAS_RIGHT_PAD: f32 = 20.0;
+const SIDEBAR_W: f32 = 340.0;
+const SIDEBAR_GAP: f32 = 16.0;
+/// Shortest the stage gets; below this the page is too cramped to place zones.
+const MIN_CANVAS_H: f32 = 320.0;
 const DEBOUNCE: f64 = 0.14;
 const HANDLE_R: f32 = 5.0;
 const HANDLE_HIT_R: f32 = 14.0;
 const MIN_ZONE: f32 = 0.03;
-/// Most chips shown on an instance card before collapsing into "+N more".
-const MAX_ZONE_CHIPS: usize = 7;
 
 // ── Interaction types ─────────────────────────────────────────────────────────
 #[derive(Clone, Copy, PartialEq)]
@@ -112,77 +103,47 @@ impl FpsCounter {
     }
 }
 
-/// Debounced one-shot commands (zone move / effect param edit) awaiting flush.
-/// `move_zones` is keyed by `zone_key` so a group move debounces every dragged
-/// zone independently, latest position winning per zone.
-#[derive(Default)]
-struct PendingCommands {
-    move_zones: HashMap<String, (halod_shared::commands::DaemonCommand, f64)>,
-    effect: Option<(String, halod_shared::commands::DaemonCommand, f64)>,
-    sample: Option<(halod_shared::commands::DaemonCommand, f64)>,
-    fps: Option<(halod_shared::commands::DaemonCommand, f64)>,
+const SAMPLE_KEY: &str = "sample";
+const FPS_KEY: &str = "fps";
+const MOVE_PREFIX: &str = "move:";
+
+fn effect_key(id: &str) -> String {
+    format!("effect:{id}")
 }
 
-impl PendingCommands {
-    /// Send each pending command whose deadline has passed; keep the rest.
-    fn flush(&mut self, cmd: &crate::runtime::ipc::CommandTx, time: f64) {
-        let due: Vec<String> = self
-            .move_zones
-            .iter()
-            .filter(|(_, (_, deadline))| time >= *deadline)
-            .map(|(k, _)| k.clone())
-            .collect();
-        for k in due {
-            if let Some((c, _)) = self.move_zones.remove(&k) {
-                crate::runtime::ipc::send(cmd, c);
-            }
-        }
-        for slot in [&mut self.sample, &mut self.fps] {
-            if let Some((c, deadline)) = slot.take() {
-                if time >= deadline {
-                    crate::runtime::ipc::send(cmd, c);
-                } else {
-                    *slot = Some((c, deadline));
-                }
-            }
-        }
-        if let Some((id, c, deadline)) = self.effect.take() {
-            if time >= deadline {
-                crate::runtime::ipc::send(cmd, c);
-            } else {
-                self.effect = Some((id, c, deadline));
-            }
-        }
-    }
+/// Queue a debounced move for one zone, so a group move debounces every
+/// dragged zone independently, latest position winning per zone.
+fn queue_move(pending: &mut Debouncer, z: &PlacedZone, time: f64) {
+    pending.queue(
+        &format!(
+            "{MOVE_PREFIX}{}",
+            geometry::zone_key(&z.device_id, &z.channel_id)
+        ),
+        halod_shared::commands::DaemonCommand::CanvasMoveZone {
+            device_id: z.device_id.clone(),
+            channel_id: z.channel_id.clone(),
+            x: z.x as f64,
+            y: z.y as f64,
+            w: Some(z.w as f64),
+            h: Some(z.h as f64),
+            rotation: Some(z.rotation as f64),
+            effect: None,
+            sampling_mode: None,
+        },
+        time,
+        DEBOUNCE,
+    );
+}
 
-    /// True when nothing is awaiting flush.
-    fn is_empty(&self) -> bool {
-        self.move_zones.is_empty()
-            && self.effect.is_none()
-            && self.sample.is_none()
-            && self.fps.is_none()
+/// Send every queued zone move now (drag released), leaving other edits debounced.
+fn flush_moves(pending: &mut Debouncer, cmd: &crate::runtime::ipc::CommandTx, time: f64) {
+    for (_, (_, due)) in pending
+        .iter_mut()
+        .filter(|(k, _)| k.starts_with(MOVE_PREFIX))
+    {
+        *due = f64::NEG_INFINITY;
     }
-
-    /// Queue a debounced move for one zone (replacing any pending move for it).
-    fn queue_move(&mut self, z: &PlacedZone, deadline: f64) {
-        self.move_zones.insert(
-            geometry::zone_key(&z.device_id, &z.channel_id),
-            (
-                halod_shared::commands::DaemonCommand::CanvasMoveZone {
-                    device_id: z.device_id.clone(),
-                    channel_id: z.channel_id.clone(),
-                    x: z.x as f64,
-                    y: z.y as f64,
-                    w: Some(z.w as f64),
-                    h: Some(z.h as f64),
-                    rotation: Some(z.rotation as f64),
-                    effect: None,
-                    sampling_mode: None,
-                },
-                deadline,
-            ),
-        );
-    }
+    pending.flush(cmd, time);
 }
 
 // ── CanvasUi ──────────────────────────────────────────────────────────────────
@@ -194,22 +155,27 @@ pub struct CanvasUi {
     drag: Option<DragState>,
     /// Optimistic zone positions while dragging / pending flush
     drag_zones: HashMap<String, PlacedZone>,
-    pending: PendingCommands,
+    pending: Debouncer,
     param_edits: HashMap<String, HashMap<String, EffectParamValue>>,
     marquee: Option<MarqueeState>,
     /// The instance rack row currently expanded for editing.
-    selected_instance: Option<String>,
+    pub(crate) selected_instance: Option<String>,
     /// The instance whose name is being edited inline, plus its buffer.
     rename_instance: Option<String>,
     rename_buf: String,
     /// Set when rename editing starts; cleared after requesting focus.
     rename_just_started: bool,
     /// The instance whose assign-channels modal is open.
-    zones_modal: Option<String>,
+    pub(crate) zones_modal: Option<String>,
+    /// The zones modal's staged selection, applied on confirm.
+    zones_draft: Option<HashSet<(String, String)>>,
     /// Whether the "new instance" picker modal is open.
     new_instance_modal: bool,
     /// Aspect ratio (w/h) of the daemon canvas, for letterboxing the view.
     canvas_aspect: f32,
+    canvas_size: (u32, u32),
+    /// Which colour param the layer-parameters picker edits.
+    color_slot: usize,
     led_mode: LedMode,
     /// Per-LED colors keyed by (device, zone); inner map is led_id → color.
     led_colors: LedColorMap,
@@ -235,7 +201,7 @@ impl Default for CanvasUi {
             fps: FpsCounter::default(),
             drag: None,
             drag_zones: HashMap::new(),
-            pending: PendingCommands::default(),
+            pending: Debouncer::default(),
             param_edits: HashMap::new(),
             marquee: None,
             selected_instance: None,
@@ -243,8 +209,11 @@ impl Default for CanvasUi {
             rename_buf: String::new(),
             rename_just_started: false,
             zones_modal: None,
+            zones_draft: None,
             new_instance_modal: false,
             canvas_aspect: 4.0 / 3.0,
+            canvas_size: (0, 0),
+            color_slot: 0,
             led_mode: LedMode::Frame,
             led_colors: HashMap::new(),
             led_frame_id: u64::MAX,
@@ -253,7 +222,7 @@ impl Default for CanvasUi {
             fps_edit_at: 0.0,
             sample_radius: 3.0,
             sample_edit_at: 0.0,
-            fps_label: "0 FPS".to_string(),
+            fps_label: "0 fps".to_string(),
             context_menu_target: None,
         }
     }
@@ -317,7 +286,7 @@ pub fn ingest_led_colors(ui: &mut CanvasUi, frame: &CanvasFrame) {
 
 pub fn ingest_frame(ctx: &egui::Context, ui: &mut CanvasUi, frame: &CanvasFrame) {
     if let Some(new_fps) = ui.fps.tick(frame.timestamp_ms) {
-        ui.fps_label = format!("{new_fps} FPS");
+        ui.fps_label = format!("{new_fps} fps");
     }
 
     ingest_led_colors(ui, frame);
@@ -334,6 +303,7 @@ pub fn ingest_frame(ctx: &egui::Context, ui: &mut CanvasUi, frame: &CanvasFrame)
     }
     if w > 0 && h > 0 {
         ui.canvas_aspect = w as f32 / h as f32;
+        ui.canvas_size = (frame.canvas_w, frame.canvas_h);
     }
     ui.texture = Some(crate::ui::components::rgba_texture(
         ctx,
@@ -378,24 +348,9 @@ pub(crate) fn body(
         }
     }
 
-    // Lay out below the shared header (title/subtitle/tabs), not over it.
-    let area = ui.available_rect_before_wrap();
-    let canvas_rect = canvas_stage_rect(area, canvas_ui.canvas_aspect);
+    let (canvas_rect, sidebar_rect) = stage_layout(ui.available_rect_before_wrap());
     canvas_view(ui, state, canvas_ui, cmd, time, canvas_rect);
 
-    // Sidebar hugs the canvas's right edge at a fixed gap, so it tracks the
-    // canvas rather than the window edge. `canvas_stage_rect` reserves its full
-    // width, so it is never clipped.
-    let sidebar_rect = Rect::from_min_max(
-        Pos2::new(
-            canvas_rect.right() + CANVAS_SIDEBAR_GAP,
-            area.top() + CANVAS_TOP,
-        ),
-        Pos2::new(
-            canvas_rect.right() + CANVAS_SIDEBAR_GAP + SIDEBAR_W,
-            area.bottom(),
-        ),
-    );
     let mut sidebar = ui.new_child(
         egui::UiBuilder::new()
             .max_rect(sidebar_rect)
@@ -405,7 +360,6 @@ pub(crate) fn body(
         .auto_shrink([false, false])
         .show(&mut sidebar, |ui| {
             right_panel(ui, state, canvas_ui, cmd, time, designer_ui, page);
-            ui.add_space(26.0);
         });
 
     if canvas_ui.zones_modal.is_some() {
@@ -416,28 +370,18 @@ pub(crate) fn body(
     }
 }
 
-/// The canvas stage rect within `area`: top-left anchored (so it never drifts
-/// when the window widens), aspect-preserving, filling the available height
-/// down to [`MIN_CANVAS_H`]. Width is capped to the room left after reserving
-/// the sidebar (+ gap + margins), so the sidebar is never clipped — that
-/// reservation wins over the minimum when the window is too narrow for both.
-fn canvas_stage_rect(area: Rect, aspect: f32) -> Rect {
-    let aspect = if aspect.is_finite() && aspect > 0.0 {
-        aspect
-    } else {
-        4.0 / 3.0
-    };
-    let mut ch = (area.height() - CANVAS_TOP - CANVAS_BOTTOM).max(MIN_CANVAS_H);
-    let mut cw = ch * aspect;
-    let room =
-        (area.width() - CANVAS_LEFT - CANVAS_SIDEBAR_GAP - SIDEBAR_W - CANVAS_RIGHT_PAD).max(1.0);
-    // Grow to the minimum where the window allows, but never past `room`.
-    cw = cw.max(MIN_CANVAS_H * aspect).min(room);
-    ch = cw / aspect;
-    Rect::from_min_size(
-        Pos2::new(area.left() + CANVAS_LEFT, area.top() + CANVAS_TOP),
-        Vec2::new(cw, ch),
-    )
+/// Split `area` into the canvas stage (growing) and the fixed-width sidebar.
+fn stage_layout(area: Rect) -> (Rect, Rect) {
+    let canvas_w = (area.width() - SIDEBAR_GAP - SIDEBAR_W).max(1.0);
+    let canvas = Rect::from_min_size(
+        area.min,
+        Vec2::new(canvas_w, area.height().max(MIN_CANVAS_H)),
+    );
+    let sidebar = Rect::from_min_max(
+        Pos2::new(canvas.right() + SIDEBAR_GAP, area.top()),
+        area.max,
+    );
+    (canvas, sidebar)
 }
 
 // Remove drag overrides once the daemon confirms them.
@@ -506,14 +450,6 @@ mod test_fixtures {
         }
     }
 
-    pub fn def_of(effect_id: &str) -> halod_shared::types::EffectDef {
-        halod_shared::types::EffectDef {
-            effect_id: effect_id.into(),
-            name: None,
-            params: HashMap::new(),
-        }
-    }
-
     pub fn led(dev: &str, zone: &str, id: u32, v: u8) -> halod_shared::types::LedFrameEntry {
         halod_shared::types::LedFrameEntry {
             device_id: dev.into(),
@@ -542,46 +478,17 @@ mod tests {
     use super::*;
 
     #[test]
-    fn stage_is_top_left_anchored_and_width_tracks_canvas_not_window() {
-        let aspect = 4.0 / 3.0;
-        let r = canvas_stage_rect(
-            Rect::from_min_size(Pos2::ZERO, Vec2::new(2000.0, 900.0)),
-            aspect,
-        );
-        // Top-left never moves off the page margin.
-        assert_eq!(r.min, Pos2::new(CANVAS_LEFT, CANVAS_TOP));
-        // Widening the window leaves the stage untouched (sidebar hugs it, so
-        // the extra width becomes empty space to the right of the sidebar).
-        let wider = canvas_stage_rect(
-            Rect::from_min_size(Pos2::ZERO, Vec2::new(4000.0, 900.0)),
-            aspect,
-        );
-        assert_eq!(r.min, wider.min);
-        assert_eq!(r.size(), wider.size());
-    }
-
-    #[test]
-    fn stage_holds_minimum_when_the_window_has_room() {
-        // Short but wide enough for canvas-min + sidebar: the 600px floor holds.
-        let r = canvas_stage_rect(
-            Rect::from_min_size(Pos2::ZERO, Vec2::new(1200.0, 400.0)),
-            4.0 / 3.0,
-        );
-        assert!(r.height() >= MIN_CANVAS_H);
-        assert!(r.width() >= MIN_CANVAS_H);
-    }
-
-    #[test]
-    fn sidebar_is_never_clipped_even_when_that_shrinks_the_canvas() {
-        // Narrow window: the canvas yields so the full sidebar + gap still fit.
-        let area = Rect::from_min_size(Pos2::ZERO, Vec2::new(900.0, 1000.0));
-        let r = canvas_stage_rect(area, 4.0 / 3.0);
-        assert!(
-            r.right() + CANVAS_SIDEBAR_GAP + SIDEBAR_W <= area.right(),
-            "sidebar right {} must stay within window {}",
-            r.right() + CANVAS_SIDEBAR_GAP + SIDEBAR_W,
-            area.right()
-        );
+    fn stage_and_sidebar_partition_the_area() {
+        for w in [600.0, 1304.0, 3000.0] {
+            let area = Rect::from_min_size(Pos2::new(28.0, 90.0), Vec2::new(w, 700.0));
+            let (canvas, side) = stage_layout(area);
+            assert_eq!(canvas.min, area.min);
+            assert!((side.right() - area.right()).abs() < 1e-3);
+            assert!((canvas.right() + SIDEBAR_GAP - side.left()).abs() < 1e-3);
+            assert!(canvas.width() >= 1.0);
+        }
+        let short = Rect::from_min_size(Pos2::ZERO, Vec2::new(1200.0, 100.0));
+        assert_eq!(stage_layout(short).0.height(), MIN_CANVAS_H);
     }
 
     #[test]
@@ -602,29 +509,29 @@ mod tests {
     }
 
     #[test]
-    fn pending_fps_flushes_only_after_its_deadline() {
+    fn releasing_a_drag_sends_moves_but_keeps_other_edits_debounced() {
         use halod_shared::commands::{DaemonCommand, EngineKind};
         let (tx, mut rx) = tokio::sync::mpsc::unbounded_channel();
-        let mut pending = PendingCommands {
-            fps: Some((DaemonCommand::set_engine_fps(EngineKind::Canvas, 30), 1.0)),
+        let mut pending = Debouncer::default();
+        let zone = PlacedZone {
+            device_id: "d".into(),
+            channel_id: "c".into(),
             ..Default::default()
         };
-        // Before the deadline: nothing sent, still pending (so the caller keeps
-        // repainting until it fires — the bug was the Direct tab never flushing).
-        pending.flush(&tx, 0.5);
-        assert!(!pending.is_empty());
-        assert!(rx.try_recv().is_err());
-        // At/after the deadline: the command is sent and the queue drains.
-        pending.flush(&tx, 1.0);
-        assert!(pending.is_empty());
+        queue_move(&mut pending, &zone, 1.0);
+        pending.queue(
+            FPS_KEY,
+            DaemonCommand::set_engine_fps(EngineKind::Canvas, 30),
+            1.0,
+            DEBOUNCE,
+        );
+        flush_moves(&mut pending, &tx, 1.0);
         assert!(matches!(
-            rx.try_recv().expect("fps command sent"),
-            DaemonCommand::SetEngineConfig {
-                engine: EngineKind::Canvas,
-                fps: Some(30),
-                ..
-            }
+            rx.try_recv(),
+            Ok(DaemonCommand::CanvasMoveZone { .. })
         ));
+        assert!(rx.try_recv().is_err());
+        assert_eq!(pending.keys().collect::<Vec<_>>(), [FPS_KEY]);
     }
 
     #[test]
@@ -734,11 +641,11 @@ mod tests {
         let ctx = egui::Context::default();
         let mut ui = CanvasUi::default();
         // Label starts at the sentinel; sub-second frames must not change it.
-        assert_eq!(ui.fps_label, "0 FPS");
+        assert_eq!(ui.fps_label, "0 fps");
         let f0 = frame(0, 4, 2, &[0u8; 32]);
         ingest_frame(&ctx, &mut ui, &f0);
         assert_eq!(
-            ui.fps_label, "0 FPS",
+            ui.fps_label, "0 fps",
             "single frame should not trigger update"
         );
         // Drive 10 frames spaced 100 ms apart → 1000 ms window → 10 FPS label.
@@ -747,6 +654,6 @@ mod tests {
             f.timestamp_ms = i * 100;
             ingest_frame(&ctx, &mut ui, &f);
         }
-        assert_eq!(ui.fps_label, "10 FPS");
+        assert_eq!(ui.fps_label, "10 fps");
     }
 }

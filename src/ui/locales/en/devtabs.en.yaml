@@ -1,4 +1,9 @@
 devtabs:
+  manage: Manage
+  hide_from_home: Hide from Home
+  show_on_home: Show on Home
+  disable_device: Disable device
+  enable_device: Enable device
   read_only: Read-only
   tab_devices: Devices
   tab_lighting: Lighting
@@ -22,9 +27,7 @@ devtabs:
   battery: Battery
   offline: Offline
   charging_bolt: "⚡ charging"
-  charging: Charging
-  discharging: Discharging
-  unknown: Unknown
+  led_count: "%{n} LEDs"
 
   info_id: ID
   info_name: Name
@@ -52,37 +55,52 @@ devtabs:
   cap_equalizer: Equalizer
   cap_sensors: Sensors
   cap_fan: Fan
-  cap_rgb: RGB
+  cap_rgb: Lighting
   cap_dpi: DPI
   cap_onboard: Onboard memory
   cap_lcd: LCD
   cap_key_remap: Key remap
   cap_keyboard_layout: Keyboard layout
 
-  write_rate_shared: Write rate (shared with hub)
-  write_rate: Write rate
+  write_rate_shared: Throughput (shared with hub)
   throughput: Throughput
   rejected_writes: Rejected writes
 
+  now: Now
+  axis_now: now
+  peak: Peak
+  write_limit: Write limit
+  write_limit_none: None
+  range_1m: 1 min
+  range_10m: 10 min
+  range_1h: 1 h
+  interface_n: "interface %{n}"
+  provided_by: "Provided by %{name} %{version}"
+  diagnostics_desc: Raw device report for bug reports and plugin development.
   diagnostics: Diagnostics
   copy_json: Copy JSON
   copied: Copied!
-  fetching_debug: "Fetching debug data…"
 
   equalizer: Equalizer
   eq_presets: Presets
+  eq_reset_flat: Reset to flat
+  eq_device: Device
+  eq_custom: Custom
 
   onboard_intro: Profiles saved to the device's onboard memory work even when the engine is not running.
   host_mode: Host mode
   host_mode_desc: Let HaloDaemon control this device. Turn this off to use its onboard profiles independently.
   slot_n: "Slot %{n}"
+  slot_active: Active
+  slot_saved: Saved
+  slot_empty: Empty
   restore_to_rom: Restore to ROM
   switch: Switch
   remove: Remove
   create: Create
 
   dpi_stages: DPI stages
-  add_stage: "+ Add stage"
-  dpi_help: Drag a node along the axis or enter an exact value. The mouse currently uses the active stage.
-  stage_n_current: "Stage %{n} · current"
+  add_stage: Add stage
+  dpi_help: Drag a stage along the axis or enter an exact value. The mouse uses the current stage.
+  stage_current: Current
   stage_n: "Stage %{n}"

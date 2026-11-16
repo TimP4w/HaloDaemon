@@ -1,27 +1,30 @@
 misc:
+  color_recent: Recent
+  discovery_looking: Looking for devices
+  discovery_step: "Step %{step} of %{total}"
+  startup_title: Finding your devices
+  startup_scanning: Scanning…
+  startup_found: "%{found} found so far. This usually takes a few seconds."
   # effect_designer.rs
-  designer_back_canvas: Effects Canvas
-  designer_back_lighting: RGB Lighting
-  designer_title: Effect Designer
+  designer_back_canvas: Effects canvas
+  designer_back_lighting: Lighting
+  designer_title: Effect designer
   designer_save: Save effect
   designer_invalid_name: Invalid name
   designer_reset: Reset
-  designer_subtitle: "Procedural effect · rendered on the canvas or sent directly to individual LEDs"
   designer_name_hint: Effect name
   designer_new_effect_name: New effect
   designer_live_preview: Live preview
   designer_rig_strip: 40-LED strip
   designer_rig_ring: 32-LED ring
-  designer_rig_matrix: 8x4 matrix
-  designer_rig_triple: "Triple ring · fan hub (Ring scope below)"
-  designer_brightness_formula: "Brightness · b(p)"
+  designer_rig_matrix: 8×4 matrix
+  designer_rig_triple: Triple ring
+  designer_brightness_formula: Brightness along the zone
   designer_generator: Generator
-  designer_motion: Motion
   designer_direction: Direction
   designer_speed: Speed
   designer_repeats: Repeats
-  designer_ring_scope: "Ring scope · multi-ring zones (e.g. triple fans)"
-  designer_shape: Shape
+  designer_ring_scope: Ring scope
   designer_decay: Decay
   designer_width: Width
   designer_sharpness: Sharpness
@@ -48,16 +51,12 @@ misc:
   designer_ring_separate: Separate rings
   designer_color_cycle_speed: Color cycle speed
   designer_phase_spread: Phase spread
+  designer_curve_caption: "b(p), p = LED position"
+  designer_off: "Off"
   designer_ambient_color: Ambient color
   # radar.rs
   radar_daemon_down_sub: Daemon is starting
-  radar_one_device_ready: 1 device ready
-  radar_devices_ready: "%{found} devices ready"
-  radar_all_connected: All peripherals connected to the engine
   radar_checking_updates: "Checking for plugin updates…"
-  radar_scanning: "Scanning for devices…"
-  radar_scan_fallback: "%{found} found · scanning…"
-  radar_scan_detail: "%{found} found · Scanning %{detail}"
   radar_phase_usb: USB devices
   radar_phase_plugin_hosts: Plugin host transports
   radar_phase_hid: HID devices
@@ -70,21 +69,20 @@ misc:
   # device/macro_editor.rs
   macro_full: The sequence is full. Remove some steps to add more.
   macro_unreleased: Some keys are still held at the end of the sequence. They will be released automatically after playback.
-  macro_stop: "■ Stop"
-  macro_record: "● Record"
-  macro_play: "▶ Play"
+  macro_stop: Stop
+  macro_record: Record
+  macro_play: Play
   macro_clear: Clear
-  macro_hint_recording: Recording in progress. Press keys to record them; pauses will become waits. Select Stop to save.
-  macro_hint_empty: "Record a sequence or add steps below. Drag steps to reorder them; drag the edge of a wait to change its duration."
-  macro_hint_playback: "Playback sends key presses to the focused window. Drag steps to reorder them; drag the edge of a wait to change its duration."
-  macro_click_to_record: Click in here to record mouse buttons
-  macro_add_step: ADD STEP
-  macro_press_key: "press a key…"
-  macro_add_key_down: "+ Key ↓"
-  macro_add_key_up: "+ Key ↑"
-  macro_add_mouse_up: "+ Mouse ↑"
-  macro_add_mouse_down: "+ Mouse ↓"
-  macro_add_wait: "+ Wait"
+  macro_hint_recording: Recording. Press keys to record them; pauses become delays. Select Stop to save.
+  macro_hint_empty: "Record a sequence or insert steps below. Steps flow left to right; drag them to reorder, drag the edge of a delay to resize it."
+  macro_hint_playback: "Playback sends key presses to the focused window. Drag steps to reorder them; drag the edge of a delay to resize it."
+  macro_click_to_record: Click here to record mouse buttons
+  macro_timeline: Macro timeline
+  macro_insert: Insert
+  macro_press_key: "Press a key…"
+  macro_insert_key: Key
+  macro_insert_mouse: Mouse
+  macro_insert_delay: Delay
   macro_mouse_left: Left
   macro_mouse_right: Right
   macro_mouse_middle: Middle

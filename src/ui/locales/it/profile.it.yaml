@@ -10,6 +10,10 @@ capability:
   boolean: Interruttori
 
 profile:
+  profiles_title: Profili
+  delete_profile: Elimina profilo
+  new_profile: Nuovo profilo
+  title_caption: Profilo
   new_profile_btn: "+ Nuovo profilo"
   profile_settings_btn: "Impostazioni profilo"
   new_profile_title: "Nuovo profilo"
@@ -20,18 +24,19 @@ profile:
   delete_title: "Vuoi eliminare il profilo?"
   delete_confirm: 'Vuoi davvero eliminare "%{name}"? Non potrai annullare questa operazione.'
   delete: "Elimina"
-  back: "← Indietro"
+  rename: "Rinomina"
+  fallback: "Riserva"
   active: "Attivo"
   set_active: "Imposta come attivo"
   default_desc: "Il profilo predefinito resta attivo quando nessuna regola associata alle applicazioni corrisponde."
-  profile_desc: "Le impostazioni di questo profilo vengono applicate quando è attivo."
-  auto_activate_title: "ATTIVAZIONE AUTOMATICA"
-  auto_activate_desc: "Passa automaticamente a questo profilo quando una di queste app è in primo piano."
-  add_processes: "+ Aggiungi processi"
-  overrides_title: "OVERRIDE"
-  overrides_empty: "Non ci sono ancora impostazioni specifiche. Le modifiche che apporti mentre il profilo è attivo verranno salvate qui."
-  canvas_effects: "Effetti canvas"
-  revert: "Ripristina"
+  profile_desc: "Le modifiche che apporti mentre questo profilo è attivo vengono salvate qui."
+  auto_activate_title: "Cambio automatico"
+  auto_activate_desc: "Usa questo profilo quando una di queste app è in primo piano."
+  add_processes: "Aggiungi app"
+  overrides_title: "Salvato in questo profilo"
+  overrides_empty: "Non è ancora stato salvato nulla. Le modifiche che apporti mentre il profilo è attivo vengono salvate qui."
+  canvas_effects: "Canvas effetti"
+  revert: "Ripristina predefinito"
   select_processes_title: "Seleziona processi"
   select_processes_desc: "Scegli quali app in esecuzione attivano questo profilo."
   filter_processes_hint: "Filtra processi…"

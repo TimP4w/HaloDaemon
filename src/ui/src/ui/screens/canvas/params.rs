@@ -179,7 +179,7 @@ pub(super) fn instance_params(
                     _ => *min as f32,
                 };
                 ui.add_space(theme::SPACE_3);
-                let readout = format!("{val:.0}%");
+                let readout = widgets::range_readout(val, *step);
                 if widgets::slider_row(
                     ui,
                     &effect_param_label(param),
@@ -213,21 +213,6 @@ pub(super) fn instance_params(
                     }
                 });
             }
-            ParamKind::Color => {
-                let color = match &current {
-                    EffectParamValue::Color(c) => *c,
-                    _ => RgbColor {
-                        r: 90,
-                        g: 209,
-                        b: 232,
-                    },
-                };
-                ui.add_space(theme::SPACE_3);
-                if let Some(new_color) = widgets::color_picker(ui, color) {
-                    edits.insert(param.id.clone(), EffectParamValue::Color(new_color));
-                    changed = true;
-                }
-            }
             ParamKind::Boolean => {
                 let on = matches!(&current, EffectParamValue::Bool(true));
                 ui.add_space(theme::SPACE_2);
@@ -241,25 +226,76 @@ pub(super) fn instance_params(
                         );
                     },
                     |ui| {
-                        if super::rack::toggle_switch(
-                            ui,
-                            on,
-                            egui::Id::new(("inst_bool", instance_id, &param.id)),
-                        ) {
+                        if widgets::toggle(ui, on) != on {
                             edits.insert(param.id.clone(), EffectParamValue::Bool(!on));
                             changed = true;
                         }
                     },
                 );
             }
-            ParamKind::Text
+            ParamKind::Color
+            | ParamKind::Text
             | ParamKind::Sensor
             | ParamKind::Image
             | ParamKind::Number { .. }
             | ParamKind::Steps => {}
         }
     }
+    changed |= color_slots(ui, edits, &mut canvas_ui.color_slot, def, eff);
     changed
+}
+
+/// The effect's colour params as slot buttons sharing one picker, which edits
+/// the active slot.
+fn color_slots(
+    ui: &mut egui::Ui,
+    edits: &mut HashMap<String, EffectParamValue>,
+    slot: &mut usize,
+    def: &EffectDef,
+    eff: &halod_shared::types::Animation,
+) -> bool {
+    let colors: Vec<(&EffectParamDescriptor, RgbColor)> = eff
+        .params
+        .iter()
+        .filter(|p| matches!(p.kind, ParamKind::Color))
+        .map(|p| {
+            let c = match edits.get(&p.id).or_else(|| def.params.get(&p.id)) {
+                Some(EffectParamValue::Color(c)) => *c,
+                _ => match p.default {
+                    EffectParamValue::Color(c) => c,
+                    _ => RgbColor::default(),
+                },
+            };
+            (p, c)
+        })
+        .collect();
+    if colors.is_empty() {
+        return false;
+    }
+    *slot = (*slot).min(colors.len() - 1);
+    ui.add_space(theme::SPACE_3);
+    widgets::field_label(ui, &t!("canvas.colors"));
+    let gap = theme::SPACE_4;
+    let w = (ui.available_width() - gap * (colors.len() - 1) as f32) / colors.len() as f32;
+    ui.horizontal(|ui| {
+        ui.spacing_mut().item_spacing.x = gap;
+        for (i, (p, c)) in colors.iter().enumerate() {
+            let label = if p.label.is_empty() { &p.id } else { &p.label };
+            let rgb = widgets::rgb_to_color32(*c);
+            if widgets::color_slot_button(ui, label, rgb, i == *slot, w).clicked() {
+                *slot = i;
+            }
+        }
+    });
+    ui.add_space(theme::SPACE_4);
+    let (p, c) = colors[*slot];
+    match widgets::color_picker(ui, c) {
+        Some(new) => {
+            edits.insert(p.id.clone(), EffectParamValue::Color(new));
+            true
+        }
+        None => false,
+    }
 }
 
 #[cfg(test)]

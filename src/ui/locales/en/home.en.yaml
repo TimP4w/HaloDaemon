@@ -1,4 +1,5 @@
 home:
+  title: Devices
   device_name: Device name
   save: Save
   cancel: Cancel
@@ -11,25 +12,16 @@ home:
   remove: Remove
   remove_device_title: Remove device
   remove_device_confirm: "Do you want to remove %{name} from its chain? This will disconnect the device, and it will no longer appear here."
-  devices_connected: "%{online} of %{total} devices connected"
-  devices_connected_attention: "%{online} of %{total} devices connected · %{attention} need attention"
-  hide_hidden: Hide hidden
-  show_hidden: Show hidden
+  devices_count: "%{total} devices"
+  devices_found_so_far: "%{total} found so far"
+  devices_count_attention: "%{total} devices · %{attention} need attention"
   search_devices: Search devices
-  grid: Grid
-  list: List
   offline: Offline
   conflict_confirmed: Duplicate device
   conflict_possible: Possible duplicate
   conflict_recommended: Recommended owner
   conflict_owner: "Recommended owner: %{name}"
   conflict_with: "May also control: %{name}. Click to choose which device to keep."
-  conflict_dialog_title: Choose device owner
-  conflict_dialog_confirmed: "These entries control the same physical device. Choose the one to keep enabled; the others will be disabled."
-  conflict_dialog_possible: "These entries may control the same physical device. Choose the one to keep enabled; the others will be disabled."
-  conflict_keep: "Keep %{name}"
-  conflict_keep_recommended: "Keep %{name} (recommended)"
-  conflict_choose_owner: Choose this device owner
   conflict_source_builtin: Built-in host device
   conflict_source_plugin: "Plugin: %{name}"
   conflict_source_integration: "Integration: %{name}"
@@ -38,12 +30,11 @@ home:
   conflict_banner_sub: A device can only be controlled by one source. Choose which source keeps control.
   conflict_resolve: Resolve
   conflict_modal_title: Resolve control conflicts
-  conflict_modal_intro: "Each device below is controlled by multiple sources. Choose which source should keep control; the others will release that device."
-  conflict_modal_note: Unselected sources will continue controlling their other devices. This only changes control of the devices listed here.
-  conflict_sources: "%{count} sources"
+  conflict_modal_intro: "Each device below is controlled by more than one source. Choose which source keeps control. The others keep controlling their other devices."
   conflict_tag_recommended: Recommended
   conflict_decide_later: Decide later
-  conflict_keep_selected: "Apply selections · %{count}"
+  conflict_keep_selected: "Apply %{count} choices"
+  conflict_keep_selected_one: Apply choice
   no_matching: No matching devices
   no_matching_sub: None of your connected devices match this search
   no_devices: No devices connected
@@ -58,6 +49,8 @@ home:
   widget_chart: Chart
   widget_chart_desc: Sparkline trend over time
   widget_gauge: Gauge
+  widget_meter: Meter
+  widget_meter_desc: Segmented bar across a range you choose
   widget_gauge_desc: Radial dial across a range you choose
   widget_battery: Battery
   widget_battery_desc: Charge levels for up to three batteries
@@ -67,6 +60,7 @@ home:
   widget_label: Label
   widget_color: Color
   widget_range: Range
+  widget_window: "Last %{secs} s"
   widget_min: Minimum
   widget_max: Maximum
   widget_unavailable: Source unavailable

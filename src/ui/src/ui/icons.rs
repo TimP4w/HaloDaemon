@@ -10,45 +10,24 @@ use std::collections::HashMap;
 
 #[derive(Clone, Copy, PartialEq, Eq, Hash)]
 pub enum Icon {
-    Home,
-    Lighting,
-    Cooling,
-    Settings,
-    Plugins,
-    Integrations,
     Lock,
     Check,
-    VerifiedBadge,
     IntegrityShield,
 }
 
 impl Icon {
     fn svg(self) -> &'static [u8] {
         match self {
-            Icon::Home => include_bytes!("../../assets/icons/home.svg"),
-            Icon::Lighting => include_bytes!("../../assets/icons/rgb.svg"),
-            Icon::Cooling => include_bytes!("../../assets/icons/cooling.svg"),
-            Icon::Settings => include_bytes!("../../assets/icons/settings.svg"),
-            Icon::Plugins => include_bytes!("../../assets/icons/plugins.svg"),
-            Icon::Integrations => include_bytes!("../../assets/icons/integrations.svg"),
             Icon::Lock => include_bytes!("../../assets/icons/lock.svg"),
             Icon::Check => include_bytes!("../../assets/icons/check.svg"),
-            Icon::VerifiedBadge => include_bytes!("../../assets/icons/verified_badge.svg"),
             Icon::IntegrityShield => include_bytes!("../../assets/icons/integrity_shield.svg"),
         }
     }
 
     fn key(self) -> &'static str {
         match self {
-            Icon::Home => "nav_home",
-            Icon::Lighting => "nav_lighting",
-            Icon::Cooling => "nav_cooling",
-            Icon::Settings => "nav_settings",
-            Icon::Plugins => "nav_plugins",
-            Icon::Integrations => "nav_integrations",
             Icon::Lock => "lock",
             Icon::Check => "check",
-            Icon::VerifiedBadge => "verified_badge",
             Icon::IntegrityShield => "integrity_shield",
         }
     }
@@ -116,15 +95,8 @@ fn texture(ctx: &egui::Context, icon: Icon) -> egui::TextureHandle {
             .borrow_mut()
             .entry(icon)
             .or_insert_with(|| {
-                let img = if matches!(
-                    icon,
-                    Icon::Lock | Icon::Check | Icon::VerifiedBadge | Icon::IntegrityShield
-                ) {
-                    rasterize_mask(icon.svg(), ICON_PX)
-                } else {
-                    crate::svg::color_image(icon.svg(), ICON_PX)
-                }
-                .unwrap_or_else(|| egui::ColorImage::from_rgba_unmultiplied([1, 1], &[0; 4]));
+                let img = rasterize_mask(icon.svg(), ICON_PX)
+                    .unwrap_or_else(|| egui::ColorImage::from_rgba_unmultiplied([1, 1], &[0; 4]));
                 ctx.load_texture(icon.key(), img, egui::TextureOptions::LINEAR)
             })
             .clone()
@@ -234,17 +206,7 @@ mod tests {
     /// wrong include path at build time rather than as a blank sidebar glyph.
     #[test]
     fn every_nav_icon_rasterizes() {
-        for icon in [
-            Icon::Home,
-            Icon::Lighting,
-            Icon::Cooling,
-            Icon::Settings,
-            Icon::Integrations,
-            Icon::Lock,
-            Icon::Check,
-            Icon::VerifiedBadge,
-            Icon::IntegrityShield,
-        ] {
+        for icon in [Icon::Lock, Icon::Check, Icon::IntegrityShield] {
             let img = crate::svg::color_image(icon.svg(), ICON_PX)
                 .unwrap_or_else(|| panic!("{} failed to rasterize", icon.key()));
             assert_eq!(img.width().max(img.height()), ICON_PX as usize);

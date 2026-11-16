@@ -62,6 +62,12 @@ mod pending_rediscovery_tests {
     }
 
     #[test]
+    fn scanners_run_in_the_advertised_order() {
+        let details: Vec<_> = super::SCANNERS.iter().map(|s| s.detail.clone()).collect();
+        assert_eq!(details, halod_shared::types::DISCOVERY_STEPS);
+    }
+
+    #[test]
     fn no_discovery_root_is_listed_twice() {
         let names: Vec<&str> = super::SCANNERS.iter().map(|s| s.name).collect();
         let unique: HashSet<&str> = names.iter().copied().collect();
@@ -266,7 +272,8 @@ pub async fn discover_handle(
     if scoped && !app.handle_in_scope(&handle).await {
         return;
     }
-    if let Some(device) = app.registry.make_device(app, &handle) {
+    let known = app.device_registry.known_ids().await;
+    if let Some(device) = app.registry.make_device_unless_known(app, &handle, &known) {
         crate::application::usecases::registry::registration::register_device_and_children(
             app, device,
         )

@@ -261,21 +261,28 @@ fn setting_row(ui: &mut egui::Ui, id: &str, ctx: &TabCtx, st: &mut DeviceUi, s: 
                             .color(theme::TEXT_DIM),
                     );
                     ui.add_space(theme::SPACE_3);
-                    widgets::pill_strip(ui, |ui| {
-                        for (i, opt) in c.options.iter().enumerate() {
-                            if widgets::pill(ui, &opt.label, i == selected) && i != selected {
-                                st.set(&edit_key, i as f32, ctx.time);
-                                crate::runtime::ipc::send(
-                                    ctx.cmd,
-                                    halod_shared::commands::DaemonCommand::SetChoice {
-                                        id: id.to_string(),
-                                        key: c.key.clone(),
-                                        selected: i,
-                                    },
-                                );
-                            }
-                        }
-                    });
+                    let labels: Vec<&str> = c.options.iter().map(|o| o.label.as_str()).collect();
+                    let mut pick = selected;
+                    let changed = if labels.len() <= 5 {
+                        widgets::segmented(ui, &labels, &mut pick, true)
+                    } else {
+                        let tiles = widgets::option_grid(ui, &labels, Some(selected), 3);
+                        tiles.iter().position(|t| t.clicked()).is_some_and(|i| {
+                            pick = i;
+                            i != selected
+                        })
+                    };
+                    if changed {
+                        st.set(&edit_key, pick as f32, ctx.time);
+                        crate::runtime::ipc::send(
+                            ctx.cmd,
+                            halod_shared::commands::DaemonCommand::SetChoice {
+                                id: id.to_string(),
+                                key: c.key.clone(),
+                                selected: pick,
+                            },
+                        );
+                    }
                 }
                 ChoiceDisplay::List => {
                     ui.label(
@@ -405,25 +412,16 @@ fn setting_row(ui: &mut egui::Ui, id: &str, ctx: &TabCtx, st: &mut DeviceUi, s: 
                     );
                 },
                 |ui| {
-                    if b.read_only {
-                        // Paint a non-interactive toggle showing the current value.
-                        let (rect, _resp) = ui
-                            .allocate_exact_size(egui::Vec2::new(34.0, 18.0), egui::Sense::hover());
-                        let t = ui.ctx().animate_bool_with_time(ui.next_auto_id(), on, 0.1);
-                        widgets::paint_toggle(ui.painter(), rect, t);
-                    } else {
-                        let new_val = widgets::toggle(ui, on);
-                        if new_val != on {
-                            st.set(&edit_key, if new_val { 1.0 } else { 0.0 }, ctx.time);
-                            crate::runtime::ipc::send(
-                                ctx.cmd,
-                                halod_shared::commands::DaemonCommand::SetBoolean {
-                                    id: id.to_string(),
-                                    key: b.key.clone(),
-                                    value: new_val,
-                                },
-                            );
-                        }
+                    if widgets::toggle_ex(ui, on, b.read_only).clicked() {
+                        st.set(&edit_key, if on { 0.0 } else { 1.0 }, ctx.time);
+                        crate::runtime::ipc::send(
+                            ctx.cmd,
+                            halod_shared::commands::DaemonCommand::SetBoolean {
+                                id: id.to_string(),
+                                key: b.key.clone(),
+                                value: !on,
+                            },
+                        );
                     }
                 },
             );
@@ -433,7 +431,7 @@ fn setting_row(ui: &mut egui::Ui, id: &str, ctx: &TabCtx, st: &mut DeviceUi, s: 
             if widgets::button(
                 ui,
                 &a.label,
-                widgets::ButtonKind::Ghost,
+                widgets::ButtonKind::Secondary,
                 egui::vec2(ui.available_width().min(180.0), 32.0),
             )
             .clicked()

@@ -10,14 +10,6 @@ mod hide_state;
 pub use debounce::Debouncer;
 pub use hide_state::HideState;
 
-/// Home device-list layout: grid of cards or a compact list.
-#[derive(Clone, Copy, PartialEq, Default)]
-pub enum Variant {
-    #[default]
-    Grid,
-    List,
-}
-
 /// Which top-level screen is showing.
 #[derive(Clone, PartialEq, Debug)]
 pub enum Page {
@@ -28,7 +20,6 @@ pub enum Page {
     Device(String),
     Settings,
     Plugins,
-    Integrations,
     Profile(String),
 }
 
@@ -38,8 +29,10 @@ pub struct Rename {
     pub buf: String,
 }
 
-/// Rolling sensor/write-rate history length (seconds, sampled once per second).
+/// Rolling sensor history length (seconds, sampled once per second).
 pub(crate) const HISTORY_LEN: usize = 40;
+/// One hour of 1 Hz write-rate samples, the longest device Info chart window.
+pub(crate) const WRITE_RATE_HISTORY_LEN: usize = 3600;
 
 /// Drop optimistic toggle locks whose plugin has vanished or whose `landed`
 /// predicate says the daemon state caught up with the queued `target`.

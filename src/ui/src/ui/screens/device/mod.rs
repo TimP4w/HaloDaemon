@@ -105,10 +105,8 @@ pub struct CoolingTab {
 /// Per-tab edit state for the Performance tab.
 #[derive(Default)]
 pub struct PerfTab {
-    /// DPI stage buffer + active stage index.
     pub dpi: Vec<u32>,
     pub dpi_seeded: bool,
-    pub dpi_active: usize,
 }
 
 /// Per-tab edit state for the Equalizer tab.
@@ -156,6 +154,9 @@ pub struct KeysTab {
         bool,
         std::sync::mpsc::Receiver<Option<std::path::PathBuf>>,
     )>,
+    layer: keys::Layer,
+    /// Armed key-chord capture for `(cid, layer)`.
+    chord_capture: Option<(u16, keys::Layer)>,
 }
 
 /// Which panel is shown in the Media card.
@@ -412,7 +413,7 @@ pub fn empty_led_colors() -> &'static crate::ui::screens::canvas::LedColorMap {
 }
 
 fn pending_tab_id() -> egui::Id {
-    egui::Id::new("__halod_pending_device_tab")
+    egui::Id::unique("__halod_pending_device_tab")
 }
 
 pub fn request_cooling_tab(ctx: &egui::Context) {
@@ -455,11 +456,16 @@ pub fn show(
         .auto_shrink([false, false])
         .show(ui, |ui| {
             crate::ui::components::page_frame(ui, |ui| {
-                if crate::ui::components::back_link(ui, &t!("devtabs.back_all_devices")) {
+                if crate::ui::components::back_link(
+                    ui,
+                    &t!("devtabs.back_all_devices"),
+                    Some(crate::domain::tour::AnchorId::DeviceBackLink),
+                ) {
                     *page = Page::Home;
                 }
+                ui.add_space(crate::ui::theme::SPACE_2);
                 header(ui, dev, ui_state, cmd);
-                ui.add_space(crate::ui::theme::SPACE_4);
+                ui.add_space(crate::ui::theme::SPACE_8);
 
                 let labels: Vec<std::borrow::Cow<'static, str>> =
                     tabs.iter().map(|t| tab_label(t.kind, dev)).collect();
@@ -471,6 +477,7 @@ pub fn show(
                     crate::domain::tour::AnchorId::DeviceTabBar,
                     tab_bar_rect,
                 );
+                ui.add_space(crate::ui::theme::SPACE_6);
                 // Remember the selection by kind for the next frame's realign.
                 ui_state.tab_kind = tabs.get(ui_state.tab).map(|t| t.kind);
 
@@ -626,7 +633,7 @@ mod tests {
             ..Default::default()
         };
         let write_rate_history = HashMap::new();
-        let _ = ctx.run_ui(input, |ui| {
+        let _ = crate::ui::run_headless(&ctx, input, |ui| {
             show(
                 ui,
                 FrameCtx {
@@ -651,7 +658,7 @@ mod tests {
         });
 
         let stamped = ctx.data(|d| {
-            d.get_temp::<f64>(egui::Id::new(("pair_started", id.as_str())))
+            d.get_temp::<f64>(egui::Id::unique(("pair_started", id.as_str())))
                 .is_some()
         });
         assert!(stamped, "children::pairing did not run for the Pairing tab");

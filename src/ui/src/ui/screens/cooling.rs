@@ -4,7 +4,6 @@
 //! preview) for every fan/pump device.
 
 use crate::ui::components as widgets;
-use std::collections::{HashMap, VecDeque};
 
 use crate::domain::topic_store::TopicStore;
 use egui::{Align2, Color32, Pos2, Rect, Sense, Stroke, Vec2};
@@ -15,7 +14,6 @@ use halod_shared::types::{
 use crate::domain::models::device as model;
 use crate::domain::state::Page;
 use crate::runtime::ipc::CommandTx;
-use crate::ui::components::ButtonKind;
 use crate::ui::theme::{self, a};
 
 pub(crate) fn preset_display_name(preset: &WirePresetCurve) -> String {
@@ -68,28 +66,15 @@ fn curve_preset_command(
 // ── Entry point ───────────────────────────────────────────────────────────────
 
 /// Everything the Cooling page owns across frames.
+#[derive(Default)]
 pub struct CoolingUi {
-    /// The Cooling page's configurable sensor widget row. Same widget as Home,
-    /// persisted under its own config key.
-    widgets: crate::ui::screens::home::widget_row::EditState,
-}
-
-impl Default for CoolingUi {
-    fn default() -> Self {
-        Self {
-            widgets: crate::ui::screens::home::widget_row::EditState::new(
-                crate::ui::screens::home::widget_row::Target::Cooling,
-            ),
-        }
-    }
+    show_disabled: bool,
 }
 
 pub fn show(
     ui: &mut egui::Ui,
     state: &TopicStore,
     cmd: &CommandTx,
-    history: &HashMap<String, VecDeque<f32>>,
-    time: f64,
     page: &mut Page,
     cooling: &mut CoolingUi,
 ) {
@@ -103,12 +88,13 @@ pub fn show(
                         .iter()
                         .filter(|d| !model::is_hidden(d))
                         .flat_map(|device| match device.cooling() {
-                            Some(cooling) => cooling
+                            Some(cooling_cap) => cooling_cap
                                 .channels
                                 .iter()
                                 .filter(|channel| {
-                                    channel.visibility
-                                        == halod_shared::types::VisibilityState::Visible
+                                    cooling.show_disabled
+                                        || channel.visibility
+                                            == halod_shared::types::VisibilityState::Visible
                                 })
                                 .map(|channel| (device, Some(channel)))
                                 .collect::<Vec<_>>(),
@@ -125,75 +111,52 @@ pub fn show(
                         .map(|c| &c.status);
                     is_disconnected(*channel, status)
                 });
+                let devices = coolers
+                    .iter()
+                    .map(|(d, _)| d.id.as_str())
+                    .collect::<std::collections::HashSet<_>>()
+                    .len();
 
-                widgets::page_header(
+                let title = widgets::page_title(
                     ui,
                     &t!("cooling.title"),
-                    &t!("cooling.subtitle", count = coolers.len()),
-                    Some(crate::domain::tour::AnchorId::CoolingCurve),
+                    &t!(
+                        "cooling.subtitle",
+                        channels = coolers.len(),
+                        devices = devices
+                    ),
+                    |ui| {
+                        if widgets::checkbox(
+                            ui,
+                            &t!("cooling.show_disabled_channels"),
+                            cooling.show_disabled,
+                        )
+                        .clicked()
+                        {
+                            cooling.show_disabled = !cooling.show_disabled;
+                        }
+                    },
                 );
-
-                widget_header(ui, state, cmd, history, time, cooling);
-
-                cooler_grid(ui, state, cmd, &coolers, time, page);
+                crate::domain::tour::anchor(
+                    ui.ctx(),
+                    crate::domain::tour::AnchorId::CoolingCurve,
+                    title,
+                );
+                ui.add_space(theme::SPACE_1);
+                cooler_grid(ui, state, cmd, &coolers, page);
             });
         });
 }
 
-/// The configurable sensor widget row, mirroring Home's, with a Customize pill.
-fn widget_header(
-    ui: &mut egui::Ui,
-    state: &TopicStore,
-    cmd: &CommandTx,
-    history: &HashMap<String, VecDeque<f32>>,
-    time: f64,
-    cooling: &mut CoolingUi,
-) {
-    use crate::ui::screens::home::widget_row;
-    let sensors = crate::domain::models::sensors::sensors(state);
-    let customizing = cooling.widgets.customizing();
-
-    ui.horizontal(|ui| {
-        ui.with_layout(egui::Layout::right_to_left(egui::Align::Center), |ui| {
-            let label = if customizing {
-                t!("home.customize_done")
-            } else {
-                t!("home.customize")
-            };
-            if widgets::pill(ui, &label, customizing) {
-                cooling.widgets.toggle(state);
-            }
-        });
-    });
-
-    let has_row = customizing || !state.gui.cooling_widgets.is_empty();
-    if has_row {
-        ui.add_space(theme::SPACE_5);
-    }
-    widget_row::show(
-        ui,
-        &mut cooling.widgets,
-        widget_row::RowCtx {
-            state,
-            cmd,
-            history,
-            sensors: &sensors,
-            time,
-        },
-    );
-    if has_row {
-        ui.add_space(22.0);
-    }
-}
-
 // ── Cooler grid (2-col) ───────────────────────────────────────────────────────
+
+const GRID_GAP: f32 = 16.0;
 
 fn cooler_grid(
     ui: &mut egui::Ui,
     state: &TopicStore,
     cmd: &CommandTx,
     coolers: &[(&WireDevice, Option<&halod_shared::types::CoolingChannel>)],
-    time: f64,
     page: &mut Page,
 ) {
     if coolers.is_empty() {
@@ -210,9 +173,10 @@ fn cooler_grid(
         if row > 0 {
             ui.add_space(theme::SPACE_8);
         }
-        ui.columns(2, |cols| {
-            for (i, dev) in pair.iter().enumerate() {
-                cooler_card(&mut cols[i], dev.0, dev.1, state, cmd, &sensors, time, page);
+        let col_w = (ui.available_width() - GRID_GAP) / 2.0;
+        widgets::split_columns(ui, col_w, GRID_GAP, |left, right| {
+            for (col, dev) in [left, right].into_iter().zip(pair) {
+                cooler_card(col, dev.0, dev.1, state, cmd, &sensors, page);
             }
         });
     }
@@ -225,13 +189,11 @@ fn cooler_card(
     state: &TopicStore,
     cmd: &CommandTx,
     sensors: &[(String, Sensor)],
-    time: f64,
     page: &mut Page,
 ) {
     let rpm = channel
         .and_then(|channel| channel.rpm)
         .unwrap_or_else(|| rpm_for(dev));
-    let dev_color = theme::device_color(dev);
     let channel_id = channel
         .map(|channel| channel.id.as_str())
         .unwrap_or("default");
@@ -248,217 +210,194 @@ fn cooler_card(
     let sensor_name = live
         .map(|(_, s)| s.name.clone())
         .unwrap_or_else(|| "-".into());
-    // Chain accessories use their hardware name for both the child device and
-    // their sole cooling channel.
-    let cooler_name = channel
-        .map(|channel| {
-            if channel.name.trim() == dev.name.trim() {
-                dev.name.clone()
-            } else {
-                format!("{} · {}", dev.name, channel.name)
-            }
-        })
-        .unwrap_or_else(|| dev.name.clone());
 
     let disconnected = is_disconnected(channel, curve.map(|c| &c.status));
-    if disconnected {
+    let disabled =
+        channel.is_some_and(|c| c.visibility != halod_shared::types::VisibilityState::Visible);
+    if disconnected || disabled {
         ui.multiply_opacity(IDLE_OPACITY);
     }
+    let (title, subtitle) = card_titles(dev, channel);
+    let duty = channel.and_then(|channel| channel.duty);
 
-    widgets::card(ui, |ui| {
-        // A header with no fan is inert: dimmed above, and here made truly
-        // non-interactive so presets/sensor/curve cannot be changed.
+    widgets::card_with_margin(ui, egui::Margin::same(18), |ui| {
+        ui.set_width(ui.available_width());
         if disconnected {
             ui.disable();
         }
-        // ── Header: rotating fan + name/type + RPM ────────────────────────────
-        ui.horizontal(|ui| {
-            let (icon, _) = ui.allocate_exact_size(Vec2::splat(40.0), Sense::hover());
-            fan_icon(ui.painter(), icon.center(), 18.0, time, rpm, dev_color);
+        egui::Sides::new().show(
+            ui,
+            |ui| {
+                ui.vertical(|ui| {
+                    ui.spacing_mut().item_spacing.y = 2.0;
+                    ui.label(
+                        egui::RichText::new(&title)
+                            .font(theme::semibold(16.0))
+                            .color(theme::TEXT),
+                    );
+                    ui.label(
+                        egui::RichText::new(&subtitle)
+                            .font(theme::body_sm())
+                            .color(theme::TEXT_DIM),
+                    );
+                });
+            },
+            |ui| {
+                ui.with_layout(egui::Layout::top_down(egui::Align::Max), |ui| {
+                    ui.spacing_mut().item_spacing.y = 2.0;
+                    ui.label(
+                        egui::RichText::new(rpm.to_string())
+                            .font(theme::semibold(26.0))
+                            .color(theme::TEXT),
+                    );
+                    let caption = match duty {
+                        Some(duty) => t!("cooling.rpm_duty", duty = duty).to_string(),
+                        None => "rpm".to_owned(),
+                    };
+                    ui.label(
+                        egui::RichText::new(caption)
+                            .font(theme::body_sm())
+                            .color(theme::TEXT_MUT),
+                    );
+                });
+            },
+        );
+
+        if disconnected {
             ui.add_space(theme::SPACE_6);
-            let col_w = ui.available_width();
-            ui.vertical(|ui| {
-                ui.set_width(col_w);
-                ui.spacing_mut().item_spacing.y = 2.0;
-                egui::Sides::new().show(
-                    ui,
-                    |ui| {
-                        ui.label(
-                            egui::RichText::new(&cooler_name)
-                                .font(theme::title())
-                                .color(theme::TEXT),
-                        );
-                    },
-                    |ui| {
-                        ui.label(
-                            egui::RichText::new(format!("{rpm}"))
-                                .font(theme::mono_bold(18.0))
-                                .color(dev_color),
-                        );
-                    },
-                );
-                egui::Sides::new().show(
-                    ui,
-                    |ui| {
-                        ui.label(
-                            egui::RichText::new(model::type_label(dev))
-                                .font(theme::body_sm())
-                                .color(theme::TEXT_MUT),
-                        );
-                    },
-                    |ui| {
-                        ui.label(
-                            egui::RichText::new("RPM")
-                                .font(theme::caption())
-                                .color(theme::TEXT_FAINT),
-                        );
-                    },
-                );
-            });
-        });
-        if rpm > 0 {
-            ui.ctx().request_repaint();
+            widgets::Banner::neutral(&t!("cooling.status_disconnected")).show(ui);
+        } else if let Some(warning) = curve.map(|c| &c.status).and_then(curve_status_text) {
+            ui.add_space(theme::SPACE_6);
+            widgets::Banner::warn(&warning).show(ui);
         }
+        ui.add_space(theme::SPACE_7);
 
-        ui.add_space(theme::SPACE_6);
-
-        // ── Preset pills ──────────────────────────────────────────────────────
         if !state.cooling.preset_curves.is_empty() {
-            // Highlight the preset whose curve matches this fan's current curve.
-            let active = curve
+            let names: Vec<String> = state
+                .cooling
+                .preset_curves
+                .iter()
+                .map(preset_display_name)
+                .collect();
+            let labels: Vec<&str> = names.iter().map(String::as_str).collect();
+            let mut selected = curve
                 .map(|c| c.points.as_slice())
                 .and_then(|pts| matching_preset(&state.cooling.preset_curves, pts))
-                .map(|p| p.id.clone());
-            ui.horizontal_wrapped(|ui| {
-                ui.spacing_mut().item_spacing = Vec2::splat(6.0);
-                for preset in &state.cooling.preset_curves {
-                    if widgets::pill(
-                        ui,
-                        &preset_display_name(preset),
-                        active.as_deref() == Some(&preset.id),
-                    ) {
-                        crate::runtime::ipc::send(
-                            cmd,
-                            curve_preset_command(
-                                dev.id.clone(),
-                                channel_id.to_string(),
-                                preset.id.clone(),
-                                sensor_id.clone(),
-                            ),
-                        );
-                    }
-                }
-            });
-            ui.add_space(theme::SPACE_6);
-        }
-
-        // ── Curve sensor selector ─────────────────────────────────────────────
-        ui.horizontal(|ui| {
-            widgets::caps_label(ui, &t!("cooling.curve_sensor"));
-            ui.add_space(theme::SPACE_3);
-            let current = live
-                .map(|(d, s)| format!("{d} · {} ({:.0}°C)", s.name, s.value))
-                .unwrap_or_else(|| t!("cooling.no_sensor").to_string());
-            let mut pick: Option<Option<String>> = None;
-            // A device can expose multiple cooling channels. Include the
-            // channel in the persistent widget ID so their selectors do not
-            // alias each other's egui state.
-            egui::ComboBox::from_id_salt(format!("cool_sensor_{}_{}", dev.id, channel_id))
-                .selected_text(current)
-                .width(ui.available_width())
-                .show_ui(ui, |ui| {
-                    if ui
-                        .selectable_label(sensor_id.is_none(), t!("cooling.no_sensor"))
-                        .clicked()
-                    {
-                        pick = Some(None);
-                    }
-                    for (d, s) in sensors {
-                        let on = sensor_id.as_deref() == Some(s.id.as_str());
-                        let label = format!("{d} · {} ({:.0}°C)", s.name, s.value);
-                        if ui.selectable_label(on, label).clicked() {
-                            pick = Some(Some(s.id.clone()));
-                        }
-                    }
-                });
-            if let Some(sel) = pick {
+                .and_then(|m| {
+                    state
+                        .cooling
+                        .preset_curves
+                        .iter()
+                        .position(|p| p.id == m.id)
+                })
+                .unwrap_or(usize::MAX);
+            if widgets::segmented(ui, &labels, &mut selected, false) {
                 crate::runtime::ipc::send(
                     cmd,
-                    curve_points_command(
+                    curve_preset_command(
                         dev.id.clone(),
                         channel_id.to_string(),
-                        curve
-                            .map(|c| c.points.clone())
-                            .unwrap_or_else(default_curve),
-                        sel,
+                        state.cooling.preset_curves[selected].id.clone(),
+                        sensor_id.clone(),
                     ),
                 );
             }
-        });
-
-        ui.add_space(theme::SPACE_6);
-
-        // ── Mini curve preview ────────────────────────────────────────────────
-        let (rect, _) =
-            ui.allocate_exact_size(Vec2::new(ui.available_width(), 158.0), Sense::hover());
-        curve_preview(ui.painter(), rect, curve, sensor_temp, dev_color);
-        ui.painter().text(
-            Pos2::new(rect.left() + 10.0, rect.top() + 8.0),
-            Align2::LEFT_TOP,
-            t!("cooling.rpm_vs", sensor = &sensor_name),
-            theme::value_xs(),
-            theme::TEXT_FAINT2,
-        );
-
-        // ── Curve status warning (e.g. no sensor, stalled fan) ────────────────
-        if disconnected {
-            ui.add_space(theme::SPACE_5);
-            ui.label(
-                egui::RichText::new(t!("cooling.status_disconnected"))
-                    .font(theme::body_sm())
-                    .color(theme::TEXT_FAINT),
-            );
-        } else if let Some(warning) = curve.map(|c| &c.status).and_then(curve_status_text) {
-            ui.add_space(theme::SPACE_5);
-            ui.label(
-                egui::RichText::new(warning)
-                    .font(theme::body_sm())
-                    .color(theme::STAT_AMBER),
-            );
+            ui.add_space(theme::SPACE_7);
         }
-
-        ui.add_space(theme::SPACE_6);
-
-        // ── Footer: sensor temp + open device ─────────────────────────────────
-        ui.horizontal(|ui| {
-            if let Some(t) = sensor_temp {
+        ui.allocate_ui_with_layout(
+            Vec2::new(ui.available_width(), 32.0),
+            egui::Layout::left_to_right(egui::Align::Center),
+            |ui| {
+                ui.spacing_mut().item_spacing.x = theme::SPACE_4;
                 ui.label(
-                    egui::RichText::new(&sensor_name)
-                        .font(theme::body_sm())
+                    egui::RichText::new(t!("cooling.sensor"))
+                        .font(theme::body_md())
                         .color(theme::TEXT_DIM),
                 );
-                ui.add_space(theme::SPACE_3);
-                ui.label(
-                    egui::RichText::new(format!("{t:.0}°C"))
-                        .font(theme::mono_semibold(11.5))
-                        .color(dev_color),
-                );
-            }
-            ui.with_layout(egui::Layout::right_to_left(egui::Align::Center), |ui| {
-                if widgets::button(
-                    ui,
-                    &t!("cooling.open_device"),
-                    ButtonKind::Ghost,
-                    Vec2::new(118.0, 30.0),
+                let current = live
+                    .map(|(d, s)| format!("{d} · {}", s.name))
+                    .unwrap_or_else(|| t!("cooling.no_sensor").to_string());
+                let mut pick: Option<Option<String>> = None;
+                // Channel in the salt so a device's selectors don't alias.
+                egui::ComboBox::from_id_salt(format!("cool_sensor_{}_{}", dev.id, channel_id))
+                    .selected_text(current)
+                    .icon(widgets::select_chevron)
+                    .width(210.0)
+                    .show_ui(ui, |ui| {
+                        if ui
+                            .selectable_label(sensor_id.is_none(), t!("cooling.no_sensor"))
+                            .clicked()
+                        {
+                            pick = Some(None);
+                        }
+                        for (d, s) in sensors {
+                            let on = sensor_id.as_deref() == Some(s.id.as_str());
+                            let label = format!("{d} · {} ({:.0}°C)", s.name, s.value);
+                            if ui.selectable_label(on, label).clicked() {
+                                pick = Some(Some(s.id.clone()));
+                            }
+                        }
+                    });
+                if let Some(sel) = pick {
+                    crate::runtime::ipc::send(
+                        cmd,
+                        curve_points_command(
+                            dev.id.clone(),
+                            channel_id.to_string(),
+                            curve
+                                .map(|c| c.points.clone())
+                                .unwrap_or_else(default_curve),
+                            sel,
+                        ),
+                    );
+                }
+            },
+        );
+        ui.add_space(theme::SPACE_7);
+
+        let w = ui.available_width();
+        let (rect, _) = ui.allocate_exact_size(Vec2::new(w, w * 170.0 / 520.0), Sense::hover());
+        curve_preview(ui.painter(), rect, curve, sensor_temp, theme::CYAN);
+
+        ui.add_space(theme::SPACE_6);
+        ui.horizontal(|ui| {
+            let summary = match (sensor_temp, curve) {
+                (Some(temp), Some(curve)) if curve.points.len() >= 2 => t!(
+                    "cooling.now_summary",
+                    sensor = &sensor_name,
+                    temp = format!("{temp:.0}"),
+                    duty = format!("{:.0}", halod_shared::curve::duty_at(&curve.points, temp))
                 )
-                .clicked()
-                {
+                .to_string(),
+                _ => String::new(),
+            };
+            ui.label(
+                egui::RichText::new(summary)
+                    .font(theme::body_md())
+                    .color(theme::TEXT_DIM),
+            );
+            ui.with_layout(egui::Layout::right_to_left(egui::Align::Center), |ui| {
+                if widgets::text_link(ui, &t!("cooling.open_device")).clicked() {
                     crate::ui::screens::device::request_cooling_tab(ui.ctx());
                     *page = Page::Device(dev.id.clone());
                 }
             });
         });
     });
+}
+
+/// Card heading: the channel name over its device, or the device over its
+/// type when the channel carries the device's own name.
+fn card_titles(
+    dev: &WireDevice,
+    channel: Option<&halod_shared::types::CoolingChannel>,
+) -> (String, String) {
+    match channel {
+        Some(channel) if channel.name.trim() != dev.name.trim() => {
+            (channel.name.clone(), dev.name.clone())
+        }
+        _ => (dev.name.clone(), model::type_label(dev).to_string()),
+    }
 }
 
 // ── Curve preview painter (read-only) ─────────────────────────────────────────
@@ -471,11 +410,38 @@ fn curve_preview(
     color: Color32,
 ) {
     p.rect_filled(rect, 8.0, theme::INNER_BG);
-    p.rect_stroke(
-        rect,
-        8.0,
-        Stroke::new(1.0, theme::BORDER_INNER),
-        egui::StrokeKind::Middle,
+    let grid = Stroke::new(1.0, theme::STAGE_GRID);
+    for i in 1..5 {
+        p.vline(
+            rect.left() + rect.width() * i as f32 / 5.0,
+            rect.y_range(),
+            grid,
+        );
+    }
+    for i in 1..4 {
+        p.hline(
+            rect.x_range(),
+            rect.top() + rect.height() * i as f32 / 4.0,
+            grid,
+        );
+    }
+    let label = |pos: Pos2, align: Align2, text: &str| {
+        p.text(pos, align, text, theme::caption(), theme::TEXT_FAINT);
+    };
+    label(
+        rect.left_top() + Vec2::new(10.0, 10.0),
+        Align2::LEFT_TOP,
+        "100%",
+    );
+    label(
+        rect.left_bottom() + Vec2::new(10.0, -8.0),
+        Align2::LEFT_BOTTOM,
+        "20 °C",
+    );
+    label(
+        rect.right_bottom() + Vec2::new(-10.0, -8.0),
+        Align2::RIGHT_BOTTOM,
+        "100 °C",
     );
 
     let points = match curve.map(|c| c.points.as_slice()) {
@@ -488,7 +454,7 @@ fn curve_preview(
         let ny = 1.0 - (duty / 100.0).clamp(0.0, 1.0);
         Pos2::new(
             rect.left() + nx * rect.width(),
-            rect.top() + 8.0 + ny * (rect.height() - 14.0),
+            rect.top() + ny * rect.height(),
         )
     };
 
@@ -503,58 +469,30 @@ fn curve_preview(
     }
     let line: Vec<Pos2> = ext.iter().map(|&[t, d]| map(t, d)).collect();
 
-    widgets::fill_under_line(p, &line, rect.bottom(), a(color, 0.13));
-    p.add(egui::Shape::line(line, Stroke::new(2.0, a(color, 0.85))));
+    let clipped = p.with_clip_rect(rect);
+    widgets::fill_under_line(&clipped, &line, rect.bottom(), a(color, 0.10));
+    clipped.add(egui::Shape::line(line, Stroke::new(2.0, color)));
+    for &[t, d] in points {
+        let pos = map(t, d);
+        clipped.circle_filled(pos, 5.0, theme::INNER_BG);
+        clipped.circle_stroke(pos, 5.0, Stroke::new(2.0, color));
+    }
 
     if let Some(temp) = sensor_temp {
         let duty = halod_shared::curve::duty_at(points, temp);
         let pos = map(temp.clamp(20.0, 100.0), duty);
-        p.line_segment(
-            [Pos2::new(pos.x, rect.bottom()), pos],
-            Stroke::new(1.0, a(color, 0.35)),
-        );
-        p.circle_filled(pos, 4.0, color);
-        p.circle_stroke(pos, 4.0, Stroke::new(1.5, theme::INNER_BG));
+        clipped.extend(egui::Shape::dashed_line(
+            &[
+                Pos2::new(pos.x, rect.top()),
+                Pos2::new(pos.x, rect.bottom()),
+            ],
+            Stroke::new(1.0, a(theme::TEXT, 0.35)),
+            3.0,
+            3.0,
+        ));
+        clipped.circle_filled(pos, 4.0, theme::TEXT);
     }
 }
-
-// ── Rotating fan icon ─────────────────────────────────────────────────────────
-
-/// A 4-blade fan at `center`, radius `r`, spinning at a speed scaled from `rpm`.
-fn fan_icon(p: &egui::Painter, center: Pos2, r: f32, time: f64, rpm: u32, color: Color32) {
-    let rps = (rpm as f64 / 1000.0).min(2.5);
-    let angle = (time * rps * std::f64::consts::TAU) as f32;
-    let blade_color = a(color, if rpm == 0 { 0.30 } else { 0.85 });
-    let inner = r * 0.20;
-    let outer = r * 0.88;
-    let arc = std::f32::consts::TAU / 4.0 * 0.62;
-    const SEG: u32 = 8;
-
-    for b in 0..4u32 {
-        let start = angle + b as f32 * std::f32::consts::FRAC_PI_2;
-        let mut mesh = egui::Mesh::default();
-        for j in 0..=SEG {
-            let ang = start + (j as f32 / SEG as f32) * arc;
-            let (s, c) = ang.sin_cos();
-            mesh.colored_vertex(center + Vec2::new(c * inner, s * inner), blade_color);
-            mesh.colored_vertex(center + Vec2::new(c * outer, s * outer), blade_color);
-        }
-        for j in 0..SEG {
-            let k = j * 2;
-            mesh.indices
-                .extend_from_slice(&[k, k + 1, k + 2, k + 1, k + 2, k + 3]);
-        }
-        p.add(egui::Shape::mesh(mesh));
-    }
-    p.circle_filled(
-        center,
-        inner + 1.5,
-        a(color, if rpm == 0 { 0.20 } else { 0.55 }),
-    );
-    p.circle_stroke(center, outer + 1.5, Stroke::new(1.5, a(color, 0.18)));
-}
-
-// ── Helpers ───────────────────────────────────────────────────────────────────
 
 const IDLE_OPACITY: f32 = 0.45;
 

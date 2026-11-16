@@ -10,6 +10,8 @@ use halod_shared::types::{
 };
 
 #[derive(Clone, Default)]
+#[cfg_attr(feature = "screenshots", derive(serde::Deserialize))]
+#[cfg_attr(feature = "screenshots", serde(default))]
 pub struct TopicStore {
     pub revision: u64,
     /// Whether the authoritative `config.gui` topic has been received. A bus

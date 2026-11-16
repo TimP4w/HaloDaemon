@@ -3,40 +3,44 @@
 
 use egui::FontId;
 
-use super::{body, mono, mono_semibold, semibold};
+use super::{body, medium, semibold};
 
+/// Page titles.
+pub fn display() -> FontId {
+    semibold(26.0)
+}
 pub fn title() -> FontId {
-    semibold(15.0)
+    semibold(17.0)
 }
 pub fn heading() -> FontId {
-    semibold(13.0)
+    semibold(15.0)
 }
 pub fn subhead() -> FontId {
-    semibold(12.0)
+    semibold(13.0)
 }
 
 pub fn body_lg() -> FontId {
-    body(13.0)
+    body(14.0)
 }
 pub fn body_md() -> FontId {
-    body(12.0)
+    body(13.0)
 }
 pub fn body_sm() -> FontId {
-    body(11.0)
+    body(12.0)
 }
 pub fn caption() -> FontId {
-    body(10.5)
+    body(11.0)
 }
 pub fn micro() -> FontId {
-    body(9.0)
+    body(10.0)
 }
 
 pub fn value() -> FontId {
-    mono_semibold(12.0)
+    semibold(13.0)
 }
 pub fn value_sm() -> FontId {
-    mono(11.0)
+    medium(12.0)
 }
 pub fn value_xs() -> FontId {
-    mono(9.5)
+    medium(11.0)
 }

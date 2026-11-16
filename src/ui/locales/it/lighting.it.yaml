@@ -1,5 +1,5 @@
 lighting:
-  title: Illuminazione RGB
+  title: Illuminazione
   subtitle: Applica contemporaneamente un colore o un effetto a tutti i dispositivi
   tab_canvas: Canvas degli effetti
   tab_direct: Effetti diretti
@@ -13,11 +13,16 @@ lighting:
   global_effect: Effetto globale
   new_effect: Nuovo effetto
   import: Importa
-  effect_settings: Impostazioni effetto
+  effect_settings_for: "Impostazioni effetto · %{name}"
   master_brightness: Luminosità master
   saturation: Saturazione
-  target_devices_zones: Dispositivi e zone interessati
-  targets_subtitle: Scegli a quali dispositivi e zone applicare l'illuminazione. Seleziona un dispositivo per visualizzarne le zone.
+  target_devices_zones: Dispositivi e zone di destinazione
+  targets_subtitle: Scegli quali dispositivi usano questa illuminazione. Seleziona un dispositivo per vederne le zone.
+  source_builtin: Integrato
+  source_effects: Effetti
+  source_mine: I miei effetti
+  on_canvas_warning: "%{names} è sul canvas. Applicando questo effetto verrà rimosso dal canvas."
+  apply_to: "Applica a %{n} dispositivi"
   deselect_all: Deseleziona tutto
   select_all: Seleziona tutto
   zones_count: "%{sel}/%{total} zone"
@@ -29,26 +34,20 @@ lighting:
   remove_from_canvas_title: Vuoi rimuovere il dispositivo dal canvas?
   remove_from_canvas_body: Il dispositivo si trova sul canvas. Se applichi questo effetto, verrà rimosso dal canvas.
   remove_and_apply: Rimuovi e applica
-  lighting_preview: Anteprima illuminazione
-  mode_static: STATICO
-  mode_paint: DIPINGI
-  mode_effect: EFFETTO
-  mode_software: SOFTWARE
-  mode_canvas_engine: MOTORE CANVAS
-  zone_caps: ZONA
-  layout_caps: LAYOUT
+  preview: Anteprima
+  layout: Layout
   all_zones: Tutte
   paint_hint: Clicca o trascina sui LED per dipingerli
   clear: Cancella
   fill_zone: Riempi zona
-  transform_caps: TRASFORMAZIONE
-  reverse: "↺ Inverti"
-  swap: "⇄ Scambia"
-  flip_h: "⇄ Ribalta orizz."
-  flip_v: "⇅ Ribalta vert."
+  transform: Trasformazione
+  reverse: Inverti
+  swap: Scambia
+  flip_h: Ribalta orizzontale
+  flip_v: Ribalta verticale
   reset: Ripristina
   rotate: Ruota
   effect: Effetto
-  place_on_canvas: "Aggiungi al canvas →"
+  place_on_canvas: Aggiungi al canvas
   brush_color: Colore pennello
   color: Colore

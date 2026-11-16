@@ -16,50 +16,16 @@ use crate::runtime::ipc::CommandTx;
 use crate::ui::theme::{self, a};
 
 use super::widget_config::Draft;
-use super::widget_view::{self, TILE_H};
-use super::GAP;
+use super::widget_view::{self, CELL_H};
 
-/// Half-columns per row: four full-width tiles, or eight gauges.
-const UNITS: usize = 8;
+/// Cells per strip row.
+const COLS: usize = 3;
 const BADGE: f32 = 20.0;
 const SAVE_DEBOUNCE: f64 = 0.25;
-
-/// Which page's widget row an [`EditState`] reads from and persists to. The Home
-/// and Cooling rows are the same kind of widget, kept under separate config keys.
-#[derive(Clone, Copy, Default)]
-pub enum Target {
-    #[default]
-    Home,
-    Cooling,
-}
-
-impl Target {
-    fn persisted(self, state: &TopicStore) -> &[HomeWidget] {
-        match self {
-            Target::Home => &state.gui.home_widgets,
-            Target::Cooling => &state.gui.cooling_widgets,
-        }
-    }
-
-    fn command(self, widgets: Vec<HomeWidget>) -> DaemonCommand {
-        match self {
-            Target::Home => DaemonCommand::SetHomeWidgets { widgets },
-            Target::Cooling => DaemonCommand::SetCoolingWidgets { widgets },
-        }
-    }
-
-    fn save_key(self) -> &'static str {
-        match self {
-            Target::Home => "home_widgets",
-            Target::Cooling => "cooling_widgets",
-        }
-    }
-}
 
 /// Customize mode and its unsaved working copy.
 #[derive(Default)]
 pub struct EditState {
-    target: Target,
     /// `None` follows the bus; `Some` is Customize mode's working copy.
     draft: Option<Vec<HomeWidget>>,
     /// The open add/edit modal.
@@ -68,13 +34,6 @@ pub struct EditState {
 }
 
 impl EditState {
-    pub fn new(target: Target) -> Self {
-        Self {
-            target,
-            ..Default::default()
-        }
-    }
-
     pub fn customizing(&self) -> bool {
         self.draft.is_some()
     }
@@ -83,26 +42,26 @@ impl EditState {
     pub fn toggle(&mut self, state: &TopicStore) {
         self.draft = match self.draft {
             Some(_) => None,
-            None => Some(self.target.persisted(state).to_vec()),
+            None => Some(state.gui.home_widgets.clone()),
         };
         self.modal = None;
     }
 
     fn row<'a>(&'a self, state: &'a TopicStore) -> &'a [HomeWidget] {
-        self.draft
-            .as_deref()
-            .unwrap_or_else(|| self.target.persisted(state))
+        self.draft.as_deref().unwrap_or(&state.gui.home_widgets)
     }
 
     /// Edit the working copy and schedule the persist.
     fn apply(&mut self, state: &TopicStore, time: f64, edit: impl FnOnce(&mut Vec<HomeWidget>)) {
         let row = self
             .draft
-            .get_or_insert_with(|| self.target.persisted(state).to_vec());
+            .get_or_insert_with(|| state.gui.home_widgets.clone());
         edit(row);
         self.save.queue(
-            self.target.save_key(),
-            self.target.command(row.clone()),
+            "home_widgets",
+            DaemonCommand::SetHomeWidgets {
+                widgets: row.clone(),
+            },
             time,
             SAVE_DEBOUNCE,
         );
@@ -117,75 +76,20 @@ pub struct RowCtx<'a> {
     pub time: f64,
 }
 
-/// A tile's placement on the half-column grid.
-#[derive(Debug, PartialEq, Eq)]
-pub struct Cell {
-    pub col: usize,
-    pub row: usize,
-    pub size: widget_view::Size,
-}
-
-/// First-fit placement of `sizes` on a [`UNITS`]-wide grid, scanning top-left
-/// to bottom-right. Tall gauges leave a short slot beside them, which the next
-/// tile that fits backfills, so the row packs densely without reordering.
-pub fn pack(sizes: &[widget_view::Size]) -> Vec<Cell> {
-    let mut grid: Vec<[bool; UNITS]> = Vec::new();
-    let mut cells = Vec::with_capacity(sizes.len());
-    for &size in sizes {
-        let (col, row) = 'placed: {
-            // A fresh row always fits, so the scan ends at the first empty one.
-            let first_empty_row = grid.len();
-            for row in 0..=first_empty_row {
-                while grid.len() < row + size.rows {
-                    grid.push([false; UNITS]);
-                }
-                for col in 0..=UNITS - size.cols {
-                    let free = grid[row..row + size.rows]
-                        .iter()
-                        .all(|r| r[col..col + size.cols].iter().all(|taken| !taken));
-                    if free {
-                        break 'placed (col, row);
-                    }
-                }
-            }
-            unreachable!("an empty row always fits a tile no wider than the grid")
-        };
-        for r in &mut grid[row..row + size.rows] {
-            r[col..col + size.cols].fill(true);
-        }
-        cells.push(Cell { col, row, size });
-    }
-    cells
-}
-
-/// Total height of a packed grid, in painted pixels.
-fn grid_height(cells: &[Cell]) -> f32 {
-    let rows = cells
-        .iter()
-        .map(|c| c.row + c.size.rows)
-        .max()
-        .unwrap_or_default();
-    span_len(rows, TILE_H)
-}
-
-/// The painted extent of `n` grid steps of `step` pixels, gaps included.
-fn span_len(n: usize, step: f32) -> f32 {
-    (n as f32 * step + GAP * (n as f32 - 1.0)).max(0.0)
-}
-
-/// Where a placed tile paints inside the grid's `area`.
-fn cell_rect(area: Rect, cell: &Cell) -> Rect {
-    let unit = (area.width() - GAP * (UNITS as f32 - 1.0)) / UNITS as f32;
+/// Where strip cell `i` paints inside the strip's `area`.
+fn cell_rect(area: Rect, i: usize) -> Rect {
+    let w = area.width() / COLS as f32;
     Rect::from_min_size(
         Pos2::new(
-            area.left() + cell.col as f32 * (unit + GAP),
-            area.top() + cell.row as f32 * (TILE_H + GAP),
+            area.left() + (i % COLS) as f32 * w,
+            area.top() + (i / COLS) as f32 * CELL_H,
         ),
-        Vec2::new(
-            span_len(cell.size.cols, unit),
-            span_len(cell.size.rows, TILE_H),
-        ),
+        Vec2::new(w, CELL_H),
     )
+}
+
+fn strip_height(cells: usize) -> f32 {
+    cells.div_ceil(COLS) as f32 * CELL_H
 }
 
 /// The next free widget id for `row`, so ids stay unique without a clock or RNG.
@@ -207,21 +111,17 @@ pub fn show(ui: &mut egui::Ui, edit: &mut EditState, ctx: RowCtx) {
     }
 
     let can_add = customizing && row.len() < MAX_HOME_WIDGETS;
-    let sizes: Vec<widget_view::Size> = row
-        .iter()
-        .map(|w| widget_view::size(&w.kind))
-        .chain(can_add.then_some(widget_view::Size::FULL))
-        .collect();
-    let cells = pack(&sizes);
+    let cells = row.len() + usize::from(can_add);
     let (area, _) = ui.allocate_exact_size(
-        Vec2::new(ui.available_width(), grid_height(&cells)),
+        Vec2::new(ui.available_width(), strip_height(cells)),
         Sense::hover(),
     );
+    strip_frame(ui.painter(), area, cells);
     let mut moved = None;
     let mut removed = None;
 
-    for (idx, cell) in cells.iter().enumerate() {
-        let rect = cell_rect(area, cell);
+    for idx in 0..cells {
+        let rect = cell_rect(area, idx).shrink(1.0);
         let Some(w) = row.get(idx) else {
             if add_tile(ui, rect) {
                 edit.modal = Some(Draft::adding());
@@ -263,6 +163,28 @@ pub fn show(ui: &mut egui::Ui, edit: &mut EditState, ctx: RowCtx) {
     modal(ui.ctx(), edit, &ctx);
 }
 
+/// The shared card behind the strip, with dividers between its cells.
+fn strip_frame(p: &egui::Painter, area: Rect, cells: usize) {
+    theme::paint_surface(p, area, theme::RADIUS_MD, theme::CARD_BG, theme::BORDER);
+    for i in 0..cells {
+        let rect = cell_rect(area, i);
+        if i % COLS < COLS - 1 {
+            p.vline(
+                rect.right(),
+                rect.y_range(),
+                Stroke::new(1.0, theme::BORDER_SOFT),
+            );
+        }
+        if i >= COLS {
+            p.hline(
+                rect.x_range(),
+                rect.top(),
+                Stroke::new(1.0, theme::BORDER_SOFT),
+            );
+        }
+    }
+}
+
 fn modal(ctx_egui: &egui::Context, edit: &mut EditState, ctx: &RowCtx) {
     let Some(mut draft) = edit.modal.take() else {
         return;
@@ -298,24 +220,15 @@ fn tile(
     } else {
         Sense::hover()
     };
-    let resp = ui.interact(rect, egui::Id::new(("home_widget", &w.id)), sense);
+    let resp = ui.interact(rect, egui::Id::unique(("home_widget", &w.id)), sense);
     let color = theme::widget_hue(w.color);
     let resolved = widget_view::resolve(w, ctx.sensors, ctx.state);
     let p = ui.painter();
     widget_view::paint(p, rect, w, resolved.as_ref(), ctx.history);
-    widget_view::frame(
-        p,
-        rect,
-        if customizing {
-            a(color, 0.5)
-        } else {
-            theme::BORDER
-        },
-    );
-
     if !customizing {
         return (Rect::NOTHING, resp);
     }
+    widget_view::frame(p, rect, a(color, 0.5));
     let badge = Rect::from_min_size(
         Pos2::new(rect.right() - BADGE - 8.0, rect.top() + 8.0),
         Vec2::splat(BADGE),
@@ -338,7 +251,7 @@ fn tile(
 }
 
 fn add_tile(ui: &mut egui::Ui, rect: Rect) -> bool {
-    let resp = ui.interact(rect, egui::Id::new("home_widget_add"), Sense::click());
+    let resp = ui.interact(rect, egui::Id::unique("home_widget_add"), Sense::click());
     let hovered = resp.hovered();
     if hovered {
         ui.ctx().set_cursor_icon(egui::CursorIcon::PointingHand);
@@ -349,7 +262,9 @@ fn add_tile(ui: &mut egui::Ui, rect: Rect) -> bool {
         theme::TEXT_FAINT
     };
     let p = ui.painter();
-    widget_view::frame(p, rect, if hovered { theme::CYAN } else { theme::BORDER });
+    if hovered {
+        widget_view::frame(p, rect, theme::CYAN);
+    }
     p.text(
         Pos2::new(rect.center().x, rect.center().y - 10.0),
         Align2::CENTER_CENTER,
@@ -433,71 +348,27 @@ mod tests {
         assert!(rx.try_recv().is_err(), "edits coalesce into a single save");
     }
 
-    use widget_view::Size;
-
-    fn at(col: usize, row: usize) -> (usize, usize) {
-        (col, row)
-    }
-
-    fn placements(sizes: &[Size]) -> Vec<(usize, usize)> {
-        pack(sizes).iter().map(|c| at(c.col, c.row)).collect()
+    #[test]
+    fn strip_cells_tile_three_per_row_without_overlap() {
+        let area = Rect::from_min_size(Pos2::ZERO, Vec2::new(900.0, strip_height(5)));
+        let rects: Vec<_> = (0..5).map(|i| cell_rect(area, i)).collect();
+        assert_eq!(rects[2].right(), area.right());
+        assert_eq!(rects[3].left(), area.left());
+        assert_eq!(rects[3].top(), rects[0].bottom());
+        assert!(rects.iter().all(|r| area.contains_rect(*r)));
+        for (i, a) in rects.iter().enumerate() {
+            for b in &rects[i + 1..] {
+                assert!(a.intersect(*b).area() <= 0.0);
+            }
+        }
     }
 
     #[test]
-    fn four_full_tiles_fill_a_row_and_the_fifth_wraps() {
-        assert_eq!(
-            placements(&[Size::FULL; 5]),
-            vec![at(0, 0), at(2, 0), at(4, 0), at(6, 0), at(0, 1)]
-        );
-    }
-
-    #[test]
-    fn gauges_pack_four_across_and_span_two_rows() {
-        let cells = pack(&[Size::GAUGE; 5]);
-        let cols: Vec<_> = cells.iter().map(|c| at(c.col, c.row)).collect();
-        assert_eq!(cols[0], at(0, 0));
-        assert_eq!(cols[3], at(6, 0));
-        // The fifth starts a new band, two rows below — gauges are double height.
-        assert_eq!(cols[4], at(0, 2));
-    }
-
-    #[test]
-    fn a_short_tile_backfills_the_row_beside_a_tall_gauge() {
-        // The gauge holds columns 0-1 across both rows; charts fill the rest of
-        // row 0, then wrap into row 1 beside it rather than below the whole band.
-        let sizes = [Size::GAUGE, Size::FULL, Size::FULL, Size::FULL, Size::FULL];
-        assert_eq!(
-            placements(&sizes),
-            vec![at(0, 0), at(2, 0), at(4, 0), at(6, 0), at(2, 1)]
-        );
-    }
-
-    #[test]
-    fn a_gauge_is_a_square_tile_two_rows_tall() {
-        let area = Rect::from_min_size(Pos2::ZERO, Vec2::new(1000.0, 500.0));
-        let cells = pack(&[Size::FULL, Size::GAUGE]);
-        let full = cell_rect(area, &cells[0]);
-        let gauge = cell_rect(area, &cells[1]);
-        assert_eq!(gauge.width(), full.width());
-        assert!((gauge.height() - (full.height() * 2.0 + GAP)).abs() < 0.01);
-        // Near-square: the two-row height is within a tile gap of the width.
-        assert!(
-            (gauge.width() - gauge.height()).abs() <= GAP * 2.0,
-            "{gauge:?}"
-        );
-        // Four full tiles plus their gaps consume the row exactly.
-        assert!((full.width() * 4.0 + GAP * 3.0 - area.width()).abs() < 0.01);
-    }
-
-    #[test]
-    fn grid_height_covers_the_tallest_column() {
-        assert_eq!(grid_height(&pack(&[Size::FULL])), TILE_H);
-        assert_eq!(grid_height(&pack(&[Size::GAUGE])), TILE_H * 2.0 + GAP);
-        assert_eq!(
-            grid_height(&pack(&[Size::GAUGE, Size::FULL])),
-            TILE_H * 2.0 + GAP,
-            "a short tile beside a gauge must not shrink the band"
-        );
+    fn strip_height_rounds_up_to_whole_rows() {
+        assert_eq!(strip_height(0), 0.0);
+        assert_eq!(strip_height(1), CELL_H);
+        assert_eq!(strip_height(3), CELL_H);
+        assert_eq!(strip_height(4), CELL_H * 2.0);
     }
 
     #[test]

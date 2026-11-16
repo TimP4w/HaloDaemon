@@ -38,30 +38,38 @@ const SCALE: f32 = 2.0;
 
 /// Render a seeded state to `docs/images/<name>.png`. `setup` positions the app
 /// on the target page/tab before the captured frame.
-fn capture(name: &str, state: TopicStore, setup: impl FnOnce(&mut App)) {
-    let force_quit = Arc::new(AtomicBool::new(false));
-    let (cmd, ui_rx, _senders, sinks) = ipc::fake(state, true);
-    let hidden = Arc::new(AtomicBool::new(false));
+fn app_with(cmd: ipc::CommandTx, ui_rx: ipc::UiRx, sinks: ipc::FrameSinks) -> App {
     let mut app = App::new(
         ui_rx,
         sinks,
         cmd,
         Tray::headless(),
-        force_quit,
-        hidden,
+        Arc::new(AtomicBool::new(false)),
+        Arc::new(AtomicBool::new(false)),
         Arc::new(crate::domain::state::HideState::default()),
     );
     app.entered = true;
-    setup(&mut app);
+    app
+}
 
-    // The theme (fonts, dark visuals) is installed by `main.rs` at startup. The
-    // harness draws once on build, before we can touch its context, so the first
-    // pass installs the theme and skips drawing — set_fonts only binds the custom
-    // families ("bold", "mono", …) from the next frame.
+fn shot_size() -> egui::Vec2 {
+    std::env::var("HALOD_SHOT_SIZE")
+        .ok()
+        .and_then(|v| {
+            let (w, h) = v.split_once('x')?;
+            Some(vec2(w.parse().ok()?, h.parse().ok()?))
+        })
+        .unwrap_or(vec2(SIZE.0, SIZE.1))
+}
+
+fn harness(app: App, scale: f32) -> egui_kittest::Harness<'static, App> {
+    // The harness draws once on build, before we can touch its context, so the
+    // first pass installs the theme and skips drawing — set_fonts only binds
+    // the custom families from the next frame.
     let mut themed = false;
-    let mut harness = egui_kittest::Harness::builder()
-        .with_size(vec2(SIZE.0, SIZE.1))
-        .with_pixels_per_point(SCALE)
+    egui_kittest::Harness::builder()
+        .with_size(shot_size())
+        .with_pixels_per_point(scale)
         .wgpu()
         .build_ui_state(
             move |ui: &mut egui::Ui, app: &mut App| {
@@ -73,20 +81,393 @@ fn capture(name: &str, state: TopicStore, setup: impl FnOnce(&mut App)) {
                 app.draw(ui);
             },
             app,
-        );
+        )
+}
 
-    // The UI repaints every frame (title-bar clock, grace timer), so `run` would
-    // trip its no-more-repaints assertion; a fixed few steps settles layout.
+fn save(harness: &mut egui_kittest::Harness<'static, App>, path: PathBuf) {
+    // The UI repaints every frame, so `run` would trip its no-more-repaints
+    // assertion; a fixed few steps settles layout.
     harness.run_steps(4);
     let image = harness.render().expect("wgpu render");
-    let path = out_dir().join(format!("{name}.png"));
     image.save(&path).expect("save png");
-    eprintln!(
-        "wrote {} ({}x{})",
-        path.display(),
-        image.width(),
-        image.height()
+    eprintln!("wrote {}", path.display());
+}
+
+/// Render a seeded state to `docs/images/<name>.png`. `setup` positions the app
+/// on the target page/tab before the captured frame.
+fn capture(name: &str, state: TopicStore, setup: impl FnOnce(&mut App)) {
+    let (cmd, ui_rx, _senders, sinks) = ipc::fake(state, true);
+    let mut app = app_with(cmd, ui_rx, sinks);
+    setup(&mut app);
+    save(
+        &mut harness(app, SCALE),
+        out_dir().join(format!("{name}.png")),
     );
+}
+
+/// Every view of the app against the running daemon, written to
+/// `$HALOD_SHOT_DIR`: top-level pages, both lighting tabs, each device's tabs,
+/// and each profile.
+#[test]
+#[ignore = "live screenshot tour; needs a running halod"]
+fn live_tour() {
+    let dir = PathBuf::from(std::env::var("HALOD_SHOT_DIR").expect("HALOD_SHOT_DIR"));
+    std::fs::create_dir_all(&dir).expect("shot dir");
+    let (cmd, ui_rx, sinks) = ipc::spawn(|| {}, Arc::new(AtomicBool::new(false)));
+    let mut app = app_with(cmd, ui_rx, sinks);
+    app.depcheck_ui.dismiss_for_session();
+    app.onboarding_completed = true;
+    for key in crate::domain::tour::defs::ALL_TOUR_KEYS {
+        app.tour.mark_locally_seen(key.id());
+    }
+    let mut h = harness(app, 1.0);
+    let settle = |h: &mut egui_kittest::Harness<'static, App>, secs: f32| {
+        for _ in 0..(secs * 10.0) as usize {
+            h.run_steps(1);
+            std::thread::sleep(std::time::Duration::from_millis(100));
+        }
+    };
+    for _ in 0..600 {
+        settle(&mut h, 0.1);
+        let app = h.state();
+        let state = app.ui.state.get();
+        if *app.ui.connected.borrow()
+            && state.gui_present
+            && matches!(
+                state.discovery.phase,
+                halod_shared::types::DiscoveryPhase::Complete
+            )
+        {
+            break;
+        }
+    }
+    settle(&mut h, 2.0);
+    let only = std::env::var("HALOD_SHOT_ONLY").ok();
+    let shot = |h: &mut egui_kittest::Harness<'static, App>, name: &str, set: &dyn Fn(&mut App)| {
+        if only
+            .as_deref()
+            .is_some_and(|f| !f.split(',').any(|f| name.contains(f)))
+        {
+            return;
+        }
+        set(h.state_mut());
+        settle(h, 1.0);
+        save(h, dir.join(format!("{name}.png")));
+    };
+    shot(&mut h, "home", &|a| a.page = Page::Home);
+    shot(&mut h, "lighting-canvas", &|a| {
+        a.page = Page::Lighting;
+        a.lighting_ui.tab = 0;
+    });
+    shot(&mut h, "lighting-direct", &|a| {
+        a.page = Page::Lighting;
+        a.lighting_ui.tab = 1;
+    });
+    for (name, zones) in [("lighting-params", false), ("lighting-zones", true)] {
+        shot(&mut h, name, &move |a| {
+            let id =
+                a.ui.state
+                    .get()
+                    .lighting
+                    .canvas
+                    .effects
+                    .keys()
+                    .min()
+                    .cloned();
+            a.page = Page::Lighting;
+            a.lighting_ui.tab = 0;
+            if zones {
+                a.canvas_ui.selected_instance = None;
+                a.canvas_ui.zones_modal = id;
+            } else {
+                a.canvas_ui.selected_instance = id;
+            }
+        });
+    }
+    shot(&mut h, "cooling", &|a| a.page = Page::Cooling);
+    shot(&mut h, "plugins", &|a| a.page = Page::Plugins);
+    shot(&mut h, "plugin-openrgb", &|a| {
+        a.page = Page::Plugins;
+        a.plugins_ui.select_plugin("openrgb");
+    });
+    shot(&mut h, "settings", &|a| a.page = Page::Settings);
+    shell_overlay_shots(&mut h, &shot);
+    shot(&mut h, "effect-designer", &|a| {
+        a.page = Page::EffectDesigner
+    });
+    let state = h.state().ui.state.get().clone();
+    let mut seen = std::collections::HashSet::new();
+    for dev in state
+        .devices
+        .iter()
+        .filter(|d| crate::domain::models::device::listable(d))
+        .filter(|d| {
+            let kinds: Vec<_> = tabs_for(d).iter().map(|t| t.kind).collect();
+            seen.insert(format!("{:?}{kinds:?}", d.device_type))
+        })
+    {
+        for (i, tab) in tabs_for(dev).iter().enumerate() {
+            let id = dev.id.clone();
+            shot(
+                &mut h,
+                &format!("device-{}-{:?}", dev.id, tab.kind),
+                &move |a| {
+                    a.page = Page::Device(id.clone());
+                    a.device_ui = DeviceUi::new(id.clone());
+                    a.device_ui.tab = i;
+                },
+            );
+        }
+    }
+    keys_shots(&mut h, &state, &shot);
+    device_state_shots(&mut h, &state, &shot);
+    for name in &state.profiles.available {
+        let name = name.clone();
+        shot(&mut h, &format!("profile-{name}"), &move |a| {
+            a.page = Page::Profile(name.clone())
+        });
+    }
+}
+
+/// Shell overlays on top of Home: the notifications panel, the delete and
+/// conflict dialogs, and the startup healthcheck.
+fn shell_overlay_shots(
+    h: &mut egui_kittest::Harness<'static, App>,
+    shot: &dyn Fn(&mut egui_kittest::Harness<'static, App>, &str, &dyn Fn(&mut App)),
+) {
+    use halod_shared::types::{Notification, NotificationCode};
+    shot(h, "notifications", &|a| {
+        a.page = Page::Home;
+        let state = a.ui.state.get().clone();
+        let note = |code| Notification {
+            code,
+            show_native: false,
+            timestamp_ms: 0,
+        };
+        let device = state
+            .devices
+            .first()
+            .map_or_else(String::new, |d| d.name.clone());
+        a.toasts.ingest(
+            [
+                note(NotificationCode::DeviceWriteFailed {
+                    device,
+                    detail: String::new(),
+                }),
+                note(NotificationCode::ProfileSwitched {
+                    profile: state.profiles.active.clone(),
+                }),
+            ],
+            0.0,
+        );
+        a.toasts.panel_open = true;
+    });
+    shot(h, "dialog-delete", &|a| {
+        a.toasts.panel_open = false;
+        a.profile_ui.confirm_delete = a.ui.state.get().profiles.available.first().cloned();
+    });
+    shot(h, "healthcheck", &|a| {
+        a.profile_ui.confirm_delete = None;
+        a.depcheck_ui = Default::default();
+    });
+    shot(h, "healthcheck-closed", &|a| {
+        a.depcheck_ui.dismiss_for_session()
+    });
+}
+
+/// One shell state against a seeded snapshot, picked by `HALOD_SHELL_STATE`
+/// (`startup`, `discovery`, `offline`, `conflicts` or `onboarding-<step>`);
+/// one process per state.
+#[test]
+#[ignore = "seeded shell state; writes to HALOD_SHOT_DIR"]
+fn shell_state() {
+    use halod_shared::types::{DiscoveryDetail, DiscoveryPhase};
+    let dir = PathBuf::from(std::env::var("HALOD_SHOT_DIR").expect("HALOD_SHOT_DIR"));
+    let which = std::env::var("HALOD_SHELL_STATE").expect("HALOD_SHELL_STATE");
+    let mut state = home_state();
+    let onboarding = which
+        .strip_prefix("onboarding-")
+        .map(|step| step.parse::<u8>().expect("onboarding step"));
+    if which == "conflicts" {
+        let conflict = |peer: &str| {
+            json!({
+                "peer_ids": [peer], "recommended_id": "trident-z5", "confidence": "confirmed",
+                "participants": [
+                    {"id": "trident-z5", "source": {"plugin": "gskill_dram"}},
+                    {"id": "trident-orgb", "source": {"integration": "openrgb"}},
+                ],
+            })
+        };
+        let mut devices = serde_json::to_value(&state.devices).expect("devices");
+        let list = devices.as_array_mut().expect("device list");
+        for d in list.iter_mut() {
+            if d["id"] == "trident-z5" {
+                d["conflict"] = conflict("trident-orgb");
+            }
+        }
+        list.push(json!({
+            "id": "trident-orgb", "name": "Trident Z5 RGB", "vendor": "G.Skill", "model": "Trident Z5 RGB", "device_type": "ram",
+            "connected": true, "capabilities": [],
+            "conflict": conflict("trident-z5"),
+        }));
+        state.devices = serde_json::from_value(devices).expect("conflict devices");
+    }
+    if onboarding.is_some() {
+        state.gui_present = true;
+        state.gui.seen_tours.clear();
+    } else if matches!(which.as_str(), "startup" | "discovery") {
+        state.discovery.phase = DiscoveryPhase::Discovering;
+        state.discovery.detail = DiscoveryDetail::SmbusBus { number: 3 };
+    } else {
+        state.discovery.phase = DiscoveryPhase::Complete;
+    }
+    let devices = state.devices.clone();
+    let (cmd, ui_rx, _senders, sinks) = ipc::fake(state, which != "offline");
+    let mut app = app_with(cmd, ui_rx, sinks);
+    app.entered = which != "startup";
+    app.onboarding_completed = onboarding.is_none();
+    if let Some(step) = onboarding {
+        app.onboarding_ui = crate::ui::screens::onboarding::OnboardingUi::at_step(step);
+    }
+    if which == "conflicts" {
+        app.home_ui.open_conflicts(&devices);
+    }
+    app.depcheck_ui.dismiss_for_session();
+    for key in crate::domain::tour::defs::ALL_TOUR_KEYS {
+        app.tour.mark_locally_seen(key.id());
+    }
+    save(&mut harness(app, 1.0), dir.join(format!("{which}.png")));
+}
+
+/// Keys tab states the default tour misses: a remapped button selected, and a
+/// local (unsent) macro draft open in the editor.
+/// Device-page states the plain tab tour can't reach: the chains Add-link
+/// form open and an LCD editor widget selected.
+fn device_state_shots(
+    h: &mut egui_kittest::Harness<'static, App>,
+    state: &TopicStore,
+    shot: &dyn Fn(&mut egui_kittest::Harness<'static, App>, &str, &dyn Fn(&mut App)),
+) {
+    use halod_shared::types::{DeviceCapability, LightingDivision};
+    let tab_of = |dev: &halod_shared::types::WireDevice, kind| {
+        tabs_for(dev).iter().position(|t| t.kind == kind)
+    };
+    if let Some((dev, i, channel)) = state.devices.iter().find_map(|d| {
+        let channel = d.capabilities.iter().find_map(|c| match c {
+            DeviceCapability::Lighting(l) => l
+                .descriptor
+                .channels
+                .iter()
+                .find(|c| matches!(c.division, LightingDivision::Divisible { .. })),
+            _ => None,
+        })?;
+        Some((d, tab_of(d, TabKind::Chains)?, channel.id.clone()))
+    }) {
+        h.ctx.data_mut(|d| {
+            d.insert_temp(
+                egui::Id::unique(("ch_add_open", dev.id.as_str(), &channel)),
+                true,
+            );
+            d.insert_temp(
+                egui::Id::unique(("ch_add_name", dev.id.as_str(), &channel)),
+                "Desk strip".to_string(),
+            );
+            d.insert_temp(
+                egui::Id::unique(("ch_add_leds", dev.id.as_str(), &channel)),
+                "30".to_string(),
+            );
+        });
+        shot(h, &format!("device-{}-chains-adding", dev.id), &|a| {
+            a.page = Page::Device(dev.id.clone());
+            a.device_ui = DeviceUi::new(dev.id.clone());
+            a.device_ui.tab = i;
+        });
+    }
+    if let Some((dev, i)) = state
+        .devices
+        .iter()
+        .find_map(|d| Some((d, tab_of(d, TabKind::Lcd)?)))
+    {
+        shot(h, &format!("device-{}-lcd-selected", dev.id), &|a| {
+            let def = std::mem::take(&mut a.device_ui.lcd.editor.def);
+            a.page = Page::Device(dev.id.clone());
+            a.device_ui = DeviceUi::new(dev.id.clone());
+            a.device_ui.tab = i;
+            // Show the editor without re-activating the custom template on the live device.
+            let lcd = &mut a.device_ui.lcd;
+            lcd.media_tab = crate::ui::screens::device::LcdMediaTab::Template;
+            lcd.prev_mode_tab = Some(lcd.media_tab);
+            lcd.seeded_profile = Some(a.ui.state.get().profiles.active.clone());
+            if let Some(w) = def.widgets.first() {
+                a.device_ui.lcd.editor.select_only(w.id.clone());
+            }
+            a.device_ui.lcd.editor.def = def;
+        });
+    }
+}
+
+fn keys_shots(
+    h: &mut egui_kittest::Harness<'static, App>,
+    state: &TopicStore,
+    shot: &dyn Fn(&mut egui_kittest::Harness<'static, App>, &str, &dyn Fn(&mut App)),
+) {
+    use halod_shared::types::{ButtonAction, DeviceCapability, MacroAtom, MacroStep, MouseBtn};
+    for dev in &state.devices {
+        let Some(remap) = dev.capabilities.iter().find_map(|c| match c {
+            DeviceCapability::KeyRemap(r) => Some(r),
+            _ => None,
+        }) else {
+            continue;
+        };
+        let Some(i) = tabs_for(dev).iter().position(|t| t.kind == TabKind::Keys) else {
+            continue;
+        };
+        let open = |a: &mut App, cid: u16| {
+            a.page = Page::Device(dev.id.clone());
+            a.device_ui = DeviceUi::new(dev.id.clone());
+            a.device_ui.tab = i;
+            a.device_ui.keys.keys_sel_cid = Some(cid);
+        };
+        if let Some(m) = remap
+            .mappings
+            .iter()
+            .find(|m| m.base != ButtonAction::Native)
+        {
+            shot(h, &format!("keys-{}-remapped", dev.id), &|a| open(a, m.cid));
+        }
+        let Some(cid) = remap.buttons.first().map(|b| b.cid) else {
+            continue;
+        };
+        let step = |kind| MacroStep {
+            kind,
+            delay_after_ms: 0,
+        };
+        let draft = ButtonAction::Macro {
+            steps: vec![
+                step(MacroAtom::KeyDown { key: 29 }),
+                step(MacroAtom::KeyDown { key: 46 }),
+                MacroStep {
+                    kind: MacroAtom::Delay,
+                    delay_after_ms: 40,
+                },
+                step(MacroAtom::KeyUp { key: 46 }),
+                step(MacroAtom::KeyUp { key: 29 }),
+                MacroStep {
+                    kind: MacroAtom::Delay,
+                    delay_after_ms: 120,
+                },
+                step(MacroAtom::MouseDown {
+                    btn: MouseBtn::Left,
+                }),
+            ],
+        };
+        shot(h, &format!("keys-{}-macro", dev.id), &|a| {
+            open(a, cid);
+            a.device_ui.keys.observed_mapping =
+                Some((cid, ButtonAction::Native, ButtonAction::Native));
+            a.device_ui.keys.keys_action = Some(draft.clone());
+        });
+    }
 }
 
 /// `docs/images/`, resolved from this crate's manifest dir (`src/ui`).
@@ -685,7 +1066,7 @@ fn lcd() {
     capture("lcd", state, move |a| {
         a.page = Page::Device("kraken-lcd".into());
         a.device_ui = ui;
-        a.lcd_editor_render_cache = Some(render);
+        a.ui.lcd_editor_render.set(Some(render));
     });
 }
 

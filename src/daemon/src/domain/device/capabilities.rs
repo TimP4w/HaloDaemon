@@ -247,7 +247,7 @@ pub trait LightingCapability: Send + Sync {
         if let Some(s) = v.get("state") {
             if let Ok(state) = serde_json::from_value(s.clone()) {
                 if let Err(e) = self.apply(state).await {
-                    log::warn!("[rgb restore_state] apply failed: {e:#}");
+                    log::debug!("[rgb restore_state] apply failed: {e:#}");
                     ok = false;
                 }
             }
@@ -284,7 +284,7 @@ pub trait RangeCapability: Send + Sync {
                 continue;
             }
             if let Err(e) = self.set_range(&key, value).await {
-                log::warn!("[range restore_state] set_range({key}) failed: {e:#}");
+                log::debug!("[range restore_state] set_range({key}) failed: {e:#}");
                 ok = false;
             }
         }
@@ -311,7 +311,7 @@ pub trait ChoiceCapability: Send + Sync {
         let mut ok = true;
         for (key, selected) in self.choice_cache().load_pairs(v) {
             if let Err(e) = self.set_choice(&key, selected).await {
-                log::warn!("[choice restore_state] set_choice({key}) failed: {e:#}");
+                log::debug!("[choice restore_state] set_choice({key}) failed: {e:#}");
                 ok = false;
             }
         }
@@ -361,7 +361,7 @@ pub trait BooleanCapability: Send + Sync {
                     continue;
                 }
                 if let Err(e) = self.set_boolean(&key, value).await {
-                    log::warn!("[boolean restore_state] set_boolean({key}) failed: {e:#}");
+                    log::debug!("[boolean restore_state] set_boolean({key}) failed: {e:#}");
                     ok = false;
                 }
             }
@@ -442,7 +442,7 @@ pub trait EqualizerCapability: Send + Sync {
         let mut ok = true;
         if let Some(preset) = v["preset"].as_u64() {
             if let Err(e) = self.set_eq_preset(preset as usize).await {
-                log::warn!("[eq restore_state] set_eq_preset failed: {e:#}");
+                log::debug!("[eq restore_state] set_eq_preset failed: {e:#}");
                 ok = false;
             }
         }
@@ -453,7 +453,7 @@ pub trait EqualizerCapability: Send + Sync {
                 .collect();
             if values.len() == 10 {
                 if let Err(e) = self.set_eq_bands(&values).await {
-                    log::warn!("[eq restore_state] set_eq_bands failed: {e:#}");
+                    log::debug!("[eq restore_state] set_eq_bands failed: {e:#}");
                     ok = false;
                 }
             }
@@ -667,7 +667,7 @@ pub trait LcdCapability: Send + Sync {
                 0
             });
             if let Err(e) = self.set_brightness(b).await {
-                log::warn!("[lcd restore_state] set_brightness failed: {e:#}");
+                log::debug!("[lcd restore_state] set_brightness failed: {e:#}");
                 failure = Some(format!("restoring brightness failed: {e}"));
             }
         }
@@ -683,7 +683,7 @@ pub trait LcdCapability: Send + Sync {
             };
             if let Some(degrees) = degrees {
                 if let Err(e) = self.set_rotation(degrees).await {
-                    log::warn!("[lcd restore_state] set_rotation failed: {e:#}");
+                    log::debug!("[lcd restore_state] set_rotation failed: {e:#}");
                     failure.get_or_insert_with(|| format!("restoring rotation failed: {e}"));
                 }
             }

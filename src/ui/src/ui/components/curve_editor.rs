@@ -10,7 +10,9 @@ use crate::ui::theme::{self, a};
 /// An editable monotonic curve over a normalized domain. `points` are
 /// `[x, y]` in data units; `x_range`/`y_range` map them into `rect`. Click on
 /// empty space adds a point, drag a handle to move it, right-click removes.
+/// The hovered or dragged handle shows `label(point)` in a raised chip.
 /// Returns `true` when the point set changed.
+#[allow(clippy::too_many_arguments)]
 pub fn curve_editor(
     ui: &mut egui::Ui,
     rect: Rect,
@@ -19,6 +21,7 @@ pub fn curve_editor(
     y_range: RangeInclusive<f32>,
     color: Color32,
     op: Option<[f32; 2]>,
+    label: impl Fn([f32; 2]) -> String,
 ) -> bool {
     let (xlo, xhi) = (*x_range.start(), *x_range.end());
     let (ylo, yhi) = (*y_range.start(), *y_range.end());
@@ -38,27 +41,21 @@ pub fn curve_editor(
 
     let p = ui.painter().with_clip_rect(rect);
     p.rect_filled(rect, 8.0, theme::INNER_BG);
-    p.rect_stroke(
-        rect,
-        8.0,
-        Stroke::new(1.0, theme::BORDER_INNER),
-        egui::StrokeKind::Middle,
-    );
     for i in 1..4 {
         let y = rect.top() + rect.height() * i as f32 / 4.0;
         p.line_segment(
             [Pos2::new(rect.left(), y), Pos2::new(rect.right(), y)],
-            Stroke::new(1.0, theme::hex(0x161d29)),
+            Stroke::new(1.0, theme::DIVIDER),
         );
         let x = rect.left() + rect.width() * i as f32 / 4.0;
         p.line_segment(
             [Pos2::new(x, rect.top()), Pos2::new(x, rect.bottom())],
-            Stroke::new(1.0, theme::hex(0x161d29)),
+            Stroke::new(1.0, theme::DIVIDER),
         );
     }
 
     let mut changed = false;
-    let id = ui.id().with("curve");
+    let id = ui.scope_id().with("curve");
     let screen_pts: Vec<Pos2> = points.iter().map(|&pt| to_screen(pt)).collect();
 
     // Detect right-click via raw input so the bg widget (registered last)
@@ -71,6 +68,7 @@ pub fn curve_editor(
         }
     });
     let mut remove: Option<usize> = None;
+    let mut focus: Option<usize> = None;
     if let Some(rpos) = right_click_pos {
         if rect.contains(rpos) && points.len() > 2 {
             // Find the nearest handle within the 18px hit zone.
@@ -99,12 +97,14 @@ pub fn curve_editor(
                 changed = true;
             }
         }
-        if resp.hovered() {
+        if resp.hovered() || resp.dragged() {
             ui.ctx().set_cursor_icon(egui::CursorIcon::Grab);
+            focus = Some(i);
         }
     }
     if let Some(i) = remove {
         points.remove(i);
+        focus = None;
         changed = true;
     }
     let bg = ui.interact(rect, id.with("bg"), Sense::click());
@@ -136,8 +136,8 @@ pub fn curve_editor(
     }
     if pts.len() >= 2 {
         let mut mesh = egui::Mesh::default();
-        let top_fill = a(color, 0.28);
-        let bot_fill = a(color, 0.0);
+        let top_fill = a(color, 0.16);
+        let bot_fill = a(color, 0.04);
         for w in pts.windows(2) {
             let base = mesh.vertices.len() as u32;
             for (v, c) in [
@@ -152,20 +152,38 @@ pub fn curve_editor(
             mesh.add_triangle(base, base + 2, base + 3);
         }
         p.add(egui::Shape::mesh(mesh));
-        p.add(egui::Shape::line(pts.clone(), Stroke::new(2.5, color)));
+        p.add(egui::Shape::line(pts.clone(), Stroke::new(2.0, color)));
     }
     if let Some(op) = op {
         let s = to_screen(op);
-        p.line_segment(
-            [Pos2::new(s.x, rect.top()), Pos2::new(s.x, rect.bottom())],
-            Stroke::new(1.0, a(color, 0.5)),
-        );
-        theme::glow(&p, s, 8.0, color, 0.6);
-        p.circle_filled(s, 4.5, Color32::WHITE);
+        p.extend(egui::Shape::dashed_line(
+            &[Pos2::new(s.x, rect.top()), Pos2::new(s.x, rect.bottom())],
+            Stroke::new(1.0, a(theme::TEXT, 0.35)),
+            3.0,
+            3.0,
+        ));
+        p.circle_filled(s, 4.0, theme::TEXT);
     }
-    for &s in &handle_pts {
-        p.circle_filled(s, 8.0, color);
-        p.circle_stroke(s, 8.0, Stroke::new(2.5, theme::INNER_BG));
+    for (i, &s) in handle_pts.iter().enumerate() {
+        if focus == Some(i) {
+            p.circle_filled(s, 8.0, color);
+        } else {
+            p.circle_filled(s, 6.0, theme::INNER_BG);
+            p.circle_stroke(s, 6.0, Stroke::new(2.0, color));
+        }
+    }
+    if let Some(i) = focus.filter(|&i| i < points.len()) {
+        let galley = p.layout_no_wrap(label(points[i]), theme::body_sm(), theme::TEXT);
+        let size = galley.size() + Vec2::new(16.0, 10.0);
+        let anchor = handle_pts[i] + Vec2::new(12.0, -size.y - 8.0);
+        let chip = Rect::from_min_size(anchor, size)
+            .translate(Vec2::new(
+                (rect.right() - 4.0 - anchor.x - size.x).min(0.0),
+                0.0,
+            ))
+            .translate(Vec2::new(0.0, (rect.top() + 4.0 - anchor.y).max(0.0)));
+        theme::paint_surface(&p, chip, 5.0, theme::RAISED_BG, theme::BORDER_INNER);
+        p.galley(chip.center() - galley.size() / 2.0, galley, theme::TEXT);
     }
     changed
 }

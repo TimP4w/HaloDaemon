@@ -1,21 +1,11 @@
 integrations:
-  title: Integrations
-  subtitle: Connect HaloDaemon to other applications. Devices from active integrations become available in the workspace.
-  empty_title: No integrations available
-  empty_hint: You don't have any integrations yet.
-  configure: Configure
-  hide_configure: Hide
   reset_setup: Reset setup
   reset_setup_title: Reset integration setup?
   reset_setup_confirm: "This removes the saved configuration and credentials for %{name}. The integration will be disabled until setup succeeds again."
   reset_setup_action: Reset and configure
-  status_connected: Connected
   status_connecting: Not connected
-  status_disabled: Disabled
-  status_unconfigured: Unconfigured
   status_configured: Configured
   status_active: Active
-  devices_exposed: "%{count} devices"
   issue_connect_failed: Connection failed
   issue_runtime_error: Runtime error
   issue_details: Details
@@ -57,3 +47,18 @@ integrations:
   setup_connected_sub: The device is now available in your workspace.
   setup_failed: Setup failed
   setup_finish: Close
+  # inline panel on the Plugins page
+  paused: This integration is paused.
+  resume: Resume
+  not_set_up: Not set up yet. Set it up to connect and add its devices.
+  set_up: Set up
+  cancel_setup: Cancel setup
+  connection: Connection
+  devices: Devices
+  status: Status
+  devices_title: Devices from this integration
+  open_device: Open
+  save_reconnect: Save and reconnect
+  connected_to: "Connected to %{address}. %{count} devices are on Home."
+  connected: "Connected. %{count} devices are on Home."
+  setup_step_of: "Step %{current} of %{total}"

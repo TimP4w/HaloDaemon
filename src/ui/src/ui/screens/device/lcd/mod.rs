@@ -132,7 +132,7 @@ pub fn show(ui: &mut egui::Ui, ctx: &TabCtx, st: &mut DeviceUi) {
         }
     }
 
-    ui.add_space(crate::ui::theme::SPACE_7);
+    ui.add_space(crate::ui::theme::SPACE_4);
 
     match st.lcd.media_tab {
         LcdMediaTab::Template => editor::show(ui, ctx, st, &id, lcd),
@@ -183,37 +183,62 @@ fn mode_header(ui: &mut egui::Ui, ctx: &TabCtx, st: &mut DeviceUi) {
         crate::domain::tour::AnchorId::LcdModeTabs,
         hdr_rect,
     );
-    widgets::card_with_margin(ui, egui::Margin::symmetric(8, 6), |ui| {
-        ui.horizontal(|ui| {
-            ui.spacing_mut().item_spacing.x = 7.0;
-            if widgets::pill(
+    let tabs = media_tabs(ctx.state.health.ffmpeg_available);
+    let labels: Vec<std::borrow::Cow<'static, str>> = tabs
+        .iter()
+        .map(|tab| match tab {
+            LcdMediaTab::Images => t!("lcd.tab_image"),
+            LcdMediaTab::Template => t!("lcd.tab_editor"),
+            LcdMediaTab::Video => t!("lcd.tab_video"),
+        })
+        .collect();
+    let refs: Vec<&str> = labels.iter().map(|l| l.as_ref()).collect();
+    let mut selected = tabs
+        .iter()
+        .position(|tab| *tab == st.lcd.media_tab)
+        .unwrap_or(usize::MAX);
+    let editing = st.lcd.media_tab == LcdMediaTab::Template;
+    let count = st.lcd.editor.def.widgets.len();
+    let mut save_open = false;
+    egui::Sides::new().show(
+        ui,
+        |ui| {
+            if widgets::segmented(ui, &refs, &mut selected, false) {
+                st.lcd.media_tab = tabs[selected];
+            }
+        },
+        |ui| {
+            if !editing {
+                return;
+            }
+            ui.spacing_mut().item_spacing.x = crate::ui::theme::SPACE_6;
+            if widgets::button(
                 ui,
-                &t!("lcd.tab_image"),
-                st.lcd.media_tab == LcdMediaTab::Images,
-            ) {
-                st.lcd.media_tab = LcdMediaTab::Images;
+                &t!("lcd.save_as_template"),
+                widgets::ButtonKind::Secondary,
+                egui::vec2(0.0, 30.0),
+            )
+            .clicked()
+            {
+                save_open = true;
             }
-            if widgets::pill(
-                ui,
-                &t!("lcd.tab_editor"),
-                st.lcd.media_tab == LcdMediaTab::Template,
-            ) {
-                st.lcd.media_tab = LcdMediaTab::Template;
-            }
-            let video_active = st.lcd.media_tab == LcdMediaTab::Video;
-            if ctx.state.health.ffmpeg_available {
-                if widgets::pill(ui, &t!("lcd.tab_video"), video_active) {
-                    st.lcd.media_tab = LcdMediaTab::Video;
-                }
-            } else {
-                ui.add_enabled_ui(false, |ui| {
-                    let _ = widgets::pill(ui, &t!("lcd.tab_video"), video_active);
-                })
-                .response
-                .on_disabled_hover_text(t!("lcd.ffmpeg_not_installed").to_string());
-            }
-        });
-    });
+            ui.label(
+                egui::RichText::new(t!("lcd.widget_count", n = count))
+                    .font(crate::ui::theme::body_md())
+                    .color(crate::ui::theme::TEXT_DIM),
+            );
+        },
+    );
+    st.lcd.editor.save_open |= save_open;
+}
+
+/// Media sources the user can switch to; video needs ffmpeg on the host.
+fn media_tabs(ffmpeg: bool) -> Vec<LcdMediaTab> {
+    let mut tabs = vec![LcdMediaTab::Images, LcdMediaTab::Template];
+    if ffmpeg {
+        tabs.push(LcdMediaTab::Video);
+    }
+    tabs
 }
 
 /// Refresh `preview_tex` from whichever source the current mode implies.
@@ -266,6 +291,12 @@ fn drive_preview(ui: &mut egui::Ui, ctx: &TabCtx, st: &mut DeviceUi, lcd: &LcdSt
 
 #[cfg(test)]
 mod tests {
+    #[test]
+    fn video_source_requires_ffmpeg() {
+        assert!(!super::media_tabs(false).contains(&LcdMediaTab::Video));
+        assert!(super::media_tabs(true).contains(&LcdMediaTab::Video));
+    }
+
     use super::{preview_keepalive_due, preview_key, rot_label, show, wants_engine_preview};
     use crate::domain::topic_store::TopicStore;
     use crate::runtime::ipc::DecodedFrame;
@@ -381,7 +412,7 @@ mod tests {
                 config_dir: tmp.path().to_string_lossy().into_owned(),
                 ..Default::default()
             };
-            // The widgets reference custom font families ("semibold", "mono", …);
+            // The widgets reference custom font families ("semibold", "lcd_mono", …);
             // register them or text layout panics.
             let ctx = egui::Context::default();
             crate::ui::theme::install_fonts(&ctx);
@@ -433,7 +464,7 @@ mod tests {
                 rx,
                 ..
             } = self;
-            let _ = ctx.run_ui(input, |ui| {
+            let _ = crate::ui::run_headless(ctx, input, |ui| {
                 egui::CentralPanel::default().show(ui, |ui| {
                     let tab = TabCtx {
                         state,

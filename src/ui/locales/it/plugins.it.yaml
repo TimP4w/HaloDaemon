@@ -1,31 +1,31 @@
 plugins:
+  not_set_up: Non configurato
+  repo_signed: Firmato
+  repo_unsigned: Non firmato
+  repo_synced: "sincronizzato %{age}"
+  repo_official: Ufficiale
+  enable: Abilita
+  disable: Disabilita
+  search: Cerca plugin
   title: Plugin
-  subtitle: I pacchetti dei repository aggiungono il supporto a nuovi dispositivi senza ricompilare il daemon.
-  counts: "%{count} pacchetti · %{active} attivi"
+  counts: "%{count} pacchetti · %{enabled} abilitati"
   empty_title: Nessun plugin installato
   empty_hint: Aggiungi un repository di plugin per estendere HaloDaemon con nuovi dispositivi.
-  add: Aggiungi repository
   # Repository dei plugin
   repos_title: Repository
   repos_check_updates: Controlla aggiornamenti
   repos_checking: Controllo aggiornamenti…
   repos_updates_disabled: Il controllo aggiornamenti è disattivato. Attiva il download dei plugin nelle Impostazioni per cercare aggiornamenti.
   repos_url_hint: URL Git (https://...)
-  repos_branch_hint: Branch (opzionale)
-  repos_branch_label: BRANCH
-  repos_branch_default: Branch predefinito
-  repos_branch_loading: Caricamento branch…
-  repos_branch_enter_url: Inserisci prima un URL
   repos_add: Aggiungi
   repos_add_title: Aggiungi repository
   repos_add_sub: Collega HaloDaemon a un repository Git remoto per esplorare, installare e aggiornare i plugin disponibili.
-  repos_import_folder: Cartella Git locale
   repos_import_archive: Archivio tar
   repos_empty: Nessun repository di plugin registrato.
   repos_update: Aggiorna
   repos_update_repo: Aggiorna il repository
   repos_move_pin: "Aggiorna a %{tag}"
-  repo_pinned: FISSATO
+  repo_pinned: Fissato
   repo_pinned_hint: Questo repository resta sulla release selezionata. Le nuove release vengono segnalate ma non installate automaticamente.
   repo_pinned_update_title: "La release %{tag} è disponibile"
   repo_pinned_update_body: "Questo repository è fissato a %{pinned}. L'aggiornamento sposta il vincolo a %{tag}."
@@ -43,25 +43,22 @@ plugins:
   repos_remove: Rimuovi repository
   repos_remove_title: Vuoi rimuovere il repository?
   repos_remove_body: In questo modo rimuoverai %{name} e disinstallerai tutti i plugin forniti dal repository.
-  repo_source: ORIGINE
-  repo_source_remote_git: Git remoto
-  repo_source_local_git: Git locale
+  repo_source: Origine
   repo_source_local_archive: Archivio locale
   repo_signing_fingerprint: "Chiave dell'autore: %{fingerprint}"
-  repo_last_sync: ULTIMA SINCRONIZZAZIONE
+  repo_last_sync: Ultima sincronizzazione
   repo_never_synced: mai
   repo_sync_just_now: proprio ora
   repo_sync_minutes: "%{count} min fa"
   repo_sync_hours: "%{count} ore fa"
   repo_sync_days: "%{count} giorni fa"
-  repo_drivers: DRIVER
+  repo_drivers: Driver
   repo_drivers_count: "%{count} installati"
-  repo_drivers_from: DRIVER DA QUESTO REPOSITORY
+  repo_drivers_from: Driver da questo repository
   repo_no_drivers: Nessun driver installato da questo repository.
   repo_signature_verified: Firma verificata con la chiave dell'autore registrata alla prima importazione del repository.
   repo_signature_unsigned: Repository non firmato. Gli hash dei pacchetti vengono controllati, ma l'autore non è autenticato.
   repo_signature_verification_failed: Verifica della firma del repository non riuscita.
-  repo_compatible_fallback: Revisione compatibile
   # Aggiornamenti per plugin
   updates_available: "%{count} aggiornamento plugin disponibile"
   updates_available_plural: "%{count} aggiornamenti plugin disponibili"
@@ -111,17 +108,19 @@ plugins:
   skipped_heading: Plugin ignorati
   skipped_title: Questo plugin è stato ignorato
   # Pannello dettagli
+  filter_all: Tutti
+  filter_devices: Dispositivi
+  filter_integrations: Integrazioni
+  filter_effects: Effetti
   type_device: Driver
   type_effect: Effetti
   type_integration: Integrazione
   experimental: Sperimentale
-  author: AUTORE
-  capabilities: FUNZIONALITÀ
-  targets: DISPOSITIVI SUPPORTATI
-  effects: EFFETTI
+  capabilities: Funzionalità
+  targets: Dispositivi supportati
+  effects: Effetti
   status_active: Attivo
   status_disabled: Disattivato
-  status_needs_permission: Richiede permessi
   status_inactive: Configurazione richiesta
   status_degraded: Funzionalità limitate
   req_command_missing: "Il daemon non trova '%{name}' nel PATH."
@@ -132,22 +131,17 @@ plugins:
   req_hwmon_missing: "Nessun sensore hardware rilevato in /sys/class/hwmon."
   req_hwmon_read_permission: "HaloDaemon non può leggere i sensori disponibili. Verifica i permessi sysfs e udev."
   req_hwmon_pwm_permission: "Il controllo delle ventole richiede l'accesso in scrittura ai file PWM in /sys/class/hwmon."
-  enable: Attiva
-  disable: Disattiva
   provenance_official: Ufficiale verificato
   provenance_repository: Repository non firmato
   provenance_development: Sorgente di sviluppo
   provenance_local: Pacchetto locale
   provenance_invalid: Firma non valida
   # Permessi
-  permissions: PERMESSI
-  permissions_pending: Questo plugin richiede permessi che non hai ancora concesso. Resterà inattivo finché non deciderai se concederli.
-  permissions_not_granted_tag: Non concesso
   regrant_required: È necessario controllare i permessi
   permissions_enable_hint: Se attivi questo plugin, ti verranno richiesti i permessi elencati sopra.
-  permissions_granted: Concesso
-  grant: Concedi permessi
   revoke: Revoca e disattiva
+  access_granted: Accesso al sistema concesso
+  access_requested: Accesso al sistema richiesto da questo plugin
   permission_hid: Accesso ai dispositivi HID
   permission_usb: Accesso ai dispositivi USB
   permission_hwmon: Monitoraggio hardware
@@ -175,8 +169,6 @@ plugins:
   permission_audio_routing_desc: Crea e instrada sink audio di sistema. Uno script malevolo potrebbe avviare moduli audio o catturare/reindirizzare l'audio su questo computer.
   permission_data_reads_desc: "Legge i dati pubblicati dal sistema o da altri plugin:"
   # Campi di configurazione
-  settings: IMPOSTAZIONI
-  save_settings: Salva
   secret_set_hint: (un segreto è memorizzato)
   # Finestra di consenso permessi (mostrata quando si attiva un plugin che richiede permessi)
   consent_title: Concedi permessi
@@ -186,7 +178,6 @@ plugins:
   consent_permission_added: Un aggiornamento del plugin ha aggiunto un nuovo permesso. Per poterlo usare di nuovo, controlla le richieste qui sotto e concedi il nuovo permesso.
   consent_grant_enable: Concedi e attiva
   consent_cancel: Annulla
-  consent_deny: Non ora
   # Finestra di aggiunta
   cancel: Annulla
   # Conferma eliminazione

@@ -18,11 +18,15 @@ pub enum ButtonKind {
     /// Amber fill with dark ink — an affirmative action tied to a warning
     /// context (e.g. the "Update" call-to-action inside an amber update banner).
     Warn,
-    /// Transparent with a hairline border — secondary / cancel.
+    /// Raised fill with a strong outline — the default / cancel action.
+    Secondary,
+    /// Text-only, no outline — low-emphasis inline actions.
     Ghost,
-    /// Like [`Ghost`] but tinted red — destructive actions (delete/remove).
+    /// Outline tinted red — destructive actions (delete/remove).
     /// Carries a faint red hint at rest and turns fully red on hover.
     Danger,
+    /// Solid red fill — the confirming action of a destructive dialog.
+    DangerSolid,
 }
 
 /// A themed button that animates its hover state, laid out in the current flow.
@@ -33,6 +37,70 @@ pub fn button(ui: &mut egui::Ui, label: &str, kind: ButtonKind, size: Vec2) -> R
     let (rect, resp) = ui.allocate_exact_size(size, Sense::click());
     paint_button(ui, rect, resp.id, resp.hovered(), label, kind, false);
     resp
+}
+
+/// [`button`] when `enabled`, otherwise [`button_disabled`]. Returns whether it
+/// was clicked.
+pub fn button_enabled(
+    ui: &mut egui::Ui,
+    label: &str,
+    kind: ButtonKind,
+    size: Vec2,
+    enabled: bool,
+) -> bool {
+    if enabled {
+        button(ui, label, kind, size).clicked()
+    } else {
+        button_disabled(ui, label, kind, size);
+        false
+    }
+}
+
+/// A square icon-only button at `rect` (close ×, gear, …). `glyph` paints the
+/// icon in the given color; hover adds the row-active fill.
+pub fn glyph_button_at(
+    ui: &mut egui::Ui,
+    rect: Rect,
+    id: egui::Id,
+    glyph: impl FnOnce(&egui::Painter, Rect, Color32),
+) -> Response {
+    let resp = ui.interact(rect, id, Sense::click());
+    if resp.hovered() {
+        ui.painter()
+            .rect_filled(rect, theme::RADIUS_XS + 1.0, theme::ROW_ACTIVE);
+        ui.ctx().set_cursor_icon(egui::CursorIcon::PointingHand);
+    }
+    glyph(
+        ui.painter(),
+        rect,
+        if resp.hovered() {
+            theme::TEXT
+        } else {
+            theme::TEXT_MUT
+        },
+    );
+    resp
+}
+
+/// The × glyph for [`glyph_button_at`].
+pub fn paint_close_glyph(p: &egui::Painter, rect: Rect, color: Color32) {
+    let c = rect.center();
+    let stroke = Stroke::new(1.4, color);
+    p.line_segment([c + Vec2::new(-3.5, -3.5), c + Vec2::new(3.5, 3.5)], stroke);
+    p.line_segment([c + Vec2::new(3.5, -3.5), c + Vec2::new(-3.5, 3.5)], stroke);
+}
+
+/// A 6×3 chevron centred at `c`, pointing down (or up when `up`).
+pub fn paint_chevron(p: &egui::Painter, c: egui::Pos2, up: bool, color: Color32) {
+    let dy = if up { -1.5 } else { 1.5 };
+    p.add(egui::Shape::line(
+        vec![
+            c + Vec2::new(-3.0, -dy),
+            c + Vec2::new(0.0, dy),
+            c + Vec2::new(3.0, -dy),
+        ],
+        Stroke::new(1.5, color),
+    ));
 }
 
 /// Like [`button`] but non-interactive and visually dimmed (e.g. while a task
@@ -74,12 +142,22 @@ pub fn button_at(
     resp
 }
 
-/// The label font for `kind` — bolder for the filled call-to-action kinds,
-/// regular weight for the outline kinds.
-fn button_font(kind: ButtonKind) -> FontId {
+/// The label font for `kind` at button height `h`: 13 px on small (≤ 32 px)
+/// buttons, 14 px otherwise; bolder for the filled call-to-action kinds.
+fn button_font(kind: ButtonKind, h: f32) -> FontId {
+    let size = if h <= 32.0 { 13.0 } else { 14.0 };
     match kind {
-        ButtonKind::Primary | ButtonKind::Warn => theme::semibold(11.5),
-        ButtonKind::Ghost | ButtonKind::Danger => theme::body_sm(),
+        ButtonKind::Primary | ButtonKind::Warn | ButtonKind::DangerSolid => theme::semibold(size),
+        ButtonKind::Secondary | ButtonKind::Ghost | ButtonKind::Danger => theme::medium(size),
+    }
+}
+
+/// Corner radius at button height `h`: 6 px small, 8 px otherwise.
+fn button_radius(h: f32) -> f32 {
+    if h <= 32.0 {
+        6.0
+    } else {
+        8.0
     }
 }
 
@@ -88,7 +166,7 @@ fn button_font(kind: ButtonKind) -> FontId {
 fn fit_size(ui: &egui::Ui, label: &str, kind: ButtonKind, size: Vec2) -> Vec2 {
     let text_w = ui
         .painter()
-        .layout_no_wrap(label.to_owned(), button_font(kind), Color32::WHITE)
+        .layout_no_wrap(label.to_owned(), button_font(kind, size.y), Color32::WHITE)
         .size()
         .x;
     fit_width(text_w, size)
@@ -122,40 +200,62 @@ fn paint_button(
     };
     let p = ui.painter();
 
-    let font = button_font(kind);
+    let font = button_font(kind, rect.height());
     let (fill, stroke, text_color) = match kind {
         ButtonKind::Primary => (
-            theme::lerp_color(a(theme::CYAN, 0.92), theme::CYAN, t),
+            theme::lerp_color(theme::CYAN, a(theme::CYAN, 0.85), t),
             Stroke::NONE,
             if disabled {
-                a(Color32::WHITE, 0.5)
+                a(theme::ON_ACCENT, 0.5)
             } else {
-                Color32::WHITE
+                theme::ON_ACCENT
             },
         ),
         ButtonKind::Warn => (
             theme::lerp_color(a(theme::STAT_AMBER, 0.92), theme::STAT_AMBER, t),
             Stroke::NONE,
             if disabled {
-                a(theme::hex(0x0a0d13), 0.5)
+                a(theme::ON_ACCENT, 0.5)
             } else {
-                theme::hex(0x0a0d13)
+                theme::ON_ACCENT
             },
         ),
-        ButtonKind::Ghost => (
-            Color32::TRANSPARENT,
+        ButtonKind::Secondary => (
+            if disabled {
+                a(theme::RAISED_BG, 0.45)
+            } else {
+                theme::lerp_color(theme::RAISED_BG, theme::ROW_ACTIVE, t)
+            },
             Stroke::new(
                 1.0,
                 if disabled {
-                    a(theme::BORDER, 0.4)
+                    a(theme::BORDER_INNER, 0.45)
                 } else {
-                    theme::lerp_color(theme::BORDER, theme::hex(0x2a3446), t)
+                    theme::BORDER_INNER
                 },
             ),
             if disabled {
-                a(theme::TEXT_DIM, 0.4)
+                a(theme::TEXT, 0.45)
+            } else {
+                theme::TEXT
+            },
+        ),
+        ButtonKind::Ghost => (
+            theme::lerp_color(Color32::TRANSPARENT, theme::ROW_ACTIVE, t),
+            Stroke::NONE,
+            if disabled {
+                a(theme::TEXT_DIM, 0.45)
             } else {
                 theme::lerp_color(theme::TEXT_DIM, theme::TEXT, t)
+            },
+        ),
+        ButtonKind::DangerSolid => (
+            theme::lerp_color(theme::DANGER, a(theme::DANGER, 0.85), t),
+            Stroke::NONE,
+            if disabled {
+                a(theme::TEXT_BRIGHT, 0.5)
+            } else {
+                theme::TEXT_BRIGHT
             },
         ),
         ButtonKind::Danger => (
@@ -165,7 +265,7 @@ fn paint_button(
                 if disabled {
                     a(theme::BORDER, 0.4)
                 } else {
-                    theme::lerp_color(a(theme::OFFLINE, 0.45), theme::OFFLINE, t)
+                    theme::lerp_color(theme::DANGER_BORDER, theme::OFFLINE, t)
                 },
             ),
             if disabled {
@@ -179,9 +279,10 @@ fn paint_button(
     // Buttons use fill, border, and hover contrast only. Animated halos made
     // ordinary actions such as “Update all” look like alerts and competed
     // with the content around them.
-    p.rect_filled(rect, theme::RADIUS_SM, fill);
+    let radius = button_radius(rect.height());
+    p.rect_filled(rect, radius, fill);
     if stroke != Stroke::NONE {
-        p.rect_stroke(rect, theme::RADIUS_SM, stroke, egui::StrokeKind::Middle);
+        p.rect_stroke(rect, radius, stroke, egui::StrokeKind::Inside);
     }
 
     let text = label.to_string();
@@ -191,6 +292,18 @@ fn paint_button(
 #[cfg(test)]
 mod tests {
     use super::*;
+
+    #[test]
+    fn small_buttons_use_the_smaller_label_and_radius() {
+        for kind in [
+            ButtonKind::Primary,
+            ButtonKind::Secondary,
+            ButtonKind::DangerSolid,
+        ] {
+            assert!(button_font(kind, 30.0).size < button_font(kind, 36.0).size);
+        }
+        assert!(button_radius(30.0) < button_radius(36.0));
+    }
 
     #[test]
     fn fit_width_keeps_requested_size_when_label_fits() {

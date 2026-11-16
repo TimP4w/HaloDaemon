@@ -58,7 +58,7 @@ pub(super) fn video_section(ui: &mut egui::Ui, ctx: &TabCtx, st: &mut DeviceUi, 
     if widgets::button(
         ui,
         &t!("lcd.choose_video"),
-        widgets::ButtonKind::Ghost,
+        widgets::ButtonKind::Secondary,
         egui::vec2(140.0, 30.0),
     )
     .clicked()
@@ -150,13 +150,13 @@ pub(super) fn image_section(
         widgets::button_loading(
             ui,
             &upload_label(ctx.lcd_upload.as_ref(), id),
-            widgets::ButtonKind::Ghost,
+            widgets::ButtonKind::Secondary,
             egui::vec2(180.0, 30.0),
         );
     } else if widgets::button(
         ui,
         &t!("lcd.upload_image_gif"),
-        widgets::ButtonKind::Ghost,
+        widgets::ButtonKind::Secondary,
         egui::vec2(180.0, 30.0),
     )
     .clicked()
@@ -221,13 +221,13 @@ pub(super) fn image_picker(
         widgets::button_loading(
             ui,
             &upload_label(ctx.lcd_upload.as_ref(), id),
-            widgets::ButtonKind::Ghost,
+            widgets::ButtonKind::Secondary,
             egui::vec2(180.0, 30.0),
         );
     } else if widgets::button(
         ui,
         &t!("lcd.upload_image_gif"),
-        widgets::ButtonKind::Ghost,
+        widgets::ButtonKind::Secondary,
         egui::vec2(180.0, 30.0),
     )
     .clicked()
@@ -496,7 +496,11 @@ pub(super) fn draw_thumb_tile(
     let badge_r = 8.0;
     let badge_c = rect.right_top() + egui::vec2(-badge_r - 2.0, badge_r + 2.0);
     let badge_rect = Rect::from_center_size(badge_c, Vec2::splat(badge_r * 2.0));
-    let badge = ui.interact(badge_rect, ui.id().with(("del", id_salt)), Sense::click());
+    let badge = ui.interact(
+        badge_rect,
+        ui.scope_id().with(("del", id_salt)),
+        Sense::click(),
+    );
     let show_badge = resp.hovered() || badge.hovered();
 
     let p = ui.painter();

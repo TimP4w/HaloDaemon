@@ -46,6 +46,12 @@ impl DeviceRegistry {
             .cloned()
     }
 
+    pub async fn known_ids(&self) -> HashSet<String> {
+        let mut ids = self.registrations.lock().await.clone();
+        ids.extend(self.devices.read().await.iter().map(|d| d.id().to_owned()));
+        ids
+    }
+
     pub fn revision(&self) -> u64 {
         self.revision.load(Ordering::Acquire)
     }
@@ -82,5 +88,29 @@ impl DerefMut for DeviceRegistryWriteGuard<'_> {
 impl Drop for DeviceRegistryWriteGuard<'_> {
     fn drop(&mut self) {
         self.revision.fetch_add(1, Ordering::Release);
+    }
+}
+
+#[cfg(test)]
+mod tests {
+    use super::*;
+    use crate::test_support::MockDevice;
+
+    #[tokio::test]
+    async fn known_ids_cover_registered_and_in_flight_devices() {
+        let registry = DeviceRegistry::default();
+        registry
+            .write()
+            .await
+            .push(Arc::new(MockDevice::new("registered")));
+        registry
+            .registrations
+            .lock()
+            .await
+            .insert("in-flight".into());
+        assert_eq!(
+            registry.known_ids().await,
+            HashSet::from(["registered".to_owned(), "in-flight".to_owned()])
+        );
     }
 }

@@ -10,11 +10,20 @@ use crate::infrastructure::drivers::transports::usb::{
     present_usb_locations, stale_usb_ids, USB_LIVENESS_POLL,
 };
 
+async fn list_present() -> Option<HashSet<UsbLocation>> {
+    tokio::task::spawn_blocking(present_usb_locations)
+        .await
+        .ok()
+        .flatten()
+}
+
 pub async fn run(app: Arc<AppState>) {
-    let mut last_present: HashSet<UsbLocation> = present_usb_locations().into_iter().collect();
+    let mut last_present = list_present().await.unwrap_or_default();
     loop {
         tokio::time::sleep(USB_LIVENESS_POLL).await;
-        let present: HashSet<UsbLocation> = present_usb_locations().into_iter().collect();
+        let Some(present) = list_present().await else {
+            continue;
+        };
         let registered = {
             let devices = app.device_registry.read().await;
             devices
@@ -29,9 +38,10 @@ pub async fn run(app: Arc<AppState>) {
             .await;
         }
         if present != last_present {
-            // A plug event is a user retry boundary: replugging must re-arm
-            // devices that exhausted their transport-open attempts.
-            app.registry.reset_transport_open_failures();
+            for arrived in present.difference(&last_present) {
+                app.registry
+                    .reset_transport_open_failures_for_usb(arrived.vid, arrived.pid);
+            }
             crate::domain::registry::observers::discovery::scan_usb_non_hid(Arc::clone(&app)).await;
         }
         last_present = present;

@@ -68,11 +68,12 @@ impl UsbClaim {
 
 impl Drop for UsbClaim {
     fn drop(&mut self) {
-        if let Err(e) = self.handle.release_interface(self.interface) {
-            log::warn!(
+        match self.handle.release_interface(self.interface) {
+            Ok(()) | Err(rusb::Error::NoDevice) => {}
+            Err(e) => log::warn!(
                 "UsbClaim: release_interface({}) failed: {e}",
                 self.interface
-            );
+            ),
         }
         #[cfg(target_os = "linux")]
         if self.had_kernel_driver {

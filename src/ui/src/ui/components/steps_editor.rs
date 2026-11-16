@@ -139,7 +139,7 @@ pub fn steps_editor(ui: &mut egui::Ui, label: &str, steps: &mut Vec<ColorStep>) 
     if button(
         ui,
         &t!("misc.widget_add_step"),
-        ButtonKind::Ghost,
+        ButtonKind::Secondary,
         Vec2::new(92.0, 24.0),
     )
     .clicked()

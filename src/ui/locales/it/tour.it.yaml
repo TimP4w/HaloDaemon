@@ -9,9 +9,6 @@ tour:
     manage_device:
       title: "Gestisci un dispositivo"
       body: "Fai clic con il pulsante destro su una scheda per rinominare, nascondere o disabilitare un dispositivo."
-    hidden_devices:
-      title: "Dispositivi nascosti"
-      body: "Qui puoi scegliere se mostrare o nascondere i dispositivi che hai contrassegnato come nascosti."
     sidebar_home:
       title: "Home"
       body: "La pagina Home elenca tutti i dispositivi collegati. Puoi cercarli, nasconderli o gestirli facendo clic con il pulsante destro sulla relativa scheda."
@@ -21,12 +18,6 @@ tour:
     sidebar_cooling:
       title: "Raffreddamento"
       body: "Visualizza le curve di ventole e pompe, le letture dei sensori e i profili di raffreddamento di tutti i dispositivi."
-    sidebar_canvas:
-      title: "Canvas degli effetti"
-      body: "Combina effetti su più dispositivi in un canvas condiviso. Sposta le zone, sovrapponi gli effetti e regola il campionamento."
-    sidebar_integrations:
-      title: "Integrazioni"
-      body: "Collega HaloDaemon ad altre applicazioni e servizi. Le integrazioni connesse espongono i loro dispositivi nello spazio di lavoro."
     sidebar_plugins:
       title: "Plugin"
       body: "Estendi HaloDaemon con supporto hardware, effetti e integrazioni. Qui puoi controllare aggiornamenti, errori e permessi dei plugin."
@@ -200,10 +191,3 @@ tour:
     permissions:
       title: "Permessi del plugin"
       body: "I permessi spiegano cosa può usare un plugin, ad esempio rete o orologio di sistema. Concedi solo ciò di cui ti fidi e revoca l'accesso dai dettagli."
-  page_integrations:
-    overview:
-      title: "Integrazioni"
-      body: "Le integrazioni collegano HaloDaemon a un'altra applicazione o servizio. Le integrazioni connesse espongono i loro dispositivi nello spazio di lavoro."
-    toggle:
-      title: "Connetti un'integrazione"
-      body: "Usa l'interruttore per connettere o disconnettere un'integrazione. Configura eventuali endpoint o account richiesti prima di abilitarla."

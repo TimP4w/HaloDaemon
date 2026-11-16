@@ -6,7 +6,7 @@
 use std::collections::HashMap;
 
 use crate::domain::topic_store::TopicStore;
-use egui::{RichText, Sense, Stroke, Vec2};
+use egui::{RichText, Stroke, Vec2};
 use halod_shared::commands::DaemonCommand;
 use halod_shared::debug_info::DebugInfo;
 use halod_shared::types::{
@@ -24,7 +24,8 @@ const SCANNING: u8 = 3;
 const PLUGINS: u8 = 4;
 const DONE: u8 = 5;
 const OFFICIAL_REPO_SLUG: &str = "official";
-const BODY_HEIGHT: f32 = 420.0;
+const COLUMN_W: f32 = 640.0;
+const LIST_MAX_H: f32 = 360.0;
 
 /// How long the cosmetic scan animation runs before showing recommendations
 /// (they are already computed at startup; this is a settle beat, not real work).
@@ -40,6 +41,18 @@ pub struct OnboardingUi {
     /// Optimistic value while the daemon persists download consent. This keeps
     /// a previous installation's config from winning the next wizard click.
     plugin_downloads: Option<bool>,
+    start_on_boot: Option<bool>,
+}
+
+impl OnboardingUi {
+    /// The wizard opened on step `step` (0 = welcome … 5 = done).
+    #[cfg(all(test, feature = "screenshots"))]
+    pub fn at_step(step: u8) -> Self {
+        Self {
+            step,
+            ..Default::default()
+        }
+    }
 }
 
 /// Whether the wizard was explicitly completed this frame, so the caller can
@@ -108,7 +121,7 @@ fn primary_label(step: u8, active: usize) -> String {
         PREFS => t!("onboarding.p_scan").to_string(),
         PLUGINS => {
             if active > 0 {
-                t!("onboarding.p_grant_enable").to_string()
+                t!("onboarding.p_grant_enable", n = active).to_string()
             } else {
                 t!("onboarding.p_finish").to_string()
             }
@@ -118,10 +131,15 @@ fn primary_label(step: u8, active: usize) -> String {
     }
 }
 
-/// Which onboarding progress dot is active. The completion page keeps the
-/// plugin dot active because it has no separate input.
+/// Which setup step the rail highlights; scanning belongs to Plugins.
 fn active_dot(step: u8) -> usize {
-    usize::from(step.min(PLUGINS))
+    match step {
+        WELCOME => 0,
+        HEALTH => 1,
+        PREFS => 2,
+        SCANNING | PLUGINS => 3,
+        _ => 4,
+    }
 }
 
 /// Selected official plugins that are currently disabled.
@@ -132,13 +150,6 @@ fn enable_targets(st: &OnboardingUi, plugins: &[PluginInfo]) -> Vec<String> {
         .map(|plugin| plugin.id.clone())
         .collect()
 }
-
-const SCAN_LINES: &[&str] = &[
-    "probing usb bus…",
-    "querying mdns _wled._udp.local",
-    "reading smbus sensors",
-    "matching signed driver manifests",
-];
 
 pub fn show(
     ctx: &egui::Context,
@@ -163,293 +174,324 @@ pub fn show(
     }
 
     let mut outcome = Outcome::Pending;
-    let _response = egui::Modal::new(egui::Id::new("onboarding_modal"))
-        .frame(
-            egui::Frame::NONE
-                .fill(theme::MODAL_BG)
-                .stroke(Stroke::new(1.0, theme::BORDER))
-                .corner_radius(theme::RADIUS_2XL)
-                .inner_margin(egui::Margin {
-                    left: 28,
-                    right: 28,
-                    top: 28,
-                    bottom: 0,
-                }),
-        )
+    let area = egui::Modal::default_area(egui::Id::unique("onboarding_modal"))
+        .anchor(egui::Align2::CENTER_TOP, Vec2::new(0.0, 40.0));
+    egui::Modal::new(egui::Id::unique("onboarding_modal"))
+        .area(area)
+        .backdrop_color(theme::BODY)
+        .frame(egui::Frame::NONE)
         .show(ctx, |ui| {
-            ui.set_width(600.0);
-            // A fixed body keeps every step aligned; list-heavy pages scroll
-            // within it instead of growing the modal.
-            let body = egui::Frame::NONE.inner_margin(egui::Margin::symmetric(0, 0));
-            body.show(ui, |ui| {
-                ui.set_min_height(BODY_HEIGHT);
-                ui.set_max_height(BODY_HEIGHT);
-                ui.vertical_centered(|ui| ui.set_width(600.0));
-                match st.step {
-                    WELCOME => step_welcome(ui, time as f32),
-                    HEALTH => step_health(ui, debug),
-                    PREFS => step_prefs(ui, st, state, cmd),
-                    SCANNING => step_scanning(ui, time),
-                    PLUGINS => step_plugins(ui, st, state, cmd, time),
-                    _ => step_done(ui, st, state, &state.plugins.plugins),
-                }
-            });
-            ui.separator();
-            footer(
-                ui,
-                st,
-                active_count(st, &state.plugins.plugins),
-                &mut outcome,
-                state,
-                cmd,
+            ui.set_width(COLUMN_W);
+            ui.spacing_mut().item_spacing.y = 0.0;
+            let (logo, _) = ui.allocate_exact_size(Vec2::new(COLUMN_W, 22.0), egui::Sense::hover());
+            let size = widgets::logo_size(ui.painter(), 22.0, 16.0);
+            widgets::paint_logo(
+                ui.painter(),
+                ui.ctx(),
+                egui::pos2(logo.center().x - size.x / 2.0, logo.top()),
+                22.0,
+                16.0,
             );
+            ui.add_space(28.0);
+            widgets::progress_steps(ui, &step_labels(), active_dot(st.step));
+            ui.add_space(28.0);
+            egui::Frame::NONE
+                .fill(theme::CARD_BG)
+                .stroke(Stroke::new(1.0, theme::BORDER))
+                .corner_radius(16.0)
+                .show(ui, |ui| {
+                    ui.set_width(COLUMN_W);
+                    let (title, intro) = step_copy(st.step);
+                    egui::Frame::NONE
+                        .inner_margin(egui::Margin {
+                            left: 28,
+                            right: 28,
+                            top: 28,
+                            bottom: 18,
+                        })
+                        .show(ui, |ui| {
+                            ui.set_width(ui.available_width());
+                            ui.label(
+                                RichText::new(title)
+                                    .font(theme::semibold(24.0))
+                                    .color(theme::TEXT),
+                            );
+                            ui.add_space(theme::SPACE_4);
+                            ui.label(
+                                RichText::new(intro)
+                                    .font(theme::body_lg())
+                                    .color(theme::TEXT_DIM),
+                            );
+                        });
+                    egui::Frame::NONE
+                        .inner_margin(egui::Margin::symmetric(28, 0))
+                        .show(ui, |ui| {
+                            ui.set_width(ui.available_width());
+                            ui.spacing_mut().item_spacing.y = theme::SPACE_4;
+                            match st.step {
+                                WELCOME => step_welcome(ui),
+                                HEALTH => step_health(ui, debug),
+                                PREFS => step_prefs(ui, st, state, cmd),
+                                SCANNING => step_scanning(ui),
+                                PLUGINS => step_plugins(ui, st, state, cmd, time),
+                                _ => step_done(ui, st, state),
+                            }
+                        });
+                    ui.add_space(theme::SPACE_8);
+                    widgets::divider(ui);
+                    egui::Frame::NONE
+                        .inner_margin(egui::Margin::symmetric(28, 22))
+                        .show(ui, |ui| {
+                            footer(
+                                ui,
+                                st,
+                                active_count(st, &state.plugins.plugins),
+                                &mut outcome,
+                                state,
+                                cmd,
+                            );
+                        });
+                });
         });
     outcome
 }
 
-/// Shared scaffold of the form-style steps: lead space, left indent, 520 px
-/// column, bold title + muted subtitle, then the step body.
-fn step_shell(ui: &mut egui::Ui, title: &str, sub: &str, body: impl FnOnce(&mut egui::Ui)) {
-    ui.add_space(26.0);
-    ui.horizontal(|ui| {
-        ui.add_space(theme::SPACE_12);
-        ui.vertical(|ui| {
-            ui.set_width(520.0);
-            ui.label(
-                RichText::new(title)
-                    .font(theme::bold(21.0))
-                    .color(theme::TEXT),
-            );
-            ui.add_space(theme::SPACE_3);
-            ui.label(
-                RichText::new(sub)
-                    .font(theme::body_lg())
-                    .color(theme::TEXT_MUT),
-            );
-            body(ui);
-        });
+/// The card title and lede for a step.
+fn step_copy(step: u8) -> (String, String) {
+    let (title, intro) = match step {
+        WELCOME => ("onboarding.welcome_title", "onboarding.welcome_body"),
+        HEALTH => ("onboarding.health_title", "onboarding.health_sub"),
+        PREFS => ("onboarding.prefs_title", "onboarding.prefs_sub"),
+        SCANNING | PLUGINS => (
+            "onboarding.plugins_page_title",
+            "onboarding.plugins_page_sub",
+        ),
+        _ => ("onboarding.done_title", "onboarding.done_sub"),
+    };
+    (t!(title).into_owned(), t!(intro).into_owned())
+}
+
+/// A recessed list panel holding a step's rows.
+fn inset_list(ui: &mut egui::Ui, body: impl FnOnce(&mut egui::Ui)) {
+    widgets::inset(ui, egui::Margin::symmetric(14, 0), |ui| {
+        ui.spacing_mut().item_spacing.y = 0.0;
+        body(ui);
     });
 }
 
-fn step_welcome(ui: &mut egui::Ui, time: f32) {
-    ui.add_space(34.0);
-    ui.allocate_ui_with_layout(
-        Vec2::new(ui.available_width(), 0.0),
-        egui::Layout::top_down(egui::Align::Center),
-        |ui| {
-            widgets::logo_icon(ui, 96.0, time);
-            ui.add_space(26.0);
-            ui.label(
-                RichText::new(t!("onboarding.welcome_title"))
-                    .font(theme::bold(30.0))
-                    .color(theme::TEXT),
+fn step_labels() -> Vec<String> {
+    [
+        "onboarding.step_welcome",
+        "onboarding.step_system",
+        "onboarding.step_prefs",
+        "onboarding.step_plugins",
+        "onboarding.step_done",
+    ]
+    .into_iter()
+    .map(|key| t!(key).to_string())
+    .collect()
+}
+
+fn step_welcome(ui: &mut egui::Ui) {
+    for (title, body, glyph) in [
+        (
+            "onboarding.feature_lighting",
+            "onboarding.feature_lighting_body",
+            Glyph::Lighting,
+        ),
+        (
+            "onboarding.feature_cooling",
+            "onboarding.feature_cooling_body",
+            Glyph::Cooling,
+        ),
+        (
+            "onboarding.feature_profiles",
+            "onboarding.feature_profiles_body",
+            Glyph::Profiles,
+        ),
+    ] {
+        widgets::inset(ui, egui::Margin::same(14), |ui| {
+            ui.horizontal(|ui| {
+                ui.spacing_mut().item_spacing.x = 14.0;
+                let (tile, _) = ui.allocate_exact_size(Vec2::splat(36.0), egui::Sense::hover());
+                ui.painter().rect_filled(tile, 9.0, theme::SELECTED_BG);
+                paint_glyph(ui.painter(), tile.center(), glyph);
+                ui.vertical(|ui| {
+                    ui.spacing_mut().item_spacing.y = 2.0;
+                    ui.label(
+                        RichText::new(t!(title))
+                            .font(theme::semibold(14.0))
+                            .color(theme::TEXT),
+                    );
+                    ui.label(
+                        RichText::new(t!(body))
+                            .font(theme::body_md())
+                            .color(theme::TEXT_DIM),
+                    );
+                });
+            });
+        });
+    }
+}
+
+#[derive(Clone, Copy)]
+enum Glyph {
+    Lighting,
+    Cooling,
+    Profiles,
+}
+
+/// The 18 px feature glyphs on the welcome step.
+fn paint_glyph(p: &egui::Painter, c: egui::Pos2, glyph: Glyph) {
+    let stroke = Stroke::new(1.6, theme::LINK);
+    match glyph {
+        Glyph::Lighting => {
+            p.circle_stroke(c, 6.5, stroke);
+            p.circle_stroke(c, 2.5, stroke);
+        }
+        Glyph::Cooling => {
+            for i in 0..4 {
+                let ang = std::f32::consts::FRAC_PI_2 * i as f32 + 0.6;
+                p.circle_stroke(c + Vec2::angled(ang) * 3.4, 3.2, stroke);
+            }
+        }
+        Glyph::Profiles => {
+            let r = egui::Rect::from_center_size(c, Vec2::new(12.0, 10.0));
+            p.rect_stroke(r, 1.0, stroke, egui::StrokeKind::Middle);
+            p.line_segment(
+                [c + Vec2::new(-3.0, -1.5), c + Vec2::new(3.0, -1.5)],
+                stroke,
             );
-            ui.add_space(theme::SPACE_7);
-            centered_wrapped(
-                ui,
-                &t!("onboarding.welcome_body"),
-                440.0,
-                theme::TEXT_DIM,
-                15.0,
-            );
-            ui.add_space(theme::SPACE_8);
-            ui.label(
-                RichText::new(format!(
-                    "{} v{}",
-                    halod_shared::app::APP_DISPLAY_NAME,
-                    env!("CARGO_PKG_VERSION")
-                ))
-                .font(theme::body(13.0))
-                .color(theme::TEXT_FAINT),
-            );
-        },
-    );
+            p.line_segment([c + Vec2::new(-3.0, 1.5), c + Vec2::new(1.0, 1.5)], stroke);
+        }
+    }
 }
 
 fn step_health(ui: &mut egui::Ui, debug: Option<&DebugInfo>) {
-    step_shell(
-        ui,
-        &t!("onboarding.health_title"),
-        &t!("onboarding.health_sub"),
-        |ui| {
-            ui.add_space(theme::SPACE_9);
-            match debug {
-                None => {
-                    widgets::spinner(ui, 22.0);
-                    ui.add_space(theme::SPACE_4);
-                    ui.label(
-                        RichText::new(t!("onboarding.health_checking"))
-                            .font(theme::body_md())
-                            .color(theme::TEXT_FAINT),
+    let Some(info) = debug else {
+        ui.horizontal(|ui| {
+            widgets::spinner(ui, 18.0);
+            ui.label(
+                RichText::new(t!("onboarding.health_checking"))
+                    .font(theme::body_md())
+                    .color(theme::TEXT_FAINT),
+            );
+        });
+        return;
+    };
+    let failing = crate::ui::screens::depcheck::failing(info);
+    let missing_optional = info
+        .dependencies
+        .iter()
+        .filter(|d| !d.present && !d.required)
+        .count();
+    if failing.iter().all(|d| !d.required) {
+        let text = if missing_optional == 0 {
+            t!("onboarding.health_ok")
+        } else {
+            t!("onboarding.health_ok_optional", n = missing_optional)
+        };
+        widgets::Banner::ok(&text).show(ui);
+    }
+    egui::ScrollArea::vertical()
+        .max_height(LIST_MAX_H)
+        .show(ui, |ui| {
+            inset_list(ui, |ui| {
+                for dep in &info.dependencies {
+                    let (tag, tone) = if dep.present {
+                        (t!("onboarding.check_ready"), widgets::TagTone::Ok)
+                    } else if dep.required {
+                        (t!("onboarding.check_missing"), widgets::TagTone::Danger)
+                    } else {
+                        (t!("onboarding.check_missing"), widgets::TagTone::Warn)
+                    };
+                    let impact = crate::ui::screens::depcheck::impact_text(dep);
+                    let sub = if dep.required {
+                        impact
+                    } else {
+                        t!("onboarding.check_optional", impact = impact).into_owned()
+                    };
+                    widgets::list_row(
+                        ui,
+                        &crate::ui::screens::depcheck::title_text(dep),
+                        &sub,
+                        |ui| widgets::tag(ui, &tag, tone),
                     );
                 }
-                Some(info) => {
-                    let failing = crate::ui::screens::depcheck::failing(info);
-                    if failing.is_empty() {
-                        widgets::card_with_surface(
-                            ui,
-                            theme::PAD_CARD,
-                            theme::CARD_BG,
-                            theme::BORDER,
-                            |ui| {
-                                ui.label(
-                                    RichText::new(t!("onboarding.health_ok"))
-                                        .font(theme::heading())
-                                        .color(theme::ONLINE_TEXT),
-                                );
-                            },
-                        );
-                    } else {
-                        egui::ScrollArea::vertical()
-                            .max_height(310.0)
-                            .min_scrolled_height(310.0)
-                            .auto_shrink([false, false])
-                            .show(ui, |ui| {
-                                for dependency in failing {
-                                    crate::ui::screens::depcheck::issue_card_with_surface(
-                                        ui,
-                                        dependency,
-                                        theme::CARD_BG,
-                                        theme::BORDER,
-                                    );
-                                    ui.add_space(theme::SPACE_5);
-                                }
-                            });
-                    }
-                }
-            }
-        },
-    );
-}
-
-fn centered_wrapped(ui: &mut egui::Ui, text: &str, max_w: f32, color: egui::Color32, size: f32) {
-    ui.allocate_ui_with_layout(
-        Vec2::new(max_w, 0.0),
-        egui::Layout::top_down(egui::Align::Center),
-        |ui| {
-            ui.label(RichText::new(text).font(theme::body(size)).color(color));
-        },
-    );
-}
-
-fn pref_card(ui: &mut egui::Ui, title: &str, desc: &str, control: impl FnOnce(&mut egui::Ui)) {
-    egui::Frame::NONE
-        .fill(theme::CARD_BG)
-        .stroke(Stroke::new(1.0, theme::BORDER))
-        .corner_radius(theme::RADIUS_LG)
-        .inner_margin(egui::Margin::same(14))
-        .show(ui, |ui| {
-            widgets::setting_row(ui, title, desc, control);
+            });
         });
 }
 
 fn step_prefs(ui: &mut egui::Ui, st: &mut OnboardingUi, state: &TopicStore, cmd: &CommandTx) {
-    step_shell(
-        ui,
-        &t!("onboarding.prefs_title"),
-        &t!("onboarding.prefs_sub"),
-        |ui| {
-            ui.add_space(22.0);
-
-            pref_card(
-                ui,
-                &t!("onboarding.tray_title"),
-                &t!("onboarding.tray_desc"),
-                |ui| {
-                    if widgets::toggle(ui, state.gui.close_to_tray) != state.gui.close_to_tray {
-                        send_ui_config(cmd, state, Some(!state.gui.close_to_tray), None);
-                    }
-                },
-            );
-            ui.add_space(theme::SPACE_6);
-            pref_card(
-                ui,
-                &t!("settings.window_controls_title"),
-                &t!("settings.window_controls_sub"),
-                |ui| {
-                    let on = !state.gui.hide_window_controls;
-                    let next = widgets::toggle(ui, on);
-                    if next != on {
-                        send_ui_config(cmd, state, None, Some(!next));
-                    }
-                },
-            );
-            ui.add_space(theme::SPACE_6);
-            let on = plugins_on(st, state);
-            pref_card(
-                ui,
-                &t!("onboarding.plugins_title"),
-                &t!("onboarding.plugins_desc"),
-                |ui| {
-                    if widgets::toggle(ui, on) != on {
-                        st.plugin_downloads = Some(!on);
-                        ipc::send(
-                            cmd,
-                            DaemonCommand::SetPluginDownloadConsent { allowed: !on },
-                        );
-                    }
-                },
-            );
-        },
-    );
-}
-
-fn step_scanning(ui: &mut egui::Ui, time: f64) {
-    ui.add_space(theme::SPACE_12);
-    ui.vertical_centered(|ui| {
-        let (rect, _) = ui.allocate_exact_size(Vec2::splat(230.0), Sense::hover());
-        crate::ui::screens::radar::draw_radar(ui.painter(), rect.center(), 112.0, time);
-        // A couple of detected-device blips (pink), placed deterministically.
-        for (dx, dy) in [(-42.0, -30.0), (54.0, 40.0)] {
-            let c = rect.center() + Vec2::new(dx, dy);
-            theme::glow(ui.painter(), c, 8.0, theme::hex(0xe879f9), 0.7);
-            ui.painter().circle_filled(c, 4.0, theme::hex(0xe879f9));
-        }
-        ui.add_space(22.0);
-        ui.label(
-            RichText::new(t!("onboarding.scanning"))
-                .font(theme::title())
-                .color(theme::TEXT),
+    let on = plugins_on(st, state);
+    inset_list(ui, |ui| {
+        crate::ui::screens::settings::start_on_boot_row(ui, &mut st.start_on_boot);
+        widgets::list_row(
+            ui,
+            &t!("settings.close_to_tray_title"),
+            &t!("settings.close_to_tray_sub"),
+            |ui| {
+                if widgets::toggle(ui, state.gui.close_to_tray) != state.gui.close_to_tray {
+                    send_ui_config(cmd, state, !state.gui.close_to_tray);
+                }
+            },
         );
-        ui.add_space(theme::SPACE_4);
-        let line = SCAN_LINES[((time * 1.6) as usize) % SCAN_LINES.len()];
-        ui.label(
-            RichText::new(format!("{line}_"))
-                .font(theme::mono(12.0))
-                .color(theme::TEXT_MUT),
+        widgets::list_row(
+            ui,
+            &t!("settings.plugin_downloads_title"),
+            &t!("settings.plugin_downloads_sub"),
+            |ui| {
+                if widgets::toggle(ui, on) != on {
+                    st.plugin_downloads = Some(!on);
+                    ipc::send(
+                        cmd,
+                        DaemonCommand::SetPluginDownloadConsent { allowed: !on },
+                    );
+                }
+            },
         );
+        crate::ui::screens::settings::language_row(ui, state, cmd, &t!("onboarding.language_sub"));
     });
 }
 
-/// One plugin row: name, description, toggle, and — once selected — the system
-/// access it wants, so choosing a plugin and consenting to it are one decision.
-fn plugin_toggle_row(ui: &mut egui::Ui, plugin: &PluginInfo, on: bool) -> bool {
-    let next = egui::Frame::NONE
-        .inner_margin(egui::Margin::symmetric(4, 14))
-        .show(ui, |ui| {
-            let next = widgets::setting_row(
-                ui,
-                plugin.localized_name(&rust_i18n::locale()),
-                plugin.localized_description(&rust_i18n::locale()),
-                |ui| widgets::toggle(ui, on),
+fn step_scanning(ui: &mut egui::Ui) {
+    ui.add_space(theme::SPACE_10);
+    ui.vertical_centered(|ui| {
+        widgets::spinner(ui, 28.0);
+        ui.add_space(theme::SPACE_6);
+        ui.label(
+            RichText::new(t!("misc.startup_title"))
+                .font(theme::body_lg())
+                .color(theme::TEXT_DIM),
+        );
+    });
+    ui.add_space(theme::SPACE_10);
+}
+
+/// One plugin row: a checkbox row and — once checked — the system access it
+/// wants, so choosing a plugin and consenting to it are one decision.
+fn plugin_toggle_row(ui: &mut egui::Ui, plugin: &PluginInfo, on: bool, note: &str) -> bool {
+    let locale = rust_i18n::locale();
+    let clicked = widgets::check_row(
+        ui,
+        plugin.localized_name(&locale),
+        Some(plugin.localized_description(&locale)),
+        (!note.is_empty()).then_some((note, theme::TEXT_SOFT)),
+        on,
+    )
+    .clicked();
+    if on && !plugin.enabled {
+        if plugin.declared_permissions.is_empty() {
+            ui.label(
+                RichText::new(t!("onboarding.permissions_none"))
+                    .font(theme::body_sm())
+                    .color(theme::TEXT_MUT),
             );
-            if on && !plugin.enabled {
-                ui.add_space(theme::SPACE_4);
-                if plugin.declared_permissions.is_empty() {
-                    ui.label(
-                        RichText::new(t!("onboarding.permissions_none"))
-                            .font(theme::body_sm())
-                            .color(theme::TEXT_MUT),
-                    );
-                } else {
-                    crate::ui::screens::plugins::authority_review_cards(ui, plugin);
-                }
-            }
-            next
-        })
-        .inner;
-    ui.separator();
-    next
+        } else {
+            crate::ui::screens::plugins::authority_review_cards(ui, plugin);
+        }
+    }
+    clicked
 }
 
 fn step_plugins(
@@ -466,12 +508,8 @@ fn step_plugins(
     if !candidates.is_empty() {
         st.official_retry_started = None;
     }
-    step_shell(
-        ui,
-        &t!("onboarding.plugins_page_title"),
-        &t!("onboarding.plugins_page_sub"),
-        |ui| {
-            ui.add_space(theme::SPACE_8);
+    {
+        {
             if candidates.is_empty() && official_unavailable && plugins_on(st, state) {
                 let retrying = st
                     .official_retry_started
@@ -521,17 +559,27 @@ fn step_plugins(
                         .color(theme::TEXT_FAINT),
                 );
                 ui.add_space(theme::SPACE_7);
-                widgets::progress_bar(ui, 520.0, 8.0, None);
+                widgets::progress_bar(ui, ui.available_width(), 4.0, None);
             }
             if !candidates.is_empty() {
+                let recommended = t!("onboarding.recommended");
                 egui::ScrollArea::vertical()
-                    .max_height(258.0)
-                    .min_scrolled_height(258.0)
-                    .auto_shrink([false, false])
+                    .max_height(LIST_MAX_H)
                     .show(ui, |ui| {
+                        ui.spacing_mut().item_spacing.y = theme::SPACE_4;
                         for plugin in candidates {
                             let on = is_selected(st, &plugin.id);
-                            if plugin_toggle_row(ui, plugin, on) != on {
+                            let note = if state
+                                .plugins
+                                .recommendations
+                                .iter()
+                                .any(|r| r.plugin_id == plugin.id)
+                            {
+                                recommended.as_ref()
+                            } else {
+                                ""
+                            };
+                            if plugin_toggle_row(ui, plugin, on, note) {
                                 st.selected.insert(plugin.id.clone(), !on);
                             }
                         }
@@ -543,37 +591,56 @@ fn step_plugins(
                         .color(theme::TEXT_MUT),
                 );
             }
-        },
-    );
+        }
+    }
 }
 
-fn step_done(ui: &mut egui::Ui, st: &OnboardingUi, state: &TopicStore, plugins: &[PluginInfo]) {
-    // The completion composition is roughly 180 px tall including its wrapped
-    // summary. Center it in the fixed onboarding body rather than aligning it
-    // with the top-biased form pages.
-    ui.add_space((BODY_HEIGHT - 180.0) / 2.0);
-    ui.vertical_centered(|ui| {
-        widgets::success_check(ui, 76.0);
-        ui.add_space(theme::SPACE_10);
-        ui.label(
-            RichText::new(t!("onboarding.done_title"))
-                .font(theme::bold(25.0))
-                .color(theme::TEXT),
+fn step_done(ui: &mut egui::Ui, st: &OnboardingUi, state: &TopicStore) {
+    let devices = state
+        .devices
+        .iter()
+        .filter(|d| crate::domain::models::device::listable(d))
+        .count();
+    let plugins = state.plugins.plugins.iter().filter(|p| p.enabled).count()
+        + enable_targets(st, &state.plugins.plugins).len();
+    let sensors = crate::domain::models::sensors::sensors(state).len();
+    let tiles = [
+        (devices, t!("onboarding.done_devices")),
+        (plugins, t!("onboarding.done_plugins")),
+        (sensors, t!("onboarding.done_sensors")),
+    ];
+    let gap = theme::SPACE_5;
+    let w = (ui.available_width() - gap * 2.0) / 3.0;
+    let (row, _) =
+        ui.allocate_exact_size(Vec2::new(ui.available_width(), 78.0), egui::Sense::hover());
+    let p = ui.painter();
+    for (i, (n, label)) in tiles.into_iter().enumerate() {
+        let tile = egui::Rect::from_min_size(
+            row.min + Vec2::new(i as f32 * (w + gap), 0.0),
+            Vec2::new(w, row.height()),
         );
-        ui.add_space(theme::SPACE_6);
-        let summary = if plugins_on(st, state) && active_count(st, plugins) > 0 {
-            t!("onboarding.done_summary_plugins")
-        } else {
-            t!("onboarding.done_summary_basic")
-        };
-        // Center each line on its own so the explicit break stays balanced.
-        ui.scope(|ui| {
-            ui.spacing_mut().item_spacing.y = 2.0;
-            for line in summary.split('\n') {
-                centered_wrapped(ui, line, 380.0, theme::TEXT_DIM, 13.5);
-            }
-        });
-    });
+        theme::paint_surface(p, tile, theme::RADIUS_MD, theme::INNER_BG, theme::BORDER);
+        p.text(
+            tile.min + Vec2::splat(14.0),
+            egui::Align2::LEFT_TOP,
+            n.to_string(),
+            theme::semibold(28.0),
+            theme::TEXT,
+        );
+        p.text(
+            tile.left_bottom() + Vec2::new(14.0, -14.0),
+            egui::Align2::LEFT_BOTTOM,
+            label,
+            theme::body_md(),
+            theme::TEXT_DIM,
+        );
+    }
+    ui.add_space(theme::SPACE_3);
+    ui.label(
+        RichText::new(t!("onboarding.done_note"))
+            .font(theme::body_md())
+            .color(theme::TEXT_DIM),
+    );
 }
 
 fn footer(
@@ -584,64 +651,56 @@ fn footer(
     state: &TopicStore,
     cmd: &CommandTx,
 ) {
-    ui.add_space(theme::SPACE_3);
-    ui.horizontal(|ui| {
-        let show_back = matches!(st.step, HEALTH | PREFS | PLUGINS);
-        if show_back
-            && widgets::button(
-                ui,
-                &t!("onboarding.back"),
-                ButtonKind::Ghost,
-                Vec2::new(84.0, 38.0),
-            )
-            .clicked()
-        {
-            st.step = match st.step {
-                HEALTH => WELCOME,
-                PREFS => HEALTH,
-                PLUGINS => PREFS,
-                _ => WELCOME,
-            };
-        }
-
-        // Centered progress dots.
-        ui.with_layout(egui::Layout::right_to_left(egui::Align::Center), |ui| {
-            if st.step != SCANNING {
+    ui.allocate_ui_with_layout(
+        Vec2::new(ui.available_width(), 40.0),
+        egui::Layout::left_to_right(egui::Align::Center),
+        |ui| {
+            let show_back = matches!(st.step, HEALTH | PREFS | PLUGINS);
+            if show_back
+                && widgets::button(
+                    ui,
+                    &t!("onboarding.back"),
+                    ButtonKind::Ghost,
+                    Vec2::new(0.0, 36.0),
+                )
+                .clicked()
+            {
+                st.step = match st.step {
+                    HEALTH => WELCOME,
+                    PREFS => HEALTH,
+                    PLUGINS => PREFS,
+                    _ => WELCOME,
+                };
+            }
+            ui.with_layout(egui::Layout::right_to_left(egui::Align::Center), |ui| {
+                if st.step == SCANNING {
+                    ui.label(
+                        RichText::new(t!("onboarding.please_wait"))
+                            .font(theme::body_md())
+                            .color(theme::TEXT_FAINT),
+                    );
+                    return;
+                }
                 let label = primary_label(st.step, active);
-                if widgets::button(ui, &label, ButtonKind::Primary, Vec2::new(0.0, 38.0)).clicked()
+                if widgets::button(ui, &label, ButtonKind::Primary, Vec2::new(0.0, 40.0)).clicked()
                 {
                     advance_primary(st, state, cmd, outcome);
                 }
-            } else {
-                ui.label(
-                    RichText::new(t!("onboarding.please_wait"))
-                        .font(theme::value_sm())
-                        .color(theme::TEXT_FAINT),
-                );
-            }
-            ui.with_layout(egui::Layout::left_to_right(egui::Align::Center), |ui| {
-                dots(ui, st.step);
+                if st.step == PLUGINS
+                    && active > 0
+                    && widgets::button(
+                        ui,
+                        &t!("onboarding.skip"),
+                        ButtonKind::Secondary,
+                        Vec2::new(0.0, 36.0),
+                    )
+                    .clicked()
+                {
+                    st.step = DONE;
+                }
             });
-        });
-    });
-    ui.add_space(theme::SPACE_3);
-}
-
-fn dots(ui: &mut egui::Ui, step: u8) {
-    let active = active_dot(step);
-    ui.horizontal(|ui| {
-        for i in 0..=usize::from(PLUGINS) {
-            let w = if i == active { 22.0 } else { 6.0 };
-            let (rect, _) = ui.allocate_exact_size(Vec2::new(w, 6.0), Sense::hover());
-            let c = if i == active {
-                theme::CYAN
-            } else {
-                theme::hex(0x3a3546)
-            };
-            ui.painter().rect_filled(rect, 3.0, c);
-            ui.add_space(theme::SPACE_2);
-        }
-    });
+        },
+    );
 }
 
 fn advance_primary(
@@ -695,18 +754,13 @@ fn advance_primary(
     }
 }
 
-fn send_ui_config(
-    cmd: &CommandTx,
-    state: &TopicStore,
-    tray: Option<bool>,
-    hide_controls: Option<bool>,
-) {
+fn send_ui_config(cmd: &CommandTx, state: &TopicStore, tray: bool) {
     ipc::send(
         cmd,
         DaemonCommand::SetUiConfig {
-            close_to_tray: tray.unwrap_or(state.gui.close_to_tray),
+            close_to_tray: tray,
             suppress_dependency_warning: state.gui.suppress_dependency_warning,
-            hide_window_controls: hide_controls.unwrap_or(state.gui.hide_window_controls),
+            hide_window_controls: state.gui.hide_window_controls,
             low_battery_notifications: state.gui.low_battery_notifications,
         },
     );
@@ -770,8 +824,9 @@ mod tests {
         assert_eq!(active_dot(HEALTH), 1);
         assert_eq!(active_dot(PREFS), 2);
         assert_eq!(active_dot(SCANNING), 3);
-        assert_eq!(active_dot(PLUGINS), 4);
+        assert_eq!(active_dot(PLUGINS), 3);
         assert_eq!(active_dot(DONE), 4);
+        assert_eq!(step_labels().len(), 5);
     }
 
     #[test]

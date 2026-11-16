@@ -1,9 +1,9 @@
 // SPDX-License-Identifier: GPL-3.0-or-later
 //! Maps the daemon's `WireDevice`/`TopicStore` onto the fields the Prism design
-//! expects (short code, accent hue, two headline metrics, status). All values
+//! expects (short code, two headline metrics, status). All values
 //! are derived from real device capabilities — there is no mock data. Colors
 //! themselves are a presentation concern; this module only classifies (see
-//! [`BatteryLevel`], [`hue_index`]) and `ui::theme` maps the classification
+//! [`BatteryLevel`]) and `ui::theme` maps the classification
 //! to a `Color32`.
 
 use crate::domain::topic_store::TopicStore;
@@ -184,29 +184,6 @@ pub fn matches_query(d: &WireDevice, query: &str) -> bool {
     d.name.to_lowercase().contains(&q) || d.vendor.to_lowercase().contains(&q)
 }
 
-/// Short badge abbreviation, translated GUI-side from the `DeviceType` enum —
-/// the daemon ships the enum, never the abbreviation text.
-pub fn code(d: &WireDevice) -> std::borrow::Cow<'static, str> {
-    match d.device_type {
-        DeviceType::AIO => t!("device_code.aio"),
-        DeviceType::Fan => t!("device_code.fan"),
-        DeviceType::Hub => t!("device_code.hub"),
-        DeviceType::Dongle => t!("device_code.dongle"),
-        DeviceType::Keyboard => t!("device_code.keyboard"),
-        DeviceType::Mouse => t!("device_code.mouse"),
-        DeviceType::Headset => t!("device_code.headset"),
-        DeviceType::Monitor => t!("device_code.monitor"),
-        DeviceType::Gpu => t!("device_code.gpu"),
-        DeviceType::LedStrip => t!("device_code.led_strip"),
-        DeviceType::Motherboard => t!("device_code.motherboard"),
-        DeviceType::Ram => t!("device_code.ram"),
-        DeviceType::Sensor => t!("device_code.sensor"),
-        DeviceType::Speaker => t!("device_code.speaker"),
-        DeviceType::Computer => t!("device_code.computer"),
-        DeviceType::Other => t!("device_code.other"),
-    }
-}
-
 /// Human-readable device-category label, translated GUI-side from the
 /// `DeviceType` enum the daemon ships — the daemon never sends prose.
 pub fn type_label(d: &WireDevice) -> std::borrow::Cow<'static, str> {
@@ -236,31 +213,16 @@ pub fn device_type_label(ty: DeviceType) -> std::borrow::Cow<'static, str> {
     }
 }
 
-/// Number of distinct accent hues a device can map to (see [`hue_index`]).
-/// Pinned against `ui::theme::DEVICE_HUES.len()` on the theme side.
-#[cfg(test)]
-pub const DEVICE_HUE_COUNT: usize = 10;
-
-/// Which accent hue slot (`0..DEVICE_HUE_COUNT`) a device type maps to.
-pub fn hue_index(d: &WireDevice) -> usize {
-    match d.device_type {
-        DeviceType::Keyboard => 0,
-        DeviceType::Mouse => 1,
-        DeviceType::Headset => 2,
-        DeviceType::Ram => 3,
-        DeviceType::Gpu => 4,
-        DeviceType::Fan => 5,
-        DeviceType::AIO => 6,
-        DeviceType::LedStrip => 7,
-        DeviceType::Monitor | DeviceType::Motherboard => 8,
-        _ => 9,
-    }
-}
-
-/// Up to two headline metrics derived from the device's capabilities. Battery
-/// is intentionally excluded — it renders as the top-right hint, not a metric.
+/// Up to two headline metrics derived from the device's capabilities, battery
+/// first.
 pub fn metrics(d: &WireDevice) -> Vec<Metric> {
-    let mut out = Vec::new();
+    let mut out: Vec<Metric> = battery(d)
+        .map(|(level, _)| Metric {
+            label: t!("model.metric_battery").into(),
+            value: format!("{level}%"),
+        })
+        .into_iter()
+        .collect();
     for cap in &d.capabilities {
         if out.len() >= 2 {
             break;
@@ -410,15 +372,7 @@ mod tests {
     }
 
     #[test]
-    fn code_and_hue_are_stable_per_type() {
-        let a = dev(DeviceType::Keyboard, vec![]);
-        let b = dev(DeviceType::Keyboard, vec![]);
-        assert_eq!(code(&a), "KB");
-        assert_eq!(hue_index(&a), hue_index(&b));
-    }
-
-    #[test]
-    fn battery_is_a_hint_not_a_metric() {
+    fn battery_leads_the_metrics() {
         let d = dev(
             DeviceType::Mouse,
             vec![DeviceCapability::Battery(vec![Battery {
@@ -428,9 +382,8 @@ mod tests {
                 status: BatteryStatus::Discharging,
             }])],
         );
-        // Battery surfaces via battery(), never as a metric chip.
         assert_eq!(battery(&d), Some((40, false)));
-        assert!(metrics(&d).iter().all(|m| m.label != "Battery"));
+        assert_eq!(metrics(&d)[0].value, "40%");
     }
 
     #[test]
@@ -502,44 +455,6 @@ mod tests {
         // An empty transport string falls back to the link type.
         d.transport = Some(String::new());
         assert_eq!(transport_label(&d), "Wired");
-    }
-
-    const ALL_TYPES: [DeviceType; 16] = [
-        DeviceType::Other,
-        DeviceType::Fan,
-        DeviceType::Hub,
-        DeviceType::Dongle,
-        DeviceType::Keyboard,
-        DeviceType::Mouse,
-        DeviceType::Headset,
-        DeviceType::Monitor,
-        DeviceType::Gpu,
-        DeviceType::LedStrip,
-        DeviceType::Motherboard,
-        DeviceType::Ram,
-        DeviceType::Sensor,
-        DeviceType::AIO,
-        DeviceType::Speaker,
-        DeviceType::Computer,
-    ];
-
-    #[test]
-    fn code_and_type_label_nonempty_for_every_type() {
-        for ty in ALL_TYPES {
-            let d = dev(ty, vec![]);
-            assert!(!code(&d).is_empty());
-            assert!(!type_label(&d).is_empty());
-        }
-    }
-
-    #[test]
-    fn hue_index_is_in_range_for_every_type() {
-        // hue_index() indexes theme::DEVICE_HUES; every DeviceType must map to
-        // a valid in-range index (no panic, no out-of-bounds).
-        for ty in ALL_TYPES {
-            let d = dev(ty, vec![]);
-            assert!(hue_index(&d) < DEVICE_HUE_COUNT);
-        }
     }
 
     #[test]

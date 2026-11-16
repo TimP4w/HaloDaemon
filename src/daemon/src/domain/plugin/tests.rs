@@ -127,6 +127,88 @@ fn init_failure_is_aggregated_and_clears_after_recovery() {
 }
 
 #[test]
+fn pid_filters_admit_listed_or_any_pid() {
+    assert!(super::ids_list_pid(&[0x3012], Some(0), 0x3012));
+    assert!(!super::ids_list_pid(&[0x3012], Some(0x3013), 0x3013));
+    assert!(super::ids_list_pid(&[], Some(0x3013), 0x3013));
+    assert!(!super::ids_list_pid(&[], Some(0x3013), 0x3012));
+    assert!(super::ids_list_pid(&[], None, 0xc547));
+    assert!(super::ids_list_pid(&[], Some(0), 0xc547));
+}
+
+#[test]
+fn init_failures_share_the_open_budget_until_a_successful_init() {
+    let registry = super::Registry::default();
+    let key = ("plug_b".to_owned(), "plug_b-dev".to_owned());
+    for attempt in 1..=super::TRANSPORT_OPEN_ATTEMPTS {
+        assert_eq!(
+            registry.report_init_error("plug_b", "plug_b-dev", "timeout".into()),
+            attempt
+        );
+    }
+    assert!(registry.transport_open_blocked(&key));
+    assert!(registry.retryable_open_failure_kinds().is_empty());
+
+    registry.clear_init_error("plug_b", "plug_b-dev");
+    assert!(!registry.transport_open_blocked(&key));
+}
+
+#[tokio::test(start_paused = true)]
+async fn runtime_error_from_a_device_that_left_is_dropped_after_the_grace() {
+    let app = crate::test_support::app_with(vec![]);
+    app.registry
+        .report_runtime_error(&app, "plug_a", "plug_a-gone", "Broken pipe".into())
+        .await;
+    assert_eq!(
+        app.registry.health_for("plug_a").status,
+        halod_shared::types::HealthStatus::Failed
+    );
+
+    tokio::time::sleep(super::RUNTIME_ERROR_GRACE * 2).await;
+
+    assert_eq!(
+        app.registry.health_for("plug_a"),
+        halod_shared::types::HealthState::default()
+    );
+    assert!(
+        queue_recovery(&app.registry, "plug_a"),
+        "no recovery was queued"
+    );
+}
+
+#[tokio::test(start_paused = true)]
+async fn runtime_error_from_a_present_device_queues_recovery_after_the_grace() {
+    let device = std::sync::Arc::new(crate::test_support::MockDevice::new("plug_a-live"));
+    let app = crate::test_support::app_with(vec![device]);
+    app.registry
+        .report_runtime_error(&app, "plug_a", "plug_a-live", "Broken pipe".into())
+        .await;
+    assert!(
+        queue_recovery(&app.registry, "plug_a"),
+        "nothing queued yet"
+    );
+    app.registry.runtime_recovery.clear("plug_a");
+
+    tokio::time::sleep(super::RUNTIME_ERROR_GRACE + std::time::Duration::from_millis(10)).await;
+
+    assert!(!queue_recovery(&app.registry, "plug_a"));
+}
+
+#[tokio::test(start_paused = true)]
+async fn runtime_error_that_recovers_within_the_grace_stays_silent() {
+    let device = std::sync::Arc::new(crate::test_support::MockDevice::new("plug_a-live"));
+    let app = crate::test_support::app_with(vec![device]);
+    app.registry
+        .report_runtime_error(&app, "plug_a", "plug_a-live", "Broken pipe".into())
+        .await;
+    app.registry.clear_runtime_error("plug_a", "plug_a-live");
+
+    tokio::time::sleep(super::RUNTIME_ERROR_GRACE * 2).await;
+
+    assert!(queue_recovery(&app.registry, "plug_a"));
+}
+
+#[test]
 fn fresh_integration_runtime_clears_stale_device_errors() {
     let registry = super::Registry::default();
     registry.set_load_warning("openrgb", "logo is unavailable".into());

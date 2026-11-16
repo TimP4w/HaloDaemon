@@ -35,95 +35,142 @@ pub fn show(ui: &mut egui::Ui, ctx: &TabCtx, st: &mut DeviceUi) {
         st.equalizer.eq_seeded = true;
     }
 
-    widgets::card_titled(
-        ui,
-        &t!("devtabs.equalizer"),
-        |_| {},
-        |ui| {
-            ui.horizontal_top(|ui| {
-                preset_list(ui, ctx, &id, &eq);
-                ui.add_space(theme::SPACE_10);
-                if eq.editable {
-                    ui.vertical(|ui| bands(ui, ctx, st, &id, &eq));
-                }
-            });
-        },
-    );
+    let main_w = (ui.available_width() - 320.0 - 16.0).max(320.0);
+    widgets::split_columns(ui, main_w, 16.0, |main, aside| {
+        widgets::card(main, |ui| {
+            ui.spacing_mut().item_spacing.y = theme::SPACE_8;
+            egui::Sides::new().show(
+                ui,
+                |ui| {
+                    ui.label(
+                        egui::RichText::new(t!("devtabs.equalizer"))
+                            .font(theme::semibold(18.0))
+                            .color(theme::TEXT),
+                    );
+                },
+                |ui| {
+                    if eq.editable
+                        && widgets::button(
+                            ui,
+                            &t!("devtabs.eq_reset_flat"),
+                            widgets::ButtonKind::Ghost,
+                            Vec2::new(0.0, 30.0),
+                        )
+                        .clicked()
+                    {
+                        let flat = flat_bands(&eq.bands);
+                        st.equalizer.eq = flat.clone();
+                        st.last_edit = ctx.time;
+                        crate::runtime::ipc::send(
+                            ctx.cmd,
+                            DaemonCommand::SetEqBands {
+                                id: id.clone(),
+                                values: flat,
+                            },
+                        );
+                    }
+                },
+            );
+            if eq.editable {
+                bands(ui, ctx, st, &id, &eq);
+            }
+        });
+        widgets::card_with_margin(aside, egui::Margin::same(18), |ui| {
+            ui.set_width(ui.available_width());
+            ui.spacing_mut().item_spacing.y = theme::SPACE_4;
+            ui.label(
+                egui::RichText::new(t!("devtabs.eq_presets"))
+                    .font(theme::heading())
+                    .color(theme::TEXT),
+            );
+            ui.add_space(theme::SPACE_2);
+            preset_list(ui, ctx, &id, &eq);
+        });
+    });
 }
 
-/// Left column: the Custom preset as a button, every other preset in a select
-/// whose placeholder entry maps back to Custom.
+/// Every band at 0 dB, clamped into its range.
+fn flat_bands(bands: &[EqBand]) -> Vec<f32> {
+    bands.iter().map(|b| 0.0f32.clamp(b.min, b.max)).collect()
+}
+
+fn preset_note(preset: &halod_shared::types::EqPreset) -> std::borrow::Cow<'static, str> {
+    if preset.is_custom {
+        t!("devtabs.eq_custom")
+    } else if preset.is_firmware {
+        t!("devtabs.eq_device")
+    } else {
+        std::borrow::Cow::Borrowed("")
+    }
+}
+
 fn preset_list(ui: &mut egui::Ui, ctx: &TabCtx, id: &str, eq: &Equalizer) {
-    const LIST_W: f32 = 200.0;
-    let select = |idx: usize| {
-        if idx != eq.selected_preset {
+    for (idx, preset) in eq.presets.iter().enumerate() {
+        let selected = idx == eq.selected_preset;
+        if widgets::choice_row(ui, &preset.label, &preset_note(preset), selected).clicked()
+            && !selected
+        {
             crate::runtime::ipc::send(
                 ctx.cmd,
-                halod_shared::commands::DaemonCommand::SetEqPreset {
+                DaemonCommand::SetEqPreset {
                     id: id.to_string(),
                     preset_index: idx,
                 },
             );
         }
-    };
-    ui.allocate_ui_with_layout(
-        Vec2::new(LIST_W, ui.available_height()),
-        egui::Layout::top_down(egui::Align::Min),
-        |ui| {
-            ui.spacing_mut().item_spacing = egui::vec2(0.0, 10.0);
-            ui.spacing_mut().combo_width = LIST_W;
+    }
+}
 
-            let custom = eq.presets.iter().position(|p| p.is_custom);
-            if let Some(ci) = custom {
-                if widgets::pill_row(ui, &eq.presets[ci].label, ci == eq.selected_preset) {
-                    select(ci);
-                }
-            }
+const WELL_H: f32 = 300.0;
 
-            let options: Vec<(String, String)> = eq
-                .presets
-                .iter()
-                .filter(|p| !p.is_custom)
-                .map(|p| (p.id.clone(), p.label.clone()))
-                .collect();
-            if options.is_empty() {
-                return;
-            }
-            let current = eq
-                .presets
-                .get(eq.selected_preset)
-                .filter(|p| !p.is_custom)
-                .map_or("", |p| p.id.as_str());
-            if let Some(sel) = widgets::combo_picker(
-                ui,
-                ("eq_preset", id),
-                &options,
-                current,
-                Some(&t!("devtabs.eq_presets")),
-            ) {
-                let idx = if sel.is_empty() {
-                    custom
-                } else {
-                    eq.presets.iter().position(|p| p.id == sel && !p.is_custom)
-                };
-                if let Some(idx) = idx {
-                    select(idx);
-                }
-            }
-        },
-    );
+fn db_label(v: f32) -> String {
+    let v = if v.abs() < 0.05 { 0.0 } else { v };
+    if v > 0.0 {
+        format!("+{v:.0} dB")
+    } else if v < 0.0 {
+        format!("−{:.0} dB", -v)
+    } else {
+        "0 dB".to_owned()
+    }
 }
 
 fn bands(ui: &mut egui::Ui, ctx: &TabCtx, st: &mut DeviceUi, id: &str, eq: &Equalizer) {
     let n = eq.bands.len().max(1);
-    let avail = ui.available_width();
-    let col = (avail / n as f32).min(60.0);
-    let (rect, _) = ui.allocate_exact_size(Vec2::new(avail, 200.0), Sense::hover());
+    let (well, _) = ui.allocate_exact_size(Vec2::new(ui.available_width(), WELL_H), Sense::hover());
+    let p = ui.painter();
+    p.rect_filled(well, 8.0, theme::INNER_BG);
+    let plot = Rect::from_min_max(
+        well.min + Vec2::new(12.0, 20.0),
+        well.max - Vec2::new(12.0, 32.0),
+    );
+    let mid = plot.center().y;
+    p.extend(egui::Shape::dashed_line(
+        &[Pos2::new(plot.left(), mid), Pos2::new(plot.right(), mid)],
+        egui::Stroke::new(1.0, theme::BORDER_INNER),
+        3.0,
+        3.0,
+    ));
+    if let Some(first) = eq.bands.first() {
+        p.text(
+            Pos2::new(well.left() + 12.0, well.top() + 14.0),
+            Align2::LEFT_TOP,
+            db_label(first.max),
+            theme::caption(),
+            theme::TEXT_FAINT,
+        );
+        p.text(
+            Pos2::new(well.left() + 12.0, well.bottom() - 34.0),
+            Align2::LEFT_BOTTOM,
+            db_label(first.min),
+            theme::caption(),
+            theme::TEXT_FAINT,
+        );
+    }
+    let col = plot.width() / n as f32;
     let mut changed = false;
     for (i, b) in eq.bands.iter().enumerate() {
-        let cx = rect.left() + col * (i as f32 + 0.5);
-        let band_rect =
-            Rect::from_center_size(Pos2::new(cx, rect.top() + 80.0), Vec2::new(28.0, 160.0));
+        let cx = plot.left() + col * (i as f32 + 0.5);
+        let band_rect = Rect::from_center_size(Pos2::new(cx, mid), Vec2::new(28.0, plot.height()));
         if let Some(v) = st.equalizer.eq.get_mut(i) {
             if vband(ui, band_rect, v, b) {
                 changed = true;
@@ -131,23 +178,23 @@ fn bands(ui: &mut egui::Ui, ctx: &TabCtx, st: &mut DeviceUi, id: &str, eq: &Equa
             }
         }
         ui.painter().text(
-            Pos2::new(cx, rect.top() + 174.0),
+            Pos2::new(cx, plot.bottom() + 18.0),
             Align2::CENTER_CENTER,
             &b.label,
-            theme::caption(),
-            theme::TEXT_MUT,
+            theme::body_sm(),
+            theme::TEXT_DIM,
         );
+    }
+    let (values, _) = ui.allocate_exact_size(Vec2::new(well.width(), 16.0), Sense::hover());
+    let vcol = values.width() / n as f32;
+    for (i, b) in eq.bands.iter().enumerate() {
         let val = st.equalizer.eq.get(i).copied().unwrap_or(b.value);
         ui.painter().text(
-            Pos2::new(cx, rect.top() + 190.0),
+            Pos2::new(values.left() + vcol * (i as f32 + 0.5), values.center().y),
             Align2::CENTER_CENTER,
-            format!("{}{:.0}", if val >= 0.0 { "+" } else { "" }, val),
-            theme::value_xs(),
-            if val >= 0.0 {
-                theme::CYAN
-            } else {
-                theme::STAT_PURPLE
-            },
+            db_label(val),
+            theme::body_sm(),
+            theme::TEXT_SOFT,
         );
     }
     if changed {
@@ -171,10 +218,14 @@ fn band_value(t: f32, b: &EqBand) -> f32 {
 
 /// A vertical band slider (track + fill from center + thumb). Returns changed.
 fn vband(ui: &mut egui::Ui, rect: Rect, value: &mut f32, b: &EqBand) -> bool {
-    let resp = ui.interact(rect, ui.id().with(("eq", b.index)), Sense::click_and_drag());
+    let resp = ui.interact(
+        rect,
+        ui.scope_id().with(("eq", b.index)),
+        Sense::click_and_drag(),
+    );
     let p = ui.painter();
     let track = Rect::from_center_size(rect.center(), Vec2::new(4.0, rect.height()));
-    p.rect_filled(track, 2.0, theme::hex(0x222936));
+    p.rect_filled(track, 2.0, theme::BORDER);
 
     let mut changed = false;
     if resp.dragged() || resp.clicked() {
@@ -187,11 +238,7 @@ fn vband(ui: &mut egui::Ui, rect: Rect, value: &mut f32, b: &EqBand) -> bool {
     let t = ((*value - b.min) / (b.max - b.min)).clamp(0.0, 1.0);
     let y = rect.bottom() - t * rect.height();
     let mid = rect.center().y;
-    let color = if *value >= 0.0 {
-        theme::CYAN
-    } else {
-        theme::STAT_PURPLE
-    };
+    let color = theme::CYAN;
     p.rect_filled(
         Rect::from_min_max(
             Pos2::new(track.left(), y.min(mid)),
@@ -200,7 +247,8 @@ fn vband(ui: &mut egui::Ui, rect: Rect, value: &mut f32, b: &EqBand) -> bool {
         2.0,
         color,
     );
-    p.circle_filled(Pos2::new(rect.center().x, y), 7.0, theme::hex(0xdfe6f2));
+    p.circle_filled(Pos2::new(rect.center().x, y), 8.0, theme::CYAN);
+    p.circle_filled(Pos2::new(rect.center().x, y), 5.0, theme::TEXT);
     if resp.hovered() {
         ui.ctx().set_cursor_icon(egui::CursorIcon::ResizeVertical);
     }
@@ -209,7 +257,7 @@ fn vband(ui: &mut egui::Ui, rect: Rect, value: &mut f32, b: &EqBand) -> bool {
 
 #[cfg(test)]
 mod tests {
-    use super::band_value;
+    use super::{band_value, db_label, flat_bands};
     use halod_shared::types::EqBand;
 
     fn band(step: f32) -> EqBand {
@@ -241,5 +289,20 @@ mod tests {
         // Out-of-range t is clamped by snap_to_step into [min, max].
         assert_eq!(band_value(1.5, &b), 10.0);
         assert_eq!(band_value(-0.5, &b), -10.0);
+    }
+
+    #[test]
+    fn flat_is_zero_clamped_into_each_band() {
+        let mut shifted = band(1.0);
+        shifted.min = 2.0;
+        assert_eq!(flat_bands(&[band(1.0), shifted]), vec![0.0, 2.0]);
+    }
+
+    #[test]
+    fn db_labels_sign_only_nonzero_gains() {
+        assert_eq!(db_label(4.0), "+4 dB");
+        assert_eq!(db_label(0.0), "0 dB");
+        assert_eq!(db_label(-0.01), "0 dB");
+        assert_eq!(db_label(-1.0), "−1 dB");
     }
 }

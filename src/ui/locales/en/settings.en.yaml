@@ -1,62 +1,84 @@
 settings:
+  language_sub: "Interface language"
+  credits_sub: "People and projects that made halod possible"
+  version_sub: "Build %{build} · %{license}"
+  version_title: "Version"
+  show_hidden_sub: "Include devices you hid from Home"
+  show_hidden_title: "Show hidden devices"
+  open_folder_button: "Open folder"
+  open_log_button: "Open log"
+  log_file_title: "Log file"
+  log_debug: "Debug"
+  log_info: "Info"
+  log_warn: "Warning"
+  log_error: "Error"
+  daemon_stopped: "Not running"
+  daemon_running: "Running"
+  daemon_disconnected_sub: "Not connected"
+  daemon_connected_sub: "Connected · version %{version}"
+  fps_value: "%{n} fps"
+  failsafe_sub: "Used when a curve’s sensor is unavailable for more than 10 s"
+  failsafe_title: "Failsafe fan duty"
+  fan_tick_value: "Every %{secs} s"
+  fan_engine_sub: "How often fan curves read sensors and set duty"
+  fan_engine_title: "Fan curves"
+  canvas_engine_sub: "How often the canvas samples and sends frames"
+  canvas_engine_title: "Lighting canvas"
+  section_application_sub: "Startup, tray and language"
+  section_engines_sub: "How often halod updates lighting, screens and fans"
+  section_devices_sub: "Discovery and connection to the halod service"
+  section_healthcheck_sub: "System access halod needs for your hardware"
+  section_logging_sub: "Where halod writes its log and how much detail it keeps"
+  section_about_sub: "halod, a daemon for controlling peripherals"
+  recheck_title: "Run all checks"
+  recheck_sub: "Check system access again"
   title: Settings
-  subtitle: Engine, startup and integrations
-  section_application: APPLICATION
-  section_engines: ENGINES
-  section_devices: DEVICES
-  section_logging: LOGGING
-  section_advanced: ADVANCED
-  section_debug: DEBUG
-  section_about: ABOUT
-  section_healthcheck: HEALTHCHECK
+  section_application: "Application"
+  section_engines: "Engines"
+  section_devices: "Devices"
+  section_logging: "Logging"
+  section_about: "About"
+  section_healthcheck: "Healthcheck"
   start_on_boot_title: Start on boot
-  start_on_boot_sub: Launch HaloDaemon in the tray when you sign in
+  start_on_boot_sub: "Launch halod in the tray when you sign in"
   start_on_boot_managed_sub: This option is managed by your system configuration. Change it there.
   start_on_boot_managed_value: Controlled by system
   close_to_tray_title: Close to tray
-  close_to_tray_sub: Hide the window instead of quitting when the close button is pressed
+  close_to_tray_sub: "Hide the window instead of quitting when you close it"
   low_battery_notifications_title: Low battery notifications
-  low_battery_notifications_sub: Notify once below 20%, then again below 10% and 5%
-  plugin_downloads_title: Official plugins & updates
-  plugin_downloads_sub: Allow HaloDaemon to download official plugins from GitHub and check for updates on startup
+  low_battery_notifications_sub: "Notify below 20%, then again below 10% and 5%"
+  plugin_downloads_title: "Official plugins and updates"
+  plugin_downloads_sub: "Download official plugins from GitHub and check for updates on startup"
   window_controls_title: Window controls
-  window_controls_sub: Show Minimize, Maximize, and Close buttons in the title bar. Turn this off when using a tiling window manager.
-  startup_healthcheck_title: Startup healthcheck
-  startup_healthcheck_sub: Warn on launch when a check fails
+  window_controls_sub: "Show minimize, maximize and close. Turn off on tiling window managers."
+  startup_healthcheck_title: "Check on startup"
+  startup_healthcheck_sub: "Warn when launching if a required check fails"
   replay_tutorials_title: Replay tutorials
-  replay_tutorials_sub: Show the onboarding tour again next time you visit each page
+  replay_tutorials_sub: "Show the guided tour again the next time you open each page"
   replay_button: Replay
-  lcd_engine_sub: Frame rate for dynamic content driven to LCD screens by the LCD engine
-  daemon_title: Daemon
-  daemon_sub: Connection to the HaloDaemon daemon
-  daemon_connected: "● Connected"
-  daemon_disconnected: "○ Disconnected"
-  rediscover_title: Rediscover Devices
-  rediscover_sub: Scan USB, HID, hwmon, SMBus for new devices
+  lcd_engine_sub: "Frame rate for dynamic LCD content"
+  daemon_title: "halod service"
+  rediscover_title: "Rediscover devices"
+  rediscover_sub: "Scan USB, HID, hwmon and SMBus for new devices"
   scan_now_button: Scan now
   scanning_button: Scanning…
-  recheck_button: Re-check
+  recheck_button: "Check again"
   running_healthcheck_title: Running healthcheck…
   running_healthcheck_sub: Waiting for the daemon to report the system status
   no_checks_title: No checks reported
   no_checks_sub: The daemon returned an empty list of system checks
-  dep_detected: "● Detected"
-  dep_missing: "● Missing"
-  dep_not_found: "○ Not found"
-  dep_required: Required
-  dep_optional: Optional
-  log_level_sub: Daemon log verbosity
-  config_folder_title: Config Folder
+  dep_detected: "Detected"
+  dep_missing: "Missing"
+  dep_not_found: "Not found"
+  log_level_sub: "Daemon log detail"
+  config_folder_title: "Config folder"
   unknown: Unknown
-  open_external_button: "Open ↗"
-  diagnostics_title: System & device diagnostics
-  diagnostics_sub: Show all connected HID devices, which ones were recognized, and the current privilege level
-  open_button: Open…
-  app_tagline: A daemon for controlling peripherals
-  credits_button: Credits…
-  third_party_title: Third-Party Licenses
-  third_party_sub: Open source components used by HaloDaemon
-  view_button: View…
+  diagnostics_title: "System and device diagnostics"
+  diagnostics_sub: "Every connected HID device, which ones were recognised, and the current access level"
+  open_button: "Open"
+  third_party_title: "Third-party licenses"
+  third_party_sub: "Open-source components used by halod"
+  view_button: "View"
   repository_title: Repository
   licenses_modal_body: Open-source components included or used by HaloDaemon, grouped by license.
   credits_title: Credits

@@ -8,28 +8,33 @@ use crate::ui::components::{self as widgets, ButtonKind};
 use crate::ui::theme;
 
 use super::widget_row::RowCtx;
-use super::widget_view::{self, TILE_H};
-use super::GAP;
+use super::widget_view::{self, CELL_H};
 
 /// Preview tiles are drawn at the dashboard's four-column width so the layout
 /// the user approves is the layout they get.
-const PREVIEW_W: f32 = 260.0;
+const PREVIEW_W: f32 = 420.0;
 const PREVIEW_ID: &str = "preview";
 
 #[derive(Clone, Copy, PartialEq)]
 pub enum Kind {
     Chart,
     Gauge,
+    Meter,
     Battery,
 }
 
 impl Kind {
-    const ALL: [Self; 3] = [Self::Chart, Self::Gauge, Self::Battery];
+    const ALL: [Self; 4] = [Self::Chart, Self::Gauge, Self::Meter, Self::Battery];
+
+    fn ranged(self) -> bool {
+        matches!(self, Self::Gauge | Self::Meter)
+    }
 
     fn name(self) -> String {
         match self {
             Self::Chart => t!("home.widget_chart"),
             Self::Gauge => t!("home.widget_gauge"),
+            Self::Meter => t!("home.widget_meter"),
             Self::Battery => t!("home.widget_battery"),
         }
         .to_string()
@@ -39,6 +44,7 @@ impl Kind {
         match self {
             Self::Chart => t!("home.widget_chart_desc"),
             Self::Gauge => t!("home.widget_gauge_desc"),
+            Self::Meter => t!("home.widget_meter_desc"),
             Self::Battery => t!("home.widget_battery_desc"),
         }
         .to_string()
@@ -111,6 +117,16 @@ impl Draft {
                 draft.min = *min as f32;
                 draft.max = *max as f32;
             }
+            HomeWidgetKind::Meter {
+                sensor_id,
+                min,
+                max,
+            } => {
+                draft.kind = Kind::Meter;
+                draft.sensor_id = sensor_id.clone();
+                draft.min = *min as f32;
+                draft.max = *max as f32;
+            }
             HomeWidgetKind::Battery { batteries } => {
                 draft.kind = Kind::Battery;
                 draft.batteries = batteries.clone();
@@ -125,6 +141,11 @@ impl Draft {
                 sensor_id: self.sensor_id.clone(),
             },
             Kind::Gauge => HomeWidgetKind::Gauge {
+                sensor_id: self.sensor_id.clone(),
+                min: self.min as f64,
+                max: self.max as f64,
+            },
+            Kind::Meter => HomeWidgetKind::Meter {
                 sensor_id: self.sensor_id.clone(),
                 min: self.min as f64,
                 max: self.max as f64,
@@ -145,7 +166,7 @@ impl Draft {
     pub fn complete(&self) -> bool {
         match self.kind {
             Kind::Chart => !self.sensor_id.is_empty(),
-            Kind::Gauge => !self.sensor_id.is_empty() && self.min < self.max,
+            Kind::Gauge | Kind::Meter => !self.sensor_id.is_empty() && self.min < self.max,
             Kind::Battery => !self.batteries.is_empty(),
         }
     }
@@ -185,16 +206,10 @@ pub fn show(ctx: &egui::Context, draft: &mut Draft, row: &RowCtx) -> Option<Outc
             } else {
                 t!("home.save")
             };
-            let clicked = if complete {
-                widgets::button(ui, &confirm, ButtonKind::Primary, size).clicked()
-            } else {
-                widgets::button_disabled(ui, &confirm, ButtonKind::Primary, size);
-                false
-            };
-            if clicked {
+            if widgets::button_enabled(ui, &confirm, ButtonKind::Primary, size, complete) {
                 outcome = Some(Outcome::Save);
             }
-            if widgets::button(ui, &t!("home.cancel"), ButtonKind::Ghost, size).clicked() {
+            if widgets::button(ui, &t!("home.cancel"), ButtonKind::Secondary, size).clicked() {
                 outcome = Some(Outcome::Close);
             }
         },
@@ -208,7 +223,7 @@ pub fn show(ctx: &egui::Context, draft: &mut Draft, row: &RowCtx) -> Option<Outc
 fn body(ui: &mut egui::Ui, draft: &mut Draft, row: &RowCtx) {
     preview(ui, draft, row);
     ui.add_space(theme::SPACE_9);
-    widgets::caps_label(ui, &t!("home.widget_type"));
+    widgets::section_label(ui, &t!("home.widget_type"));
     ui.add_space(theme::SPACE_5);
     widgets::pill_strip(ui, |ui| {
         for kind in Kind::ALL {
@@ -226,13 +241,13 @@ fn body(ui: &mut egui::Ui, draft: &mut Draft, row: &RowCtx) {
 
     ui.add_space(theme::SPACE_9);
     match draft.kind {
-        Kind::Chart | Kind::Gauge => sensor_picker(ui, draft, row),
+        Kind::Chart | Kind::Gauge | Kind::Meter => sensor_picker(ui, draft, row),
         Kind::Battery => battery_picker(ui, draft, row),
     }
 
-    if draft.kind == Kind::Gauge {
+    if draft.kind.ranged() {
         ui.add_space(theme::SPACE_9);
-        widgets::caps_label(ui, &t!("home.widget_range"));
+        widgets::section_label(ui, &t!("home.widget_range"));
         ui.add_space(theme::SPACE_5);
         let half = (ui.available_width() - theme::SPACE_6) / 2.0;
         widgets::split_columns(ui, half, theme::SPACE_6, |left, right| {
@@ -242,7 +257,7 @@ fn body(ui: &mut egui::Ui, draft: &mut Draft, row: &RowCtx) {
     }
 
     ui.add_space(theme::SPACE_9);
-    widgets::caps_label(ui, &t!("home.widget_label"));
+    widgets::section_label(ui, &t!("home.widget_label"));
     ui.add_space(theme::SPACE_5);
     let hint = default_label(draft, row);
     ui.add_sized(
@@ -251,7 +266,7 @@ fn body(ui: &mut egui::Ui, draft: &mut Draft, row: &RowCtx) {
     );
 
     ui.add_space(theme::SPACE_9);
-    widgets::caps_label(ui, &t!("home.widget_color"));
+    widgets::section_label(ui, &t!("home.widget_color"));
     ui.add_space(theme::SPACE_5);
     if let Some(picked) =
         widgets::palette_swatch_row(ui, "widget_color", &theme::WIDGET_HUES, draft.color)
@@ -264,14 +279,11 @@ fn body(ui: &mut egui::Ui, draft: &mut Draft, row: &RowCtx) {
 /// changes — the same painter, so the preview cannot drift from the real thing.
 fn preview(ui: &mut egui::Ui, draft: &Draft, row: &RowCtx) {
     let widget = draft.to_widget(PREVIEW_ID.to_string());
-    // Same footprint the dashboard gives it, so the preview is to scale.
-    let size = widget_view::size(&widget.kind);
-    let width = (PREVIEW_W * size.cols as f32 / widget_view::Size::FULL.cols as f32)
-        .min(ui.available_width());
-    let height = TILE_H * size.rows as f32 + GAP * (size.rows as f32 - 1.0);
-    let (rect, _) = ui.allocate_exact_size(egui::vec2(width, height), egui::Sense::hover());
+    let width = PREVIEW_W.min(ui.available_width());
+    let (rect, _) = ui.allocate_exact_size(egui::vec2(width, CELL_H), egui::Sense::hover());
     let resolved = widget_view::resolve(&widget, row.sensors, row.state);
     let p = ui.painter();
+    p.rect_filled(rect, theme::RADIUS_MD, theme::CARD_BG);
     widget_view::paint(p, rect, &widget, resolved.as_ref(), row.history);
     widget_view::frame(p, rect, theme::BORDER);
 }
@@ -289,7 +301,7 @@ fn default_label(draft: &Draft, row: &RowCtx) -> String {
 }
 
 fn sensor_picker(ui: &mut egui::Ui, draft: &mut Draft, row: &RowCtx) {
-    widgets::caps_label(ui, &t!("home.widget_sensor"));
+    widgets::section_label(ui, &t!("home.widget_sensor"));
     ui.add_space(theme::SPACE_5);
     let options: Vec<(String, String)> = row
         .sensors
@@ -309,7 +321,7 @@ fn sensor_picker(ui: &mut egui::Ui, draft: &mut Draft, row: &RowCtx) {
 }
 
 fn battery_picker(ui: &mut egui::Ui, draft: &mut Draft, row: &RowCtx) {
-    widgets::caps_label(
+    widgets::section_label(
         ui,
         &t!("home.widget_batteries", max = MAX_BATTERY_WIDGET_ENTRIES),
     );

@@ -41,7 +41,7 @@ fn index_widget_ids(ids: impl IntoIterator<Item = String>) -> HashMap<String, us
 }
 
 pub(super) fn stage(ui: &mut egui::Ui, ctx: &TabCtx, st: &mut DeviceUi, id: &str, lcd: &LcdStatus) {
-    let avail = (ui.available_width() - 4.0).clamp(220.0, 520.0);
+    let avail = (ui.available_width() - 12.0).clamp(220.0, 380.0);
     let size_vec = panel_size(avail, lcd.descriptor.width, lcd.descriptor.height);
     // Background senses clicks before per-widget interacts below, so a widget
     // (registered later, "on top") consumes clicks over it — giving
@@ -103,13 +103,13 @@ pub(super) fn stage(ui: &mut egui::Ui, ctx: &TabCtx, st: &mut DeviceUi, id: &str
     match lcd.descriptor.shape {
         ScreenShape::Circle => {
             ui.painter()
-                .circle_stroke(center, radius, Stroke::new(6.0, theme::BODY));
+                .circle_stroke(center, radius + 3.0, Stroke::new(6.0, theme::BORDER));
         }
         ScreenShape::Square => {
             ui.painter().rect_stroke(
                 rect,
                 theme::RADIUS_XL,
-                Stroke::new(6.0, theme::BODY),
+                Stroke::new(6.0, theme::BORDER),
                 egui::StrokeKind::Outside,
             );
         }
@@ -228,7 +228,7 @@ pub(super) fn stage(ui: &mut egui::Ui, ctx: &TabCtx, st: &mut DeviceUi, id: &str
 
         let resp = ui.interact(
             hit,
-            ui.id().with(("lcd_editor_widget", wid.as_str())),
+            ui.scope_id().with(("lcd_editor_widget", wid.as_str())),
             Sense::click_and_drag(),
         );
         if resp.dragged() && !editing && !is_primary {
@@ -286,8 +286,7 @@ pub(super) fn stage(ui: &mut egui::Ui, ctx: &TabCtx, st: &mut DeviceUi, id: &str
             let text_edit = egui::TextEdit::singleline(&mut buf)
                 .font(font_id)
                 .text_color(color)
-                .horizontal_align(egui::Align::Center)
-                .vertical_align(egui::Align::Center)
+                .align(egui::Align2::CENTER_CENTER)
                 .clip_text(false)
                 .frame(egui::Frame::NONE);
             // A child `Ui` rather than `ui.put`, which would advance the parent
@@ -338,18 +337,13 @@ pub(super) fn stage(ui: &mut egui::Ui, ctx: &TabCtx, st: &mut DeviceUi, id: &str
             } else {
                 Stroke::new(1.0, theme::a(theme::TEXT_MUT, 0.6))
             };
-            let fill = if selected {
-                theme::a(theme::CYAN, 0.10)
-            } else {
-                Color32::TRANSPARENT
-            };
             if rotation_active(deg) {
-                p.add(egui::Shape::convex_polygon(corners.to_vec(), fill, stroke));
+                p.add(egui::Shape::convex_polygon(
+                    corners.to_vec(),
+                    Color32::TRANSPARENT,
+                    stroke,
+                ));
             } else {
-                // Unrotated: keep the rounded-rect look of the original outline.
-                if selected {
-                    p.rect_filled(content, theme::RADIUS_XS, fill);
-                }
                 p.rect_stroke(content, theme::RADIUS_XS, stroke, egui::StrokeKind::Outside);
             }
         }
@@ -384,13 +378,13 @@ pub(super) fn stage(ui: &mut egui::Ui, ctx: &TabCtx, st: &mut DeviceUi, id: &str
         if is_primary {
             // Resize handle at the (rotated) bottom-right corner.
             let handle_c = corners[2];
-            let handle_rect = Rect::from_center_size(handle_c, Vec2::splat(14.0));
+            let handle_rect = Rect::from_center_size(handle_c, Vec2::splat(12.0));
             let hresp = ui.interact(
                 handle_rect,
-                ui.id().with(("lcd_editor_resize", wid.as_str())),
+                ui.scope_id().with(("lcd_editor_resize", wid.as_str())),
                 Sense::drag(),
             );
-            ui.painter().rect_filled(handle_rect, 3.0, theme::CYAN);
+            ui.painter().rect_filled(handle_rect, 2.0, theme::CYAN);
             if hresp.drag_started() {
                 // Capture the true (daemon-sprite) start box before this frame's
                 // drag; later frames scale it by the live scale ratio.
@@ -469,7 +463,7 @@ pub(super) fn stage(ui: &mut egui::Ui, ctx: &TabCtx, st: &mut DeviceUi, id: &str
             let rot_rect = Rect::from_center_size(rot_c, Vec2::splat(16.0));
             let rresp = ui.interact(
                 rot_rect,
-                ui.id().with(("lcd_editor_rotate", wid.as_str())),
+                ui.scope_id().with(("lcd_editor_rotate", wid.as_str())),
                 Sense::drag(),
             );
             {
@@ -478,7 +472,8 @@ pub(super) fn stage(ui: &mut egui::Ui, ctx: &TabCtx, st: &mut DeviceUi, id: &str
                     [top_mid, rot_c],
                     Stroke::new(1.0, theme::a(theme::TEXT_MUT, 0.8)),
                 );
-                p.circle_filled(rot_c, 6.0, theme::CYAN);
+                p.circle_filled(rot_c, 5.5, theme::TEXT);
+                p.circle_stroke(rot_c, 5.5, Stroke::new(2.0, theme::CYAN));
             }
             if rresp.dragged() {
                 if let Some(cur) = rresp.interact_pointer_pos() {
@@ -501,7 +496,7 @@ pub(super) fn stage(ui: &mut egui::Ui, ctx: &TabCtx, st: &mut DeviceUi, id: &str
             let badge_rect = Rect::from_center_size(badge_c, Vec2::splat(18.0));
             let badge = ui.interact(
                 badge_rect,
-                ui.id().with(("lcd_editor_del", wid.as_str())),
+                ui.scope_id().with(("lcd_editor_del", wid.as_str())),
                 Sense::click(),
             );
             let p = ui.painter();
@@ -539,7 +534,7 @@ pub(super) fn stage(ui: &mut egui::Ui, ctx: &TabCtx, st: &mut DeviceUi, id: &str
                 let drag_hit = selected_hit.shrink(inset);
                 let selected_resp = ui.interact(
                     drag_hit,
-                    ui.id()
+                    ui.scope_id()
                         .with(("lcd_editor_selected_overlay", selected_id.as_str())),
                     Sense::click_and_drag(),
                 );
@@ -703,41 +698,6 @@ pub(super) fn stage(ui: &mut egui::Ui, ctx: &TabCtx, st: &mut DeviceUi, id: &str
         send_def(ctx, st, id, true);
     } else if moved || resized || rotated || edited {
         send_def(ctx, st, id, false);
-    }
-
-    ui.add_space(theme::SPACE_3);
-    ui.horizontal(|ui| {
-        ui.label(
-            egui::RichText::new(t!("lcd.widget_count", n = st.lcd.editor.def.widgets.len()))
-                .font(theme::mono(10.5))
-                .color(theme::TEXT_FAINT),
-        );
-        if !st.lcd.editor.def.widgets.is_empty()
-            && widgets::button(
-                ui,
-                &t!("lcd.clear_all"),
-                widgets::ButtonKind::Ghost,
-                egui::vec2(80.0, 24.0),
-            )
-            .clicked()
-        {
-            st.lcd.editor.def.widgets.clear();
-            st.lcd.editor.clear_selection();
-            send_def(ctx, st, id, true);
-        }
-    });
-    if st.lcd.editor.def.widgets.is_empty() {
-        ui.label(
-            egui::RichText::new(t!("lcd.empty_screen_hint"))
-                .font(theme::caption())
-                .color(theme::TEXT_FAINT),
-        );
-    } else {
-        ui.label(
-            egui::RichText::new(t!("lcd.editor_shortcuts_hint"))
-                .font(theme::body(9.5))
-                .color(theme::TEXT_FAINT2),
-        );
     }
 }
 

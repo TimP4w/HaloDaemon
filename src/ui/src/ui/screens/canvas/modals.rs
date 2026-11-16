@@ -1,7 +1,7 @@
 // SPDX-License-Identifier: GPL-3.0-or-later
 //! Canvas modals: assign-channels, new-instance picker, FPS adjust.
 
-use std::collections::HashMap;
+use std::collections::{HashMap, HashSet};
 
 use crate::domain::topic_store::TopicStore;
 use egui::Vec2;
@@ -16,12 +16,80 @@ use crate::ui::components as widgets;
 use crate::ui::theme;
 
 use super::params::{assign_zone_cmd, upsert_instance_cmd};
-use super::rack::{instance_color_for, instance_name};
+use super::rack::instance_name;
 use super::{CanvasUi, DEBOUNCE};
 
-/// Modal assigning device channels to one effect instance (design: "Assign channels
-/// · <name>"). Lists every RGB device's channels; ● marks channels driven by a
-/// different instance — clicking one reassigns it here.
+type ZoneKey = (String, String);
+
+/// Every listable RGB zone as `(device id, device name, zones)`.
+fn rgb_zone_groups(
+    state: &TopicStore,
+) -> Vec<(&str, &str, &[halod_shared::types::LightingChannel])> {
+    state
+        .devices
+        .iter()
+        .filter(|d| !crate::domain::models::device::is_hidden(d))
+        .filter_map(|d| {
+            d.capabilities.iter().find_map(|c| match c {
+                DeviceCapability::Lighting(r) if !r.descriptor.channels.is_empty() => Some((
+                    d.id.as_str(),
+                    d.name.as_str(),
+                    r.descriptor.channels.as_slice(),
+                )),
+                _ => None,
+            })
+        })
+        .collect()
+}
+
+fn placed_of<'a>(state: &'a TopicStore, dev: &str, zone: &str) -> Option<&'a PlacedZone> {
+    state
+        .lighting
+        .canvas
+        .placed_zones
+        .iter()
+        .find(|p| p.device_id == dev && p.channel_id == zone)
+}
+
+/// The zones layer `inst_id` currently drives.
+fn owned_zones(state: &TopicStore, inst_id: &str, is_default: bool) -> HashSet<ZoneKey> {
+    state
+        .lighting
+        .canvas
+        .placed_zones
+        .iter()
+        .filter(|p| modal_zone_state(Some(p), inst_id, is_default).0)
+        .map(|p| (p.device_id.clone(), p.channel_id.clone()))
+        .collect()
+}
+
+/// Commands turning the layer's current zones into `draft`: one toggle per
+/// zone whose membership differs.
+fn draft_commands(
+    state: &TopicStore,
+    inst_id: &str,
+    is_default: bool,
+    draft: &HashSet<ZoneKey>,
+) -> Vec<DaemonCommand> {
+    let assign = (!is_default).then_some(inst_id);
+    let owned = owned_zones(state, inst_id, is_default);
+    let mut keys: Vec<&ZoneKey> = owned.symmetric_difference(draft).collect();
+    keys.sort();
+    keys.into_iter()
+        .map(|(dev, zone)| {
+            assign_zone_cmd(
+                dev,
+                zone,
+                assign,
+                owned.contains(&(dev.clone(), zone.clone())),
+                placed_of(state, dev, zone),
+            )
+        })
+        .collect()
+}
+
+/// Modal choosing which zones one layer drives. Selections are staged and
+/// applied on confirm; zones driven by another layer move to this one.
 pub(super) fn zones_assign_modal(
     ctx: &egui::Context,
     state: &TopicStore,
@@ -31,188 +99,122 @@ pub(super) fn zones_assign_modal(
     let Some(inst_id) = canvas_ui.zones_modal.clone() else {
         return;
     };
-    let Some(def) = state.lighting.canvas.effects.get(&inst_id) else {
+    if !state.lighting.canvas.effects.contains_key(&inst_id) {
         canvas_ui.zones_modal = None;
+        canvas_ui.zones_draft = None;
         return;
-    };
+    }
     let is_default = state.lighting.canvas.default_effect.as_deref() == Some(inst_id.as_str());
-    let color = instance_color_for(state, Some(inst_id.as_str()));
-    let eff_name = state
-        .lighting
-        .canvas
-        .available_effects
-        .iter()
-        .find(|e| e.id == def.effect_id)
-        .map(|e| e.name.as_str())
-        .unwrap_or(def.effect_id.as_str());
-    let assigned = state
-        .lighting
-        .canvas
-        .placed_zones
-        .iter()
-        .filter(|z| match z.effect.as_deref() {
-            Some(e) => e == inst_id,
-            None => is_default,
-        })
-        .count();
+    let effects = &state.lighting.canvas.effects;
+    let draft = canvas_ui
+        .zones_draft
+        .get_or_insert_with(|| owned_zones(state, &inst_id, is_default));
+    let n = draft.len();
     let title = t!(
         "canvas.assign_zones_title",
-        name = instance_name(&state.lighting.canvas.effects, &inst_id)
-    );
-    let zone_word = if assigned == 1 {
-        t!("canvas.unit_zone")
-    } else {
-        t!("canvas.unit_zones")
-    };
-    let subtitle = t!(
-        "canvas.assign_zones_sub",
-        eff = eff_name,
-        n = assigned,
-        channels = zone_word
+        name = instance_name(effects, &inst_id)
     );
 
-    let mut done = false;
-    let closed = widgets::dialog(
+    let (mut assign, mut cancel) = (false, false);
+    let closed = widgets::dialog_with_subtitle(
         ctx,
         "canvas_assign_zones",
         &title,
+        &t!("canvas.assign_zones_sub"),
         600.0,
         |ui| {
-            ui.label(
-                egui::RichText::new(subtitle.to_string())
-                    .font(theme::body_sm())
-                    .color(theme::TEXT_FAINT),
-            );
-            ui.add_space(theme::SPACE_3);
-            for dev in &state.devices {
-                if crate::domain::models::device::is_hidden(dev) {
-                    continue;
-                }
-                let Some(rgb) = dev.capabilities.iter().find_map(|c| match c {
-                    DeviceCapability::Lighting(r) => Some(r),
-                    _ => None,
-                }) else {
-                    continue;
-                };
-                if rgb.descriptor.channels.is_empty() {
-                    continue;
-                }
-                let assign = (!is_default).then_some(inst_id.as_str());
-                let placed_of = |channel_id: &str| {
-                    state
-                        .lighting
-                        .canvas
-                        .placed_zones
-                        .iter()
-                        .find(|p| p.device_id == dev.id && p.channel_id == channel_id)
-                };
-                let on_count = rgb
-                    .descriptor
-                    .channels
+            for (dev_id, dev_name, zones) in rgb_zone_groups(state) {
+                let on = zones
                     .iter()
-                    .filter(|z| modal_zone_state(placed_of(&z.id), &inst_id, is_default).0)
+                    .filter(|z| draft.contains(&(dev_id.to_string(), z.id.clone())))
                     .count();
-                let total = rgb.descriptor.channels.len();
-                let all_on = on_count == total;
-
                 ui.add_space(theme::SPACE_5);
                 egui::Sides::new().show(
                     ui,
                     |ui| {
-                        ui.vertical(|ui| {
-                            ui.label(
-                                egui::RichText::new(&dev.name)
-                                    .font(theme::heading())
-                                    .color(theme::TEXT),
-                            );
-                            let zw = if total == 1 {
-                                t!("canvas.unit_zone")
-                            } else {
-                                t!("canvas.unit_zones")
-                            };
-                            ui.label(
-                                egui::RichText::new(format!(
-                                    "{} · {total} {zw}",
-                                    crate::domain::models::device::type_label(dev),
-                                ))
-                                .font(theme::caption())
-                                .color(theme::TEXT_FAINT),
-                            );
-                        });
+                        ui.label(
+                            egui::RichText::new(dev_name)
+                                .font(theme::subhead())
+                                .color(theme::TEXT),
+                        );
                     },
                     |ui| {
-                        let sel_all_label = if all_on {
-                            t!("canvas.clear")
-                        } else {
-                            t!("canvas.select_all")
-                        };
-                        if widgets::button(
-                            ui,
-                            &sel_all_label,
-                            widgets::ButtonKind::Ghost,
-                            egui::vec2(78.0, 26.0),
-                        )
-                        .clicked()
-                        {
-                            for z in &rgb.descriptor.channels {
-                                let placed = placed_of(&z.id);
-                                let (on, _) = modal_zone_state(placed, &inst_id, is_default);
-                                // Select all assigns the missing channels; Clear removes them all.
-                                if on == all_on {
-                                    crate::runtime::ipc::send(
-                                        cmd,
-                                        assign_zone_cmd(&dev.id, &z.id, assign, on, placed),
-                                    );
-                                }
-                            }
-                        }
                         ui.label(
-                            egui::RichText::new(format!("{on_count}/{total}"))
-                                .font(theme::mono(10.5))
-                                .color(theme::TEXT_FAINT),
+                            egui::RichText::new(t!(
+                                "canvas.n_of_total",
+                                n = on,
+                                total = zones.len()
+                            ))
+                            .font(theme::body_md())
+                            .color(theme::TEXT_MUT),
                         );
                     },
                 );
                 ui.add_space(theme::SPACE_3);
-                ui.horizontal_wrapped(|ui| {
-                    ui.spacing_mut().item_spacing = egui::vec2(6.0, 6.0);
-                    for z in &rgb.descriptor.channels {
-                        let placed = placed_of(&z.id);
-                        let (on, marked) = modal_zone_state(placed, &inst_id, is_default);
-                        let label = if marked {
-                            format!("● {}", z.name)
+                for z in zones {
+                    let key = (dev_id.to_string(), z.id.clone());
+                    let checked = draft.contains(&key);
+                    let used_by = placed_of(state, dev_id, &z.id)
+                        .filter(|p| !checked && modal_zone_state(Some(p), &inst_id, is_default).1)
+                        .and_then(|p| {
+                            p.effect
+                                .as_deref()
+                                .or(state.lighting.canvas.default_effect.as_deref())
+                        })
+                        .map(|other| {
+                            t!("canvas.used_by", name = instance_name(effects, other)).to_string()
+                        });
+                    let leds = if z.leds.len() == 1 {
+                        t!("canvas.led_one").to_string()
+                    } else {
+                        t!("canvas.led_count", n = z.leds.len()).to_string()
+                    };
+                    let meta = used_by.as_deref().map(|m| (m, theme::WARN_TEXT));
+                    if widgets::check_row(ui, &z.name, Some(&leds), meta, checked).clicked() {
+                        if checked {
+                            draft.remove(&key);
                         } else {
-                            z.name.clone()
-                        };
-                        if widgets::pill_styled(ui, &label, on, color, theme::INNER_BG) {
-                            crate::runtime::ipc::send(
-                                cmd,
-                                assign_zone_cmd(&dev.id, &z.id, assign, on, placed),
-                            );
+                            draft.insert(key);
                         }
                     }
-                });
+                    ui.add_space(theme::SPACE_3);
+                }
             }
         },
         |ui| {
-            done = widgets::button(
+            assign = widgets::button(
                 ui,
-                &t!("canvas.done"),
+                &t!("canvas.assign_n", n = n),
                 widgets::ButtonKind::Primary,
-                Vec2::new(90.0, 32.0),
+                Vec2::new(0.0, 36.0),
+            )
+            .clicked();
+            cancel = widgets::button(
+                ui,
+                &t!("canvas.cancel"),
+                widgets::ButtonKind::Secondary,
+                Vec2::new(0.0, 36.0),
             )
             .clicked();
             ui.with_layout(egui::Layout::left_to_right(egui::Align::Center), |ui| {
                 ui.label(
-                    egui::RichText::new(t!("canvas.reassign_hint").to_string())
-                        .font(theme::caption())
-                        .color(theme::TEXT_FAINT),
+                    egui::RichText::new(t!("canvas.n_selected", n = n))
+                        .font(theme::body_md())
+                        .color(theme::TEXT_DIM),
                 );
             });
         },
     );
-    if done || closed {
+    if assign {
+        if let Some(draft) = &canvas_ui.zones_draft {
+            for c in draft_commands(state, &inst_id, is_default, draft) {
+                crate::runtime::ipc::send(cmd, c);
+            }
+        }
+    }
+    if assign || cancel || closed {
         canvas_ui.zones_modal = None;
+        canvas_ui.zones_draft = None;
     }
 }
 
@@ -271,7 +273,7 @@ pub(super) fn new_instance_modal(
                 });
             }
 
-            widgets::caps_label(ui, &t!("canvas.effect_caps"));
+            widgets::section_label(ui, &t!("canvas.effect"));
             ui.add_space(theme::SPACE_4);
             let gap = 10.0;
             let cols = 4usize;
@@ -292,7 +294,6 @@ pub(super) fn new_instance_modal(
                             cell_w,
                             66.0,
                             34.0,
-                            false,
                         ) {
                             let id = new_instance_id(effects);
                             crate::runtime::ipc::send(
@@ -314,7 +315,7 @@ pub(super) fn new_instance_modal(
             if widgets::button(
                 ui,
                 &t!("canvas.cancel"),
-                widgets::ButtonKind::Ghost,
+                widgets::ButtonKind::Secondary,
                 egui::vec2(90.0, 32.0),
             )
             .clicked()
@@ -357,10 +358,12 @@ pub(crate) fn fps_modal(
             if widgets::slider_row(ui, &t!("canvas.frame_rate"), &mut fps, 1.0..=60.0, &readout) {
                 canvas_ui.canvas_fps = fps;
                 canvas_ui.fps_edit_at = time;
-                canvas_ui.pending.fps = Some((
+                canvas_ui.pending.queue(
+                    super::FPS_KEY,
                     DaemonCommand::set_engine_fps(EngineKind::Canvas, fps.round() as u64),
-                    time + DEBOUNCE,
-                ));
+                    time,
+                    DEBOUNCE,
+                );
             }
         },
         |ui| {
@@ -426,6 +429,28 @@ mod tests {
             },
         );
         assert_eq!(new_instance_id(&effects), "effect-3");
+    }
+
+    #[test]
+    fn draft_commands_toggle_only_changed_zones() {
+        let mut state = TopicStore::default();
+        state.lighting.canvas.placed_zones = vec![
+            zone_with("a", Some("effect-1")),
+            zone_with("b", Some("effect-2")),
+            zone_with("c", Some("effect-1")),
+        ];
+        let key = |z: &str| ("d".to_string(), z.to_string());
+        let unchanged: HashSet<_> = [key("a"), key("c")].into();
+        assert!(draft_commands(&state, "effect-1", false, &unchanged).is_empty());
+
+        let draft: HashSet<_> = [key("a"), key("b")].into();
+        let cmds = draft_commands(&state, "effect-1", false, &draft);
+        assert_eq!(cmds.len(), 2);
+        assert!(matches!(&cmds[0],
+            DaemonCommand::CanvasMoveZone { channel_id, effect: Some(e), .. }
+                if channel_id == "b" && e == "effect-1"));
+        assert!(matches!(&cmds[1],
+            DaemonCommand::CanvasRemoveZone { channel_id, .. } if channel_id == "c"));
     }
 
     #[test]

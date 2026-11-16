@@ -21,11 +21,9 @@ pub use defs::tour_for;
 pub enum AnchorId {
     HomeSearch,
     HomeDeviceCard,
-    HomeShowHidden,
     HomeSidebarHome,
     HomeSidebarLighting,
     HomeSidebarCooling,
-    HomeSidebarIntegrations,
     HomeSidebarPlugins,
     HomeSidebarSettings,
     LightingEffects,
@@ -90,9 +88,6 @@ pub enum AnchorId {
     PluginsAddRepo,
     PluginsToggle,
     PluginsPermissions,
-    /// Integrations page
-    IntegrationsOverview,
-    IntegrationsToggle,
 }
 
 /// Which tour applies to the page/tab the user is currently viewing.
@@ -119,7 +114,6 @@ pub enum TourKey {
     LcdEditor,
     EffectDesigner,
     PagePlugins,
-    PageIntegrations,
 }
 
 impl TourKey {
@@ -147,7 +141,6 @@ impl TourKey {
             TourKey::LcdEditor => "lcd_editor",
             TourKey::EffectDesigner => "effect_designer",
             TourKey::PagePlugins => "page:plugins",
-            TourKey::PageIntegrations => "page:integrations",
         }
     }
 }
@@ -367,7 +360,7 @@ fn defer_or_advance(st: &mut TourState, key: TourKey, total_steps: usize) {
 }
 
 fn anchor_key(id: AnchorId) -> egui::Id {
-    egui::Id::new(("tour_anchor", id))
+    egui::Id::unique(("tour_anchor", id))
 }
 
 /// Register `rect` as this frame's location of `id`. Call once per frame from
@@ -391,7 +384,7 @@ pub(crate) fn peek_anchor(ctx: &egui::Context, id: AnchorId) -> Option<Rect> {
 }
 
 fn reset_request_key() -> egui::Id {
-    egui::Id::new("tour_reset_request")
+    egui::Id::unique("tour_reset_request")
 }
 
 /// Requested by the Settings "Replay tutorials" button; consumed by
@@ -589,27 +582,6 @@ mod tests {
             .expect("acknowledging the returned deferred step completes the tour");
         assert_eq!(completed.id, "page:cooling");
         assert!(deferred_steps(&st, TourKey::PageCooling).is_empty());
-    }
-
-    #[test]
-    fn missing_integration_toggle_returns_when_an_integration_appears() {
-        let mut st = TourState::default();
-        maybe_start(&mut st, &seen(&[]), TourKey::PageIntegrations);
-        assert!(advance(&mut st, true, 0.0, Some(Event::Next)).is_none());
-        assert_eq!(st.active.as_ref().unwrap().step, 1);
-
-        advance(&mut st, false, 1.0, None);
-        advance(&mut st, false, 1.0 + MISSING_GRACE_SECS, None);
-        assert!(st.active.is_none());
-        assert_eq!(
-            deferred_steps(&st, TourKey::PageIntegrations),
-            vec![(1, AnchorId::IntegrationsToggle)]
-        );
-        assert!(!is_seen(&st, &seen(&[]), TourKey::PageIntegrations));
-
-        assert!(resume_deferred(&mut st, TourKey::PageIntegrations, 1));
-        let completed = advance(&mut st, true, 2.0, Some(Event::Next)).unwrap();
-        assert_eq!(completed.id, "page:integrations");
     }
 
     #[test]

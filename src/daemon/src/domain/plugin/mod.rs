@@ -221,12 +221,13 @@ const TRANSPORT_OPEN_ATTEMPTS: u32 = 3;
 /// Minimum spacing between attempts. Polling scanners re-offer an unregistered
 /// handle every few seconds, which would burn the whole attempt budget before a
 /// transient owner (e.g. a previous halod instance shutting down) lets go.
-const TRANSPORT_OPEN_BACKOFF: std::time::Duration = std::time::Duration::from_secs(10);
+pub(crate) const TRANSPORT_OPEN_BACKOFF: std::time::Duration = std::time::Duration::from_secs(10);
 
 /// Bound automatic recovery for a plugin whose failure survives the reconcile.
 /// Each retry re-applies device state, so the failure it provokes would
 /// otherwise queue the next retry forever.
 const RUNTIME_RECOVERY_ATTEMPTS: u32 = 3;
+const RUNTIME_ERROR_GRACE: std::time::Duration = std::time::Duration::from_secs(5);
 
 /// The device-plugin registry: every piece of runtime-mutable plugin state the
 /// daemon owns. Held as [`crate::application::state::AppState::registry`] (one per process in
@@ -713,10 +714,45 @@ impl Registry {
         self.runtime_recovery.clear(plugin_id);
     }
 
+    /// Plugging a device in is a retry boundary for the plugins that could
+    /// drive it, and only those.
+    pub(crate) fn reset_transport_open_failures_for_usb(&self, vid: u16, pid: u16) {
+        let plugins: Vec<String> = self
+            .snapshot()
+            .manifests
+            .iter()
+            .filter(|m| {
+                m.devices
+                    .iter()
+                    .any(|spec| spec_targets_usb_id(spec, vid, pid))
+            })
+            .map(|m| m.plugin_id.clone())
+            .collect();
+        for plugin_id in plugins {
+            self.reset_transport_open_failures_for(&plugin_id);
+        }
+    }
+
     /// A user-requested full discovery is another explicit retry boundary.
     pub(crate) fn reset_transport_open_failures(&self) {
         write_recover(&self.transport_open_failures).clear();
         self.runtime_recovery.clear_all();
+    }
+
+    /// Transport kinds of plugins with an open or init failure that still has
+    /// attempts left, so a retry loop can rescan only the buses that need it.
+    pub(crate) fn retryable_open_failure_kinds(&self) -> HashSet<&'static str> {
+        let plugins: HashSet<String> = read_recover(&self.transport_open_failures)
+            .iter()
+            .filter(|(_, streak)| streak.failures() < TRANSPORT_OPEN_ATTEMPTS)
+            .map(|((plugin_id, _), _)| plugin_id.clone())
+            .collect();
+        self.snapshot()
+            .manifests
+            .iter()
+            .filter(|manifest| plugins.contains(&manifest.plugin_id))
+            .flat_map(|manifest| manifest.devices.iter().map(|spec| spec.transport.kind()))
+            .collect()
     }
 
     fn transport_open_blocked(&self, key: &(String, String)) -> bool {
@@ -965,7 +1001,36 @@ impl Registry {
         if !notify {
             return; // already reported this episode
         }
+        let app = Arc::clone(app);
+        let plugin_id = plugin_id.to_owned();
+        let device_id = device_id.to_owned();
+        tokio::spawn(async move {
+            tokio::time::sleep(RUNTIME_ERROR_GRACE).await;
+            app.registry
+                .surface_runtime_error(&app, &plugin_id, &device_id, detail)
+                .await;
+        });
+    }
+
+    /// Runs after [`RUNTIME_ERROR_GRACE`], which outlasts the hotplug poll, so an
+    /// unplug is seen as a removal instead of a plugin fault.
+    async fn surface_runtime_error(
+        &self,
+        app: &Arc<crate::application::state::AppState>,
+        plugin_id: &str,
+        device_id: &str,
+        detail: String,
+    ) {
+        let scope = Self::device_health_scope(plugin_id, device_id);
+        if !read_recover(&self.health).contains_key(&scope) {
+            return;
+        }
         if self.is_disabled(plugin_id) || self.is_integration_disabled(plugin_id) {
+            self.clear_health(&scope);
+            return;
+        }
+        if app.find_device_by_id(device_id).await.is_none() {
+            log::debug!("[{plugin_id}] runtime error on '{device_id}' after it left: {detail}");
             self.clear_health(&scope);
             return;
         }
@@ -1034,13 +1099,21 @@ impl Registry {
     /// Persist a physical plugin device's initialize failure on the owning
     /// plugin card. The generic registration path sends the DeviceInitFailed
     /// toast; this record keeps the failure visible after that toast expires.
-    pub(crate) fn report_init_error(&self, plugin_id: &str, device_id: &str, detail: String) {
+    pub(crate) fn report_init_error(
+        &self,
+        plugin_id: &str,
+        device_id: &str,
+        detail: String,
+    ) -> u32 {
         let scope = Self::device_health_scope(plugin_id, device_id);
         self.set_health(&scope, PluginIssueKind::InitFailed, detail);
+        self.note_transport_open_failure((plugin_id.to_owned(), device_id.to_owned()))
     }
 
     /// A later successful initialization ends the per-device failure episode.
     pub(crate) fn clear_init_error(&self, plugin_id: &str, device_id: &str) {
+        write_recover(&self.transport_open_failures)
+            .remove(&(plugin_id.to_owned(), device_id.to_owned()));
         let scope = Self::device_health_scope(plugin_id, device_id);
         let should_clear = read_recover(&self.health)
             .get(&scope)
@@ -2243,6 +2316,24 @@ fn device_id(
     format!("{}-{}", manifest.id_prefix(), suffix)
 }
 
+fn spec_targets_usb_id(spec: &manifest::DeviceSpec, vid: u16, pid: u16) -> bool {
+    match (spec.usb(), spec.hid()) {
+        (Some(usb), _) => usb.vid == vid && ids_list_pid(&usb.pids, Some(usb.pid), pid),
+        (_, Some(hid)) => hid.vid == Some(vid) && ids_list_pid(&hid.pids, hid.pid, pid),
+        _ => false,
+    }
+}
+
+/// Whether a manifest pid filter (`pids` list or single `pid`, neither = any)
+/// admits `pid`.
+fn ids_list_pid(pids: &[u16], single: Option<u16>, pid: u16) -> bool {
+    match (pids.is_empty(), single) {
+        (false, _) => pids.contains(&pid),
+        (true, Some(0) | None) => true,
+        (true, Some(single)) => single == pid,
+    }
+}
+
 impl Registry {
     /// Build a device from a matched manifest, the spec that matched, and the
     /// handle. Device-only plugins need no runtime/transport; capability plugins
@@ -2255,8 +2346,12 @@ impl Registry {
         spec: &manifest::DeviceSpec,
         handle: &DiscoveryHandle<'_>,
         ready: ReadyPlugin,
+        known: &HashSet<String>,
     ) -> Option<Arc<dyn Device>> {
         let id = device_id(manifest, spec, handle);
+        if known.contains(&id) {
+            return None;
+        }
         let failure_key = (manifest.plugin_id.clone(), id.clone());
         if self.transport_open_blocked(&failure_key) {
             return None;
@@ -2312,7 +2407,6 @@ impl Registry {
             }
             None => return None,
         };
-        write_recover(&self.transport_open_failures).remove(&failure_key);
 
         let dev_match = worker::DevMatch {
             transport: spec.transport.kind().to_owned(),
@@ -2405,6 +2499,17 @@ impl Registry {
         app: &Arc<crate::application::state::AppState>,
         handle: &DiscoveryHandle<'_>,
     ) -> Option<Arc<dyn Device>> {
+        self.make_device_unless_known(app, handle, &HashSet::new())
+    }
+
+    /// Like [`Self::make_device`], but skips a match whose device id is in
+    /// `known` before its transport is opened.
+    pub fn make_device_unless_known(
+        &self,
+        app: &Arc<crate::application::state::AppState>,
+        handle: &DiscoveryHandle<'_>,
+        known: &HashSet<String>,
+    ) -> Option<Arc<dyn Device>> {
         // The snapshot is a frozen `Arc`, not a lock guard, so `build_device` can
         // freely take its own snapshots with no risk of a recursive-read deadlock.
         let state = self.snapshot();
@@ -2417,7 +2522,7 @@ impl Registry {
             // falls through to the native path.
             match self.activation_status(app.secret_store.as_ref(), manifest) {
                 ActivationState::Ready(ready) => {
-                    return self.build_device(app, manifest, spec, handle, ready);
+                    return self.build_device(app, manifest, spec, handle, ready, known);
                 }
                 ActivationState::MissingRequirements(missing) => {
                     log::debug!(

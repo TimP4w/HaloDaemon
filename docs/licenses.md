@@ -111,7 +111,7 @@ file is, so there is deliberately **no** `LICENSES/MIT.txt`.
 All embedded fonts live in one place, [`src/assets/fonts/`](../src/assets/fonts/),
 shared by the daemon (LCD text rendering) and the GUI (egui):
 
-- NotoSans, JetBrains Mono, Inter Tight: all **OFL-1.1**.
+- NotoSans, JetBrains Mono, Inter Tight, Geist: all **OFL-1.1**.
 - Attributed via `override` annotations in [`REUSE.toml`](../REUSE.toml).
 - Loaded with `include_bytes!` from [`daemon/src/domain/lcd/engine/templates.rs`](../src/daemon/src/domain/lcd/engine/templates.rs)
   and [`ui/src/ui/theme/mod.rs`](../src/ui/src/ui/theme/mod.rs).
@@ -125,9 +125,9 @@ Most glyphs are original HaloDaemon assets and inherit the project license. The 
 that came from Pictogrammers Material Design Icons or Google Material Icons carry
 their own `Apache-2.0` SPDX header and copyright attribution. The About dialog names
 both icon projects and includes the full Apache-2.0 text from `LICENSES/`.
-The verified-publisher badge comes from
-[Boxicons](https://github.com/box-icons/boxicons-core), carries its own `MIT`
-SPDX attribution, and is accompanied by the MIT text in `LICENSES/` and the
+The computer device glyph comes from
+[Bootstrap Icons](https://github.com/twbs/icons), is attributed as `MIT` in
+`REUSE.toml`, and is accompanied by the MIT text in `LICENSES/` and the
 About dialog.
 The repository-integrity shield comes from Microsoft's
 [Visual Studio Code Codicons](https://github.com/microsoft/vscode-codicons),

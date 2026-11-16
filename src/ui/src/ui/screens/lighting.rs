@@ -13,7 +13,6 @@ use crate::ui::components as widgets;
 use std::collections::HashMap;
 
 use crate::domain::topic_store::TopicStore;
-use egui::{Align2, Color32, Pos2, Rect, Sense, Stroke, Vec2};
 use halod_shared::commands::DaemonCommand;
 use halod_shared::effect_designer::DESIGNER_EFFECT_ID;
 use halod_shared::types::{
@@ -33,16 +32,6 @@ use crate::ui::theme;
 const CUSTOM_PREFIX: &str = "custom:";
 
 pub(crate) const TAB_CANVAS: usize = 0;
-
-// ── Constants ─────────────────────────────────────────────────────────────────
-
-/// Collapsed device target card height.
-const CARD_BASE_H: f32 = 58.0;
-/// Vertical padding above the first / below the last zone-pill row.
-const ZONE_PAD_TOP: f32 = 10.0;
-const ZONE_PAD_BOTTOM: f32 = 14.0;
-/// Gap between wrapped zone pills (both axes).
-const ZONE_PILL_GAP: f32 = 6.0;
 
 // ── State ─────────────────────────────────────────────────────────────────────
 
@@ -110,58 +99,43 @@ pub fn show(
     time: f64,
     page: &mut Page,
 ) {
-    // Shared header: title + canvas transport chrome + tab switcher. Kept above
-    // both sub-views so the play/pause/stop and FPS controls stay reachable.
-    egui::Panel::top("rgb_lighting_header")
-        .show_separator_line(false)
-        .frame(egui::Frame::NONE.inner_margin(egui::Margin {
-            left: 36,
-            right: 36,
-            top: 26,
-            bottom: 0,
-        }))
+    if st.tab != TAB_CANVAS {
+        seed_if_profile_changed(st, state);
+        if let Some((name, params)) = designer_ui.result.take() {
+            st.effect = format!("{CUSTOM_PREFIX}{name}");
+            apply_direct_params(state, cmd, st, params);
+        }
+    }
+
+    egui::CentralPanel::default()
+        .frame(egui::Frame::NONE)
         .show(ui, |ui| {
-            let subtitle = if st.tab == TAB_CANVAS {
-                t!("canvas.subtitle")
-            } else {
-                t!("lighting.subtitle")
-            };
-            ui.horizontal(|ui| {
-                ui.vertical(|ui| {
-                    ui.label(
-                        egui::RichText::new(t!("lighting.title"))
-                            .font(theme::bold(22.0))
-                            .color(theme::TEXT),
-                    );
-                    ui.add_space(theme::SPACE_1);
-                    ui.label(
-                        egui::RichText::new(subtitle)
-                            .font(theme::body_md())
-                            .color(theme::TEXT_MUT),
+            if st.tab == TAB_CANVAS {
+                widgets::page_frame(ui, |ui| {
+                    header(ui, state, cmd, st, canvas_ui);
+                    canvas::body(
+                        ui,
+                        state,
+                        cmd,
+                        canvas_ui,
+                        canvas_frame,
+                        time,
+                        designer_ui,
+                        page,
                     );
                 });
-                canvas::chrome(ui, canvas_ui, cmd, state.lighting.config.canvas_enabled);
-            });
-            ui.add_space(theme::SPACE_7);
-            let labels = [t!("lighting.tab_canvas"), t!("lighting.tab_direct")];
-            let refs: Vec<&str> = labels.iter().map(|c| c.as_ref()).collect();
-            widgets::tab_bar(ui, &mut st.tab, &refs);
+            } else {
+                egui::ScrollArea::vertical()
+                    .auto_shrink([false, false])
+                    .show(ui, |ui| {
+                        widgets::page_frame(ui, |ui| {
+                            header(ui, state, cmd, st, canvas_ui);
+                            page_body(ui, state, cmd, st, designer_ui, page);
+                        });
+                    });
+                delete_confirm_modal(ui, st, cmd);
+            }
         });
-
-    if st.tab == TAB_CANVAS {
-        canvas::body(
-            ui,
-            state,
-            cmd,
-            canvas_ui,
-            canvas_frame,
-            time,
-            designer_ui,
-            page,
-        );
-    } else {
-        direct_effects(ui, state, cmd, st, designer_ui, page);
-    }
 
     if canvas_ui.fps_modal_open {
         canvas::fps_modal(ui.ctx(), state, canvas_ui, time);
@@ -177,37 +151,41 @@ pub fn show(
     }
 }
 
-/// The Direct Effects tab: seed targets, apply a just-saved designer effect,
-/// then render the scrollable body.
-fn direct_effects(
+fn header(
     ui: &mut egui::Ui,
     state: &TopicStore,
     cmd: &CommandTx,
     st: &mut LightingUi,
-    designer_ui: &mut DesignerUi,
-    page: &mut Page,
+    canvas_ui: &mut CanvasUi,
 ) {
-    seed_if_profile_changed(st, state);
-
-    // Drain a just-saved designer effect and apply it immediately.
-    if let Some((name, params)) = designer_ui.result.take() {
-        st.effect = format!("{CUSTOM_PREFIX}{name}");
-        apply_direct_params(state, cmd, st, params);
-    }
-
-    egui::CentralPanel::default()
-        .frame(egui::Frame::NONE)
-        .show(ui, |ui| {
-            egui::ScrollArea::vertical()
-                .auto_shrink([false, false])
-                .show(ui, |ui| {
-                    widgets::page_frame(ui, |ui| {
-                        page_body(ui, state, cmd, st, designer_ui, page);
-                    });
-                });
-
-            delete_confirm_modal(ui, st, cmd);
-        });
+    widgets::page_title_with(
+        ui,
+        &t!("lighting.title"),
+        |ui| {
+            ui.add_space(theme::SPACE_4);
+            let labels = [t!("lighting.tab_canvas"), t!("lighting.tab_direct")];
+            let refs: Vec<&str> = labels.iter().map(|c| c.as_ref()).collect();
+            widgets::segmented_styled(
+                ui,
+                &refs,
+                &mut st.tab,
+                false,
+                widgets::SegmentedStyle {
+                    raised: true,
+                    md: true,
+                },
+            );
+            if st.tab != TAB_CANVAS {
+                ui.add_space(theme::SPACE_4);
+                ui.label(
+                    egui::RichText::new(t!("lighting.subtitle"))
+                        .font(theme::body_lg())
+                        .color(theme::TEXT_DIM),
+                );
+            }
+        },
+        |ui| canvas::chrome(ui, canvas_ui, cmd, state.lighting.config.canvas_enabled),
+    );
 }
 
 /// Seed the selection from the active profile's saved targets; reseed on
@@ -231,45 +209,40 @@ fn page_body(
     designer_ui: &mut DesignerUi,
     page: &mut Page,
 ) {
-    ui.add_space(theme::SPACE_3);
-
     let effects = available_effects(
         &state.lighting.canvas.available_direct_effects,
         &state.lighting.canvas.custom_direct_effects,
     );
 
-    let mut apply = false;
-
-    let gap = 18.0;
-    let left_w = (ui.available_width() * 0.32).min(300.0);
     let selected_anim = state
         .lighting
         .canvas
         .available_direct_effects
         .iter()
         .find(|a| a.id == st.effect);
+    let effect_name = effects
+        .iter()
+        .find(|(id, _)| *id == st.effect)
+        .map(|(_, name)| name.clone())
+        .unwrap_or_default();
 
     let custom = &state.lighting.canvas.custom_direct_effects;
-    if show_color(&st.effect, selected_anim) {
-        apply |= widgets::split_columns(ui, left_w, gap, |left, right| {
-            let mut changed = master_color_card(left, st);
-            changed |= global_effect_card(right, st, &effects, cmd, designer_ui, page);
-            effect_actions_row(right, st, designer_ui, page, custom);
-            changed |= effect_extras(right, state, st, selected_anim);
-            changed
-        });
-    } else {
-        apply |= global_effect_card(ui, st, &effects, cmd, designer_ui, page);
-        effect_actions_row(ui, st, designer_ui, page, custom);
-        apply |= effect_extras(ui, state, st, selected_anim);
-    }
-
-    ui.add_space(theme::SPACE_8);
-    apply |= targets_card(ui, state, cmd, st);
-    ui.add_space(theme::SPACE_10);
+    let main_w = (ui.available_width() - 376.0 - 16.0).max(360.0);
+    let (apply, apply_now) = widgets::split_columns(ui, main_w, 16.0, |main, aside| {
+        let mut changed = global_effect_card(main, st, &effects, cmd, designer_ui, page);
+        effect_actions_row(main, st, designer_ui, page, custom);
+        if show_color(&st.effect, selected_anim) {
+            main.add_space(theme::SPACE_8);
+            changed |= master_color_card(main, st);
+        }
+        changed |= effect_settings_card(main, state, st, selected_anim, &effect_name);
+        let (targets_changed, apply_now) = targets_card(aside, state, cmd, st);
+        (changed | targets_changed, apply_now)
+    });
 
     let now = ui.input(|i| i.time);
-    if debounce_apply(&mut st.apply_deadline, apply, now) {
+    if apply_now || debounce_apply(&mut st.apply_deadline, apply, now) {
+        st.apply_deadline = None;
         send_to_selected(state, cmd, st);
     } else if st.apply_deadline.is_some() {
         ui.ctx()
@@ -289,27 +262,6 @@ fn debounce_apply(deadline: &mut Option<f64>, apply: bool, now: f64) -> bool {
             true
         }
         _ => false,
-    }
-}
-
-/// The card shown below the effect grid: master brightness/saturation for
-/// Static, or the selected effect's own params. Returns `true` on change.
-fn effect_extras(
-    ui: &mut egui::Ui,
-    state: &TopicStore,
-    st: &mut LightingUi,
-    anim: Option<&Animation>,
-) -> bool {
-    match anim {
-        _ if st.effect.is_empty() => {
-            ui.add_space(theme::SPACE_5);
-            sliders_card(ui, st)
-        }
-        Some(anim) => {
-            ui.add_space(theme::SPACE_5);
-            effect_params_card(ui, state, st, anim)
-        }
-        None => false,
     }
 }
 
@@ -339,7 +291,7 @@ fn available_effects(direct: &[Animation], custom: &[EffectDef]) -> Vec<(String,
     );
     v.extend(custom.iter().filter_map(|d| {
         let name = d.name.as_ref()?;
-        Some((format!("{CUSTOM_PREFIX}{name}"), format!("\u{2605} {name}")))
+        Some((format!("{CUSTOM_PREFIX}{name}"), name.clone()))
     }));
     v
 }
@@ -370,7 +322,7 @@ fn effect_actions_row(
         if widgets::button(
             ui,
             &t!("lighting.edit"),
-            widgets::ButtonKind::Ghost,
+            widgets::ButtonKind::Secondary,
             egui::vec2(64.0, 28.0),
         )
         .clicked()
@@ -381,7 +333,7 @@ fn effect_actions_row(
         if widgets::button(
             ui,
             &t!("lighting.export"),
-            widgets::ButtonKind::Ghost,
+            widgets::ButtonKind::Secondary,
             egui::vec2(72.0, 28.0),
         )
         .clicked()
@@ -391,7 +343,7 @@ fn effect_actions_row(
         if widgets::button(
             ui,
             &t!("lighting.delete"),
-            widgets::ButtonKind::Ghost,
+            widgets::ButtonKind::Secondary,
             egui::vec2(72.0, 28.0),
         )
         .clicked()
@@ -436,38 +388,37 @@ fn global_effect_card(
         ui,
         &t!("lighting.global_effect"),
         |ui| {
-            ui.horizontal(|ui| {
-                ui.spacing_mut().item_spacing.x = 8.0;
-                let new_btn = widgets::button(
-                    ui,
-                    &t!("lighting.new_effect"),
-                    widgets::ButtonKind::Ghost,
-                    egui::vec2(88.0, 26.0),
-                );
-                crate::domain::tour::anchor(
-                    ui.ctx(),
-                    crate::domain::tour::AnchorId::LightingNewEffect,
-                    new_btn.rect,
-                );
-                if new_btn.clicked() {
-                    *designer_ui = DesignerUi::new_effect();
-                    *page = Page::EffectDesigner;
-                }
-                let import_btn = widgets::button(
-                    ui,
-                    &t!("lighting.import"),
-                    widgets::ButtonKind::Ghost,
-                    egui::vec2(64.0, 26.0),
-                );
-                crate::domain::tour::anchor(
-                    ui.ctx(),
-                    crate::domain::tour::AnchorId::LightingImport,
-                    import_btn.rect,
-                );
-                if import_btn.clicked() {
-                    effect_designer::spawn_import(ui.ctx(), cmd.clone());
-                }
-            });
+            ui.spacing_mut().item_spacing.x = theme::SPACE_3;
+            let size = egui::vec2(0.0, 30.0);
+            let new_btn = widgets::button(
+                ui,
+                &t!("lighting.new_effect"),
+                widgets::ButtonKind::Secondary,
+                size,
+            );
+            crate::domain::tour::anchor(
+                ui.ctx(),
+                crate::domain::tour::AnchorId::LightingNewEffect,
+                new_btn.rect,
+            );
+            if new_btn.clicked() {
+                *designer_ui = DesignerUi::new_effect();
+                *page = Page::EffectDesigner;
+            }
+            let import_btn = widgets::button(
+                ui,
+                &t!("lighting.import"),
+                widgets::ButtonKind::Secondary,
+                size,
+            );
+            crate::domain::tour::anchor(
+                ui.ctx(),
+                crate::domain::tour::AnchorId::LightingImport,
+                import_btn.rect,
+            );
+            if import_btn.clicked() {
+                effect_designer::spawn_import(ui.ctx(), cmd.clone());
+            }
         },
         |ui| {
             let gap = 10.0;
@@ -488,8 +439,17 @@ fn global_effect_card(
                         } else {
                             widgets::CellPreview::Spectrum
                         };
-                        if widgets::effect_cell(ui, name, active, preview, cell_w, 66.0, 34.0, true)
-                        {
+                        let note = effect_source(id);
+                        if widgets::effect_cell_noted(
+                            ui,
+                            name,
+                            Some(&note),
+                            active,
+                            preview,
+                            cell_w,
+                            76.0,
+                            28.0,
+                        ) {
                             st.effect = id.clone();
                             changed = true;
                         }
@@ -504,6 +464,17 @@ fn global_effect_card(
         },
     );
     changed
+}
+
+/// Where a grid entry comes from: built in, a direct effect, or the user's own.
+fn effect_source(id: &str) -> std::borrow::Cow<'static, str> {
+    if id.is_empty() {
+        t!("lighting.source_builtin")
+    } else if id.starts_with(CUSTOM_PREFIX) {
+        t!("lighting.source_mine")
+    } else {
+        t!("lighting.source_effects")
+    }
 }
 
 // ── Effect params card ────────────────────────────────────────────────────────
@@ -538,304 +509,329 @@ fn wants_own_row(d: &EffectParamDescriptor) -> bool {
     }
 }
 
-/// Renders an effect's non-master-color params from its descriptors.
-fn effect_params_card(
+/// The settings card below the effect grid: master brightness/saturation for
+/// Static, else the selected effect's params, in two columns. Returns `true`
+/// on change.
+fn effect_settings_card(
     ui: &mut egui::Ui,
     state: &TopicStore,
     st: &mut LightingUi,
-    anim: &Animation,
+    anim: Option<&Animation>,
+    effect_name: &str,
 ) -> bool {
-    let params: Vec<&EffectParamDescriptor> =
-        anim.params.iter().filter(|d| wants_own_row(d)).collect();
-    if params.is_empty() {
+    let params: Vec<&EffectParamDescriptor> = anim
+        .map(|a| a.params.iter().filter(|d| wants_own_row(d)).collect())
+        .unwrap_or_default();
+    if !st.effect.is_empty() && params.is_empty() {
         return false;
     }
-
     let sensors = sensor_options(state);
     let mut changed = false;
+    ui.add_space(theme::SPACE_8);
     widgets::card_titled(
         ui,
-        &t!("lighting.effect_settings"),
+        &t!("lighting.effect_settings_for", name = effect_name),
         |_ui| {},
         |ui| {
-            for (i, d) in params.iter().enumerate() {
-                if i > 0 {
-                    ui.add_space(theme::SPACE_7);
+            ui.spacing_mut().item_spacing.x = 28.0;
+            ui.columns(2, |cols| {
+                let Some(anim) = anim.filter(|_| !st.effect.is_empty()) else {
+                    changed |= percent_slider(
+                        &mut cols[0],
+                        &t!("lighting.master_brightness"),
+                        &mut st.brightness,
+                    );
+                    changed |= percent_slider(
+                        &mut cols[1],
+                        &t!("lighting.saturation"),
+                        &mut st.saturation,
+                    );
+                    return;
+                };
+                for (i, d) in params.iter().enumerate() {
+                    let col = &mut cols[i % 2];
+                    if i >= 2 {
+                        col.add_space(theme::SPACE_7);
+                    }
+                    changed |= param_control(col, st, &anim.id, d, &sensors);
                 }
-                let key = format!("{}:{}", anim.id, d.id);
-                match &d.kind {
-                    ParamKind::Range { min, max, step } => {
-                        let (min, max, step) = (*min, *max, *step);
-                        let default = match d.default {
-                            EffectParamValue::Float(f) => f as f32,
-                            _ => min as f32,
-                        };
-                        let mut v = *st.param_values.get(&key).unwrap_or(&default);
-                        let readout = widgets::range_readout(v, step);
-                        let fired = widgets::slider_row_debounced(
-                            ui,
-                            &d.label,
-                            &mut v,
-                            min as f32..=max as f32,
-                            &readout,
-                        );
-                        if fired {
-                            v = widgets::snap_to_step(v, min as f32, max as f32, step as f32);
-                            changed = true;
-                        }
-                        st.param_values.insert(key, v);
-                    }
-                    ParamKind::Number { min, max } => {
-                        let default = match d.default {
-                            EffectParamValue::Float(f) => f as f32,
-                            _ => 0.0,
-                        };
-                        let mut v = *st.param_values.get(&key).unwrap_or(&default);
-                        let (_, committed) =
-                            widgets::num_input_row(ui, &d.label, &mut v, *min as f32..=*max as f32);
-                        changed |= committed;
-                        st.param_values.insert(key, v);
-                    }
-                    ParamKind::Boolean => {
-                        let default = param_bool_default(d);
-                        let on = st.param_values.get(&key).map_or(default, |&v| v != 0.0);
-                        let mut next = on;
-                        egui::Sides::new().show(
-                            ui,
-                            |ui| {
-                                ui.label(
-                                    egui::RichText::new(&d.label)
-                                        .font(theme::body_md())
-                                        .color(theme::TEXT_DIM),
-                                );
-                            },
-                            |ui| next = widgets::toggle(ui, on),
-                        );
-                        if next != on {
-                            changed = true;
-                        }
-                        st.param_values.insert(key, next as i32 as f32);
-                    }
-                    ParamKind::Steps => {
-                        let default = widgets::steps_default(d);
-                        let steps = st.param_steps.entry(key).or_insert(default);
-                        changed |= widgets::steps_editor(ui, &d.label, steps);
-                    }
-                    ParamKind::Sensor => {
-                        let current = st.param_strs.get(&key).cloned().unwrap_or_default();
-                        changed |= widgets::combo_param_row(
-                            ui,
-                            &d.label,
-                            key,
-                            &mut st.param_strs,
-                            current,
-                            &sensors,
-                            Some(t!("lighting.none").as_ref()),
-                        );
-                    }
-                    ParamKind::Enum { options } => {
-                        let current = st.param_strs.get(&key).cloned().unwrap_or_else(|| match &d
-                            .default
-                        {
-                            EffectParamValue::Str(s) => s.clone(),
-                            _ => options.first().cloned().unwrap_or_default(),
-                        });
-                        let opts: Vec<(String, String)> =
-                            options.iter().map(|o| (o.clone(), o.clone())).collect();
-                        changed |= widgets::combo_param_row(
-                            ui,
-                            &d.label,
-                            key,
-                            &mut st.param_strs,
-                            current,
-                            &opts,
-                            None,
-                        );
-                    }
-                    ParamKind::Color => {
-                        let default = match d.default {
-                            EffectParamValue::Color(c) => c,
-                            _ => RgbColor::default(),
-                        };
-                        let current = st.param_colors.get(&key).copied().unwrap_or(default);
-                        ui.label(
-                            egui::RichText::new(&d.label)
-                                .font(theme::body_md())
-                                .color(theme::TEXT_DIM),
-                        );
-                        if let Some(new_c) = widgets::color_picker(ui, current) {
-                            st.param_colors.insert(key, new_c);
-                            changed = true;
-                        }
-                    }
-                    ParamKind::Text | ParamKind::Image => {}
-                }
-            }
+            });
         },
     );
     changed
 }
 
+fn percent_slider(ui: &mut egui::Ui, label: &str, v: &mut f32) -> bool {
+    let readout = format!("{}%", v.round() as u32);
+    widgets::slider_row_debounced(ui, label, v, 0.0..=100.0, &readout)
+}
+
+/// One effect param's control. Returns `true` when its value changed.
+fn param_control(
+    ui: &mut egui::Ui,
+    st: &mut LightingUi,
+    anim_id: &str,
+    d: &EffectParamDescriptor,
+    sensors: &[(String, String)],
+) -> bool {
+    let key = format!("{anim_id}:{}", d.id);
+    let mut changed = false;
+    match &d.kind {
+        ParamKind::Range { min, max, step } => {
+            let (min, max, step) = (*min, *max, *step);
+            let default = match d.default {
+                EffectParamValue::Float(f) => f as f32,
+                _ => min as f32,
+            };
+            let mut v = *st.param_values.get(&key).unwrap_or(&default);
+            let readout = widgets::range_readout(v, step);
+            if widgets::slider_row_debounced(
+                ui,
+                &d.label,
+                &mut v,
+                min as f32..=max as f32,
+                &readout,
+            ) {
+                v = widgets::snap_to_step(v, min as f32, max as f32, step as f32);
+                changed = true;
+            }
+            st.param_values.insert(key, v);
+        }
+        ParamKind::Number { min, max } => {
+            let default = match d.default {
+                EffectParamValue::Float(f) => f as f32,
+                _ => 0.0,
+            };
+            let mut v = *st.param_values.get(&key).unwrap_or(&default);
+            let (_, committed) =
+                widgets::num_input_row(ui, &d.label, &mut v, *min as f32..=*max as f32);
+            changed |= committed;
+            st.param_values.insert(key, v);
+        }
+        ParamKind::Boolean => {
+            let default = param_bool_default(d);
+            let on = st.param_values.get(&key).map_or(default, |&v| v != 0.0);
+            let mut next = on;
+            egui::Sides::new().show(
+                ui,
+                |ui| {
+                    ui.label(
+                        egui::RichText::new(&d.label)
+                            .font(theme::body_md())
+                            .color(theme::TEXT),
+                    );
+                },
+                |ui| next = widgets::toggle(ui, on),
+            );
+            changed = next != on;
+            st.param_values.insert(key, next as i32 as f32);
+        }
+        ParamKind::Steps => {
+            let default = widgets::steps_default(d);
+            let steps = st.param_steps.entry(key).or_insert(default);
+            changed |= widgets::steps_editor(ui, &d.label, steps);
+        }
+        ParamKind::Sensor => {
+            let current = st.param_strs.get(&key).cloned().unwrap_or_default();
+            changed |= widgets::combo_param_row(
+                ui,
+                &d.label,
+                key,
+                &mut st.param_strs,
+                current,
+                sensors,
+                Some(t!("lighting.none").as_ref()),
+            );
+        }
+        ParamKind::Enum { options } => {
+            let current = st
+                .param_strs
+                .get(&key)
+                .cloned()
+                .unwrap_or_else(|| match &d.default {
+                    EffectParamValue::Str(s) => s.clone(),
+                    _ => options.first().cloned().unwrap_or_default(),
+                });
+            if options.len() <= ENUM_SEGMENTED_MAX {
+                ui.label(
+                    egui::RichText::new(&d.label)
+                        .font(theme::body_md())
+                        .color(theme::TEXT),
+                );
+                ui.add_space(theme::SPACE_4);
+                let refs: Vec<&str> = options.iter().map(String::as_str).collect();
+                let mut idx = options.iter().position(|o| *o == current).unwrap_or(0);
+                if widgets::segmented(ui, &refs, &mut idx, false) {
+                    st.param_strs.insert(key, options[idx].clone());
+                    changed = true;
+                }
+            } else {
+                let opts: Vec<(String, String)> =
+                    options.iter().map(|o| (o.clone(), o.clone())).collect();
+                changed |= widgets::combo_param_row(
+                    ui,
+                    &d.label,
+                    key,
+                    &mut st.param_strs,
+                    current,
+                    &opts,
+                    None,
+                );
+            }
+        }
+        ParamKind::Color => {
+            let default = match d.default {
+                EffectParamValue::Color(c) => c,
+                _ => RgbColor::default(),
+            };
+            let current = st.param_colors.get(&key).copied().unwrap_or(default);
+            widgets::field_label(ui, &d.label);
+            if let Some(new_c) = widgets::color_picker(ui, current) {
+                st.param_colors.insert(key, new_c);
+                changed = true;
+            }
+        }
+        ParamKind::Text | ParamKind::Image => {}
+    }
+    changed
+}
+
+/// Enum params with at most this many options render as a segmented control.
+const ENUM_SEGMENTED_MAX: usize = 4;
+
 fn param_bool_default(d: &EffectParamDescriptor) -> bool {
     matches!(d.default, EffectParamValue::Bool(true))
 }
 
-// ── Sliders card ──────────────────────────────────────────────────────────────
+// ── Target devices & channels card ───────────────────────────────────────────
 
-fn sliders_card(ui: &mut egui::Ui, st: &mut LightingUi) -> bool {
-    let mut changed = false;
-    widgets::card(ui, |ui| {
-        let rb = format!("{}%", st.brightness.round() as u32);
-        if widgets::slider_row_debounced(
-            ui,
-            &t!("lighting.master_brightness"),
-            &mut st.brightness,
-            0.0..=100.0,
-            &rb,
-        ) {
-            changed = true;
-        }
-        ui.add_space(theme::SPACE_9);
-        let rs = format!("{}%", st.saturation.round() as u32);
-        if widgets::slider_row_debounced(
-            ui,
-            &t!("lighting.saturation"),
-            &mut st.saturation,
-            0.0..=100.0,
-            &rs,
-        ) {
-            changed = true;
-        }
-    });
-    changed
-}
-
-// ── Target devices & channels card ───────────────────────────────────────────────
-
+/// The target picker: one checkbox row per RGB device (a selected device's row
+/// expands to its zone pills), a warning for devices the canvas drives, and the
+/// apply button. Returns `(selection changed, apply now)`.
 fn targets_card(
     ui: &mut egui::Ui,
     state: &TopicStore,
     cmd: &CommandTx,
     st: &mut LightingUi,
-) -> bool {
+) -> (bool, bool) {
     let mut apply = false;
+    let mut apply_now = false;
     let mut persist = false;
+    let devices: Vec<&WireDevice> = rgb_devices(state).collect();
     widgets::card(ui, |ui| {
-        // Header: title/subtitle on left, select/deselect-all on right.
-        // `shrink_left` constrains the wrapping subtitle column to the space
-        // beside the buttons.
         egui::Sides::new().shrink_left().spacing(12.0).show(
             ui,
             |ui| {
-                ui.vertical(|ui| {
-                    ui.label(
-                        egui::RichText::new(t!("lighting.target_devices_zones"))
-                            .font(theme::heading())
-                            .color(theme::TEXT),
-                    );
-                    ui.add_space(theme::SPACE_1);
-                    ui.label(
-                        egui::RichText::new(t!("lighting.targets_subtitle"))
-                            .font(theme::body_sm())
-                            .color(theme::TEXT_MUT),
-                    );
-                });
+                ui.label(
+                    egui::RichText::new(t!("lighting.target_devices_zones"))
+                        .font(theme::heading())
+                        .color(theme::TEXT),
+                );
             },
             |ui| {
-                if widgets::button(
-                    ui,
-                    &t!("lighting.deselect_all"),
-                    widgets::ButtonKind::Ghost,
-                    egui::vec2(92.0, 28.0),
-                )
-                .clicked()
-                    && !st.sel_ids.is_empty()
-                {
-                    for id in st.sel_ids.drain(..) {
-                        release_device(cmd, &id);
+                let all: Vec<String> = devices.iter().map(|d| d.id.clone()).collect();
+                let everything = !all.is_empty() && all.iter().all(|id| st.sel_ids.contains(id));
+                let label = if everything {
+                    t!("lighting.deselect_all")
+                } else {
+                    t!("lighting.select_all")
+                };
+                if widgets::text_link(ui, &label).clicked() {
+                    if everything {
+                        for id in st.sel_ids.drain(..) {
+                            release_device(cmd, &id);
+                        }
+                    } else {
+                        st.sel_ids = all;
+                        apply = true;
                     }
                     persist = true;
                 }
-                if widgets::button(
-                    ui,
-                    &t!("lighting.select_all"),
-                    widgets::ButtonKind::Ghost,
-                    egui::vec2(80.0, 28.0),
-                )
-                .clicked()
-                {
-                    let all: Vec<String> = rgb_devices(state).map(|d| d.id.clone()).collect();
-                    if st.sel_ids != all {
-                        st.sel_ids = all;
-                        persist = true;
-                        apply = true;
-                    }
-                }
             },
         );
+        ui.add_space(theme::SPACE_3);
+        ui.label(
+            egui::RichText::new(t!("lighting.targets_subtitle"))
+                .font(theme::body_sm())
+                .color(theme::TEXT_MUT),
+        );
+        ui.add_space(theme::SPACE_7);
 
-        ui.add_space(theme::SPACE_8);
-
-        let gap = 10.0;
-        let col_w = (ui.available_width() - gap) / 2.0;
-        let devices: Vec<&WireDevice> = rgb_devices(state).collect();
-
-        for (row, chunk) in devices.chunks(2).enumerate() {
-            if row > 0 {
-                ui.add_space(gap);
-            }
-            let row_h = chunk
-                .iter()
-                .map(|d| {
-                    if st.expanded_id.as_deref() == Some(d.id.as_str()) {
-                        CARD_BASE_H + expanded_zone_height(ui, d, col_w)
-                    } else {
-                        CARD_BASE_H
-                    }
-                })
-                .fold(CARD_BASE_H, f32::max);
-
-            ui.horizontal(|ui| {
-                ui.spacing_mut().item_spacing.x = gap;
-                for dev in chunk {
-                    let sel = st.sel_ids.contains(&dev.id);
-                    let expanded = st.expanded_id.as_deref() == Some(dev.id.as_str());
-                    let r = device_card(ui, dev, sel, expanded, st, col_w, row_h);
-                    if r.toggled {
-                        let was_selected = sel;
-                        toggle_device(st, &dev.id);
-                        persist = true;
-                        apply = true;
-                        if was_selected {
-                            release_device(cmd, &dev.id);
-                        }
-                    }
-                    if r.expand_toggled {
-                        st.expanded_id = if expanded { None } else { Some(dev.id.clone()) };
-                    }
-                    if r.zone_changed {
-                        persist = true;
-                        apply = true;
-                    }
+        for dev in &devices {
+            let sel = st.sel_ids.contains(&dev.id);
+            let expanded = st.expanded_id.as_deref() == Some(dev.id.as_str());
+            let r = device_row(ui, dev, sel, expanded, st);
+            if r.toggled {
+                toggle_device(st, &dev.id);
+                persist = true;
+                apply = true;
+                if sel {
+                    release_device(cmd, &dev.id);
                 }
-            });
+            }
+            if r.expand_toggled {
+                st.expanded_id = if expanded { None } else { Some(dev.id.clone()) };
+            }
+            if r.zone_changed {
+                persist = true;
+                apply = true;
+            }
+            ui.add_space(theme::SPACE_4);
         }
         crate::domain::tour::anchor(
             ui.ctx(),
             crate::domain::tour::AnchorId::LightingTargets,
             ui.min_rect(),
         );
+
+        let on_canvas = canvas_driven(state, &st.sel_ids);
+        if !on_canvas.is_empty() {
+            ui.add_space(theme::SPACE_2);
+            let names = on_canvas.join(", ");
+            widgets::Banner::warn(&t!("lighting.on_canvas_warning", names = names))
+                .title_font(theme::body_md())
+                .title_color(theme::WARN_TEXT)
+                .show(ui);
+        }
+        ui.add_space(theme::SPACE_9);
+        let n = st.sel_ids.len();
+        apply_now = widgets::button_enabled(
+            ui,
+            &t!("lighting.apply_to", n = n),
+            widgets::ButtonKind::Primary,
+            egui::vec2(ui.available_width(), 40.0),
+            n > 0,
+        );
     });
     if persist {
         crate::runtime::ipc::send(
             cmd,
-            halod_shared::commands::DaemonCommand::SetLightingTargets {
+            DaemonCommand::SetLightingTargets {
                 device_ids: st.sel_ids.clone(),
                 channels: st.zone_sel.clone(),
             },
         );
     }
-    apply
+    (apply, apply_now)
+}
+
+/// Names of the selected devices that have zones placed on the canvas — a
+/// direct effect takes them off it.
+fn canvas_driven(state: &TopicStore, selected: &[String]) -> Vec<String> {
+    state
+        .devices
+        .iter()
+        .filter(|d| selected.contains(&d.id))
+        .filter(|d| {
+            state
+                .lighting
+                .canvas
+                .placed_zones
+                .iter()
+                .any(|z| z.device_id == d.id)
+        })
+        .map(|d| d.name.clone())
+        .collect()
 }
 
 fn toggle_device(st: &mut LightingUi, id: &str) {
@@ -846,9 +842,9 @@ fn toggle_device(st: &mut LightingUi, id: &str) {
     }
 }
 
-// ── Device target card ────────────────────────────────────────────────────────
+// ── Device target row ─────────────────────────────────────────────────────────
 
-struct CardResult {
+struct RowResult {
     toggled: bool,
     expand_toggled: bool,
     zone_changed: bool,
@@ -876,62 +872,21 @@ fn rgb_zone_pairs(dev: &WireDevice) -> Vec<(String, String)> {
         .collect()
 }
 
-/// Allocated width of a zone pill for `label` (matches [`widgets::pill`]).
-fn pill_width(ui: &egui::Ui, label: &str) -> f32 {
-    ui.painter()
-        .layout_no_wrap(label.to_string(), theme::body_md(), Color32::WHITE)
-        .size()
-        .x
-        + 24.0
-}
+/// Width of a target row's leading checkbox column (padding + box + gap).
+const CHECK_COL_W: f32 = 40.0;
 
-/// Number of rows `pill_widths` wrap into within `avail_w`, matching egui's
-/// `main_wrap` layout: the first pill on a row is always placed, and a pill
-/// wraps when it (plus the inter-pill `gap`) would exceed `avail_w`.
-fn wrapped_rows(pill_widths: &[f32], avail_w: f32, gap: f32) -> usize {
-    let mut rows = 0usize;
-    let mut x = 0.0f32;
-    for &w in pill_widths {
-        if rows == 0 || x + gap + w > avail_w {
-            rows += 1;
-            x = w;
-        } else {
-            x += gap + w;
-        }
-    }
-    rows
-}
-
-/// Extra height an expanded device card needs to hold its zone pills, sized to
-/// however many rows they wrap into. `0.0` for a device with no channels.
-fn expanded_zone_height(ui: &egui::Ui, dev: &WireDevice, card_w: f32) -> f32 {
-    let pairs = rgb_zone_pairs(dev);
-    if pairs.is_empty() {
-        return 0.0;
-    }
-    let widths: Vec<f32> = pairs.iter().map(|(_, name)| pill_width(ui, name)).collect();
-    let rows = wrapped_rows(&widths, card_w - 28.0, ZONE_PILL_GAP);
-    ZONE_PAD_TOP
-        + rows as f32 * widgets::PILL_H
-        + rows.saturating_sub(1) as f32 * ZONE_PILL_GAP
-        + ZONE_PAD_BOTTOM
-}
-
-fn device_card(
+fn device_row(
     ui: &mut egui::Ui,
     dev: &WireDevice,
     selected: bool,
     expanded: bool,
     st: &mut LightingUi,
-    w: f32,
-    h: f32,
-) -> CardResult {
-    let mut result = CardResult {
+) -> RowResult {
+    let mut result = RowResult {
         toggled: false,
         expand_toggled: false,
         zone_changed: false,
     };
-
     let zone_pairs = rgb_zone_pairs(dev);
     let all_zone_ids: Vec<String> = zone_pairs.iter().map(|(id, _)| id.clone()).collect();
     let sel_zones = st
@@ -939,172 +894,61 @@ fn device_card(
         .get(&dev.id)
         .cloned()
         .unwrap_or_else(|| all_zone_ids.clone());
-    let n_sel_z = if sel_zones.is_empty() || sel_zones == all_zone_ids {
-        all_zone_ids.len()
+    let n_sel = if selected {
+        all_zone_ids
+            .iter()
+            .filter(|z| sel_zones.contains(z))
+            .count()
     } else {
-        sel_zones.len()
+        0
     };
-    let zone_summary = if all_zone_ids.is_empty() {
-        String::new()
-    } else {
-        t!(
-            "lighting.zones_count",
-            sel = n_sel_z,
-            total = all_zone_ids.len()
-        )
-        .to_string()
-    };
-
-    let (rect, _) = ui.allocate_exact_size(Vec2::new(w, h), Sense::hover());
-    let p = ui.painter();
-    let bg = if selected {
-        theme::hex(0x131820)
-    } else {
-        theme::hex(0x0d1017)
-    };
-    let border = if selected {
-        theme::hex(0x1c2a3a)
-    } else {
-        theme::BORDER
-    };
-    p.rect_filled(rect, theme::RADIUS_MD, bg);
-    p.rect_stroke(
-        rect,
-        theme::RADIUS_MD,
-        Stroke::new(1.0, border),
-        egui::StrokeKind::Middle,
+    let sub = zone_pairs
+        .iter()
+        .map(|(_, name)| name.as_str())
+        .collect::<Vec<_>>()
+        .join(" · ");
+    let count = format!("{n_sel}/{}", all_zone_ids.len());
+    let resp = widgets::check_row(
+        ui,
+        &dev.name,
+        Some(&sub),
+        Some((&count, theme::TEXT)),
+        selected,
     );
-
-    // Header (clickable row) plus the checkbox it contains. A single interact
-    // owns the whole row so the checkbox and header can't both fire on one
-    // click; the click is dispatched by where it landed.
-    let hdr = Rect::from_min_size(rect.min, Vec2::new(rect.width(), CARD_BASE_H));
-    let cb = 18.0;
-    let cb_rect = Rect::from_center_size(
-        Pos2::new(rect.left() + 14.0 + cb / 2.0, hdr.center().y),
-        Vec2::splat(cb),
-    );
-    let hdr_resp = ui.interact(hdr, ui.id().with(("hdr", &dev.id)), Sense::click());
-    if hdr_resp.hovered() {
-        ui.ctx().set_cursor_icon(egui::CursorIcon::PointingHand);
-    }
-    if hdr_resp.clicked() {
-        let on_checkbox = hdr_resp
+    if resp.clicked() {
+        let on_checkbox = resp
             .interact_pointer_pos()
-            .is_some_and(|p| cb_rect.contains(p));
+            .is_some_and(|p| p.x < resp.rect.left() + CHECK_COL_W);
         match card_click(on_checkbox, selected, !all_zone_ids.is_empty()) {
             CardClick::Expand => result.expand_toggled = true,
             CardClick::Toggle => result.toggled = true,
         }
     }
 
-    let (cb_fill, cb_border) = if selected {
-        (theme::CYAN, theme::CYAN)
-    } else {
-        (Color32::TRANSPARENT, theme::hex(0x2a3446))
-    };
-    p.rect_filled(cb_rect, 5.0, cb_fill);
-    p.rect_stroke(
-        cb_rect,
-        5.0,
-        Stroke::new(1.5, cb_border),
-        egui::StrokeKind::Middle,
-    );
-    if selected {
-        let ink = Stroke::new(1.8, theme::hex(0x0a0d13));
-        let c = cb_rect.center();
-        let r = cb_rect.width() * 0.5;
-        p.line_segment(
-            [
-                Pos2::new(c.x - r * 0.45, c.y),
-                Pos2::new(c.x - r * 0.1, c.y + r * 0.38),
-            ],
-            ink,
-        );
-        p.line_segment(
-            [
-                Pos2::new(c.x - r * 0.1, c.y + r * 0.38),
-                Pos2::new(c.x + r * 0.45, c.y - r * 0.32),
-            ],
-            ink,
-        );
-    }
-
-    // Type badge.
-    let badge = Rect::from_center_size(
-        Pos2::new(cb_rect.right() + 26.0, hdr.center().y),
-        Vec2::new(30.0, 22.0),
-    );
-    widgets::device_badge(p, badge, dev.device_type);
-
-    // Device name (clipped to avoid overlapping zone summary).
-    let name_x = badge.right() + 10.0;
-    let summary_reserve = if zone_summary.is_empty() { 0.0 } else { 72.0 };
-    let name_clip = Rect::from_min_max(
-        Pos2::new(name_x, hdr.top()),
-        Pos2::new(rect.right() - summary_reserve - 10.0, hdr.bottom()),
-    );
-    p.with_clip_rect(name_clip).text(
-        Pos2::new(name_x, hdr.center().y),
-        Align2::LEFT_CENTER,
-        &dev.name,
-        theme::semibold(12.5),
-        theme::TEXT,
-    );
-
-    // Zone summary (right edge).
-    if !zone_summary.is_empty() {
-        p.text(
-            Pos2::new(rect.right() - 14.0, hdr.center().y),
-            Align2::RIGHT_CENTER,
-            &zone_summary,
-            theme::caption(),
-            theme::TEXT_FAINT,
-        );
-    }
-
-    // Zone pills (when expanded).
-    if expanded && !zone_pairs.is_empty() {
-        let div_y = rect.min.y + CARD_BASE_H;
-        p.line_segment(
-            [
-                Pos2::new(rect.left() + 14.0, div_y),
-                Pos2::new(rect.right() - 14.0, div_y),
-            ],
-            Stroke::new(1.0, theme::BORDER_SOFT),
-        );
-        let zone_area = Rect::from_min_size(
-            Pos2::new(rect.left() + 14.0, div_y + ZONE_PAD_TOP),
-            Vec2::new(
-                rect.width() - 28.0,
-                (rect.bottom() - ZONE_PAD_BOTTOM - (div_y + ZONE_PAD_TOP)).max(0.0),
-            ),
-        );
-        let mut child = ui.new_child(
-            egui::UiBuilder::new()
-                .max_rect(zone_area)
-                .layout(egui::Layout::left_to_right(egui::Align::Min).with_main_wrap(true)),
-        );
-        child.spacing_mut().item_spacing = egui::vec2(ZONE_PILL_GAP, ZONE_PILL_GAP);
-        for (channel_id, zone_name) in &zone_pairs {
-            let active = sel_zones.contains(channel_id);
-            if widgets::pill(&mut child, zone_name, active) {
-                let zv = st
-                    .zone_sel
-                    .entry(dev.id.clone())
-                    .or_insert_with(|| all_zone_ids.clone());
-                if let Some(pos) = zv.iter().position(|z| z == channel_id) {
-                    if zv.len() > 1 {
-                        zv.remove(pos);
+    if expanded && selected && !zone_pairs.is_empty() {
+        ui.add_space(theme::SPACE_3);
+        ui.horizontal_wrapped(|ui| {
+            ui.add_space(CHECK_COL_W);
+            ui.spacing_mut().item_spacing = egui::vec2(6.0, 6.0);
+            for (channel_id, zone_name) in &zone_pairs {
+                let active = sel_zones.contains(channel_id);
+                if widgets::pill(ui, zone_name, active) {
+                    let zv = st
+                        .zone_sel
+                        .entry(dev.id.clone())
+                        .or_insert_with(|| all_zone_ids.clone());
+                    if let Some(pos) = zv.iter().position(|z| z == channel_id) {
+                        if zv.len() > 1 {
+                            zv.remove(pos);
+                        }
+                    } else {
+                        zv.push(channel_id.clone());
                     }
-                } else {
-                    zv.push(channel_id.clone());
+                    result.zone_changed = true;
                 }
-                result.zone_changed = true;
             }
-        }
+        });
     }
-
     result
 }
 
@@ -1449,10 +1293,7 @@ mod tests {
         assert_eq!(effects[0], (String::new(), "Static".to_string()));
         assert_eq!(
             effects[1],
-            (
-                format!("{CUSTOM_PREFIX}My Comet"),
-                "\u{2605} My Comet".to_string()
-            )
+            (format!("{CUSTOM_PREFIX}My Comet"), "My Comet".to_string())
         );
     }
 
@@ -1947,19 +1788,24 @@ mod tests {
     }
 
     #[test]
-    fn wrapped_rows_counts_rows_like_egui_main_wrap() {
-        // Empty → no rows.
-        assert_eq!(wrapped_rows(&[], 100.0, 6.0), 0);
-        // A single pill wider than the row still occupies one row (first pill on
-        // a row is always placed).
-        assert_eq!(wrapped_rows(&[200.0], 100.0, 6.0), 1);
-        // Three 40-wide pills + 6 gaps in a 100-wide row: 40, 40+6+40=86 fit,
-        // the third (86+6+40=132) wraps → 2 rows.
-        assert_eq!(wrapped_rows(&[40.0, 40.0, 40.0], 100.0, 6.0), 2);
-        // Exact fit stays on one row: 40+6+40+6+40 = 132 <= 132.
-        assert_eq!(wrapped_rows(&[40.0, 40.0, 40.0], 132.0, 6.0), 1);
-        // 24 equal pills in a narrow row → many rows, height grows with them
-        // (the bug: fixed height clipped everything past the first row).
-        assert!(wrapped_rows(&[80.0; 24], 300.0, 6.0) >= 7);
+    fn canvas_warning_names_only_selected_devices_placed_on_canvas() {
+        let dev = |id: &str| WireDevice {
+            id: id.into(),
+            name: id.to_uppercase(),
+            ..Default::default()
+        };
+        let mut state = TopicStore {
+            devices: vec![dev("a"), dev("b"), dev("c")],
+            ..Default::default()
+        };
+        state.lighting.canvas.placed_zones = ["a", "b"]
+            .iter()
+            .map(|d| halod_shared::types::PlacedZone {
+                device_id: d.to_string(),
+                ..Default::default()
+            })
+            .collect();
+        let sel = vec!["b".to_string(), "c".to_string()];
+        assert_eq!(canvas_driven(&state, &sel), ["B"]);
     }
 }

@@ -1,31 +1,31 @@
 plugins:
+  not_set_up: Not set up
+  repo_signed: Signed
+  repo_unsigned: Unsigned
+  repo_synced: "synced %{age}"
+  repo_official: Official
+  enable: Enable
+  disable: Disable
+  search: Search plugins
   title: Plugins
-  subtitle: Repository packages add hardware support without rebuilding the daemon.
-  counts: "%{count} packages · %{active} active"
+  counts: "%{count} packages · %{enabled} enabled"
   empty_title: No plugins installed
   empty_hint: Add a plugin repository to extend HaloDaemon with new devices.
-  add: Add repository
   # Plugin repositories
   repos_title: Repositories
   repos_check_updates: Check for updates
   repos_checking: Checking for updates…
   repos_updates_disabled: Update checks are off. Turn on plugin downloads in Settings to check for updates.
   repos_url_hint: Git URL (https://...)
-  repos_branch_hint: Branch (optional)
-  repos_branch_label: BRANCH
-  repos_branch_default: Default branch
-  repos_branch_loading: Loading branches…
-  repos_branch_enter_url: Enter a URL first
   repos_add: Add
   repos_add_title: Add repository
   repos_add_sub: Connect HaloDaemon to a remote Git repository to browse, install, and update its plugins.
-  repos_import_folder: Local Git folder
   repos_import_archive: Tar archive
   repos_empty: No plugin repositories registered.
   repos_update: Update
   repos_update_repo: Update repo
   repos_move_pin: "Update to %{tag}"
-  repo_pinned: PINNED
+  repo_pinned: Pinned
   repo_pinned_hint: This repository stays on the selected release. New releases are reported but never installed automatically.
   repo_pinned_update_title: "Release %{tag} is available"
   repo_pinned_update_body: "This repository is pinned to %{pinned}. Updating moves the pin to %{tag}."
@@ -43,25 +43,22 @@ plugins:
   repos_remove: Remove repository
   repos_remove_title: Remove repository?
   repos_remove_body: This removes %{name} and uninstalls every plugin provided by the repository.
-  repo_source: SOURCE
-  repo_source_remote_git: Remote Git
-  repo_source_local_git: Local Git
+  repo_source: Source
   repo_source_local_archive: Local archive
   repo_signing_fingerprint: "Publisher key: %{fingerprint}"
-  repo_last_sync: LAST SYNC
+  repo_last_sync: Last sync
   repo_never_synced: never
   repo_sync_just_now: just now
   repo_sync_minutes: "%{count}m ago"
   repo_sync_hours: "%{count}h ago"
   repo_sync_days: "%{count}d ago"
-  repo_drivers: DRIVERS
+  repo_drivers: Drivers
   repo_drivers_count: "%{count} installed"
-  repo_drivers_from: DRIVERS FROM THIS REPOSITORY
+  repo_drivers_from: Drivers from this repository
   repo_no_drivers: No drivers installed from this repository yet.
   repo_signature_verified: Signature verified with the publisher key pinned when this repository was first imported.
   repo_signature_unsigned: Unsigned repository. Package hashes are checked, but the publisher is not authenticated.
   repo_signature_verification_failed: Repository signature verification failed.
-  repo_compatible_fallback: Compatible revision
   # Per-plugin updates
   updates_available: "%{count} plugin update available"
   updates_available_plural: "%{count} plugin updates available"
@@ -111,17 +108,19 @@ plugins:
   skipped_heading: Skipped plugins
   skipped_title: This plugin has been skipped
   # Detail panel
+  filter_all: All
+  filter_devices: Devices
+  filter_integrations: Integrations
+  filter_effects: Effects
   type_device: Driver
   type_effect: Effects
   type_integration: Integration
   experimental: Experimental
-  author: AUTHOR
-  capabilities: CAPABILITIES
-  targets: TARGET DEVICES
-  effects: EFFECTS
+  capabilities: Capabilities
+  targets: Target devices
+  effects: Effects
   status_active: Active
   status_disabled: Disabled
-  status_needs_permission: Needs permission
   status_inactive: Setup required
   status_degraded: Limited functionality
   req_command_missing: "The daemon cannot find '%{name}' in PATH."
@@ -132,22 +131,17 @@ plugins:
   req_hwmon_missing: "No hardware sensors were found in /sys/class/hwmon."
   req_hwmon_read_permission: "HaloDaemon cannot read the available hardware sensors. Check the sysfs and udev permissions."
   req_hwmon_pwm_permission: "Fan control requires write access to the PWM files in /sys/class/hwmon."
-  enable: Enable
-  disable: Disable
   provenance_official: Verified official
   provenance_repository: Unsigned repository
   provenance_development: Development source
   provenance_local: Local package
   provenance_invalid: Invalid signature
   # Permissions
-  permissions: PERMISSIONS
-  permissions_pending: This plugin needs permissions you have not granted yet. It will remain inactive until you decide.
-  permissions_not_granted_tag: Not granted
   regrant_required: Permission review required
   permissions_enable_hint: Enabling this plugin will request the permissions above.
-  permissions_granted: Granted
-  grant: Grant permissions
-  revoke: Revoke & disable
+  revoke: Revoke and disable
+  access_granted: System access you granted
+  access_requested: System access this plugin requests
   permission_hid: HID device access
   permission_usb: USB device access
   permission_hwmon: Hardware monitoring
@@ -175,8 +169,6 @@ plugins:
   permission_audio_routing_desc: Creates and routes host audio sinks. A malicious script could spawn audio modules or capture/redirect audio on this machine.
   permission_data_reads_desc: "Reads data published by the host or by other plugins:"
   # Config fields
-  settings: SETTINGS
-  save_settings: Save
   secret_set_hint: (a secret is stored)
   # Permission consent dialog (shown when enabling a plugin that declares permissions)
   consent_title: Grant permissions
@@ -186,7 +178,6 @@ plugins:
   consent_permission_added: An update to this plugin added a new permission that must be granted before it can run again. Review what it now requires below.
   consent_grant_enable: Grant & enable
   consent_cancel: Cancel
-  consent_deny: Not now
   # Add dialog
   cancel: Cancel
   # Delete confirmation

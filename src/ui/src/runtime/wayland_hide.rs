@@ -89,7 +89,7 @@ pub fn run(background: bool, primary: crate::runtime::single_instance::Primary) 
         force_quit.clone(),
         hide_state.clone(),
     );
-    tray.watch_state(ui_rx.state.clone());
+    tray.watch_state(ui_rx.state.subscribe());
     let app = App::new(
         ui_rx,
         sinks,
@@ -187,7 +187,7 @@ impl WaylandApp {
             let app = &mut self.app;
             let egui::FullOutput {
                 platform_output,
-                textures_delta,
+                mut textures_delta,
                 shapes,
                 pixels_per_point,
                 viewport_output,
@@ -225,7 +225,9 @@ impl WaylandApp {
             let action = self.app.close_action(close_requested);
             if action == CloseAction::Stay {
                 for (id, delta) in &textures_delta.set {
-                    painter.set_texture(*id, delta);
+                    for delta in delta {
+                        painter.set_texture(*id, delta);
+                    }
                 }
                 // Skip the GL draw on a zero-sized surface (a 0-sized `Resized`
                 // slips through on some compositors); `resize` no-ops there, so
@@ -248,6 +250,7 @@ impl WaylandApp {
                     painter.free_texture(*id);
                 }
             }
+            textures_delta.clear();
             action
         };
 

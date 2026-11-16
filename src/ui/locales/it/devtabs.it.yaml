@@ -1,4 +1,9 @@
 devtabs:
+  manage: Gestisci
+  hide_from_home: Nascondi dalla Home
+  show_on_home: Mostra nella Home
+  disable_device: Disattiva dispositivo
+  enable_device: Attiva dispositivo
   read_only: Sola lettura
   tab_devices: Dispositivi
   tab_lighting: Illuminazione
@@ -22,9 +27,7 @@ devtabs:
   battery: Batteria
   offline: Offline
   charging_bolt: "⚡ in carica"
-  charging: In carica
-  discharging: In scarica
-  unknown: Sconosciuto
+  led_count: "%{n} LED"
 
   info_id: ID
   info_name: Nome
@@ -52,37 +55,52 @@ devtabs:
   cap_equalizer: Equalizzatore
   cap_sensors: Sensori
   cap_fan: Ventola
-  cap_rgb: RGB
+  cap_rgb: Illuminazione
   cap_dpi: DPI
   cap_onboard: Memoria onboard
   cap_lcd: LCD
   cap_key_remap: Rimappatura tasti
   cap_keyboard_layout: Layout tastiera
 
-  write_rate_shared: Frequenza di scrittura (condivisa con hub)
-  write_rate: Frequenza di scrittura
+  write_rate_shared: "Throughput (condiviso con l'hub)"
   throughput: Velocità effettiva
   rejected_writes: Scritture rifiutate
 
+  now: Ora
+  axis_now: ora
+  peak: Picco
+  write_limit: Limite di scrittura
+  write_limit_none: Nessuno
+  range_1m: 1 min
+  range_10m: 10 min
+  range_1h: 1 h
+  interface_n: "interfaccia %{n}"
+  provided_by: "Fornito da %{name} %{version}"
+  diagnostics_desc: Report grezzo del dispositivo per segnalazioni di bug e sviluppo di plugin.
   diagnostics: Diagnostica
   copy_json: Copia JSON
   copied: Copiato!
-  fetching_debug: "Recupero dei dati di debug…"
 
   equalizer: Equalizzatore
   eq_presets: Preset
+  eq_reset_flat: Ripristina piatto
+  eq_device: Dispositivo
+  eq_custom: Personalizzato
 
   onboard_intro: I profili salvati nella memoria interna del dispositivo funzionano anche quando halod non è in esecuzione.
   host_mode: Modalità host
   host_mode_desc: Consenti a HaloDaemon di gestire questo dispositivo. Disattiva questa opzione per usare autonomamente i profili salvati sul dispositivo.
   slot_n: "Slot %{n}"
+  slot_active: Attivo
+  slot_saved: Salvato
+  slot_empty: Vuoto
   restore_to_rom: Ripristina dalla ROM
   switch: Cambia
   remove: Elimina
   create: Crea
 
   dpi_stages: Stadi DPI
-  add_stage: "+ Aggiungi stadio"
-  dpi_help: Trascina un nodo lungo l'asse oppure digita un valore esatto. Lo stadio attivo è quello che il mouse usa ora.
-  stage_n_current: "Stadio %{n} · attivo"
+  add_stage: Aggiungi stadio
+  dpi_help: Trascina uno stadio lungo l'asse oppure digita un valore esatto. Il mouse usa lo stadio attuale.
+  stage_current: Attuale
   stage_n: "Stadio %{n}"

@@ -52,57 +52,43 @@ pub fn show(ui: &mut egui::Ui, ctx: &TabCtx, page: &mut Page) {
 /// The shared card shell of the child-device and pairing-slot lists: `CARD_BG`
 /// surface, 48 px title row over a soft divider, then zero-spaced list rows.
 fn titled_list_card(ui: &mut egui::Ui, title: &str, body: impl FnOnce(&mut egui::Ui)) {
-    egui::Frame::NONE
-        .fill(theme::CARD_BG)
-        .stroke(Stroke::new(1.0, theme::BORDER))
-        .corner_radius(theme::RADIUS_XL)
-        .show(ui, |ui| {
-            let (title_rect, _) =
-                ui.allocate_exact_size(Vec2::new(ui.available_width(), 48.0), Sense::hover());
-            ui.painter().text(
-                Pos2::new(title_rect.left() + 18.0, title_rect.center().y),
-                Align2::LEFT_CENTER,
-                title,
-                theme::heading(),
-                theme::TEXT,
-            );
-            ui.painter().line_segment(
-                [title_rect.left_bottom(), title_rect.right_bottom()],
-                Stroke::new(1.0, theme::BORDER_SOFT),
-            );
-            ui.style_mut().spacing.item_spacing = egui::vec2(0.0, 0.0);
-            body(ui);
-        });
+    widgets::card_frameless(ui, |ui| {
+        let (title_rect, _) =
+            ui.allocate_exact_size(Vec2::new(ui.available_width(), 48.0), Sense::hover());
+        ui.painter().text(
+            Pos2::new(title_rect.left() + 18.0, title_rect.center().y),
+            Align2::LEFT_CENTER,
+            title,
+            theme::heading(),
+            theme::TEXT,
+        );
+        ui.painter().line_segment(
+            [title_rect.left_bottom(), title_rect.right_bottom()],
+            Stroke::new(1.0, theme::BORDER_SOFT),
+        );
+        ui.style_mut().spacing.item_spacing = egui::vec2(0.0, 0.0);
+        body(ui);
+    });
 }
 
 fn child_row(ui: &mut egui::Ui, d: &WireDevice) -> bool {
-    let (row, resp) = ui.allocate_exact_size(Vec2::new(ui.available_width(), 52.0), Sense::click());
-    let hovered = resp.hovered();
+    let (row, resp) = widgets::hover_row(ui, 52.0, false);
     let p = ui.painter();
-    if hovered {
-        p.rect_filled(
-            row.shrink2(Vec2::new(6.0, 5.0)),
-            theme::RADIUS_MD,
-            theme::ROW_ACTIVE,
-        );
-        ui.ctx().set_cursor_icon(egui::CursorIcon::PointingHand);
-    }
     p.line_segment(
         [row.left_bottom(), row.right_bottom()],
         Stroke::new(1.0, theme::BORDER_SOFT),
     );
 
     let cy = row.center().y;
-    let badge_rect =
-        Rect::from_center_size(Pos2::new(row.left() + 37.0, cy), Vec2::new(38.0, 28.0));
-    p.rect_filled(badge_rect, theme::RADIUS_SM, theme::device_color(d));
-    let glyph = Rect::from_center_size(badge_rect.center(), Vec2::splat(badge_rect.height() * 0.8));
-    crate::ui::icons::draw_device(p, glyph, d.device_type, theme::hex(0x0a0d13));
+    let badge_rect = Rect::from_center_size(Pos2::new(row.left() + 35.0, cy), Vec2::splat(34.0));
+    p.rect_filled(badge_rect, 8.0, theme::TILE_BG);
+    let glyph = Rect::from_center_size(badge_rect.center(), Vec2::splat(20.0));
+    crate::ui::icons::draw_device(p, glyph, d.device_type, theme::TEXT_DIM);
     p.text(
-        Pos2::new(badge_rect.right() + 13.0, cy),
+        Pos2::new(badge_rect.right() + 12.0, cy),
         Align2::LEFT_CENTER,
         &d.name,
-        theme::semibold(12.5),
+        theme::medium(13.0),
         theme::TEXT,
     );
     p.text(
@@ -141,8 +127,8 @@ pub fn pairing(ui: &mut egui::Ui, ctx: &TabCtx) {
 const PAIR_TIMEOUT_SECS: u8 = 30;
 
 fn receiver_panel(ui: &mut egui::Ui, id: &str, ctx: &TabCtx, ps: &PairingStatus, listening: bool) {
-    let state_key = egui::Id::new(("pair_started", id));
-    let cancel_key = egui::Id::new(("pair_cancelled", id));
+    let state_key = egui::Id::unique(("pair_started", id));
+    let cancel_key = egui::Id::unique(("pair_cancelled", id));
     let now = ui.ctx().input(|i| i.time);
 
     let cancelled = ui
@@ -172,13 +158,12 @@ fn receiver_panel(ui: &mut egui::Ui, id: &str, ctx: &TabCtx, ps: &PairingStatus,
 
     widgets::card(ui, |ui| {
         ui.vertical_centered(|ui| {
-            widgets::caps_label(ui, &t!("device.children_receiver"));
-            ui.add_space(theme::SPACE_3);
             ui.label(
                 egui::RichText::new(&ctx.dev.name)
                     .font(theme::title())
                     .color(theme::TEXT),
             );
+            widgets::section_label(ui, &t!("device.children_receiver"));
             ui.add_space(20.0);
 
             // Big 120px circle
@@ -188,26 +173,25 @@ fn receiver_panel(ui: &mut egui::Ui, id: &str, ctx: &TabCtx, ps: &PairingStatus,
             let p = ui.painter();
 
             if listening {
-                let t = now as f32;
-                let pulse = (t * std::f32::consts::TAU / 1.4).sin() * 0.5 + 0.5;
-                theme::glow(p, center, r + 10.0, theme::CYAN, 0.15 + 0.1 * pulse);
-                p.circle_stroke(center, r - 1.5, Stroke::new(3.0, theme::CYAN));
+                let fraction = f32::from(remaining_secs) / f32::from(PAIR_TIMEOUT_SECS.max(1));
+                widgets::ring_gauge(p, center, r * 2.0, fraction, theme::CYAN);
                 p.text(
                     center,
                     Align2::CENTER_CENTER,
                     remaining_secs.to_string(),
-                    theme::mono_bold(28.0),
-                    theme::CYAN,
+                    theme::semibold(30.0),
+                    theme::TEXT,
                 );
                 ui.ctx().request_repaint();
             } else {
-                dashed_circle(p, center, r - 1.0, 2.0, theme::hex(0x2a3446));
+                p.circle_filled(center, r, theme::TILE_BG);
+                p.circle_stroke(center, r, Stroke::new(1.0, theme::BORDER_INNER));
                 p.text(
                     center,
                     Align2::CENTER_CENTER,
                     "+",
                     theme::body(30.0),
-                    theme::TEXT_FAINT,
+                    theme::TEXT_DIM,
                 );
             }
 
@@ -226,7 +210,7 @@ fn receiver_panel(ui: &mut egui::Ui, id: &str, ctx: &TabCtx, ps: &PairingStatus,
                 if widgets::button(
                     ui,
                     &t!("device.children_cancel"),
-                    widgets::ButtonKind::Ghost,
+                    widgets::ButtonKind::Secondary,
                     egui::vec2(90.0, 36.0),
                 )
                 .clicked()
@@ -268,22 +252,6 @@ fn receiver_panel(ui: &mut egui::Ui, id: &str, ctx: &TabCtx, ps: &PairingStatus,
     });
 }
 
-fn dashed_circle(p: &egui::Painter, center: Pos2, r: f32, stroke_w: f32, color: egui::Color32) {
-    const N: usize = 16;
-    const FILL: f32 = 0.55;
-    for i in 0..N {
-        let a0 = std::f32::consts::TAU * i as f32 / N as f32;
-        let a1 = a0 + std::f32::consts::TAU * FILL / N as f32;
-        let pts: Vec<Pos2> = (0..=4)
-            .map(|j| {
-                let a = a0 + (a1 - a0) * j as f32 / 4.0;
-                Pos2::new(center.x + a.cos() * r, center.y + a.sin() * r)
-            })
-            .collect();
-        p.add(egui::Shape::line(pts, Stroke::new(stroke_w, color)));
-    }
-}
-
 fn slots_panel(ui: &mut egui::Ui, id: &str, ctx: &TabCtx, ps: &PairingStatus) {
     titled_list_card(ui, &t!("device.children_paired_slots"), |ui| {
         let max = ps
@@ -303,124 +271,69 @@ fn pair_slot_row(
     slot_idx: u8,
     slot: Option<&PairingSlot>,
 ) {
-    let (row, _) = ui.allocate_exact_size(Vec2::new(ui.available_width(), 46.0), Sense::hover());
+    let (row, _) = ui.allocate_exact_size(Vec2::new(ui.available_width(), 52.0), Sense::hover());
     let p = ui.painter();
     p.line_segment(
         [row.left_bottom(), row.right_bottom()],
         Stroke::new(1.0, theme::BORDER_SOFT),
     );
-
-    let badge_rect = Rect::from_center_size(
-        Pos2::new(row.left() + 37.0, row.center().y),
-        Vec2::new(38.0, 28.0),
-    );
-    let name_x = badge_rect.right() + 13.0;
     let cy = row.center().y;
+    let dot = Pos2::new(row.left() + 22.0, cy);
+    let name_x = dot.x + 16.0;
+    let slot_label = t!("devtabs.slot_n", n = slot_idx);
 
-    if let Some(slot) = slot {
-        let badge_color = theme::DEVICE_HUES[slot_idx as usize % theme::DEVICE_HUES.len()];
-        p.rect_filled(badge_rect, theme::RADIUS_SM, badge_color);
-        let code = slot_code(&slot.name);
+    let Some(slot) = slot else {
+        p.circle_filled(dot, 4.0, theme::BORDER_INNER);
         p.text(
-            badge_rect.center(),
-            Align2::CENTER_CENTER,
-            &code,
-            theme::bold(10.0),
-            theme::hex(0x0a0d13),
-        );
-        p.text(
-            Pos2::new(name_x, cy),
+            Pos2::new(name_x, cy - 9.0),
             Align2::LEFT_CENTER,
-            &slot.name,
-            theme::body_md(),
-            theme::TEXT,
+            slot_label,
+            theme::medium(13.0),
+            theme::TEXT_DIM,
         );
-
-        let btn_area = Rect::from_min_max(
-            Pos2::new(row.right() - 130.0, row.top()),
-            row.right_bottom(),
-        );
-        ui.scope_builder(egui::UiBuilder::new().max_rect(btn_area), |ui| {
-            ui.with_layout(egui::Layout::right_to_left(egui::Align::Center), |ui| {
-                ui.add_space(theme::SPACE_9);
-                if widgets::button(
-                    ui,
-                    &t!("device.children_unpair"),
-                    widgets::ButtonKind::Ghost,
-                    egui::vec2(72.0, 28.0),
-                )
-                .clicked()
-                {
-                    crate::runtime::ipc::send(
-                        ctx.cmd,
-                        halod_shared::commands::DaemonCommand::ReceiverUnpair {
-                            id: id.to_string(),
-                            slot: slot_idx,
-                        },
-                    );
-                }
-            });
-        });
-    } else {
-        p.rect_filled(badge_rect, theme::RADIUS_SM, theme::BORDER);
         p.text(
-            Pos2::new(name_x, cy),
+            Pos2::new(name_x, cy + 9.0),
             Align2::LEFT_CENTER,
-            t!("device.children_empty_slot"),
-            theme::body_md(),
-            theme::TEXT_FAINT,
-        );
-        p.text(
-            Pos2::new(row.right() - 18.0, cy),
-            Align2::RIGHT_CENTER,
             t!("device.children_available"),
             theme::body_sm(),
-            theme::TEXT_FAINT,
+            theme::TEXT_MUT,
         );
-    }
-}
-
-/// Two-letter uppercase code derived from a device name (initials of words,
-/// falling back to the first two alphanumeric characters).
-fn slot_code(name: &str) -> String {
-    let initials: String = name
-        .split_whitespace()
-        .filter_map(|w| w.chars().next())
-        .filter(|c| c.is_alphanumeric())
-        .take(2)
-        .collect::<String>()
-        .to_uppercase();
-    if initials.len() >= 2 {
-        return initials;
-    }
-    name.chars()
-        .filter(|c| c.is_alphanumeric())
-        .take(2)
-        .collect::<String>()
-        .to_uppercase()
-}
-
-#[cfg(test)]
-mod tests {
-    use super::slot_code;
-
-    #[test]
-    fn slot_code_uses_word_initials() {
-        assert_eq!(slot_code("Wireless Mouse"), "WM");
-        assert_eq!(slot_code("logitech g pro"), "LG");
-    }
-
-    #[test]
-    fn slot_code_falls_back_to_first_two_chars() {
-        // Single word → first two alphanumerics.
-        assert_eq!(slot_code("Keyboard"), "KE");
-        // Leading non-alphanumerics are skipped in the fallback.
-        assert_eq!(slot_code("-x1"), "X1");
-    }
-
-    #[test]
-    fn slot_code_handles_short_names() {
-        assert_eq!(slot_code("A"), "A");
-        assert_eq!(slot_code(""), "");
+        return;
+    };
+    p.circle_filled(dot, 4.0, theme::ONLINE);
+    p.text(
+        Pos2::new(name_x, cy - 9.0),
+        Align2::LEFT_CENTER,
+        &slot.name,
+        theme::medium(13.0),
+        theme::TEXT,
+    );
+    p.text(
+        Pos2::new(name_x, cy + 9.0),
+        Align2::LEFT_CENTER,
+        slot_label,
+        theme::body_sm(),
+        theme::TEXT_MUT,
+    );
+    let btn = Rect::from_min_size(
+        Pos2::new(row.right() - 18.0 - 76.0, cy - 15.0),
+        Vec2::new(76.0, 30.0),
+    );
+    if widgets::button_at(
+        ui,
+        btn,
+        egui::Id::unique(("unpair", id, slot_idx)),
+        &t!("device.children_unpair"),
+        widgets::ButtonKind::Danger,
+    )
+    .clicked()
+    {
+        crate::runtime::ipc::send(
+            ctx.cmd,
+            halod_shared::commands::DaemonCommand::ReceiverUnpair {
+                id: id.to_string(),
+                slot: slot_idx,
+            },
+        );
     }
 }

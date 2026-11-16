@@ -42,7 +42,7 @@ pub fn combo_picker_full(
     combo_picker_with_width(ui, id_salt, options, current, none_label, Some(width))
 }
 
-fn combo_picker_with_width(
+pub fn combo_picker_with_width(
     ui: &mut egui::Ui,
     id_salt: impl std::hash::Hash + std::fmt::Debug,
     options: &[(String, String)],
@@ -52,7 +52,9 @@ fn combo_picker_with_width(
 ) -> Option<String> {
     let display = combo_display(options, current, none_label);
     let mut new_val = None;
-    let mut combo = egui::ComboBox::from_id_salt(id_salt).selected_text(display);
+    let mut combo = egui::ComboBox::from_id_salt(id_salt)
+        .selected_text(display)
+        .icon(select_chevron);
     if let Some(width) = width {
         combo = combo.width(width);
     }
@@ -118,4 +120,14 @@ mod tests {
         let opts = vec![("a".to_string(), "Alpha".to_string())];
         assert_eq!(combo_display(&opts, "missing", None), "-");
     }
+}
+
+/// The Select chevron, for `egui::ComboBox::icon`.
+pub fn select_chevron(ui: &egui::Ui, rect: egui::Rect, _: &egui::style::WidgetVisuals, open: bool) {
+    super::paint_chevron(
+        ui.painter(),
+        rect.center(),
+        open,
+        crate::ui::theme::TEXT_DIM,
+    );
 }

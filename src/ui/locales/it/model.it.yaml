@@ -16,26 +16,9 @@ device_type:
   computer: Computer
   other: Dispositivo
 
-device_code:
-  aio: AIO
-  fan: FAN
-  hub: HUB
-  dongle: DGL
-  keyboard: KB
-  mouse: MS
-  headset: HS
-  monitor: MON
-  gpu: GPU
-  led_strip: LED
-  motherboard: MB
-  ram: RAM
-  sensor: SEN
-  speaker: SPK
-  computer: PC
-  other: DEV
-
 model:
   metric_speed: Velocità
+  metric_battery: Batteria
   metric_temp: Temp
   metric_link: Link
   wired: Cablato

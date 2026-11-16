@@ -1,12 +1,12 @@
 // SPDX-License-Identifier: GPL-3.0-or-later
 //! Modal dialogs and the shared delete-confirmation reducer.
 
-use egui::{Align2, Pos2, Rect, Sense, Stroke, Vec2};
+use egui::{Pos2, Rect, Stroke, Vec2};
 
 use crate::ui::theme;
 
 /// Inner margin of every modal frame; the close × is inset from the frame edge.
-const MODAL_MARGIN: f32 = 18.0;
+const MODAL_MARGIN: f32 = 22.0;
 /// Inset of the close × from the modal's top and right edges.
 const CLOSE_INSET: f32 = 16.0;
 
@@ -36,16 +36,17 @@ fn modal_shell(
     title: &str,
     subtitle: Option<&str>,
     width: f32,
+    closable: bool,
     contents: impl FnOnce(&mut egui::Ui),
 ) -> bool {
     let w = width.min(ctx.content_rect().width() - 80.0);
     let mut x_clicked = false;
-    let resp = egui::Modal::new(egui::Id::new((id, "modal")))
+    let resp = egui::Modal::new(egui::Id::unique((id, "modal")))
         .frame(
             egui::Frame::NONE
                 .fill(theme::MODAL_BG)
-                .stroke(Stroke::new(1.0, theme::BORDER))
-                .corner_radius(theme::RADIUS_LG)
+                .stroke(Stroke::new(1.0, theme::BORDER_INNER))
+                .corner_radius(theme::RADIUS_XL)
                 .inner_margin(theme::PAD_MODAL),
         )
         .show(ctx, |ui| {
@@ -55,14 +56,14 @@ fn modal_shell(
                     ui.spacing_mut().item_spacing.y = 1.0;
                     let title_resp = ui.label(
                         egui::RichText::new(title)
-                            .font(theme::title())
+                            .font(theme::semibold(17.0))
                             .color(theme::TEXT),
                     );
                     if let Some(subtitle) = subtitle {
                         ui.label(
                             egui::RichText::new(subtitle)
-                                .font(theme::body_sm())
-                                .color(theme::TEXT_MUT),
+                                .font(theme::body_md())
+                                .color(theme::TEXT_DIM),
                         );
                     }
                     title_resp.rect.center().y
@@ -70,7 +71,7 @@ fn modal_shell(
                 .inner;
             ui.add_space(theme::SPACE_4);
             contents(ui);
-            if close_button(ui, id, title_center_y) {
+            if closable && close_button(ui, id, title_center_y) {
                 x_clicked = true;
             }
         });
@@ -87,23 +88,12 @@ fn close_button_rect(content: Rect, size: f32, center_y: f32) -> Rect {
 
 fn close_button(ui: &mut egui::Ui, id: &str, center_y: f32) -> bool {
     let rect = close_button_rect(ui.min_rect(), 24.0, center_y);
-    let resp = ui.interact(rect, ui.id().with((id, "close")), Sense::click());
-    if resp.hovered() {
-        ui.ctx().set_cursor_icon(egui::CursorIcon::PointingHand);
-    }
-    let col = if resp.hovered() {
-        theme::TEXT
-    } else {
-        theme::TEXT_FAINT
-    };
-    ui.ctx().layer_painter(ui.layer_id()).text(
-        rect.center(),
-        Align2::CENTER_CENTER,
-        "×",
-        theme::title(),
-        col,
-    );
-    resp.clicked()
+    let clip = ui.clip_rect();
+    ui.set_clip_rect(clip.union(rect));
+    let id = ui.scope_id().with((id, "close"));
+    let clicked = super::glyph_button_at(ui, rect, id, super::paint_close_glyph).clicked();
+    ui.set_clip_rect(clip);
+    clicked
 }
 
 /// Like [`modal_frame`] but without the outer vertical scroll area, so the
@@ -123,7 +113,7 @@ pub fn modal_frame_raw<R>(
     // title row rewinds its cursor to the top, painting the body over the
     // title bar.
     let h = default_h.min(ctx.content_rect().height() - 80.0);
-    modal_shell(ctx, id, title, None, default_w, |ui| {
+    modal_shell(ctx, id, title, None, default_w, true, |ui| {
         ui.allocate_ui(egui::Vec2::new(ui.available_width(), h), |ui| {
             ui.set_min_height(h);
             ui.set_max_height(h);
@@ -143,7 +133,7 @@ pub fn dialog(
     actions: impl FnOnce(&mut egui::Ui),
 ) -> bool {
     let max_body = (ctx.content_rect().height() - 220.0).max(120.0);
-    modal_shell(ctx, id, title, None, width, |ui| {
+    modal_shell(ctx, id, title, None, width, false, |ui| {
         egui::ScrollArea::vertical()
             .auto_shrink([false, true])
             .max_height(max_body)
@@ -172,7 +162,7 @@ pub fn dialog_with_subtitle(
     actions: impl FnOnce(&mut egui::Ui),
 ) -> bool {
     let max_body = (ctx.content_rect().height() - 220.0).max(120.0);
-    modal_shell(ctx, id, title, Some(subtitle), width, |ui| {
+    modal_shell(ctx, id, title, Some(subtitle), width, false, |ui| {
         egui::ScrollArea::vertical()
             .auto_shrink([false, true])
             .max_height(max_body)
@@ -194,7 +184,7 @@ pub fn dialog_with_subtitle(
 /// Close actions. Returns `true` when dismissed (backdrop, ×, or Close).
 pub fn issue_modal(ctx: &egui::Context, id: &str, title: &str, detail: &str) -> bool {
     use super::button::{button, ButtonKind};
-    let copied_key = egui::Id::new((id, "copied_at"));
+    let copied_key = egui::Id::unique((id, "copied_at"));
     let mut close = false;
     let dismissed = dialog(
         ctx,
@@ -223,7 +213,7 @@ pub fn issue_modal(ctx: &egui::Context, id: &str, title: &str, detail: &str) -> 
             if button(
                 ui,
                 &t!("plugins.issue_copy"),
-                ButtonKind::Ghost,
+                ButtonKind::Secondary,
                 egui::vec2(110.0, 32.0),
             )
             .clicked()
@@ -276,20 +266,20 @@ pub fn confirm_delete_dialog<T>(
         ctx,
         id,
         title,
-        420.0,
+        380.0,
         |ui| {
             ui.label(
                 egui::RichText::new(body)
-                    .font(theme::body_md())
-                    .color(theme::TEXT_MUT),
+                    .font(theme::body_lg())
+                    .color(theme::TEXT_DIM),
             );
         },
         |ui| {
             if button(
                 ui,
                 confirm_label,
-                ButtonKind::Danger,
-                egui::vec2(96.0, 32.0),
+                ButtonKind::DangerSolid,
+                egui::vec2(0.0, 36.0),
             )
             .clicked()
             {
@@ -299,8 +289,8 @@ pub fn confirm_delete_dialog<T>(
             if button(
                 ui,
                 &t!("misc.widget_cancel"),
-                ButtonKind::Ghost,
-                egui::vec2(96.0, 32.0),
+                ButtonKind::Secondary,
+                egui::vec2(0.0, 36.0),
             )
             .clicked()
             {
@@ -381,7 +371,7 @@ mod tests {
         let avail = std::rc::Rc::new(std::cell::RefCell::new(Vec::new()));
         for _ in 0..6 {
             let avail = avail.clone();
-            let _ = ctx.run_ui(input(), |ui| {
+            let _ = crate::ui::run_headless(&ctx, input(), |ui| {
                 modal_frame_raw(ui.ctx(), "t", "T", 440.0, 520.0, |ui| {
                     ui.label("Choose which running apps trigger this profile.");
                     ui.add_space(theme::SPACE_6);
@@ -432,7 +422,7 @@ mod tests {
         let body_top = std::rc::Rc::new(std::cell::RefCell::new(0.0f32));
         for _ in 0..2 {
             let body_top = body_top.clone();
-            let _ = ctx.run_ui(input(), |ui| {
+            let _ = crate::ui::run_headless(&ctx, input(), |ui| {
                 modal_frame(ui.ctx(), "t", "Title", 400.0, 300.0, |ui| {
                     *body_top.borrow_mut() = ui.max_rect().top();
                     ui.label("body");
@@ -440,7 +430,7 @@ mod tests {
             });
         }
         let modal_top = ctx
-            .memory(|m| m.area_rect(egui::Id::new(("t", "modal"))))
+            .memory(|m| m.area_rect(egui::Id::unique(("t", "modal"))))
             .expect("modal area rect")
             .top();
         // 18px frame margin, then a real title row before the body starts.
@@ -467,7 +457,7 @@ mod dialog_tests {
         };
         let mut heights = Vec::new();
         for _ in 0..8 {
-            let _ = ctx.run_ui(input(), |ui| {
+            let _ = crate::ui::run_headless(&ctx, input(), |ui| {
                 dialog(
                     ui.ctx(),
                     "d",
@@ -483,7 +473,7 @@ mod dialog_tests {
                 );
             });
             heights.push(
-                ctx.memory(|m| m.area_rect(egui::Id::new(("d", "modal"))))
+                ctx.memory(|m| m.area_rect(egui::Id::unique(("d", "modal"))))
                     .map(|r| r.height())
                     .unwrap_or(0.0),
             );

@@ -1,13 +1,9 @@
 // SPDX-License-Identifier: GPL-3.0-or-later
 //! LED chains tab — per-header chain configuration for ARGB hubs and LED-strip controllers.
-//!
-//! Shows one card per chainable channel. Each card has a header (badge, usage
-//! bar, LED budget, Discover button), a list of link rows, and an inline
-//! Add-link form. Only user-added links (non-locked) expose rename/remove
-//! controls; hardware-detected links show a DISCOVERED chip and a lock icon.
 
 use crate::ui::components as widgets;
-use egui::{Align2, Color32, Pos2, Rect, Sense, Stroke, Vec2};
+use egui::{Align2, Sense, Stroke, Vec2};
+use halod_shared::commands::DaemonCommand;
 use halod_shared::types::{
     DeviceCapability, LightingChannel, LightingDivision, LightingSegmentInfo, ZoneTopology,
 };
@@ -17,13 +13,9 @@ use super::TabCtx;
 use crate::domain::topic_store::TopicStore;
 use crate::ui::theme;
 
-/// Maximum LED dots shown inline before the "+N" overflow label.
-const DOT_CAP: usize = 20;
-/// Default LED count when the Add-link form opens.
 const ADD_LEDS_DEFAULT: u32 = 30;
 
 /// Topology choices in the Add-link form: (constructor, LED-count divisor).
-/// Display text comes from `topology_label()`, keyed off the variant.
 type TopologyChoice = (fn() -> ZoneTopology, u32);
 const TOPOLOGY_CHOICES: &[TopologyChoice] = &[
     (|| ZoneTopology::Linear, 1),
@@ -55,6 +47,13 @@ fn divisor_for_idx(idx: usize) -> u32 {
     TOPOLOGY_CHOICES.get(idx).map(|(_, d)| *d).unwrap_or(1)
 }
 
+/// The LED count typed into the Add-link form, if the header can take it with
+/// the chosen topology.
+fn parse_leds(text: &str, divisor: u32, remaining: u32) -> Option<u32> {
+    let n: u32 = text.trim().parse().ok()?;
+    (n > 0 && n <= remaining && n.is_multiple_of(divisor.max(1))).then_some(n)
+}
+
 fn segments(channel: &LightingChannel) -> &[LightingSegmentInfo] {
     match &channel.division {
         LightingDivision::Divisible { segments, .. } => segments,
@@ -69,27 +68,8 @@ fn max_leds(channel: &LightingChannel) -> u32 {
     }
 }
 
-/// Short uppercase badge derived from a channel name: "Header 1" → "H1".
-fn badge_label(name: &str) -> String {
-    let letter: String = name
-        .chars()
-        .find(|c| c.is_alphabetic())
-        .map(|c| c.to_uppercase().to_string())
-        .unwrap_or_default();
-    let digit: String = name
-        .chars()
-        .filter(|c| c.is_ascii_digit())
-        .take(1)
-        .collect();
-    if !letter.is_empty() && !digit.is_empty() {
-        format!("{letter}{digit}")
-    } else {
-        name.chars()
-            .filter(|c| c.is_alphanumeric())
-            .take(2)
-            .collect::<String>()
-            .to_uppercase()
-    }
+fn used_leds(channel: &LightingChannel) -> u32 {
+    segments(channel).iter().map(|l| l.led_count).sum()
 }
 
 pub fn show(ui: &mut egui::Ui, ctx: &TabCtx) {
@@ -98,8 +78,6 @@ pub fn show(ui: &mut egui::Ui, ctx: &TabCtx) {
         crate::domain::tour::AnchorId::TabChains,
         ui.max_rect(),
     );
-    // Borrow the chainable channels directly from the capability to avoid a
-    // per-frame Vec clone. Find the first Rgb capability with non-empty channels.
     let channels: Vec<&LightingChannel> = ctx
         .dev
         .capabilities
@@ -122,240 +100,159 @@ pub fn show(ui: &mut egui::Ui, ctx: &TabCtx) {
         return;
     }
 
-    let total_leds: u32 = channels
-        .iter()
-        .flat_map(|channel| segments(channel).iter())
-        .map(|l| l.led_count)
-        .sum();
+    let total_leds: u32 = channels.iter().map(|c| used_leds(c)).sum();
+    let dev_id = ctx.dev.id.as_str();
 
-    // Page heading
-    {
-        let (hdr, _) =
-            ui.allocate_exact_size(Vec2::new(ui.available_width(), 38.0), Sense::hover());
-        let p = ui.painter();
-        p.text(
-            hdr.left_top() + Vec2::new(0.0, 1.0),
-            Align2::LEFT_TOP,
-            t!("device.chains_title"),
-            theme::heading(),
-            theme::TEXT,
+    ui.horizontal(|ui| {
+        let right_w = 260.0;
+        ui.allocate_ui_with_layout(
+            Vec2::new((ui.available_width() - right_w).max(200.0), 0.0),
+            egui::Layout::top_down(egui::Align::Min),
+            |ui| {
+                ui.spacing_mut().item_spacing.y = theme::SPACE_2;
+                ui.label(
+                    egui::RichText::new(t!("device.chains_title"))
+                        .font(theme::semibold(18.0))
+                        .color(theme::TEXT),
+                );
+                ui.label(
+                    egui::RichText::new(t!("device.chains_subtitle"))
+                        .font(theme::body_md())
+                        .color(theme::TEXT_DIM),
+                );
+            },
         );
-        p.text(
-            Pos2::new(hdr.right(), hdr.top() + 2.0),
-            Align2::RIGHT_TOP,
-            t!(
-                "device.chains_summary",
-                leds = total_leds,
-                headers = channels.len()
-            ),
-            theme::value_sm(),
-            theme::TEXT_FAINT,
-        );
-        p.text(
-            hdr.left_top() + Vec2::new(0.0, 21.0),
-            Align2::LEFT_TOP,
-            t!("device.chains_subtitle"),
-            theme::body_md(),
-            theme::TEXT_MUT,
-        );
-    }
-
+        ui.with_layout(egui::Layout::right_to_left(egui::Align::Center), |ui| {
+            ui.spacing_mut().item_spacing.x = theme::SPACE_6;
+            discover_button(ui, ctx, dev_id, &channels);
+            ui.label(
+                egui::RichText::new(t!(
+                    "device.chains_summary",
+                    leds = total_leds,
+                    headers = channels.len()
+                ))
+                .font(theme::body_lg())
+                .color(theme::TEXT_SOFT),
+            );
+        });
+    });
     ui.add_space(theme::SPACE_8);
 
-    let dev_id = ctx.dev.id.clone();
-    for channel in channels {
-        channel_card(ui, ctx, &dev_id, channel);
-        ui.add_space(theme::SPACE_7);
+    const COLS: usize = 3;
+    for row in channels.chunks(COLS) {
+        ui.scope(|ui| {
+            ui.spacing_mut().item_spacing.x = theme::SPACE_8;
+            ui.columns(COLS, |columns| {
+                for (col, channel) in columns.iter_mut().zip(row) {
+                    channel_card(col, ctx, dev_id, channel);
+                }
+            });
+        });
+        ui.add_space(theme::SPACE_8);
     }
 }
 
 fn channel_card(ui: &mut egui::Ui, ctx: &TabCtx, dev_id: &str, channel: &LightingChannel) {
-    let used: u32 = segments(channel).iter().map(|l| l.led_count).sum();
+    let used = used_leds(channel);
+    let max = max_leds(channel);
+    widgets::card_with_margin(ui, egui::Margin::same(16), |ui| {
+        ui.set_width(ui.available_width());
+        ui.spacing_mut().item_spacing.y = theme::SPACE_6;
+        egui::Sides::new().show(
+            ui,
+            |ui| {
+                ui.label(
+                    egui::RichText::new(&channel.name)
+                        .font(theme::heading())
+                        .color(theme::TEXT),
+                );
+            },
+            |ui| {
+                ui.label(
+                    egui::RichText::new(t!("device.chains_usage", used = used, max = max))
+                        .font(theme::body_md())
+                        .color(theme::TEXT_DIM),
+                );
+            },
+        );
+        let frac = if max == 0 {
+            0.0
+        } else {
+            used as f32 / max as f32
+        };
+        widgets::progress_bar(ui, ui.available_width(), 6.0, Some(frac));
 
-    egui::Frame::NONE
-        .fill(theme::CARD_BG)
-        .stroke(Stroke::new(1.0, theme::BORDER))
-        .corner_radius(theme::RADIUS_XL)
-        .inner_margin(egui::Margin {
-            left: 18,
-            right: 18,
-            top: 16,
-            bottom: 16,
-        })
-        .show(ui, |ui| {
-            channel_header(ui, ctx, dev_id, channel, used);
-            ui.add_space(theme::SPACE_6);
-
-            let prev_spacing = ui.style().spacing.item_spacing;
-            ui.style_mut().spacing.item_spacing = egui::vec2(0.0, 9.0);
-
-            if segments(channel).is_empty() {
-                empty_placeholder(ui);
-            } else {
-                for (li, link) in segments(channel).iter().enumerate() {
-                    link_row(ui, ctx, dev_id, &channel.id, li + 1, link);
-                }
-            }
-
-            ui.style_mut().spacing.item_spacing = prev_spacing;
-
-            let remaining = max_leds(channel).saturating_sub(used);
-            if remaining > 0 {
-                ui.add_space(theme::SPACE_4);
-                add_link_panel(ui, ctx, dev_id, channel, remaining);
-            }
-        });
+        if segments(channel).is_empty() {
+            empty_header(ui);
+        }
+        for (li, link) in segments(channel).iter().enumerate() {
+            link_row(ui, ctx, dev_id, &channel.id, li + 1, link);
+        }
+        add_link_panel(ui, ctx, dev_id, channel, max.saturating_sub(used));
+    });
 }
 
-fn channel_header(
-    ui: &mut egui::Ui,
-    ctx: &TabCtx,
-    dev_id: &str,
-    channel: &LightingChannel,
-    used: u32,
-) {
-    let flash_key = egui::Id::new(("ch_flash", dev_id, &channel.id));
-    let flash_at_key = egui::Id::new(("ch_flash_at", dev_id, &channel.id));
+fn empty_header(ui: &mut egui::Ui) {
+    let (rect, _) = ui.allocate_exact_size(Vec2::new(ui.available_width(), 54.0), Sense::hover());
+    let p = ui.painter();
+    let stroke = Stroke::new(1.0, theme::BORDER_INNER);
+    let c = rect.shrink(0.5);
+    for seg in [
+        [c.left_top(), c.right_top()],
+        [c.right_top(), c.right_bottom()],
+        [c.right_bottom(), c.left_bottom()],
+        [c.left_bottom(), c.left_top()],
+    ] {
+        p.extend(egui::Shape::dashed_line(&seg, stroke, 4.0, 3.0));
+    }
+    p.text(
+        rect.center(),
+        Align2::CENTER_CENTER,
+        t!("device.chains_no_links"),
+        theme::body_md(),
+        theme::TEXT_MUT,
+    );
+}
 
+fn discover_button(ui: &mut egui::Ui, ctx: &TabCtx, dev_id: &str, channels: &[&LightingChannel]) {
+    let flash_at_key = egui::Id::unique(("ch_flash_at", dev_id));
+    let now = ui.ctx().input(|i| i.time);
     let flashing = ui
         .ctx()
-        .data(|d| d.get_temp::<bool>(flash_key).unwrap_or(false));
+        .data(|d| d.get_temp::<f64>(flash_at_key))
+        .is_some_and(|until| now < until);
     if flashing {
-        let clear_at = ui
-            .ctx()
-            .data(|d| d.get_temp::<f64>(flash_at_key).unwrap_or(0.0));
-        if ui.ctx().input(|i| i.time) >= clear_at {
-            ui.ctx().data_mut(|d| {
-                d.remove::<bool>(flash_key);
-                d.remove::<f64>(flash_at_key);
-            });
-        } else {
-            ui.ctx().request_repaint();
-        }
+        ui.ctx().request_repaint();
     }
-
-    let (row, _) = ui.allocate_exact_size(Vec2::new(ui.available_width(), 30.0), Sense::hover());
-
-    // Badge
-    let badge = Rect::from_min_size(row.left_top(), Vec2::new(30.0, 30.0));
-    {
-        let p = ui.painter();
-        theme::paint_well(p, badge, 8.0);
-        p.text(
-            badge.center(),
-            Align2::CENTER_CENTER,
-            badge_label(&channel.name),
-            theme::bold(11.0),
-            theme::CYAN,
-        );
-    }
-
-    // Discover button (right-aligned). Idle uses the shared ghost button; the
-    // flashing state is a transient red active indicator, painted directly.
-    let disc_rect = Rect::from_min_size(
-        Pos2::new(row.right() - 100.0, row.top()),
-        Vec2::new(100.0, 30.0),
+    let label = if flashing {
+        t!("device.chains_flashing")
+    } else {
+        t!("device.chains_discover")
+    };
+    let resp = widgets::button(
+        ui,
+        &label,
+        widgets::ButtonKind::Secondary,
+        Vec2::new(88.0, 36.0),
     );
     crate::domain::tour::anchor(
         ui.ctx(),
         crate::domain::tour::AnchorId::ChainsDiscover,
-        disc_rect,
+        resp.rect,
     );
-    let disc_id = egui::Id::new(("ch_disc", dev_id, &channel.id));
-    let disc_resp = if flashing {
-        let p = ui.painter();
-        p.rect_filled(disc_rect, 8.0, theme::a(theme::hex(0xff2d2d), 0.18));
-        p.rect_stroke(
-            disc_rect,
-            8.0,
-            Stroke::new(1.0, theme::hex(0xff2d2d)),
-            egui::StrokeKind::Middle,
-        );
-        p.text(
-            disc_rect.center(),
-            Align2::CENTER_CENTER,
-            t!("device.chains_flashing"),
-            theme::body_sm(),
-            theme::TEXT,
-        );
-        ui.interact(disc_rect, disc_id, Sense::click())
-    } else {
-        widgets::button_at(
-            ui,
-            disc_rect,
-            disc_id,
-            &format!("◎ {}", t!("device.chains_discover")),
-            widgets::ButtonKind::Ghost,
-        )
-    };
-    if disc_resp.clicked() && !flashing {
-        let now = ui.ctx().input(|i| i.time);
-        ui.ctx().data_mut(|d| d.insert_temp(flash_key, true));
+    if resp.clicked() && !flashing {
         ui.ctx()
             .data_mut(|d| d.insert_temp(flash_at_key, now + 2.4));
-        crate::runtime::ipc::send(
-            ctx.cmd,
-            halod_shared::commands::DaemonCommand::LightingDetectSegments {
-                id: dev_id.to_string(),
-                channel_id: channel.id.clone(),
-            },
-        );
-    }
-
-    let p = ui.painter();
-    let usage = t!("device.chains_usage", used = used, max = max_leds(channel));
-    let usage_galley = p.layout_no_wrap(usage.to_string(), theme::value_sm(), theme::TEXT_MUT);
-    let usage_size = usage_galley.size();
-    let usage_r = disc_rect.left() - 8.0;
-    p.galley(
-        Pos2::new(usage_r - usage_size.x, row.center().y - usage_size.y / 2.0),
-        usage_galley,
-        theme::TEXT_MUT,
-    );
-
-    // Usage bar
-    let bar_left = badge.right() + 14.0;
-    let bar_right = usage_r - usage_size.x - 8.0;
-    let bar_cy = row.center().y;
-    let bar = Rect::from_min_max(
-        Pos2::new(bar_left, bar_cy - 3.0),
-        Pos2::new(bar_right, bar_cy + 3.0),
-    );
-    if bar.width() > 0.0 {
-        p.rect_filled(bar, 3.0, theme::INNER_BG);
-        p.rect_stroke(
-            bar,
-            3.0,
-            Stroke::new(1.0, theme::BORDER_INNER),
-            egui::StrokeKind::Middle,
-        );
-        let pct = (used as f32 / max_leds(channel) as f32).min(1.0);
-        let bar_col = if pct > 0.85 {
-            theme::STAT_AMBER
-        } else {
-            theme::CYAN
-        };
-        if pct > 0.0 {
-            let fill = Rect::from_min_size(bar.min, Vec2::new(bar.width() * pct, bar.height()));
-            p.rect_filled(fill, 3.0, bar_col);
+        for channel in channels {
+            crate::runtime::ipc::send(
+                ctx.cmd,
+                DaemonCommand::LightingDetectSegments {
+                    id: dev_id.to_string(),
+                    channel_id: channel.id.clone(),
+                },
+            );
         }
     }
-}
-
-fn empty_placeholder(ui: &mut egui::Ui) {
-    egui::Frame::NONE
-        .stroke(Stroke::new(1.0, theme::BORDER))
-        .corner_radius(theme::RADIUS_MD)
-        .inner_margin(egui::Margin::same(14))
-        .show(ui, |ui| {
-            ui.vertical_centered(|ui| {
-                ui.label(
-                    egui::RichText::new(t!("device.chains_no_links"))
-                        .font(theme::body_md())
-                        .color(theme::TEXT_FAINT),
-                );
-            });
-        });
 }
 
 fn link_row(
@@ -366,226 +263,116 @@ fn link_row(
     index: usize,
     link: &LightingSegmentInfo,
 ) {
-    egui::Frame::NONE
-        .fill(theme::INNER_BG)
-        .stroke(Stroke::new(1.0, theme::BORDER))
-        .corner_radius(theme::RADIUS_MD)
-        .inner_margin(egui::Margin {
-            left: 13,
-            right: 13,
-            top: 11,
-            bottom: 11,
-        })
-        .show(ui, |ui| {
-            ui.horizontal(|ui| {
-                // Index badge
-                let (badge, _) = ui.allocate_exact_size(Vec2::new(22.0, 22.0), Sense::hover());
-                let p = ui.painter();
-                theme::paint_card_rect(p, badge, 6.0);
-                p.text(
-                    badge.center(),
-                    Align2::CENTER_CENTER,
-                    index.to_string(),
-                    theme::mono_bold(10.0),
-                    theme::TEXT_FAINT,
-                );
+    widgets::inset(ui, egui::Margin::symmetric(12, 10), |ui| {
+        ui.with_layout(egui::Layout::left_to_right(egui::Align::Center), |ui| {
+            ui.spacing_mut().item_spacing.x = theme::SPACE_5;
+            let (badge, _) = ui.allocate_exact_size(Vec2::splat(22.0), Sense::hover());
+            let p = ui.painter();
+            p.rect_filled(badge, 5.0, theme::TILE_BG);
+            p.text(
+                badge.center(),
+                Align2::CENTER_CENTER,
+                index.to_string(),
+                theme::caption(),
+                theme::TEXT_DIM,
+            );
 
-                ui.add_space(theme::SPACE_6);
-
-                // Name + dots column
-                ui.vertical(|ui| {
+            let trailing_w = if link.locked { 80.0 } else { 30.0 };
+            ui.allocate_ui_with_layout(
+                Vec2::new((ui.available_width() - trailing_w).max(40.0), 0.0),
+                egui::Layout::top_down(egui::Align::Min),
+                |ui| {
+                    ui.spacing_mut().item_spacing.y = 0.0;
                     name_field(ui, ctx, link);
-                    ui.add_space(theme::SPACE_4);
-                    led_dots(ui, link);
-                });
+                    ui.label(
+                        egui::RichText::new(format!(
+                            "{} · {}",
+                            topology_label(&link.topology),
+                            t!("device.chains_led_count", count = link.led_count)
+                        ))
+                        .font(theme::body_sm())
+                        .color(theme::TEXT_MUT),
+                    );
+                },
+            );
 
-                // Right-side controls
-                ui.with_layout(egui::Layout::right_to_left(egui::Align::Center), |ui| {
-                    if link.locked {
-                        locked_right(ui, link);
-                    } else {
-                        editable_right(ui, ctx, dev_id, channel_id, link);
-                    }
-                });
+            ui.with_layout(egui::Layout::right_to_left(egui::Align::Center), |ui| {
+                if link.locked {
+                    widgets::tag(
+                        ui,
+                        &t!("device.chains_discovered"),
+                        widgets::TagTone::Neutral,
+                    );
+                    return;
+                }
+                let (rect, _) = ui.allocate_exact_size(Vec2::splat(26.0), Sense::hover());
+                let id = egui::Id::unique(("ln_rm", &link.device_id));
+                if widgets::glyph_button_at(ui, rect, id, widgets::paint_close_glyph).clicked() {
+                    crate::runtime::ipc::send(
+                        ctx.cmd,
+                        DaemonCommand::LightingRemoveSegment {
+                            id: dev_id.to_string(),
+                            channel_id: channel_id.to_string(),
+                            device_id: link.device_id.clone(),
+                        },
+                    );
+                }
             });
         });
+    });
 }
 
 fn name_field(ui: &mut egui::Ui, ctx: &TabCtx, link: &LightingSegmentInfo) {
     if link.locked {
-        ui.horizontal(|ui| {
-            ui.label(
-                egui::RichText::new(&link.name)
-                    .font(theme::semibold(12.5))
-                    .color(theme::TEXT),
-            );
-            ui.add_space(theme::SPACE_5);
-            let (chip, _) = ui.allocate_exact_size(Vec2::new(94.0, 19.0), Sense::hover());
-            let p = ui.painter();
-            p.rect_filled(chip, 6.0, theme::hex(0x181d29));
-            p.rect_stroke(
-                chip,
-                6.0,
-                Stroke::new(1.0, theme::BORDER),
-                egui::StrokeKind::Middle,
-            );
-            p.text(
-                chip.center(),
-                Align2::CENTER_CENTER,
-                t!("device.chains_discovered"),
-                theme::micro(),
-                theme::TEXT_DIM,
-            );
-        });
-    } else {
-        // Inline rename: preserve edit buffer while focused, re-seed from daemon when not.
-        let buf_key = egui::Id::new(("ln_buf", &link.device_id));
-        let focused_key = egui::Id::new(("ln_focused", &link.device_id));
-        let was_focused = ui
-            .ctx()
-            .data(|d| d.get_temp::<bool>(focused_key).unwrap_or(false));
-        let mut buf: String = if was_focused {
-            ui.ctx().data(|d| {
-                d.get_temp::<String>(buf_key)
-                    .unwrap_or_else(|| link.name.clone())
-            })
-        } else {
-            link.name.clone()
-        };
-
-        let resp = ui.add(
-            egui::TextEdit::singleline(&mut buf)
-                .font(theme::semibold(12.5))
-                .desired_width(180.0),
+        ui.label(
+            egui::RichText::new(&link.name)
+                .font(theme::medium(14.0))
+                .color(theme::TEXT),
         );
-        // `has_focus()` locks the egui context internally, so it must be read
-        // *before* entering `data_mut` (which already holds that lock) — calling
-        // it inside the closure re-enters the lock and deadlocks the UI thread.
-        let has_focus = resp.has_focus();
-        ui.ctx().data_mut(|d| {
-            d.insert_temp(buf_key, buf.clone());
-            d.insert_temp(focused_key, has_focus);
-        });
-
-        if resp.lost_focus() {
-            let trimmed = buf.trim().to_string();
-            if !trimmed.is_empty() && trimmed != link.name {
-                crate::runtime::ipc::send(
-                    ctx.cmd,
-                    halod_shared::commands::DaemonCommand::SetDeviceName {
-                        device_id: link.device_id.clone(),
-                        name: trimmed,
-                    },
-                );
-            }
-        }
+        return;
     }
-}
-
-fn led_dots(ui: &mut egui::Ui, link: &LightingSegmentInfo) {
-    let count = link.led_count as usize;
-    let dot_count = count.min(DOT_CAP);
-    let extra = count.saturating_sub(DOT_CAP);
-    let dot_color = if link.locked {
-        theme::hex(0x5d6679)
+    // Preserve the edit buffer while focused; re-seed from the daemon otherwise.
+    let buf_key = egui::Id::unique(("ln_buf", &link.device_id));
+    let focused_key = egui::Id::unique(("ln_focused", &link.device_id));
+    let was_focused = ui
+        .ctx()
+        .data(|d| d.get_temp::<bool>(focused_key).unwrap_or(false));
+    let mut buf: String = if was_focused {
+        ui.ctx().data(|d| {
+            d.get_temp::<String>(buf_key)
+                .unwrap_or_else(|| link.name.clone())
+        })
     } else {
-        theme::CYAN
+        link.name.clone()
     };
 
-    ui.horizontal(|ui| {
-        ui.style_mut().spacing.item_spacing = egui::vec2(3.0, 0.0);
-        for _ in 0..dot_count {
-            let (r, _) = ui.allocate_exact_size(Vec2::splat(7.0), Sense::hover());
-            ui.painter().rect_filled(r, 1.5, dot_color);
-        }
-        if extra > 0 {
-            ui.label(
-                egui::RichText::new(format!("+{extra}"))
-                    .font(theme::value_xs())
-                    .color(theme::TEXT_FAINT),
+    let resp = ui.add(
+        egui::TextEdit::singleline(&mut buf)
+            .font(theme::medium(14.0))
+            .text_color(theme::TEXT)
+            .frame(egui::Frame::NONE)
+            .margin(egui::Margin::ZERO)
+            .desired_width(ui.available_width()),
+    );
+    // Read before `data_mut`: `has_focus()` takes the context lock and would deadlock inside it.
+    let has_focus = resp.has_focus();
+    ui.ctx().data_mut(|d| {
+        d.insert_temp(buf_key, buf.clone());
+        d.insert_temp(focused_key, has_focus);
+    });
+
+    if resp.lost_focus() {
+        let trimmed = buf.trim().to_string();
+        if !trimmed.is_empty() && trimmed != link.name {
+            crate::runtime::ipc::send(
+                ctx.cmd,
+                DaemonCommand::SetDeviceName {
+                    device_id: link.device_id.clone(),
+                    name: trimmed,
+                },
             );
         }
-    });
-}
-
-fn locked_right(ui: &mut egui::Ui, link: &LightingSegmentInfo) {
-    ui.label(
-        egui::RichText::new("🔒")
-            .font(theme::body_md())
-            .color(theme::hex(0x3a4860)),
-    );
-    ui.add_space(theme::SPACE_4);
-    ui.label(
-        egui::RichText::new(t!("device.chains_led_count", count = link.led_count))
-            .font(theme::mono(12.0))
-            .color(theme::TEXT_MUT),
-    );
-    ui.add_space(theme::SPACE_4);
-    ui.label(
-        egui::RichText::new(topology_label(&link.topology))
-            .font(theme::body_sm())
-            .color(theme::TEXT_MUT),
-    );
-}
-
-fn editable_right(
-    ui: &mut egui::Ui,
-    ctx: &TabCtx,
-    dev_id: &str,
-    channel_id: &str,
-    link: &LightingSegmentInfo,
-) {
-    // Remove button — use an explicit ID so egui can track hover/click state
-    // across frames even when the number of link rows changes.
-    let btn_id = egui::Id::new(("ln_rm", &link.device_id));
-    let (btn, _) = ui.allocate_exact_size(Vec2::new(30.0, 30.0), Sense::hover());
-    let btn_resp = ui.interact(btn, btn_id, Sense::click());
-    if btn_resp.hovered() {
-        ui.ctx().set_cursor_icon(egui::CursorIcon::PointingHand);
     }
-    let t = ui
-        .ctx()
-        .animate_bool_with_time(btn_id, btn_resp.hovered(), 0.12);
-    let border_col = theme::lerp_color(theme::BORDER, theme::hex(0x3a2730), t);
-    let icon_col = theme::lerp_color(theme::TEXT_MUT, theme::hex(0xef8b8d), t);
-    let p = ui.painter();
-    p.rect_filled(btn, 8.0, Color32::TRANSPARENT);
-    p.rect_stroke(
-        btn,
-        8.0,
-        Stroke::new(1.0, border_col),
-        egui::StrokeKind::Middle,
-    );
-    p.text(
-        btn.center(),
-        Align2::CENTER_CENTER,
-        "×",
-        theme::body_lg(),
-        icon_col,
-    );
-    if btn_resp.clicked() {
-        crate::runtime::ipc::send(
-            ctx.cmd,
-            halod_shared::commands::DaemonCommand::LightingRemoveSegment {
-                id: dev_id.to_string(),
-                channel_id: channel_id.to_string(),
-                device_id: link.device_id.clone(),
-            },
-        );
-    }
-
-    ui.add_space(theme::SPACE_4);
-    ui.label(
-        egui::RichText::new(t!("device.chains_led_count", count = link.led_count))
-            .font(theme::mono(12.0))
-            .color(theme::TEXT_DIM),
-    );
-    ui.add_space(theme::SPACE_4);
-    ui.label(
-        egui::RichText::new(topology_label(&link.topology))
-            .font(theme::body_sm())
-            .color(theme::TEXT_MUT),
-    );
 }
 
 fn add_link_panel(
@@ -595,251 +382,148 @@ fn add_link_panel(
     channel: &LightingChannel,
     remaining: u32,
 ) {
-    crate::domain::tour::anchor(
-        ui.ctx(),
-        crate::domain::tour::AnchorId::ChainsAddLink,
-        Rect::from_min_size(ui.cursor().min, Vec2::new(ui.available_width(), 34.0)),
-    );
-    let open_key = egui::Id::new(("ch_add_open", dev_id, &channel.id));
-    let name_key = egui::Id::new(("ch_add_name", dev_id, &channel.id));
-    let topo_key = egui::Id::new(("ch_add_topo", dev_id, &channel.id));
-    let leds_key = egui::Id::new(("ch_add_leds", dev_id, &channel.id));
+    let open_key = egui::Id::unique(("ch_add_open", dev_id, &channel.id));
+    let name_key = egui::Id::unique(("ch_add_name", dev_id, &channel.id));
+    let topo_key = egui::Id::unique(("ch_add_topo", dev_id, &channel.id));
+    let leds_key = egui::Id::unique(("ch_add_leds", dev_id, &channel.id));
 
     let open = ui
         .ctx()
         .data(|d| d.get_temp::<bool>(open_key).unwrap_or(false));
 
     if !open {
-        let label = format!("+ {}", t!("device.chains_add_link"));
-        let btn_w = ui
-            .painter()
-            .layout_no_wrap(label.clone(), theme::body_sm(), theme::TEXT_DIM)
-            .size()
-            .x
-            + 26.0;
-        if widgets::button(
+        if remaining == 0 {
+            return;
+        }
+        let resp = widgets::button(
             ui,
-            &label,
-            widgets::ButtonKind::Ghost,
-            Vec2::new(btn_w, 34.0),
-        )
-        .clicked()
-        {
+            &t!("device.chains_add_link"),
+            widgets::ButtonKind::Secondary,
+            Vec2::new(ui.available_width(), 30.0),
+        );
+        crate::domain::tour::anchor(
+            ui.ctx(),
+            crate::domain::tour::AnchorId::ChainsAddLink,
+            resp.rect,
+        );
+        if resp.clicked() {
             ui.ctx().data_mut(|d| {
                 d.insert_temp(open_key, true);
                 d.insert_temp(name_key, t!("device.chains_new_link").to_string());
                 d.insert_temp(topo_key, 0usize);
-                d.insert_temp(leds_key, ADD_LEDS_DEFAULT.min(remaining));
+                d.insert_temp(leds_key, ADD_LEDS_DEFAULT.min(remaining).to_string());
             });
         }
-    } else {
-        let mut name = ui.ctx().data(|d| {
-            d.get_temp::<String>(name_key)
-                .unwrap_or_else(|| t!("device.chains_new_link").to_string())
-        });
-        let mut topo_idx = ui
-            .ctx()
-            .data(|d| d.get_temp::<usize>(topo_key).unwrap_or(0));
-        let prev_divisor = divisor_for_idx(topo_idx);
-        let mut leds = ui
-            .ctx()
-            .data(|d| d.get_temp::<u32>(leds_key).unwrap_or(ADD_LEDS_DEFAULT));
+        return;
+    }
 
-        egui::Frame::NONE
-            .fill(theme::INNER_BG)
-            .stroke(Stroke::new(1.0, theme::BORDER))
-            .corner_radius(theme::RADIUS_MD)
-            .inner_margin(egui::Margin::same(14))
-            .show(ui, |ui| {
-                // Name field
-                ui.horizontal(|ui| {
-                    ui.label(
-                        egui::RichText::new(t!("device.chains_name"))
-                            .font(theme::body_sm())
-                            .color(theme::TEXT_MUT),
-                    );
-                    ui.add_space(theme::SPACE_4);
-                    ui.add(
-                        egui::TextEdit::singleline(&mut name)
-                            .font(theme::semibold(12.5))
-                            .desired_width(180.0)
-                            .margin(egui::Margin::symmetric(10, 7)),
-                    );
-                });
-                ui.add_space(theme::SPACE_5);
+    let mut name = ui
+        .ctx()
+        .data(|d| d.get_temp::<String>(name_key).unwrap_or_default());
+    let mut topo_idx = ui
+        .ctx()
+        .data(|d| d.get_temp::<usize>(topo_key).unwrap_or(0));
+    let mut leds = ui
+        .ctx()
+        .data(|d| d.get_temp::<String>(leds_key).unwrap_or_default());
 
-                // Topology picker
-                ui.horizontal(|ui| {
-                    ui.label(
-                        egui::RichText::new(t!("device.chains_type"))
-                            .font(theme::body_sm())
-                            .color(theme::TEXT_MUT),
-                    );
-                    ui.add_space(theme::SPACE_4);
-                    let labels: Vec<String> = TOPOLOGY_CHOICES
+    egui::Frame::NONE
+        .fill(theme::CHECKED_BG)
+        .stroke(Stroke::new(1.0, theme::SELECTED_BORDER))
+        .corner_radius(8.0)
+        .inner_margin(egui::Margin::same(12))
+        .show(ui, |ui| {
+            ui.set_width(ui.available_width());
+            ui.spacing_mut().item_spacing.y = theme::SPACE_4;
+            form_field(ui, &t!("device.chains_name"), |ui| {
+                widgets::text_field(ui, &mut name, "", ui.available_width());
+            });
+            ui.columns(2, |cols| {
+                form_field(&mut cols[0], &t!("device.chains_type"), |ui| {
+                    let options: Vec<(String, String)> = TOPOLOGY_CHOICES
                         .iter()
-                        .map(|(ctor, _)| topology_label(&ctor()))
+                        .enumerate()
+                        .map(|(i, (ctor, _))| (i.to_string(), topology_label(&ctor())))
                         .collect();
-                    if let Some(i) = widgets::combo_indexed(
+                    if let Some(i) = widgets::combo_picker_full(
                         ui,
                         ("ch_topo_cb", dev_id, &channel.id),
-                        &labels,
-                        topo_idx,
-                    ) {
+                        &options,
+                        &topo_idx.to_string(),
+                        None,
+                    )
+                    .and_then(|v| v.parse().ok())
+                    {
                         topo_idx = i;
+                        let d = divisor_for_idx(i);
+                        if let Ok(n) = leds.trim().parse::<u32>() {
+                            leds = n.max(d).div_ceil(d).saturating_mul(d).to_string();
+                        }
                     }
                 });
-
-                // Snap LED count when topology divisor changed
-                let new_divisor = divisor_for_idx(topo_idx);
-                if new_divisor != prev_divisor && new_divisor > 0 {
-                    leds = leds.max(new_divisor).div_ceil(new_divisor) * new_divisor;
-                }
-
-                ui.add_space(theme::SPACE_5);
-
-                // LED count stepper
-                ui.horizontal(|ui| {
-                    ui.label(
-                        egui::RichText::new(t!("device.chains_leds"))
-                            .font(theme::body_sm())
-                            .color(theme::TEXT_MUT),
-                    );
-                    ui.add_space(theme::SPACE_4);
-                    led_stepper(ui, &mut leds, new_divisor, remaining, dev_id, &channel.id);
+                form_field(&mut cols[1], &t!("device.chains_leds"), |ui| {
+                    widgets::text_field(ui, &mut leds, "", ui.available_width());
                 });
-
-                ui.add_space(theme::SPACE_7);
-
-                // Cancel (left) / Add (right)
-                ui.horizontal(|ui| {
-                    let can_add = !name.trim().is_empty() && leds > 0 && leds <= remaining;
+            });
+            let parsed = parse_leds(&leds, divisor_for_idx(topo_idx), remaining);
+            let can_add = !name.trim().is_empty() && parsed.is_some();
+            ui.allocate_ui_with_layout(
+                Vec2::new(ui.available_width(), 0.0),
+                egui::Layout::right_to_left(egui::Align::Center),
+                |ui| {
+                    ui.spacing_mut().item_spacing.x = theme::SPACE_3;
+                    if widgets::button_enabled(
+                        ui,
+                        &t!("device.chains_add"),
+                        widgets::ButtonKind::Primary,
+                        Vec2::new(48.0, 30.0),
+                        can_add,
+                    ) {
+                        if let Some(led_count) = parsed {
+                            crate::runtime::ipc::send(
+                                ctx.cmd,
+                                DaemonCommand::LightingAddSegment {
+                                    id: dev_id.to_string(),
+                                    channel_id: channel.id.clone(),
+                                    name: name.trim().to_string(),
+                                    led_count,
+                                    topology: topology_from_idx(topo_idx),
+                                },
+                            );
+                        }
+                        ui.ctx().data_mut(|d| d.insert_temp(open_key, false));
+                    }
                     if widgets::button(
                         ui,
                         &t!("device.chains_cancel"),
                         widgets::ButtonKind::Ghost,
-                        Vec2::new(72.0, 32.0),
+                        Vec2::new(60.0, 30.0),
                     )
                     .clicked()
                     {
                         ui.ctx().data_mut(|d| d.insert_temp(open_key, false));
                     }
-                    ui.add_space(theme::SPACE_4);
-                    if widgets::button(
-                        ui,
-                        &t!("device.chains_add"),
-                        widgets::ButtonKind::Primary,
-                        Vec2::new(72.0, 32.0),
-                    )
-                    .clicked()
-                        && can_add
-                    {
-                        crate::runtime::ipc::send(
-                            ctx.cmd,
-                            halod_shared::commands::DaemonCommand::LightingAddSegment {
-                                id: dev_id.to_string(),
-                                channel_id: channel.id.clone(),
-                                name: name.trim().to_string(),
-                                led_count: leds,
-                                topology: topology_from_idx(topo_idx),
-                            },
-                        );
-                        ui.ctx().data_mut(|d| d.insert_temp(open_key, false));
-                    }
-                });
-            });
-
-        // Persist form state
-        ui.ctx().data_mut(|d| {
-            d.insert_temp(name_key, name);
-            d.insert_temp(topo_key, topo_idx);
-            d.insert_temp(leds_key, leds);
+                },
+            );
         });
-    }
+
+    ui.ctx().data_mut(|d| {
+        d.insert_temp(name_key, name);
+        d.insert_temp(topo_key, topo_idx);
+        d.insert_temp(leds_key, leds);
+    });
 }
 
-/// − N + stepper drawn inline without egui layout allocation.
-fn led_stepper(
-    ui: &mut egui::Ui,
-    leds: &mut u32,
-    divisor: u32,
-    max: u32,
-    dev_id: &str,
-    channel_id: &str,
-) {
-    let (frame, _) = ui.allocate_exact_size(Vec2::new(110.0, 30.0), Sense::hover());
-    let p = ui.painter();
-    p.rect_stroke(
-        frame,
-        8.0,
-        Stroke::new(1.0, theme::hex(0x222b3a)),
-        egui::StrokeKind::Middle,
-    );
-
-    let btn_w = 28.0;
-    let dec_rect = Rect::from_min_size(frame.min, Vec2::new(btn_w, frame.height()));
-    let inc_rect = Rect::from_min_size(
-        Pos2::new(frame.right() - btn_w, frame.top()),
-        Vec2::new(btn_w, frame.height()),
-    );
-
-    let dec_id = egui::Id::new(("ch_dec", dev_id, channel_id));
-    let inc_id = egui::Id::new(("ch_inc", dev_id, channel_id));
-    let dec_resp = ui.interact(dec_rect, dec_id, Sense::click());
-    let inc_resp = ui.interact(inc_rect, inc_id, Sense::click());
-
-    if dec_resp.hovered() {
-        ui.ctx().set_cursor_icon(egui::CursorIcon::PointingHand);
-    }
-    if inc_resp.hovered() {
-        ui.ctx().set_cursor_icon(egui::CursorIcon::PointingHand);
-    }
-
-    let t_dec = ui
-        .ctx()
-        .animate_bool_with_time(dec_id, dec_resp.hovered(), 0.1);
-    let t_inc = ui
-        .ctx()
-        .animate_bool_with_time(inc_id, inc_resp.hovered(), 0.1);
-
-    p.rect_filled(dec_rect, 8.0, theme::a(Color32::WHITE, 0.05 * t_dec));
-    p.text(
-        dec_rect.center(),
-        Align2::CENTER_CENTER,
-        "−",
-        theme::body(15.0),
-        theme::lerp_color(theme::TEXT_MUT, theme::TEXT, t_dec),
-    );
-    p.rect_filled(inc_rect, 8.0, theme::a(Color32::WHITE, 0.05 * t_inc));
-    p.text(
-        inc_rect.center(),
-        Align2::CENTER_CENTER,
-        "+",
-        theme::body(15.0),
-        theme::lerp_color(theme::TEXT_MUT, theme::TEXT, t_inc),
-    );
-
-    let center = Rect::from_min_max(
-        Pos2::new(dec_rect.right(), frame.top()),
-        Pos2::new(inc_rect.left(), frame.bottom()),
-    );
-    p.text(
-        center.center(),
-        Align2::CENTER_CENTER,
-        leds.to_string(),
-        theme::mono(12.0),
-        theme::TEXT_BRIGHT,
-    );
-
-    if dec_resp.clicked() && *leds > divisor {
-        *leds = leds.saturating_sub(divisor).max(divisor);
-    }
-    if inc_resp.clicked() {
-        let next = *leds + divisor;
-        if next <= max {
-            *leds = next;
-        }
-    }
+fn form_field(ui: &mut egui::Ui, label: &str, body: impl FnOnce(&mut egui::Ui)) {
+    ui.vertical(|ui| {
+        ui.spacing_mut().item_spacing.y = theme::SPACE_2;
+        ui.label(
+            egui::RichText::new(label)
+                .font(theme::body_sm())
+                .color(theme::TEXT_DIM),
+        );
+        body(ui);
+    });
 }
 
 #[cfg(test)]
@@ -875,19 +559,13 @@ mod tests {
     }
 
     #[test]
-    fn badge_label_derives_short_names() {
-        assert_eq!(badge_label("Header 1"), "H1");
-        assert_eq!(badge_label("Channel 2"), "C2");
-        assert_eq!(badge_label("A"), "A");
-        assert_eq!(badge_label("Ch"), "CH");
-    }
-
-    #[test]
-    fn divisor_snaps_led_count_up() {
-        let div = divisor_for_idx(3); // Rings ×3
-        assert_eq!(div, 3);
-        let snapped = 10u32.div_ceil(div) * div;
-        assert_eq!(snapped, 12);
+    fn typed_led_count_must_fit_header_and_topology() {
+        assert_eq!(parse_leds(" 30 ", 1, 120), Some(30));
+        assert_eq!(parse_leds("30", 3, 120), Some(30));
+        assert_eq!(parse_leds("31", 3, 120), None);
+        assert_eq!(parse_leds("121", 1, 120), None);
+        assert_eq!(parse_leds("0", 1, 120), None);
+        assert_eq!(parse_leds("abc", 1, 120), None);
     }
 
     #[test]
@@ -982,7 +660,7 @@ mod tests {
                 ..Default::default()
             };
             for _ in 0..3 {
-                let _ = ctx.run_ui(input.clone(), |ui| {
+                let _ = crate::ui::run_headless(&ctx, input.clone(), |ui| {
                     egui::CentralPanel::default().show(ui, |ui| {
                         let tab = TabCtx {
                             state: &state,

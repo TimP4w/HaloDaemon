@@ -4,16 +4,22 @@
 use egui::{Align2, Color32, Pos2, Rect, Response, Sense, Stroke, Vec2};
 
 use crate::ui::theme;
-use crate::ui::{icons, icons::Icon};
 
 /// Height of a pill/chip control, shared so inline labels beside them can match.
 pub const PILL_H: f32 = 31.0;
 
-/// A rounded pill button; returns whether it was clicked. `active` paints the
-/// cyan-filled selected state.
+/// A compact option tile sized to its label; returns whether it was clicked.
 #[must_use]
 pub fn pill(ui: &mut egui::Ui, label: &str, active: bool) -> bool {
-    pill_styled(ui, label, active, theme::CYAN, theme::INNER_BG)
+    let w = ui
+        .painter()
+        .layout_no_wrap(label.to_string(), theme::body_md(), theme::TEXT)
+        .size()
+        .x
+        + 24.0;
+    let (_, resp) = ui.allocate_exact_size(Vec2::new(w, PILL_H), Sense::click());
+    super::segmented::paint_option(ui, &resp, label, active, Align2::CENTER_CENTER);
+    resp.clicked()
 }
 
 /// Wrapping pill/chip strip with the standard 7 px wrap spacing — the layout
@@ -76,101 +82,9 @@ pub fn chip_closable(ui: &mut egui::Ui, label: &str) -> (bool, bool) {
     (clicked_at(&body), clicked_at(&close))
 }
 
-/// Like [`pill`] but with caller-chosen `active_fill` / `inactive_fill` colors,
-/// so the Home dashboard and the global pages can share one implementation
-/// instead of hand-rolling near-identical pills.
-#[must_use]
-pub fn pill_styled(
-    ui: &mut egui::Ui,
-    label: &str,
-    active: bool,
-    active_fill: Color32,
-    inactive_fill: Color32,
-) -> bool {
-    let galley = ui.painter().layout_no_wrap(
-        label.to_string(),
-        theme::body_md(),
-        if active {
-            theme::hex(0x0a0d13)
-        } else {
-            theme::TEXT_DIM
-        },
-    );
-    let w = galley.size().x + 24.0;
-    let (rect, resp) = ui.allocate_exact_size(Vec2::new(w, PILL_H), Sense::click());
-    let (bg, border) = if active {
-        (active_fill, active_fill)
-    } else {
-        (inactive_fill, theme::BORDER)
-    };
-    ui.painter().rect_filled(rect, 8.0, bg);
-    ui.painter().rect_stroke(
-        rect,
-        8.0,
-        Stroke::new(1.0, border),
-        egui::StrokeKind::Middle,
-    );
-    ui.painter().galley(
-        Pos2::new(
-            rect.center().x - galley.size().x / 2.0,
-            rect.center().y - galley.size().y / 2.0,
-        ),
-        galley,
-        Color32::WHITE,
-    );
-    if resp.hovered() {
-        ui.ctx().set_cursor_icon(egui::CursorIcon::PointingHand);
-    }
-    resp.clicked()
-}
-
-/// A full-width [`pill`] row with a left-aligned label, for vertical selector
-/// lists (e.g. the equalizer preset column). Fills `ui.available_width()`.
-#[must_use]
-pub fn pill_row(ui: &mut egui::Ui, label: &str, active: bool) -> bool {
-    let galley = ui.painter().layout_no_wrap(
-        label.to_string(),
-        theme::body_md(),
-        if active {
-            theme::hex(0x0a0d13)
-        } else {
-            theme::TEXT_DIM
-        },
-    );
-    let (rect, resp) =
-        ui.allocate_exact_size(Vec2::new(ui.available_width(), PILL_H), Sense::click());
-    let (bg, border) = if active {
-        (theme::CYAN, theme::CYAN)
-    } else {
-        (theme::INNER_BG, theme::BORDER)
-    };
-    ui.painter().rect_filled(rect, 8.0, bg);
-    ui.painter().rect_stroke(
-        rect,
-        8.0,
-        Stroke::new(1.0, border),
-        egui::StrokeKind::Middle,
-    );
-    ui.painter().galley(
-        Pos2::new(rect.min.x + 12.0, rect.center().y - galley.size().y / 2.0),
-        galley,
-        Color32::WHITE,
-    );
-    if resp.hovered() {
-        ui.ctx().set_cursor_icon(egui::CursorIcon::PointingHand);
-    }
-    resp.clicked()
-}
-
 /// A static, non-interactive capability chip.
 pub fn chip(ui: &mut egui::Ui, label: &str) {
-    chip_impl(
-        ui,
-        label,
-        theme::TEXT_DIM,
-        theme::hex(0x181d29),
-        theme::BORDER,
-    );
+    tag(ui, label, TagTone::Neutral);
 }
 
 /// A static chip tinted with an accent color (e.g. assigned-zone chips on the
@@ -185,39 +99,6 @@ pub fn chip_colored(ui: &mut egui::Ui, label: &str, color: Color32) -> Response 
         color.gamma_multiply(0.14),
         color.gamma_multiply(0.3),
     )
-}
-
-/// A static chip with a solid accent fill and a leading bundled icon. Used for
-/// high-confidence identity/status badges that should carry primary emphasis.
-#[must_use]
-pub fn chip_filled_icon(ui: &mut egui::Ui, label: &str, fill: Color32, icon: Icon) -> Response {
-    let text = Color32::WHITE;
-    let galley = ui
-        .painter()
-        .layout_no_wrap(label.to_string(), theme::caption(), text);
-    const ICON_SIZE: f32 = 14.0;
-    const GAP: f32 = 5.0;
-    const H_PAD: f32 = 9.0;
-    let size = Vec2::new(
-        H_PAD * 2.0 + ICON_SIZE + GAP + galley.size().x,
-        (galley.size().y + 10.0).max(24.0),
-    );
-    let (rect, response) = ui.allocate_exact_size(size, Sense::hover());
-    ui.painter().rect_filled(rect, theme::RADIUS_SM, fill);
-    let icon_rect = Rect::from_center_size(
-        Pos2::new(rect.left() + H_PAD + ICON_SIZE / 2.0, rect.center().y),
-        Vec2::splat(ICON_SIZE),
-    );
-    icons::draw(ui, icon_rect, icon, text);
-    ui.painter().galley(
-        Pos2::new(
-            icon_rect.right() + GAP,
-            rect.center().y - galley.size().y / 2.0,
-        ),
-        galley,
-        text,
-    );
-    response
 }
 
 fn chip_impl(
@@ -278,7 +159,7 @@ pub fn context_menu_item(ui: &mut egui::Ui, label: &str, color: Color32) -> Resp
         ui.allocate_exact_size(Vec2::new(ui.available_width(), 30.0), Sense::click());
     if resp.hovered() {
         ui.painter()
-            .rect_filled(rect, theme::RADIUS_SM, theme::hex(0x1a2230));
+            .rect_filled(rect, theme::RADIUS_SM, theme::ROW_ACTIVE);
         ui.ctx().set_cursor_icon(egui::CursorIcon::PointingHand);
     }
     ui.painter().text(
@@ -305,4 +186,59 @@ mod tests {
         assert_eq!(body.max.x, close.min.x);
         assert_eq!(body.width() + close.width(), rect.width());
     }
+}
+
+/// Semantic tone of a [`paint_tag`].
+#[derive(Clone, Copy, PartialEq, Eq, Debug)]
+pub enum TagTone {
+    Neutral,
+    Accent,
+    Warn,
+    Danger,
+    Ok,
+}
+
+fn tag_colors(tone: TagTone) -> (Color32, Color32, Color32) {
+    let tinted = |c: Color32| (theme::a(c, 0.12), theme::a(c, 0.35), c);
+    match tone {
+        TagTone::Neutral => (Color32::TRANSPARENT, theme::BORDER_INNER, theme::TEXT_DIM),
+        TagTone::Accent => tinted(theme::CYAN),
+        TagTone::Warn => tinted(theme::STAT_AMBER),
+        TagTone::Danger => tinted(theme::OFFLINE_TEXT),
+        TagTone::Ok => tinted(theme::TRAFFIC_GREEN),
+    }
+}
+
+/// A small status tag whose right edge sits at `right_center`. Returns its rect.
+pub fn paint_tag(p: &egui::Painter, right_center: Pos2, label: &str, tone: TagTone) -> Rect {
+    let (fill, stroke, ink) = tag_colors(tone);
+    let galley = p.layout_no_wrap(label.to_owned(), theme::value_sm(), ink);
+    let rect = Rect::from_min_max(
+        Pos2::new(
+            right_center.x - galley.size().x - 16.0,
+            right_center.y - 12.0,
+        ),
+        Pos2::new(right_center.x, right_center.y + 12.0),
+    );
+    p.rect_filled(rect, 5.0, fill);
+    p.rect_stroke(
+        rect,
+        5.0,
+        Stroke::new(1.0, stroke),
+        egui::StrokeKind::Inside,
+    );
+    p.galley(rect.center() - galley.size() / 2.0, galley, ink);
+    rect
+}
+
+/// A [`paint_tag`] laid out in the current flow.
+pub fn tag(ui: &mut egui::Ui, label: &str, tone: TagTone) {
+    let w = ui
+        .painter()
+        .layout_no_wrap(label.to_owned(), theme::value_sm(), theme::TEXT)
+        .size()
+        .x
+        + 16.0;
+    let (rect, _) = ui.allocate_exact_size(Vec2::new(w, 24.0), Sense::hover());
+    paint_tag(ui.painter(), rect.right_center(), label, tone);
 }

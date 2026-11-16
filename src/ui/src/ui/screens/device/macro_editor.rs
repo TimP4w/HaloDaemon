@@ -29,9 +29,9 @@ pub const DELAY_MIN_MS: u32 = 10;
 const PX_PER_MS: f32 = 0.08;
 const DELAY_PILL_MIN_W: f32 = 64.0;
 const DELAY_PILL_MAX_W: f32 = 220.0;
-const PILL_H: f32 = 26.0;
-/// Trailing "×" zone width on every pill.
-const CLOSE_W: f32 = 16.0;
+const CHIP_H: f32 = 28.0;
+/// Trailing "×" zone width, shown on hover.
+const CLOSE_W: f32 = 18.0;
 /// Right-edge resize handle width on delay pills.
 const RESIZE_W: f32 = 10.0;
 
@@ -51,12 +51,11 @@ pub struct DragState {
     pub from: usize,
 }
 
-/// Armed one-shot key capture (palette tiles); doubles as the open
-/// mouse-picker state (`up` = the ↑ tile opened it).
+/// Armed one-shot key capture for Insert › Key; doubles as the open
+/// Insert › Mouse button-picker state.
 pub struct CaptureState {
     pub cid: u16,
     pub shifted: bool,
-    pub up: bool,
 }
 
 // ── Pure model ───────────────────────────────────────────────────────────────
@@ -131,13 +130,18 @@ fn atom_label(step: &MacroStep) -> String {
     }
 }
 
-fn atom_color(kind: &MacroAtom) -> Color32 {
+/// `(fill, border, ink)` for a step chip: presses filled, releases outlined.
+fn atom_style(kind: &MacroAtom) -> (Color32, Color32, Color32) {
     match kind {
-        MacroAtom::KeyDown { .. } => theme::CYAN,
-        MacroAtom::KeyUp { .. } => a(theme::CYAN, 0.55),
-        MacroAtom::MouseDown { .. } => theme::STAT_AMBER,
-        MacroAtom::MouseUp { .. } => a(theme::STAT_AMBER, 0.55),
-        MacroAtom::Delay => theme::STAT_PURPLE,
+        MacroAtom::KeyDown { .. } => (
+            theme::SELECTED_BG,
+            theme::ACCENT_BORDER,
+            theme::SELECTED_TEXT,
+        ),
+        MacroAtom::KeyUp { .. } => (theme::INNER_BG, theme::ACCENT_BORDER, theme::ACCENT_INK),
+        MacroAtom::MouseDown { .. } => (theme::OK_FILL, theme::OK_BORDER, theme::ONLINE_TEXT),
+        MacroAtom::MouseUp { .. } => (theme::INNER_BG, theme::OK_BORDER, theme::ONLINE_TEXT),
+        MacroAtom::Delay => (theme::RAISED_BG, theme::BORDER_INNER, theme::TEXT_DIM),
     }
 }
 
@@ -196,7 +200,7 @@ fn push_atom(steps: &mut Vec<MacroStep>, last_event: &mut Option<f64>, time: f64
 /// modifier-dependent character it produces — e.g. on a Swiss keyboard Shift+'
 /// yields logical `Questionmark` (unmapped, dropped) but physical `Quote`.
 /// Falls back to the logical key when winit gives no physical mapping.
-fn key_code(key: egui::Key, physical: Option<egui::Key>) -> Option<u32> {
+pub(super) fn key_code(key: egui::Key, physical: Option<egui::Key>) -> Option<u32> {
     physical
         .and_then(|k| keycodes::native_code(k.name()))
         .or_else(|| keycodes::native_code(key.name()))
@@ -392,16 +396,21 @@ pub(super) fn show(
     }
     let shifted = layer == Layer::Shifted;
     let mine = |c: u16, s: bool| c == cid && s == shifted;
-
-    header_row(ui, ctx, st, id, cid, layer, &steps);
     let recording = st
         .keys
         .macro_rec
         .as_ref()
         .is_some_and(|r| mine(r.cid, r.shifted));
+    let dragging = st
+        .keys
+        .macro_drag
+        .as_ref()
+        .is_some_and(|d| mine(d.cid, d.shifted));
 
-    ui.add_space(theme::SPACE_4);
-    let (rects, remove, resize_to) = pill_strip(ui, st, cid, shifted, &steps, recording);
+    header_row(ui, ctx, st, id, cid, layer, &steps, recording);
+    ui.add_space(theme::SPACE_6);
+    let (strip, rects, remove, resize_to) =
+        timeline(ui, st, cid, shifted, &steps, recording, dragging);
 
     if let Some(i) = remove {
         let mut s = steps.clone();
@@ -420,12 +429,7 @@ pub(super) fn show(
 
     // Reorder drag: ghost label at the pointer + insertion caret, reorder on
     // release (mirrors the LCD editor's library-drag pattern).
-    if st
-        .keys
-        .macro_drag
-        .as_ref()
-        .is_some_and(|d| mine(d.cid, d.shifted))
-    {
+    if dragging {
         st.last_edit = ctx.time;
         let from = st.keys.macro_drag.as_ref().unwrap().from;
         if let Some(pos) = ui.input(|i| i.pointer.hover_pos()) {
@@ -439,8 +443,8 @@ pub(super) fn show(
                     pos + Vec2::new(12.0, -12.0),
                     Align2::LEFT_CENTER,
                     atom_label(step),
-                    theme::body_sm(),
-                    atom_color(&step.kind),
+                    theme::body_md(),
+                    atom_style(&step.kind).2,
                 );
             }
         }
@@ -464,10 +468,10 @@ pub(super) fn show(
     }
 
     if recording {
-        record_ui(ui, ctx, st, id, cid, layer, &mut steps);
-    } else {
-        palette_row(ui, ctx, st, id, cid, layer, &steps);
+        record_ui(ui, ctx, st, id, cid, layer, strip, &mut steps);
     }
+    ui.add_space(theme::SPACE_6);
+    insert_row(ui, ctx, st, id, cid, layer, &steps, recording);
 
     if steps.len() >= MACRO_MAX_STEPS {
         hint(ui, &t!("misc.macro_full"), theme::STAT_AMBER);
@@ -480,11 +484,12 @@ fn hint(ui: &mut egui::Ui, text: &str, color: Color32) {
     ui.add_space(theme::SPACE_3);
     ui.label(
         egui::RichText::new(text)
-            .font(theme::caption())
+            .font(theme::body_sm())
             .color(color),
     );
 }
 
+#[allow(clippy::too_many_arguments)]
 fn header_row(
     ui: &mut egui::Ui,
     ctx: &TabCtx,
@@ -493,56 +498,60 @@ fn header_row(
     cid: u16,
     layer: Layer,
     steps: &[MacroStep],
+    recording: bool,
 ) {
     let shifted = layer == Layer::Shifted;
-    let recording = st
-        .keys
-        .macro_rec
-        .as_ref()
-        .is_some_and(|r| r.cid == cid && r.shifted == shifted);
-    widgets::pill_strip(ui, |ui| {
-        let rec_label = if recording {
-            t!("misc.macro_stop")
-        } else {
-            t!("misc.macro_record")
-        };
-        if widgets::pill_styled(
-            ui,
-            &rec_label,
-            recording,
-            theme::TRAFFIC_RED,
-            theme::INNER_BG,
-        ) {
-            if recording {
-                stop_recording(ctx, st, id);
+    let size = Vec2::new(0.0, 30.0);
+    egui::Sides::new().height(30.0).show(
+        ui,
+        |ui| widgets::section_label(ui, &t!("misc.macro_timeline")),
+        |ui| {
+            ui.spacing_mut().item_spacing.x = theme::SPACE_3;
+            let rec_label = if recording {
+                t!("misc.macro_stop")
             } else {
-                stop_recording(ctx, st, id); // commit any other layer's session
-                st.keys.macro_capture = None;
-                st.keys.macro_mouse_menu = None;
-                st.keys.macro_rec = Some(RecState {
-                    cid,
-                    shifted,
-                    last_event: None,
-                });
+                t!("misc.macro_record")
+            };
+            if widgets::button(ui, &rec_label, widgets::ButtonKind::Danger, size).clicked() {
+                stop_recording(ctx, st, id);
+                if !recording {
+                    st.keys.macro_capture = None;
+                    st.keys.macro_mouse_menu = None;
+                    st.keys.macro_rec = Some(RecState {
+                        cid,
+                        shifted,
+                        last_event: None,
+                    });
+                }
             }
-        }
-        if !steps.is_empty() && !recording {
-            if widgets::pill(ui, &t!("misc.macro_play"), false) {
-                crate::runtime::ipc::send(
-                    ctx.cmd,
-                    halod_shared::commands::DaemonCommand::PlayMacro {
-                        steps: steps.to_vec(),
-                    },
-                );
+            if steps.is_empty() || recording {
+                return;
             }
-            if widgets::pill(ui, &t!("misc.macro_clear"), false) {
+            if widgets::button(
+                ui,
+                &t!("misc.macro_clear"),
+                widgets::ButtonKind::Ghost,
+                size,
+            )
+            .clicked()
+            {
                 // Empty macros are deliberately invalid at the daemon
                 // boundary. Clearing means restoring this layer's native
                 // action, while preserving the other layer.
                 commit_action(ctx, st, id, cid, layer, ButtonAction::Native, true);
             }
-        }
-    });
+            if widgets::button(ui, &t!("misc.macro_play"), widgets::ButtonKind::Ghost, size)
+                .clicked()
+            {
+                crate::runtime::ipc::send(
+                    ctx.cmd,
+                    DaemonCommand::PlayMacro {
+                        steps: steps.to_vec(),
+                    },
+                );
+            }
+        },
+    );
     let msg = if recording {
         t!("misc.macro_hint_recording")
     } else if steps.is_empty() {
@@ -550,144 +559,178 @@ fn header_row(
     } else {
         t!("misc.macro_hint_playback")
     };
-    hint(ui, &msg, theme::TEXT_FAINT);
+    hint(ui, &msg, theme::TEXT_MUT);
 }
 
-/// Render the pill strip; returns each pill's rect (for drop-index math) plus
-/// any remove click / delay resize performed this frame.
+/// Render the step timeline; returns the strip rect (the mouse capture zone
+/// while recording), each chip's rect (for drop-index math) plus any remove
+/// click / delay resize performed this frame.
 #[allow(clippy::type_complexity)]
-fn pill_strip(
+fn timeline(
     ui: &mut egui::Ui,
     st: &mut DeviceUi,
     cid: u16,
     shifted: bool,
     steps: &[MacroStep],
     recording: bool,
-) -> (Vec<Rect>, Option<usize>, Option<(usize, u32)>) {
+    dragging: bool,
+) -> (Rect, Vec<Rect>, Option<usize>, Option<(usize, u32)>) {
     let mut rects = Vec::with_capacity(steps.len());
     let mut remove = None;
     let mut resize_to = None;
-    ui.horizontal_wrapped(|ui| {
-        ui.spacing_mut().item_spacing = egui::vec2(6.0, 6.0);
-        for (i, step) in steps.iter().enumerate() {
-            let is_delay = matches!(step.kind, MacroAtom::Delay);
-            let color = atom_color(&step.kind);
-            let label = atom_label(step);
-            let galley = ui.painter().layout_no_wrap(label, theme::body_sm(), color);
-            let w = if is_delay {
-                delay_pill_width(step.delay_after_ms)
-                    .max(galley.size().x + 10.0 + CLOSE_W + RESIZE_W)
-            } else {
-                galley.size().x + 14.0 + CLOSE_W
-            };
-            let sense = if recording {
-                Sense::hover()
-            } else {
-                Sense::click_and_drag()
-            };
-            let (rect, resp) = ui.allocate_exact_size(Vec2::new(w, PILL_H), sense);
-            rects.push(rect);
-
-            let handle_w = if is_delay { RESIZE_W } else { 0.0 };
-            let handle = Rect::from_min_max(Pos2::new(rect.max.x - handle_w, rect.min.y), rect.max);
-            let close = Rect::from_min_max(
-                Pos2::new(handle.min.x - CLOSE_W, rect.min.y),
-                Pos2::new(handle.min.x, rect.max.y),
-            );
-
-            // paint
-            let p = ui.painter();
-            let fill = if is_delay {
-                a(theme::STAT_PURPLE, 0.10)
-            } else {
-                theme::INNER_BG
-            };
-            p.rect_filled(rect, theme::RADIUS_SM, fill);
-            p.rect_stroke(
-                rect,
-                theme::RADIUS_SM,
-                Stroke::new(1.0, a(color, 0.55)),
-                egui::StrokeKind::Middle,
-            );
-            p.galley(
-                Pos2::new(rect.min.x + 7.0, rect.center().y - galley.size().y / 2.0),
-                galley,
-                color,
-            );
-            let close_hovered = resp.hover_pos().is_some_and(|hp| close.contains(hp));
-            p.text(
-                close.center(),
-                Align2::CENTER_CENTER,
-                "×",
-                theme::body_md(),
-                if close_hovered {
-                    theme::TRAFFIC_RED
-                } else {
-                    theme::TEXT_FAINT
-                },
-            );
-            if is_delay {
-                // grip: two short vertical lines on the resize handle
-                for dx in [-4.0, -1.5] {
-                    p.line_segment(
-                        [
-                            Pos2::new(rect.max.x + dx, rect.min.y + 8.0),
-                            Pos2::new(rect.max.x + dx, rect.max.y - 8.0),
-                        ],
-                        Stroke::new(1.0, a(color, 0.8)),
+    let border = if recording {
+        theme::OFFLINE
+    } else {
+        theme::BORDER
+    };
+    let frame = egui::Frame::NONE
+        .fill(theme::INNER_BG)
+        .stroke(Stroke::new(1.0, border))
+        .corner_radius(theme::RADIUS_SM)
+        .inner_margin(theme::PAD_WELL)
+        .show(ui, |ui| {
+            ui.set_width(ui.available_width());
+            ui.horizontal_wrapped(|ui| {
+                ui.spacing_mut().item_spacing = egui::vec2(6.0, 6.0);
+                for (i, step) in steps.iter().enumerate() {
+                    let (rect, removed, resized) = chip(ui, st, cid, shifted, i, step, recording);
+                    rects.push(rect);
+                    remove = remove.or(removed.then_some(i));
+                    resize_to = resize_to.or(resized.map(|ms| (i, ms)));
+                }
+                let (caret, _) = ui.allocate_exact_size(Vec2::new(2.0, CHIP_H), Sense::hover());
+                if !dragging {
+                    ui.painter().rect_filled(
+                        Rect::from_center_size(caret.center(), Vec2::new(2.0, 22.0)),
+                        1.0,
+                        theme::CYAN,
                     );
                 }
-            }
+                if recording && steps.is_empty() {
+                    ui.label(
+                        egui::RichText::new(t!("misc.macro_click_to_record"))
+                            .font(theme::body_md())
+                            .color(theme::TEXT_MUT),
+                    );
+                }
+            });
+        });
+    (frame.response.rect, rects, remove, resize_to)
+}
 
-            if recording {
-                continue;
-            }
-            let in_handle = |hp: Option<Pos2>| is_delay && hp.is_some_and(|hp| handle.contains(hp));
-            if resp.hovered() {
-                if in_handle(resp.hover_pos()) {
-                    ui.ctx().set_cursor_icon(egui::CursorIcon::ResizeHorizontal);
-                } else if close_hovered {
-                    ui.ctx().set_cursor_icon(egui::CursorIcon::PointingHand);
-                } else {
-                    ui.ctx().set_cursor_icon(egui::CursorIcon::Grab);
-                }
-            }
-            if resp.clicked()
-                && resp
-                    .interact_pointer_pos()
-                    .is_some_and(|hp| close.contains(hp))
-            {
-                remove = Some(i);
-            }
-            if resp.drag_started() {
-                let start = resp.interact_pointer_pos();
-                let state = DragState {
-                    cid,
-                    shifted,
-                    from: i,
-                };
-                if in_handle(start) {
-                    st.keys.macro_resize = Some(state);
-                } else if !start.is_some_and(|hp| close.contains(hp)) {
-                    st.keys.macro_drag = Some(state);
-                }
-            }
-            let resizing_this = st
-                .keys
-                .macro_resize
-                .as_ref()
-                .is_some_and(|d| d.cid == cid && d.shifted == shifted && d.from == i);
-            if resizing_this {
-                if resp.dragged() && resp.drag_delta().x != 0.0 {
-                    resize_to = Some((i, resize_delay(step.delay_after_ms, resp.drag_delta().x)));
-                }
-                if resp.drag_stopped() {
-                    st.keys.macro_resize = None;
-                }
+/// One step chip. Returns its rect, whether its × was clicked and a new delay
+/// from a resize drag.
+fn chip(
+    ui: &mut egui::Ui,
+    st: &mut DeviceUi,
+    cid: u16,
+    shifted: bool,
+    i: usize,
+    step: &MacroStep,
+    recording: bool,
+) -> (Rect, bool, Option<u32>) {
+    let is_delay = matches!(step.kind, MacroAtom::Delay);
+    let (fill, border, color) = atom_style(&step.kind);
+    let galley = ui
+        .painter()
+        .layout_no_wrap(atom_label(step), theme::body_md(), color);
+    let natural = galley.size().x + 20.0;
+    let w = if is_delay {
+        delay_pill_width(step.delay_after_ms).max(natural + RESIZE_W)
+    } else {
+        natural
+    };
+    let sense = if recording {
+        Sense::hover()
+    } else {
+        Sense::click_and_drag()
+    };
+    let (rect, resp) = ui.allocate_exact_size(Vec2::new(w, CHIP_H), sense);
+
+    let handle_w = if is_delay { RESIZE_W } else { 0.0 };
+    let handle = Rect::from_min_max(Pos2::new(rect.max.x - handle_w, rect.min.y), rect.max);
+    let close = Rect::from_min_max(
+        Pos2::new(handle.min.x - CLOSE_W, rect.min.y),
+        Pos2::new(handle.min.x, rect.max.y),
+    );
+    let hovered = resp.hovered() && !recording;
+    let close_hovered = hovered && resp.hover_pos().is_some_and(|hp| close.contains(hp));
+
+    let p = ui.painter();
+    theme::paint_surface(p, rect, theme::RADIUS_XS + 2.0, fill, border);
+    p.galley(
+        Pos2::new(rect.min.x + 10.0, rect.center().y - galley.size().y / 2.0),
+        galley,
+        color,
+    );
+    if hovered {
+        p.rect_filled(close.shrink(3.0), theme::RADIUS_XS, fill);
+        p.text(
+            close.center(),
+            Align2::CENTER_CENTER,
+            "×",
+            theme::body_md(),
+            if close_hovered { theme::TEXT } else { color },
+        );
+        if is_delay {
+            for dx in [-4.0, -1.5] {
+                p.line_segment(
+                    [
+                        Pos2::new(rect.max.x + dx, rect.min.y + 8.0),
+                        Pos2::new(rect.max.x + dx, rect.max.y - 8.0),
+                    ],
+                    Stroke::new(1.0, a(color, 0.6)),
+                );
             }
         }
-    });
-    (rects, remove, resize_to)
+    }
+    if recording {
+        return (rect, false, None);
+    }
+
+    let in_handle = |hp: Option<Pos2>| is_delay && hp.is_some_and(|hp| handle.contains(hp));
+    if resp.hovered() {
+        let icon = if in_handle(resp.hover_pos()) {
+            egui::CursorIcon::ResizeHorizontal
+        } else if close_hovered {
+            egui::CursorIcon::PointingHand
+        } else {
+            egui::CursorIcon::Grab
+        };
+        ui.ctx().set_cursor_icon(icon);
+    }
+    let removed = resp.clicked()
+        && resp
+            .interact_pointer_pos()
+            .is_some_and(|hp| close.contains(hp));
+    if resp.drag_started() {
+        let start = resp.interact_pointer_pos();
+        let state = DragState {
+            cid,
+            shifted,
+            from: i,
+        };
+        if in_handle(start) {
+            st.keys.macro_resize = Some(state);
+        } else if !start.is_some_and(|hp| close.contains(hp)) {
+            st.keys.macro_drag = Some(state);
+        }
+    }
+    let mut resized = None;
+    let resizing_this = st
+        .keys
+        .macro_resize
+        .as_ref()
+        .is_some_and(|d| d.cid == cid && d.shifted == shifted && d.from == i);
+    if resizing_this {
+        if resp.dragged() && resp.drag_delta().x != 0.0 {
+            resized = Some(resize_delay(step.delay_after_ms, resp.drag_delta().x));
+        }
+        if resp.drag_stopped() {
+            st.keys.macro_resize = None;
+        }
+    }
+    (rect, removed, resized)
 }
 
 /// End points of the insertion caret for `drop_index` result `idx`.
@@ -702,8 +745,10 @@ fn caret_line(rects: &[Rect], idx: usize) -> Option<[Pos2; 2]> {
 }
 
 /// Per-frame recording: hold the edit window open, keep keyboard focus (so
-/// other shortcuts stay quiet), show the mouse capture zone, and append this
-/// frame's input to the layer buffer. The commit happens on Stop.
+/// other shortcuts stay quiet) and append this frame's input to the layer
+/// buffer; mouse buttons record inside the timeline strip. The commit happens
+/// on Stop.
+#[allow(clippy::too_many_arguments)]
 fn record_ui(
     ui: &mut egui::Ui,
     ctx: &TabCtx,
@@ -711,39 +756,24 @@ fn record_ui(
     id: &str,
     cid: u16,
     layer: Layer,
+    strip: Rect,
     steps: &mut Vec<MacroStep>,
 ) {
     st.last_edit = ctx.time;
-    ui.memory_mut(|m| m.request_focus(egui::Id::new(("macro_rec_focus", cid, layer.tag()))));
-
-    ui.add_space(theme::SPACE_3);
-    let (zone, _resp) = ui.allocate_exact_size(
-        Vec2::new(ui.available_width().max(120.0), 40.0),
-        Sense::click_and_drag(), // swallow presses so they don't hit widgets below
-    );
-    let p = ui.painter();
-    p.rect_filled(zone, theme::RADIUS_SM, a(theme::STAT_AMBER, 0.06));
-    p.rect_stroke(
-        zone,
-        theme::RADIUS_SM,
-        Stroke::new(1.0, a(theme::STAT_AMBER, 0.5)),
-        egui::StrokeKind::Middle,
-    );
-    p.text(
-        zone.center(),
-        Align2::CENTER_CENTER,
-        t!("misc.macro_click_to_record"),
-        theme::body_sm(),
-        theme::STAT_AMBER,
+    ui.memory_mut(|m| m.request_focus(egui::Id::unique(("macro_rec_focus", cid, layer.tag()))));
+    // Swallow presses in the strip so they don't hit the chips below them.
+    ui.interact(
+        strip,
+        egui::Id::unique(("macro_rec_zone", cid, layer.tag())),
+        Sense::click_and_drag(),
     );
 
     let events = ui.input(|i| i.events.clone());
-    let mut rec = match st.keys.macro_rec.take() {
-        Some(r) => r,
-        None => return,
+    let Some(mut rec) = st.keys.macro_rec.take() else {
+        return;
     };
     let before = steps.len();
-    record_frame(&events, zone, ctx.time, &mut rec.last_event, steps);
+    record_frame(&events, strip, ctx.time, &mut rec.last_event, steps);
     st.keys.macro_rec = Some(rec);
     if steps.len() != before {
         layer.set(
@@ -758,7 +788,8 @@ fn record_ui(
     }
 }
 
-fn palette_row(
+#[allow(clippy::too_many_arguments)]
+fn insert_row(
     ui: &mut egui::Ui,
     ctx: &TabCtx,
     st: &mut DeviceUi,
@@ -766,34 +797,29 @@ fn palette_row(
     cid: u16,
     layer: Layer,
     steps: &[MacroStep],
+    recording: bool,
 ) {
     let shifted = layer == Layer::Shifted;
-    let append = |ctx: &TabCtx, st: &mut DeviceUi, kind: MacroAtom, ms: u32| {
-        if steps.len() >= MACRO_MAX_STEPS {
+    let append = |ctx: &TabCtx, st: &mut DeviceUi, atoms: &[(MacroAtom, u32)]| {
+        if steps.len() + atoms.len() > MACRO_MAX_STEPS {
             return;
         }
         let mut s = steps.to_vec();
-        s.push(MacroStep {
-            kind,
-            delay_after_ms: ms,
-        });
+        s.extend(atoms.iter().map(|(kind, ms)| MacroStep {
+            kind: kind.clone(),
+            delay_after_ms: *ms,
+        }));
         commit(ctx, st, id, cid, layer, s, true);
     };
 
-    ui.add_space(theme::SPACE_5);
-    widgets::caps_label(ui, &t!("misc.macro_add_step"));
-    ui.add_space(theme::SPACE_3);
-
-    // One-shot key capture armed from the palette.
-    let capture = st
+    let capturing = st
         .keys
         .macro_capture
         .as_ref()
-        .filter(|c| c.cid == cid && c.shifted == shifted)
-        .map(|c| c.up);
-    if capture.is_some() {
+        .is_some_and(|c| c.cid == cid && c.shifted == shifted);
+    if capturing {
         st.last_edit = ctx.time;
-        ui.memory_mut(|m| m.request_focus(egui::Id::new(("macro_cap_focus", cid, layer.tag()))));
+        ui.memory_mut(|m| m.request_focus(egui::Id::unique(("macro_cap_focus", cid, layer.tag()))));
         let code = ui.input(|i| {
             i.events.iter().find_map(|ev| match ev {
                 egui::Event::Key {
@@ -806,85 +832,90 @@ fn palette_row(
                 _ => None,
             })
         });
-        if let Some(code) = code {
-            let up = st.keys.macro_capture.take().unwrap().up;
-            let kind = if up {
-                MacroAtom::KeyUp { key: code }
-            } else {
-                MacroAtom::KeyDown { key: code }
-            };
-            append(ctx, st, kind, 0);
+        if let Some(key) = code {
+            st.keys.macro_capture = None;
+            append(
+                ctx,
+                st,
+                &[
+                    (MacroAtom::KeyDown { key }, 0),
+                    (MacroAtom::KeyUp { key }, 0),
+                ],
+            );
         }
     }
-
-    let menu = st
+    let menu_open = st
         .keys
         .macro_mouse_menu
         .as_ref()
-        .filter(|c| c.cid == cid && c.shifted == shifted)
-        .map(|c| c.up);
-    let mut picked: Option<MouseBtn> = None;
-    widgets::pill_strip(ui, |ui| {
-        for up in [false, true] {
-            let armed = capture == Some(up);
-            let label = match (armed, up) {
-                (true, _) => t!("misc.macro_press_key"),
-                (false, false) => t!("misc.macro_add_key_down"),
-                (false, true) => t!("misc.macro_add_key_up"),
-            };
-            if widgets::pill(ui, &label, armed) {
-                st.keys.macro_capture = if armed {
-                    None
-                } else {
-                    st.keys.macro_mouse_menu = None;
-                    Some(CaptureState { cid, shifted, up })
-                };
-            }
+        .is_some_and(|c| c.cid == cid && c.shifted == shifted);
+
+    let size = Vec2::new(0.0, 30.0);
+    let kind = |on: bool| {
+        if on {
+            widgets::ButtonKind::Primary
+        } else {
+            widgets::ButtonKind::Secondary
         }
-        for up in [false, true] {
-            let open = menu == Some(up);
-            let label = if up {
-                t!("misc.macro_add_mouse_up")
-            } else {
-                t!("misc.macro_add_mouse_down")
-            };
-            if widgets::pill(ui, &label, open) {
-                st.keys.macro_mouse_menu = if open {
-                    None
-                } else {
-                    st.keys.macro_capture = None;
-                    Some(CaptureState { cid, shifted, up })
-                };
-            }
+    };
+    ui.horizontal_wrapped(|ui| {
+        ui.spacing_mut().item_spacing = egui::vec2(6.0, 6.0);
+        widgets::section_label_inline(ui, &t!("misc.macro_insert"));
+        ui.add_space(theme::SPACE_2);
+        let key_label = if capturing {
+            t!("misc.macro_press_key")
+        } else {
+            t!("misc.macro_insert_key")
+        };
+        if widgets::button_enabled(ui, &key_label, kind(capturing), size, !recording) {
+            st.keys.macro_mouse_menu = None;
+            st.keys.macro_capture = (!capturing).then_some(CaptureState { cid, shifted });
         }
-        if widgets::pill(ui, &t!("misc.macro_add_wait"), false) {
-            append(ctx, st, MacroAtom::Delay, 250);
+        if widgets::button_enabled(
+            ui,
+            &t!("misc.macro_insert_mouse"),
+            kind(menu_open),
+            size,
+            !recording,
+        ) {
+            st.keys.macro_capture = None;
+            st.keys.macro_mouse_menu = (!menu_open).then_some(CaptureState { cid, shifted });
+        }
+        if widgets::button_enabled(
+            ui,
+            &t!("misc.macro_insert_delay"),
+            widgets::ButtonKind::Secondary,
+            size,
+            !recording,
+        ) {
+            append(ctx, st, &[(MacroAtom::Delay, 250)]);
         }
     });
 
-    if let Some(up) = menu {
+    if menu_open {
         ui.add_space(theme::SPACE_3);
-        widgets::pill_strip(ui, |ui| {
-            for (label, btn) in [
-                (t!("misc.macro_mouse_left"), MouseBtn::Left),
-                (t!("misc.macro_mouse_right"), MouseBtn::Right),
-                (t!("misc.macro_mouse_middle"), MouseBtn::Middle),
-                (t!("misc.macro_mouse_back"), MouseBtn::Back),
-                (t!("misc.macro_mouse_forward"), MouseBtn::Forward),
-            ] {
-                if widgets::pill(ui, &label, false) {
-                    picked = Some(btn);
-                }
-            }
-        });
+        let options = [
+            (t!("misc.macro_mouse_left"), MouseBtn::Left),
+            (t!("misc.macro_mouse_right"), MouseBtn::Right),
+            (t!("misc.macro_mouse_middle"), MouseBtn::Middle),
+            (t!("misc.macro_mouse_back"), MouseBtn::Back),
+            (t!("misc.macro_mouse_forward"), MouseBtn::Forward),
+        ];
+        let labels: Vec<&str> = options.iter().map(|(l, _)| l.as_ref()).collect();
+        let picked = widgets::option_grid(ui, &labels, None, 5)
+            .iter()
+            .position(|r| r.clicked())
+            .map(|i| options[i].1.clone());
         if let Some(btn) = picked {
             st.keys.macro_mouse_menu = None;
-            let kind = if up {
-                MacroAtom::MouseUp { btn }
-            } else {
-                MacroAtom::MouseDown { btn }
-            };
-            append(ctx, st, kind, 0);
+            append(
+                ctx,
+                st,
+                &[
+                    (MacroAtom::MouseDown { btn: btn.clone() }, 0),
+                    (MacroAtom::MouseUp { btn }, 0),
+                ],
+            );
         }
     }
 }
@@ -923,6 +954,34 @@ mod tests {
         egui::Key::F33,
         egui::Key::F34,
         egui::Key::F35,
+        egui::Key::BrowserForward,
+        egui::Key::BrowserRefresh,
+        egui::Key::BrowserSearch,
+        egui::Key::BrowserHome,
+        egui::Key::BrowserFavorites,
+        egui::Key::BrowserStop,
+        egui::Key::MediaPlayPause,
+        egui::Key::MediaTrackNext,
+        egui::Key::MediaTrackPrevious,
+        egui::Key::MediaStop,
+        egui::Key::AudioVolumeMute,
+        egui::Key::AudioVolumeDown,
+        egui::Key::AudioVolumeUp,
+        egui::Key::LaunchMail,
+        egui::Key::LaunchApp1,
+        egui::Key::LaunchApp2,
+        egui::Key::CapsLock,
+        egui::Key::NumLock,
+        egui::Key::ScrollLock,
+        egui::Key::PrintScreen,
+        egui::Key::Pause,
+        egui::Key::Menu,
+        egui::Key::Fn,
+        egui::Key::Eject,
+        egui::Key::Help,
+        egui::Key::Power,
+        egui::Key::Sleep,
+        egui::Key::Clear,
     ];
 
     #[test]
@@ -1337,12 +1396,10 @@ mod tests {
         st.keys.macro_capture = Some(CaptureState {
             cid: 1,
             shifted: false,
-            up: false,
         });
         st.keys.macro_mouse_menu = Some(CaptureState {
             cid: 1,
             shifted: true,
-            up: true,
         });
 
         sync_selection(&ctx, &mut st, "dev1");

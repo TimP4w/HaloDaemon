@@ -16,6 +16,22 @@ pub(crate) const SCANNER: TransportScanner = TransportScanner {
     scan: |app| Box::pin(scan(app)),
 };
 
+pub(crate) async fn retry_failed_opens(app: Arc<AppState>) {
+    loop {
+        tokio::time::sleep(crate::domain::plugin::TRANSPORT_OPEN_BACKOFF).await;
+        let kinds = app.registry.retryable_open_failure_kinds();
+        if kinds
+            .iter()
+            .any(|kind| matches!(*kind, "command" | "amd_smn" | "lpcio"))
+        {
+            scan(Arc::clone(&app)).await;
+        }
+        if kinds.contains("usb") {
+            discovery::scan_usb_non_hid(Arc::clone(&app)).await;
+        }
+    }
+}
+
 async fn scan(app: Arc<AppState>) {
     let specs = app.registry.active_device_specs();
 

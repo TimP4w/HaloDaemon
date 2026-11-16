@@ -9,6 +9,8 @@ use crate::ui::theme;
 
 pub enum BannerKind {
     Neutral,
+    Info,
+    Ok,
     Warn,
     Danger,
 }
@@ -17,6 +19,8 @@ pub enum BannerKind {
 pub fn banner_palette(kind: &BannerKind) -> (Color32, Color32, Color32) {
     match kind {
         BannerKind::Neutral => (theme::TEXT, theme::INNER_BG, theme::BORDER),
+        BannerKind::Info => tinted(theme::CYAN),
+        BannerKind::Ok => tinted(theme::TRAFFIC_GREEN),
         BannerKind::Warn => tinted(theme::STAT_AMBER),
         BannerKind::Danger => tinted(theme::TRAFFIC_RED),
     }
@@ -68,6 +72,12 @@ pub struct Banner<'a> {
 impl<'a> Banner<'a> {
     pub fn neutral(title: &'a str) -> Self {
         Self::new(BannerKind::Neutral, title)
+    }
+    pub fn info(title: &'a str) -> Self {
+        Self::new(BannerKind::Info, title)
+    }
+    pub fn ok(title: &'a str) -> Self {
+        Self::new(BannerKind::Ok, title)
     }
     pub fn warn(title: &'a str) -> Self {
         Self::new(BannerKind::Warn, title)
@@ -225,12 +235,12 @@ mod tests {
             banner_palette(&BannerKind::Neutral),
             (theme::TEXT, theme::INNER_BG, theme::BORDER)
         );
-        for kind in [BannerKind::Warn, BannerKind::Danger] {
-            let accent = match kind {
-                BannerKind::Warn => theme::STAT_AMBER,
-                BannerKind::Danger => theme::TRAFFIC_RED,
-                BannerKind::Neutral => unreachable!(),
-            };
+        for (kind, accent) in [
+            (BannerKind::Info, theme::CYAN),
+            (BannerKind::Ok, theme::TRAFFIC_GREEN),
+            (BannerKind::Warn, theme::STAT_AMBER),
+            (BannerKind::Danger, theme::TRAFFIC_RED),
+        ] {
             let (a, fill, stroke) = banner_palette(&kind);
             assert_eq!((a, fill, stroke), tinted(accent));
             assert!(fill.a() < stroke.a());
@@ -255,7 +265,7 @@ mod tests {
             ..Default::default()
         };
         let mut h = 0.0;
-        let _ = ctx.run_ui(input, |ui| {
+        let _ = crate::ui::run_headless(&ctx, input, |ui| {
             h = ui
                 .vertical(|ui| {
                     Banner::warn("x").subtitle("y").show(ui);

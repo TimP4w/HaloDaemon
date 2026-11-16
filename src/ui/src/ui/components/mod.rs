@@ -3,10 +3,12 @@
 //! building blocks (cards, pills, sliders, tab bars, color pickers, the curve
 //! editor). New screens MUST reuse these rather than hand-rolling painters.
 
+mod app_tile;
 mod badge;
 mod banner;
 mod button;
 mod card;
+mod checkbox;
 mod chips;
 mod color_picker;
 mod combo;
@@ -17,6 +19,7 @@ mod gizmo;
 mod layout;
 mod logo;
 mod modal;
+mod segmented;
 mod slider;
 mod steps_editor;
 mod tabs;
@@ -26,10 +29,12 @@ pub mod toast;
 mod toggle;
 mod util;
 
+pub use app_tile::*;
 pub use badge::*;
 pub use banner::*;
 pub use button::*;
 pub use card::*;
+pub use checkbox::*;
 pub use chips::*;
 pub use color_picker::*;
 pub use combo::*;
@@ -40,6 +45,7 @@ pub use gizmo::*;
 pub use layout::*;
 pub use logo::*;
 pub use modal::*;
+pub use segmented::*;
 pub use slider::*;
 pub use steps_editor::*;
 pub use tabs::*;

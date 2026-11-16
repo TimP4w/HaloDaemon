@@ -23,9 +23,18 @@ const BASE_TICK_SECS: u64 = 5;
 /// Backoff ceiling for a persistently-failing integration.
 const MAX_TICK_SECS: u64 = 30;
 
-/// Next-tick delay, backing off with the attempt streak: 5,5,10,20,30,30s.
-fn tick_delay(attempt: u32) -> Duration {
+/// Integrations whose source starts after the daemon (a sensor app, a local
+/// server) are retried at the base cadence for this long before backing off,
+/// so fan curves waiting on them leave failsafe promptly.
+const STARTUP_WINDOW: Duration = Duration::from_secs(60);
+
+static STARTED: std::sync::OnceLock<Instant> = std::sync::OnceLock::new();
+
+/// Next-tick delay, backing off with the attempt streak: 5,5,10,20,30,30s,
+/// but staying at the base cadence during the startup window.
+fn tick_delay(attempt: u32, uptime: Duration) -> Duration {
     let secs = match attempt {
+        _ if uptime < STARTUP_WINDOW => BASE_TICK_SECS,
         0 => BASE_TICK_SECS,
         n => (BASE_TICK_SECS << (n - 1).min(3)).min(MAX_TICK_SECS),
     };
@@ -50,6 +59,7 @@ pub(super) enum MonitorState {
 /// dropped ones, and diffs live ones for controller add/remove. Backs off
 /// exponentially while an integration stays unreachable.
 pub async fn integration_monitor(app: Arc<AppState>) {
+    STARTED.get_or_init(Instant::now);
     let mut states: HashMap<String, MonitorState> = HashMap::new();
     let mut shutdown_rx = app.config.persistence().shutdown_tx.subscribe();
     loop {
@@ -72,7 +82,11 @@ fn backoff(states: &mut HashMap<String, MonitorState>, plugin_id: &str, prev_att
         plugin_id.to_owned(),
         MonitorState::Backoff {
             attempt,
-            deadline: Instant::now() + tick_delay(attempt),
+            deadline: Instant::now()
+                + tick_delay(
+                    attempt,
+                    STARTED.get().map_or(Duration::MAX, Instant::elapsed),
+                ),
         },
     );
 }
@@ -564,12 +578,20 @@ mod tests {
 
     #[test]
     fn tick_delay_backs_off_and_caps() {
-        assert_eq!(tick_delay(0), Duration::from_secs(5));
-        assert_eq!(tick_delay(1), Duration::from_secs(5));
-        assert_eq!(tick_delay(2), Duration::from_secs(10));
-        assert_eq!(tick_delay(3), Duration::from_secs(20));
-        assert_eq!(tick_delay(4), Duration::from_secs(30));
-        assert_eq!(tick_delay(50), Duration::from_secs(30), "caps at 30s");
+        let up = Duration::MAX;
+        assert_eq!(tick_delay(0, up), Duration::from_secs(5));
+        assert_eq!(tick_delay(1, up), Duration::from_secs(5));
+        assert_eq!(tick_delay(2, up), Duration::from_secs(10));
+        assert_eq!(tick_delay(3, up), Duration::from_secs(20));
+        assert_eq!(tick_delay(4, up), Duration::from_secs(30));
+        assert_eq!(tick_delay(50, up), Duration::from_secs(30), "caps at 30s");
+    }
+
+    #[test]
+    fn startup_window_keeps_the_base_cadence() {
+        let early = STARTUP_WINDOW - Duration::from_secs(1);
+        assert_eq!(tick_delay(50, early), Duration::from_secs(BASE_TICK_SECS));
+        assert!(tick_delay(50, STARTUP_WINDOW) > Duration::from_secs(BASE_TICK_SECS));
     }
 
     #[test]

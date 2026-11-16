@@ -193,50 +193,7 @@ pub(super) fn display_card(
             }
             ui.add_space(theme::SPACE_8);
 
-            // Brightness.
-            let key = "lcd_bright";
-            let mut b = st.guarded(key, lcd.brightness as f32, ctx.time);
-            let readout = format!("{}%", b.round() as i32);
-            if widgets::slider_row(ui, &t!("lcd.brightness"), &mut b, 0.0..=100.0, &readout) {
-                st.set(key, b, ctx.time);
-                st.queue(
-                    key,
-                    DaemonCommand::SetScreenBrightness {
-                        id: id.to_string(),
-                        brightness: b.round() as u8,
-                    },
-                    ctx.time,
-                );
-            }
-            ui.add_space(theme::SPACE_8);
-
-            // Rotation.
-            widgets::caps_label(ui, &t!("lcd.rotation"));
-            ui.add_space(theme::SPACE_3);
-            ui.horizontal(|ui| {
-                ui.spacing_mut().item_spacing.x = 7.0;
-                let rots = if lcd.descriptor.supported_rotations.is_empty() {
-                    vec![
-                        ScreenRotation::R0,
-                        ScreenRotation::R90,
-                        ScreenRotation::R180,
-                        ScreenRotation::R270,
-                    ]
-                } else {
-                    lcd.descriptor.supported_rotations.clone()
-                };
-                for r in rots {
-                    if widgets::pill(ui, rot_label(r), r == lcd.rotation) && r != lcd.rotation {
-                        crate::runtime::ipc::send(
-                            ctx.cmd,
-                            halod_shared::commands::DaemonCommand::SetScreenRotation {
-                                id: id.to_string(),
-                                rotation: r,
-                            },
-                        );
-                    }
-                }
-            });
+            display_controls(ui, ctx, st, id, lcd);
             ui.add_space(theme::SPACE_8);
 
             raw_streaming_row(ui, ctx, id, lcd);
@@ -245,7 +202,7 @@ pub(super) fn display_card(
             if widgets::button(
                 ui,
                 &t!("lcd.reset_to_default"),
-                widgets::ButtonKind::Ghost,
+                widgets::ButtonKind::Secondary,
                 egui::vec2(150.0, 30.0),
             )
             .clicked()
@@ -253,6 +210,67 @@ pub(super) fn display_card(
                 crate::runtime::ipc::send(
                     ctx.cmd,
                     halod_shared::commands::DaemonCommand::SetScreenDefault { id: id.to_string() },
+                );
+            }
+        },
+    );
+}
+
+/// Brightness slider and the inline rotation picker, shared by the Display
+/// card and the editor's Display card.
+pub(super) fn display_controls(
+    ui: &mut egui::Ui,
+    ctx: &TabCtx,
+    st: &mut DeviceUi,
+    id: &str,
+    lcd: &LcdStatus,
+) {
+    let key = "lcd_bright";
+    let mut b = st.guarded(key, lcd.brightness as f32, ctx.time);
+    let readout = format!("{}%", b.round() as i32);
+    if widgets::slider_row(ui, &t!("lcd.brightness"), &mut b, 0.0..=100.0, &readout) {
+        st.set(key, b, ctx.time);
+        st.queue(
+            key,
+            DaemonCommand::SetScreenBrightness {
+                id: id.to_string(),
+                brightness: b.round() as u8,
+            },
+            ctx.time,
+        );
+    }
+    let rots = if lcd.descriptor.supported_rotations.is_empty() {
+        vec![
+            ScreenRotation::R0,
+            ScreenRotation::R90,
+            ScreenRotation::R180,
+            ScreenRotation::R270,
+        ]
+    } else {
+        lcd.descriptor.supported_rotations.clone()
+    };
+    let labels: Vec<&str> = rots.iter().map(|r| rot_label(*r)).collect();
+    let mut idx = rots
+        .iter()
+        .position(|r| *r == lcd.rotation)
+        .unwrap_or(usize::MAX);
+    egui::Sides::new().show(
+        ui,
+        |ui| {
+            ui.label(
+                egui::RichText::new(t!("lcd.rotation"))
+                    .font(theme::body_md())
+                    .color(theme::TEXT),
+            );
+        },
+        |ui| {
+            if widgets::segmented(ui, &labels, &mut idx, false) {
+                crate::runtime::ipc::send(
+                    ctx.cmd,
+                    DaemonCommand::SetScreenRotation {
+                        id: id.to_string(),
+                        rotation: rots[idx],
+                    },
                 );
             }
         },

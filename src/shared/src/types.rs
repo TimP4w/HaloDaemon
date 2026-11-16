@@ -500,6 +500,12 @@ pub enum HomeWidgetKind {
         min: f64,
         max: f64,
     },
+    /// A segmented bar across `[min, max]`.
+    Meter {
+        sensor_id: String,
+        min: f64,
+        max: f64,
+    },
     /// Battery references, each `"{device_id}/{battery_key}"`.
     Battery {
         batteries: Vec<String>,
@@ -558,7 +564,9 @@ pub fn validate_home_widgets(widgets: &[HomeWidget]) -> Result<(), HomeWidgetsEr
             return Err(HomeWidgetsError::DuplicateId);
         }
         match &w.kind {
-            HomeWidgetKind::Gauge { min, max, .. } if min >= max => {
+            HomeWidgetKind::Gauge { min, max, .. } | HomeWidgetKind::Meter { min, max, .. }
+                if min >= max =>
+            {
                 return Err(HomeWidgetsError::EmptyRange)
             }
             HomeWidgetKind::Battery { batteries }
@@ -1531,6 +1539,16 @@ pub enum DiscoveryDetail {
         number: u32,
     },
 }
+
+/// The order full discovery runs its scanners in, for progress displays.
+pub const DISCOVERY_STEPS: &[DiscoveryDetail] = &[
+    DiscoveryDetail::Computer,
+    DiscoveryDetail::Hid,
+    DiscoveryDetail::Usb,
+    DiscoveryDetail::Smbus,
+    DiscoveryDetail::PluginHostTransports,
+    DiscoveryDetail::PluginIntegrations,
+];
 
 #[derive(Debug, Clone, Default, Serialize, Deserialize)]
 pub struct DiscoveryStatus {

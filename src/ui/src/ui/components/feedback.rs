@@ -1,9 +1,6 @@
 // SPDX-License-Identifier: GPL-3.0-or-later
-//! Shared progress affordances — the ring spinner, the gradient loading bar,
-//! and the success badge. Every "something is happening / it's done" surface in
-//! the app routes through these so they read as one family: the Drift lavender→
-//! magenta gradient ([`theme::PROGRESS_A`]→[`theme::PROGRESS_B`]) over a common
-//! [`theme::TRACK`].
+//! Shared progress affordances — the ring spinner, the loading bar and the
+//! success badge: one accent over a common [`theme::TRACK`].
 
 use egui::{Pos2, Rect, Sense, Shape, Stroke, Vec2};
 
@@ -31,10 +28,10 @@ pub fn paint_spinner(painter: &egui::Painter, center: Pos2, size: f32, time: f32
     let pts: Vec<Pos2> = (0..=steps)
         .map(|i| center + Vec2::angled(start + sweep * i as f32 / steps as f32) * radius)
         .collect();
-    painter.add(Shape::line(pts, Stroke::new(stroke_w, theme::PROGRESS_A)));
+    painter.add(Shape::line(pts, Stroke::new(stroke_w, theme::CYAN)));
 }
 
-/// A gradient loading bar filling `width`. `fraction: Some(f)` draws a
+/// A loading bar filling `width`. `fraction: Some(f)` draws a
 /// determinate fill (`f` clamped to `0..=1`); `None` animates an indeterminate
 /// segment sweeping left→right and drives its own repaint.
 pub fn progress_bar(
@@ -47,17 +44,14 @@ pub fn progress_bar(
     let p = ui.painter();
     let r = rect.height() / 2.0;
     p.rect_filled(rect, r, theme::TRACK);
-    // The gradient maps across the full inner width and is revealed through a
-    // clip, so at any fraction the visible hues are the left slice of the same
-    // spectrum rather than a squished full sweep.
-    let inner = rect.shrink(1.0);
+    let inner = rect;
     match fraction {
         Some(f) => {
             let f = f.clamp(0.0, 1.0);
             if f > 0.0 {
                 let clip =
                     Rect::from_min_size(inner.min, Vec2::new(inner.width() * f, inner.height()));
-                gradient_fill(p, inner, clip);
+                p.rect_filled(clip, r, theme::CYAN);
             }
         }
         None => {
@@ -68,20 +62,12 @@ pub fn progress_bar(
                     Pos2::new(inner.left() + inner.width() * x0, inner.top()),
                     Pos2::new(inner.left() + inner.width() * x1, inner.bottom()),
                 );
-                gradient_fill(p, inner, clip);
+                p.rect_filled(clip, r, theme::CYAN);
             }
             ui.ctx().request_repaint();
         }
     }
     resp
-}
-
-fn gradient_fill(painter: &egui::Painter, full: Rect, clip: Rect) {
-    theme::h_gradient(
-        &painter.with_clip_rect(clip),
-        full,
-        &[theme::PROGRESS_A, theme::PROGRESS_B],
-    );
 }
 
 /// Visible sub-segment `(x0, x1)` in `0..=1` of an indeterminate bar at loop

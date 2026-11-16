@@ -56,6 +56,12 @@ pub(crate) async fn restore_saved_state(app: &Arc<AppState>, device: &Arc<dyn De
                 );
                 return Retry::Stop;
             }
+            if attempt == RESTORE_ATTEMPTS {
+                log::warn!(
+                    "[{}] saved state could not be restored after {RESTORE_ATTEMPTS} attempts",
+                    device.name()
+                );
+            }
             Retry::Again
         }
     });
@@ -159,21 +165,23 @@ pub async fn init_device(app: &Arc<AppState>, device: &Arc<dyn Device>) -> Resul
             Ok(v)
         }
         Err(e) => {
-            if let Some(plugin_id) = device.owning_plugin_id() {
+            let attempt = device.owning_plugin_id().map_or(1, |plugin_id| {
                 app.registry.report_init_error(
                     &plugin_id,
                     device.id(),
                     format!("{}: {e:#}", device.name()),
-                );
+                )
+            });
+            if attempt == 1 {
+                crate::application::notifications::send(
+                    app,
+                    halod_shared::types::NotificationCode::DeviceInitFailed {
+                        device: device.name().to_string(),
+                        detail: e.to_string(),
+                    },
+                )
+                .await;
             }
-            crate::application::notifications::send(
-                app,
-                halod_shared::types::NotificationCode::DeviceInitFailed {
-                    device: device.name().to_string(),
-                    detail: e.to_string(),
-                },
-            )
-            .await;
             Err(e)
         }
     }
@@ -306,8 +314,21 @@ async fn prefer_wired_transport(app: &Arc<AppState>, device: &Arc<dyn Device>) -
         return true;
     }
 
+    for displaced in &wireless {
+        log::info!(
+            "[{}] wired device '{}' replaced wireless duplicate '{}'",
+            plugin_id,
+            device.id(),
+            displaced.id()
+        );
+    }
+    displace_devices(app, wireless).await;
+    true
+}
+
+async fn displace_devices(app: &Arc<AppState>, devices: Vec<Arc<dyn Device>>) {
     let displaced_ids: std::collections::HashSet<String> =
-        wireless.iter().map(|d| d.id().to_owned()).collect();
+        devices.iter().map(|d| d.id().to_owned()).collect();
     app.device_registry
         .write()
         .await
@@ -318,16 +339,22 @@ async fn prefer_wired_transport(app: &Arc<AppState>, device: &Arc<dyn Device>) -
             children.retain(|id| !displaced_ids.contains(id));
         }
     }
-    for displaced in wireless {
-        log::info!(
-            "[{}] wired device '{}' replaced wireless duplicate '{}'",
-            plugin_id,
-            device.id(),
-            displaced.id()
-        );
+    for displaced in devices {
         close_device(app, &displaced).await;
     }
-    true
+}
+
+/// A device keeps one id on every transport so its saved state follows it, so
+/// its receiver child must leave the registry before the wired instance claims
+/// that id.
+pub(crate) async fn release_wireless_twin(app: &Arc<AppState>, id: &str) {
+    let Some(twin) = app.find_device_by_id(id).await else {
+        return;
+    };
+    if twin.wire_connection_type().await == Some(ConnectionType::Wireless) {
+        log::info!("[{id}] wired connection replaces its receiver child");
+        displace_devices(app, vec![twin]).await;
+    }
 }
 
 async fn log_registration_conflicts(app: &Arc<AppState>, device: &Arc<dyn Device>) {
@@ -549,6 +576,57 @@ mod tests {
         assert_eq!(devices.len(), 1);
         assert_eq!(devices[0].id(), wired.id());
         assert!(wireless.closed.load(Ordering::SeqCst));
+    }
+
+    #[tokio::test]
+    async fn wired_device_takes_over_the_id_of_its_receiver_child() {
+        let app = app_with(vec![]);
+        let wireless = transport("acme_wireless-AABB1122", ConnectionType::Wireless);
+        assert!(register_device(&app, wireless.clone()).await);
+        app.device_registry
+            .children
+            .lock()
+            .await
+            .entry("acme_wireless-receiver".into())
+            .or_default()
+            .insert(wireless.id().into());
+
+        let wired = transport("acme_wireless-AABB1122", ConnectionType::Wired);
+        release_wireless_twin(&app, wired.id()).await;
+        assert!(register_device(&app, wired.clone()).await);
+
+        let devices = app.device_registry.read().await;
+        assert_eq!(devices.len(), 1);
+        let registered: Arc<dyn Device> = wired.clone();
+        assert!(Arc::ptr_eq(&devices[0], &registered));
+        drop(devices);
+        assert!(wireless.closed.load(Ordering::SeqCst));
+        assert!(!wired.closed.load(Ordering::SeqCst));
+        assert!(!app
+            .device_registry
+            .children
+            .lock()
+            .await
+            .get("acme_wireless-receiver")
+            .unwrap()
+            .contains(wired.id()));
+    }
+
+    #[tokio::test]
+    async fn receiver_child_does_not_take_the_id_of_its_wired_device() {
+        let app = app_with(vec![]);
+        let wired = transport("acme_wireless-AABB1122", ConnectionType::Wired);
+        assert!(register_device(&app, wired.clone()).await);
+
+        release_wireless_twin(&app, wired.id()).await;
+        let wireless = transport("acme_wireless-AABB1122", ConnectionType::Wireless);
+        assert!(!register_device(&app, wireless).await);
+
+        let devices = app.device_registry.read().await;
+        assert_eq!(devices.len(), 1);
+        let registered: Arc<dyn Device> = wired.clone();
+        assert!(Arc::ptr_eq(&devices[0], &registered));
+        assert!(!wired.closed.load(Ordering::SeqCst));
     }
 
     #[test]

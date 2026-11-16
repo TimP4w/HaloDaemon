@@ -22,6 +22,43 @@ pub fn color32_to_rgb(c: Color32) -> RgbColor {
     }
 }
 
+/// A 36 px swatch-and-label button that selects which colour slot the picker
+/// edits ("Color A" / "Color B"); `active` rings it in the accent.
+pub fn color_slot_button(
+    ui: &mut egui::Ui,
+    label: &str,
+    color: Color32,
+    active: bool,
+    width: f32,
+) -> egui::Response {
+    let (rect, resp) = ui.allocate_exact_size(Vec2::new(width, 36.0), Sense::click());
+    let border = if active {
+        theme::CYAN
+    } else if resp.hovered() {
+        theme::BORDER_INNER
+    } else {
+        theme::TRACK
+    };
+    let p = ui.painter();
+    theme::paint_surface(p, rect, 6.0, theme::INNER_BG, border);
+    let sw = Rect::from_min_size(
+        Pos2::new(rect.left() + 10.0, rect.center().y - 9.0),
+        Vec2::splat(18.0),
+    );
+    p.rect_filled(sw, 4.0, color);
+    p.with_clip_rect(rect.shrink(4.0)).text(
+        Pos2::new(sw.right() + 10.0, rect.center().y),
+        egui::Align2::LEFT_CENTER,
+        label,
+        theme::body_md(),
+        theme::TEXT,
+    );
+    if resp.hovered() {
+        ui.ctx().set_cursor_icon(egui::CursorIcon::PointingHand);
+    }
+    resp
+}
+
 /// `#rrggbb` for a swatch/readout label.
 pub fn hex_label(c: RgbColor) -> String {
     format!("#{:02x}{:02x}{:02x}", c.r, c.g, c.b)
@@ -148,128 +185,198 @@ fn mini_swatch(ui: &mut egui::Ui, d: f32, color: Color32, selected: bool) -> boo
 fn mini_glyph_color(c: Color32) -> Color32 {
     let luma = 0.299 * c.r() as f32 + 0.587 * c.g() as f32 + 0.114 * c.b() as f32;
     if luma > 140.0 {
-        theme::hex(0x0a0d13)
+        theme::ON_ACCENT
     } else {
         Color32::WHITE
     }
 }
 
-fn preset_cols(avail: f32) -> usize {
-    (((avail - 76.0 + 7.0) / 27.0).floor() as usize).clamp(1, 6)
-}
-
 pub fn color_picker(ui: &mut egui::Ui, current: RgbColor) -> Option<RgbColor> {
-    // Use hand-laid rects to avoid egui::Grid width leakage.
-    let avail = ui.available_width();
-    ui.scope(|ui| {
-        ui.set_max_width(avail);
-        color_picker_inner(ui, avail, current)
-    })
-    .inner
+    ui.scope(|ui| picker_body(ui, current)).inner
 }
 
-fn color_picker_inner(ui: &mut egui::Ui, avail: f32, current: RgbColor) -> Option<RgbColor> {
-    let mut out: Option<RgbColor> = None;
-    let c32 = rgb_to_color32(current);
+fn picker_body(ui: &mut egui::Ui, current: RgbColor) -> Option<RgbColor> {
+    let id = ui.unique_id().with("color_picker");
+    let hue_id = id.with("hue");
+    let (h, sat, val) = rgb_to_hsv(current);
+    let hue = if sat > 0.01 && val > 0.01 {
+        h
+    } else {
+        ui.data(|d| d.get_temp::<f32>(hue_id)).unwrap_or(h)
+    };
+    let mut out = None;
+    let width = ui.available_width();
 
-    let cols = preset_cols(avail);
-
-    // Large swatch matches the preset grid height.
-    const CELL: f32 = 20.0;
-    const GAP: f32 = 7.0;
-    let grid_w = cols as f32 * CELL + (cols.saturating_sub(1)) as f32 * GAP;
-    let rows = SWATCHES.len().div_ceil(cols);
-    let grid_h = rows as f32 * CELL + (rows.saturating_sub(1)) as f32 * GAP;
-
-    ui.horizontal_top(|ui| {
-        ui.spacing_mut().item_spacing = Vec2::new(12.0, 0.0);
-
-        let popup_id = ui.unique_id().with("color_popup");
-        let (swatch_rect, swatch_resp) =
-            ui.allocate_exact_size(Vec2::new(64.0, grid_h), Sense::click());
-        let painter = ui.painter();
-        painter.rect_filled(swatch_rect, theme::RADIUS_MD, c32);
-        theme::halo(painter, swatch_rect, 10.0, c32, 26.0);
-        if swatch_resp.hovered() {
-            ui.ctx().set_cursor_icon(egui::CursorIcon::PointingHand);
-        }
-        let mut c_pick = c32;
-        egui::Popup::menu(&swatch_resp)
-            .id(popup_id)
-            .close_behavior(egui::PopupCloseBehavior::CloseOnClickOutside)
-            .show(|ui| {
-                const W: f32 = 216.0;
-                ui.set_width(W);
-                ui.spacing_mut().slider_width = W - 8.0;
-                ui.spacing_mut().item_spacing.x = 4.0;
-                ui.spacing_mut().button_padding = Vec2::new(4.0, 3.0);
-                ui.spacing_mut().interact_size.x = 30.0;
-                if egui::color_picker::color_picker_color32(
-                    ui,
-                    &mut c_pick,
-                    egui::color_picker::Alpha::Opaque,
-                ) {
-                    out = Some(color32_to_rgb(c_pick));
-                }
-            });
-
-        let (grid_rect, _) = ui.allocate_exact_size(Vec2::new(grid_w, grid_h), Sense::hover());
-        for (i, &hexv) in SWATCHES.iter().enumerate() {
-            let (cx, cy) = (i % cols, i / cols);
-            let r = Rect::from_min_size(
-                Pos2::new(
-                    grid_rect.left() + cx as f32 * (CELL + GAP),
-                    grid_rect.top() + cy as f32 * (CELL + GAP),
-                ),
-                Vec2::splat(CELL),
-            );
-            let resp = ui.interact(r, ui.unique_id().with(("swatch", i)), Sense::click());
-            let sc = theme::hex(hexv);
-            ui.painter().rect_filled(r, 6.0, sc);
-            if resp.hovered() {
-                ui.painter().rect_stroke(
-                    r,
-                    6.0,
-                    Stroke::new(2.0, theme::CYAN),
-                    egui::StrokeKind::Middle,
-                );
-                ui.ctx().set_cursor_icon(egui::CursorIcon::PointingHand);
-            }
-            if resp.clicked() {
-                out = Some(color32_to_rgb(sc));
-            }
-        }
-    });
-
-    ui.add_space(theme::SPACE_7);
-    if let Some(nc) = hue_slider(ui, current) {
-        out = Some(nc);
+    let (sv_rect, sv_resp) =
+        ui.allocate_exact_size(Vec2::new(width, 160.0), Sense::click_and_drag());
+    paint_sv_square(ui.painter(), sv_rect, hue);
+    if let Some(pos) = sv_resp
+        .interact_pointer_pos()
+        .filter(|_| sv_resp.dragged() || sv_resp.clicked())
+    {
+        let (s, v) = sv_at(sv_rect, pos);
+        out = Some(hsv_to_rgb(hue, s, v));
     }
+    let thumb = Pos2::new(
+        sv_rect.left() + sat * sv_rect.width(),
+        sv_rect.top() + (1.0 - val) * sv_rect.height(),
+    );
+    paint_thumb(ui.painter(), thumb, rgb_to_color32(current));
 
     ui.add_space(theme::SPACE_6);
-    let hex_id = ui.unique_id().with("hexbuf");
-    let mut buf = ui
-        .data(|d| d.get_temp::<String>(hex_id))
-        .unwrap_or_default();
-    if !ui.memory(|m| m.has_focus(hex_id)) {
-        buf = hex_label(out.unwrap_or(current));
-    }
-    let resp = ui.add_sized(
-        Vec2::new(ui.available_width(), 32.0),
-        egui::TextEdit::singleline(&mut buf)
-            .id(hex_id)
-            .font(theme::mono(12.0))
-            .margin(egui::vec2(10.0, 8.0))
-            .hint_text("#rrggbb"),
+    let (hue_rect, hue_resp) =
+        ui.allocate_exact_size(Vec2::new(width, 14.0), Sense::click_and_drag());
+    draw_h_gradient_rect(
+        ui.painter(),
+        hue_rect.shrink2(Vec2::new(0.0, 1.0)),
+        HUE_STOPS,
+        6.0,
     );
-    if resp.changed() {
-        if let Some(c) = parse_hex(&buf) {
-            out = Some(c);
+    let mut shown_hue = hue;
+    if let Some(pos) = hue_resp
+        .interact_pointer_pos()
+        .filter(|_| hue_resp.dragged() || hue_resp.clicked())
+    {
+        shown_hue = ((pos.x - hue_rect.left()) / hue_rect.width()).clamp(0.0, 1.0) * 360.0;
+        out = Some(hsv_to_rgb(shown_hue, sat.max(0.7), val.max(0.7)));
+    }
+    paint_thumb(
+        ui.painter(),
+        Pos2::new(
+            hue_rect.left() + shown_hue / 360.0 * hue_rect.width(),
+            hue_rect.center().y,
+        ),
+        rgb_to_color32(hsv_to_rgb(shown_hue, 1.0, 1.0)),
+    );
+    for r in [&sv_resp, &hue_resp] {
+        if r.hovered() {
+            ui.ctx().set_cursor_icon(egui::CursorIcon::Crosshair);
         }
     }
-    ui.data_mut(|d| d.insert_temp(hex_id, buf));
+    ui.data_mut(|d| d.insert_temp(hue_id, shown_hue));
 
+    ui.add_space(theme::SPACE_6);
+    ui.horizontal(|ui| {
+        let (sw, _) = ui.allocate_exact_size(Vec2::splat(36.0), Sense::hover());
+        theme::paint_surface(
+            ui.painter(),
+            sw,
+            theme::RADIUS_SM,
+            rgb_to_color32(out.unwrap_or(current)),
+            theme::BORDER_INNER,
+        );
+        let hex_id = id.with("hexbuf");
+        let mut buf = ui
+            .data(|d| d.get_temp::<String>(hex_id))
+            .unwrap_or_default();
+        if !ui.memory(|m| m.has_focus(hex_id)) {
+            buf = hex_label(out.unwrap_or(current));
+        }
+        let resp = ui.add_sized(
+            Vec2::new(ui.available_width(), 36.0),
+            egui::TextEdit::singleline(&mut buf)
+                .id(hex_id)
+                .font(theme::mono(13.0))
+                .margin(egui::vec2(10.0, 9.0))
+                .hint_text("#rrggbb"),
+        );
+        if resp.changed() {
+            if let Some(c) = parse_hex(&buf) {
+                out = Some(c);
+            }
+        }
+        ui.data_mut(|d| d.insert_temp(hex_id, buf));
+    });
+
+    ui.add_space(theme::SPACE_6);
+    ui.label(
+        egui::RichText::new(t!("misc.color_recent"))
+            .font(theme::caption())
+            .color(theme::TEXT_MUT),
+    );
+    ui.add_space(theme::SPACE_3);
+    const COLS: usize = 8;
+    const GAP: f32 = 6.0;
+    let cell = (width - GAP * (COLS - 1) as f32) / COLS as f32;
+    let rows = SWATCHES.len().div_ceil(COLS);
+    let (grid, _) = ui.allocate_exact_size(
+        Vec2::new(width, rows as f32 * (cell + GAP) - GAP),
+        Sense::hover(),
+    );
+    for (i, &hexv) in SWATCHES.iter().enumerate() {
+        let r = Rect::from_min_size(
+            grid.min
+                + Vec2::new(
+                    (i % COLS) as f32 * (cell + GAP),
+                    (i / COLS) as f32 * (cell + GAP),
+                ),
+            Vec2::splat(cell),
+        );
+        let resp = ui.interact(r, id.with(("swatch", i)), Sense::click());
+        let sc = theme::hex(hexv);
+        ui.painter().rect_filled(r, theme::RADIUS_XS + 2.0, sc);
+        if resp.hovered() || sc == rgb_to_color32(current) {
+            ui.painter().rect_stroke(
+                r,
+                theme::RADIUS_XS + 2.0,
+                Stroke::new(2.0, theme::TEXT),
+                egui::StrokeKind::Inside,
+            );
+        }
+        if resp.hovered() {
+            ui.ctx().set_cursor_icon(egui::CursorIcon::PointingHand);
+        }
+        if resp.clicked() {
+            out = Some(color32_to_rgb(sc));
+        }
+    }
     out
+}
+
+const HUE_STOPS: &[(f32, u32)] = &[
+    (0.0, 0xff0000),
+    (1.0 / 6.0, 0xffff00),
+    (2.0 / 6.0, 0x00ff00),
+    (3.0 / 6.0, 0x00ffff),
+    (4.0 / 6.0, 0x0000ff),
+    (5.0 / 6.0, 0xff00ff),
+    (1.0, 0xff0000),
+];
+
+/// Saturation (left→right) and value (top→bottom) under `pos`, clamped.
+fn sv_at(rect: Rect, pos: Pos2) -> (f32, f32) {
+    (
+        ((pos.x - rect.left()) / rect.width()).clamp(0.0, 1.0),
+        1.0 - ((pos.y - rect.top()) / rect.height()).clamp(0.0, 1.0),
+    )
+}
+
+fn paint_sv_square(p: &egui::Painter, rect: Rect, hue: f32) {
+    let pure = rgb_to_color32(hsv_to_rgb(hue, 1.0, 1.0));
+    let quad = |tl: Color32, tr: Color32, bl: Color32, br: Color32| {
+        let mut mesh = egui::Mesh::default();
+        mesh.colored_vertex(rect.left_top(), tl);
+        mesh.colored_vertex(rect.right_top(), tr);
+        mesh.colored_vertex(rect.left_bottom(), bl);
+        mesh.colored_vertex(rect.right_bottom(), br);
+        mesh.add_triangle(0, 1, 2);
+        mesh.add_triangle(1, 3, 2);
+        egui::Shape::mesh(mesh)
+    };
+    p.add(quad(Color32::WHITE, pure, Color32::WHITE, pure));
+    p.add(quad(
+        Color32::TRANSPARENT,
+        Color32::TRANSPARENT,
+        Color32::BLACK,
+        Color32::BLACK,
+    ));
+    theme::round_corners(p, rect, theme::RADIUS_SM, theme::CARD_BG);
+}
+
+fn paint_thumb(p: &egui::Painter, center: Pos2, fill: Color32) {
+    p.circle_filled(center, 7.0, fill);
+    p.circle_stroke(center, 7.0, Stroke::new(2.0, Color32::WHITE));
+    p.circle_stroke(center, 8.0, Stroke::new(1.0, theme::a(Color32::BLACK, 0.5)));
 }
 
 /// Parse a `#rrggbb` / `rrggbb` hex string into an [`RgbColor`]. Returns `None`
@@ -285,46 +392,6 @@ pub fn parse_hex(s: &str) -> Option<RgbColor> {
         g: u8::from_str_radix(&s[2..4], 16).ok()?,
         b: u8::from_str_radix(&s[4..6], 16).ok()?,
     })
-}
-
-/// A rainbow hue slider. Returns the new colour (keeping reasonable S/V) when the
-/// user drags it.
-fn hue_slider(ui: &mut egui::Ui, current: RgbColor) -> Option<RgbColor> {
-    let (rect, resp) = ui.allocate_exact_size(
-        Vec2::new(ui.available_width(), 16.0),
-        Sense::click_and_drag(),
-    );
-    let p = ui.painter();
-    let track = Rect::from_min_max(
-        Pos2::new(rect.left(), rect.center().y - 3.0),
-        Pos2::new(rect.right(), rect.center().y + 3.0),
-    );
-    const HUE_STOPS: &[(f32, u32)] = &[
-        (0.0, 0xff0000),
-        (1.0 / 6.0, 0xffff00),
-        (2.0 / 6.0, 0x00ff00),
-        (3.0 / 6.0, 0x00ffff),
-        (4.0 / 6.0, 0x0000ff),
-        (5.0 / 6.0, 0xff00ff),
-        (1.0, 0xff0000),
-    ];
-    draw_h_gradient_rect(p, track, HUE_STOPS, 3.0);
-
-    let (h, s, v) = rgb_to_hsv(current);
-    let cx = rect.left() + (h / 360.0) * rect.width();
-
-    let mut out = None;
-    if resp.dragged() || resp.clicked() {
-        if let Some(pos) = resp.interact_pointer_pos() {
-            let t = ((pos.x - rect.left()) / rect.width()).clamp(0.0, 1.0);
-            out = Some(hsv_to_rgb(t * 360.0, s.max(0.7), v.max(0.7)));
-        }
-    }
-    if resp.hovered() {
-        ui.ctx().set_cursor_icon(egui::CursorIcon::PointingHand);
-    }
-    p.circle_filled(Pos2::new(cx, rect.center().y), 7.0, theme::hex(0xdfe6f2));
-    out
 }
 
 /// Draw a horizontal multi-stop gradient into `rect` with corner rounding `r`.
@@ -370,26 +437,16 @@ mod tests {
     use super::*;
 
     #[test]
-    fn preset_cols_row_fits_within_available_width() {
-        // For any plausible card width the swatch (64) + gap (12) + grid row
-        // (cols*20 + (cols-1)*7) must not exceed the available width.
-        for avail in [120.0_f32, 150.0, 180.0, 208.0, 260.0, 369.0, 600.0] {
-            let cols = preset_cols(avail);
-            assert!((1..=6).contains(&cols));
-            let row = 64.0 + 12.0 + cols as f32 * 20.0 + (cols as f32 - 1.0) * 7.0;
-            assert!(
-                row <= avail,
-                "cols {cols} row {row} overflows avail {avail}"
-            );
-        }
-        // Narrow sidebar drops below 6 columns; wide panel keeps the full 6.
-        assert!(preset_cols(208.0) < 6);
-        assert_eq!(preset_cols(369.0), 6);
+    fn sv_square_maps_corners_and_clamps() {
+        let r = Rect::from_min_size(Pos2::new(10.0, 20.0), Vec2::new(100.0, 50.0));
+        assert_eq!(sv_at(r, r.left_top()), (0.0, 1.0));
+        assert_eq!(sv_at(r, r.right_bottom()), (1.0, 0.0));
+        assert_eq!(sv_at(r, Pos2::new(-50.0, 500.0)), (0.0, 0.0));
     }
 
     #[test]
     fn mini_glyph_color_contrasts_with_fill() {
-        assert_eq!(mini_glyph_color(Color32::WHITE), theme::hex(0x0a0d13));
+        assert_eq!(mini_glyph_color(Color32::WHITE), theme::ON_ACCENT);
         assert_eq!(mini_glyph_color(Color32::BLACK), Color32::WHITE);
         assert_eq!(mini_glyph_color(theme::hex(0x8b6fd8)), Color32::WHITE);
     }
@@ -492,7 +549,7 @@ mod tests {
             ..Default::default()
         };
         for _ in 0..2 {
-            let _ = ctx.run_ui(input(), |ui| {
+            let _ = crate::ui::run_headless(&ctx, input(), |ui| {
                 let c = RgbColor { r: 1, g: 2, b: 3 };
                 let _ = color_picker(ui, c);
                 let _ = color_picker(ui, c);

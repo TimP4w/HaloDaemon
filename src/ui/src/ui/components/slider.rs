@@ -29,7 +29,7 @@ pub fn slider_row_debounced(
     range: RangeInclusive<f32>,
     readout: &str,
 ) -> bool {
-    let id = ui.id().with(("srd", label));
+    let id = ui.scope_id().with(("srd", label));
     let raw = slider_row(ui, label, value, range, readout);
     let now = ui.input(|i| i.time);
 
@@ -73,15 +73,15 @@ pub fn slider_row(
         |ui| {
             ui.label(
                 egui::RichText::new(label)
-                    .font(theme::body_sm())
-                    .color(theme::TEXT_MUT),
+                    .font(theme::body_md())
+                    .color(theme::TEXT),
             );
         },
         |ui| {
             ui.label(
                 egui::RichText::new(readout)
-                    .font(theme::mono_semibold(11.5))
-                    .color(theme::CYAN),
+                    .font(theme::body_md())
+                    .color(theme::TEXT_DIM),
             );
         },
     );
@@ -149,79 +149,61 @@ pub fn stepper_row(ui: &mut egui::Ui, label: &str, value_text: &str) -> i32 {
 
 /// The bare `−  value  +` stepper control. Returns `-1`, `0`, or `+1`.
 #[must_use]
-fn stepper(ui: &mut egui::Ui, id_src: &str, value_text: &str) -> i32 {
-    let (frame, _) = ui.allocate_exact_size(Vec2::new(110.0, 30.0), Sense::hover());
-    let p = ui.painter();
-    p.rect_stroke(
-        frame,
-        8.0,
-        egui::Stroke::new(1.0, theme::hex(0x222b3a)),
-        egui::StrokeKind::Middle,
-    );
-
-    let btn_w = 28.0;
+pub fn stepper(
+    ui: &mut egui::Ui,
+    id_src: impl std::hash::Hash + std::fmt::Debug,
+    value_text: &str,
+) -> i32 {
+    let (frame, resp) = ui.allocate_exact_size(Vec2::new(120.0, 34.0), Sense::hover());
+    let btn_w = 34.0;
     let dec_rect = Rect::from_min_size(frame.min, Vec2::new(btn_w, frame.height()));
     let inc_rect = Rect::from_min_size(
         Pos2::new(frame.right() - btn_w, frame.top()),
         Vec2::new(btn_w, frame.height()),
     );
-
-    let dec_id = ui.id().with(("stepper_dec", id_src));
-    let inc_id = ui.id().with(("stepper_inc", id_src));
-    let dec_resp = ui.interact(dec_rect, dec_id, Sense::click());
-    let inc_resp = ui.interact(inc_rect, inc_id, Sense::click());
-
-    if dec_resp.hovered() || inc_resp.hovered() {
-        ui.ctx().set_cursor_icon(egui::CursorIcon::PointingHand);
-    }
-
-    let t_dec = ui
-        .ctx()
-        .animate_bool_with_time(dec_id, dec_resp.hovered(), 0.1);
-    let t_inc = ui
-        .ctx()
-        .animate_bool_with_time(inc_id, inc_resp.hovered(), 0.1);
+    let dec = ui.interact(dec_rect, resp.id.with(("dec", &id_src)), Sense::click());
+    let inc = ui.interact(inc_rect, resp.id.with(("inc", &id_src)), Sense::click());
 
     let p = ui.painter();
-    p.rect_filled(dec_rect, 8.0, theme::a(egui::Color32::WHITE, 0.05 * t_dec));
+    theme::paint_surface(p, frame, theme::RADIUS_SM, theme::INNER_BG, theme::TRACK);
+    let rule = egui::Stroke::new(1.0, theme::TRACK);
+    p.vline(dec_rect.right(), frame.y_range(), rule);
+    p.vline(inc_rect.left(), frame.y_range(), rule);
+    for (r, glyph, resp) in [(dec_rect, "−", &dec), (inc_rect, "+", &inc)] {
+        if resp.hovered() {
+            p.rect_filled(r.shrink(1.0), theme::RADIUS_SM - 1.0, theme::RAISED_BG);
+            ui.ctx().set_cursor_icon(egui::CursorIcon::PointingHand);
+        }
+        p.text(
+            r.center(),
+            egui::Align2::CENTER_CENTER,
+            glyph,
+            theme::body(15.0),
+            if resp.hovered() {
+                theme::TEXT
+            } else {
+                theme::TEXT_DIM
+            },
+        );
+    }
     p.text(
-        dec_rect.center(),
-        egui::Align2::CENTER_CENTER,
-        "−",
-        theme::body(15.0),
-        theme::lerp_color(theme::TEXT_MUT, theme::TEXT, t_dec),
-    );
-    p.rect_filled(inc_rect, 8.0, theme::a(egui::Color32::WHITE, 0.05 * t_inc));
-    p.text(
-        inc_rect.center(),
-        egui::Align2::CENTER_CENTER,
-        "+",
-        theme::body(15.0),
-        theme::lerp_color(theme::TEXT_MUT, theme::TEXT, t_inc),
-    );
-
-    let center = Rect::from_min_max(
-        Pos2::new(dec_rect.right(), frame.top()),
-        Pos2::new(inc_rect.left(), frame.bottom()),
-    );
-    p.text(
-        center.center(),
+        frame.center(),
         egui::Align2::CENTER_CENTER,
         value_text,
-        theme::mono(12.0),
-        theme::TEXT_BRIGHT,
+        theme::body_lg(),
+        theme::TEXT,
     );
 
-    if dec_resp.clicked() {
+    if dec.clicked() {
         -1
-    } else if inc_resp.clicked() {
+    } else if inc.clicked() {
         1
     } else {
         0
     }
 }
 
-/// A bare horizontal slider (track + fill + glowing thumb). Returns `true` on change.
+/// A bare horizontal slider (track + accent fill + ringed thumb). Returns `true` on change.
 #[must_use]
 pub fn slider(ui: &mut egui::Ui, value: &mut f32, range: RangeInclusive<f32>) -> bool {
     let (rect, resp) = ui.allocate_exact_size(
@@ -235,7 +217,7 @@ pub fn slider(ui: &mut egui::Ui, value: &mut f32, range: RangeInclusive<f32>) ->
         Pos2::new(rect.left(), cy - 2.0),
         Pos2::new(rect.right(), cy + 2.0),
     );
-    p.rect_filled(track, 2.0, theme::hex(0x222936));
+    p.rect_filled(track, 2.0, theme::TRACK);
 
     let mut changed = false;
     if (resp.dragged() || resp.clicked()) && hi > lo {
@@ -256,8 +238,8 @@ pub fn slider(ui: &mut egui::Ui, value: &mut f32, range: RangeInclusive<f32>) ->
         2.0,
         theme::CYAN,
     );
-    theme::glow(p, Pos2::new(cx, cy), 9.0, theme::CYAN, 0.25);
-    p.circle_filled(Pos2::new(cx, cy), 7.0, theme::hex(0xdfe6f2));
+    p.circle_filled(Pos2::new(cx, cy), 8.0, theme::TEXT);
+    p.circle_stroke(Pos2::new(cx, cy), 6.5, egui::Stroke::new(3.0, theme::CYAN));
     if resp.hovered() {
         ui.ctx().set_cursor_icon(egui::CursorIcon::PointingHand);
     }

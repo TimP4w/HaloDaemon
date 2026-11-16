@@ -496,22 +496,12 @@ pub(crate) const USB_LIVENESS_POLL: Duration = Duration::from_secs(2);
 
 /// Every USB device's live enumeration coordinates, read without opening a
 /// handle (no serial). Cheap enough to poll: it only lists the bus.
-pub(crate) fn present_usb_locations() -> Vec<UsbLocation> {
-    let ctx = match Context::new() {
-        Ok(c) => c,
-        Err(e) => {
-            log::debug!("USB liveness: context init failed: {e}");
-            return Vec::new();
-        }
-    };
-    let devices = match ctx.devices() {
-        Ok(d) => d,
-        Err(e) => {
-            log::debug!("USB liveness: device list failed: {e}");
-            return Vec::new();
-        }
-    };
-    devices
+pub(crate) fn present_usb_locations() -> Option<HashSet<UsbLocation>> {
+    let devices = Context::new()
+        .and_then(|ctx| ctx.devices())
+        .inspect_err(|e| log::debug!("USB liveness: device list failed: {e}"))
+        .ok()?;
+    let locations = devices
         .iter()
         .filter_map(|d| {
             let dd = d.device_descriptor().ok()?;
@@ -523,7 +513,8 @@ pub(crate) fn present_usb_locations() -> Vec<UsbLocation> {
                 port_path: d.port_numbers().unwrap_or_default(),
             })
         })
-        .collect()
+        .collect();
+    Some(locations)
 }
 
 /// Registered device ids whose USB location is no longer on the bus — their

@@ -1,12 +1,13 @@
 depcheck:
   title: Alcuni controlli richiedono la tua attenzione
-  intro: HaloDaemon ha rilevato alcuni problemi che potrebbero impedire il corretto funzionamento di dispositivi o funzionalità.
-  dont_show_again: Non mostrare più questo avviso all'avvio
-  got_it: Ho capito
+  intro: Questi problemi potrebbero impedire il funzionamento di alcuni dispositivi o funzionalità. Risolvili, poi controlla di nuovo.
+  dont_show_again: Non controllare all’avvio
+  affects: "Riguarda: %{impact}"
+  passed: "Altri %{n} controlli superati."
+  check_again: Controlla di nuovo
+  continue: Continua
   required: Obbligatorio
   optional: Facoltativo
-  impact: Impatto
-  how_to_fix: Come risolvere
   rules:
     ffmpeg:
       title: ffmpeg

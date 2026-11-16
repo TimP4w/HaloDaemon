@@ -1,12 +1,13 @@
 depcheck:
   title: Some checks need your attention
-  intro: HaloDaemon found problems that may prevent some devices or features from working correctly.
-  dont_show_again: Don't show this again on startup
-  got_it: Got it
+  intro: These problems may stop some devices or features from working. Fix them, then check again.
+  dont_show_again: Don’t check on startup
+  affects: "Affects: %{impact}"
+  passed: "%{n} other checks passed."
+  check_again: Check again
+  continue: Continue
   required: Required
   optional: Optional
-  impact: Impact
-  how_to_fix: How to fix
   rules:
     ffmpeg:
       title: ffmpeg

@@ -37,7 +37,6 @@ pub fn show(ui: &mut egui::Ui, ctx: &TabCtx, st: &mut DeviceUi) {
         &daemon_steps,
     ) {
         st.perf.dpi = daemon_steps;
-        st.perf.dpi_active = dpi.current_index.min(st.perf.dpi.len().saturating_sub(1));
         st.perf.dpi_seeded = true;
     }
 
@@ -45,12 +44,13 @@ pub fn show(ui: &mut egui::Ui, ctx: &TabCtx, st: &mut DeviceUi) {
     let mut changed = false;
 
     widgets::card(ui, |ui| {
-        egui::Sides::new().show(
+        ui.set_width(ui.available_width());
+        egui::Sides::new().height(30.0).show(
             ui,
             |ui| {
                 ui.label(
                     egui::RichText::new(t!("devtabs.dpi_stages"))
-                        .font(theme::heading())
+                        .font(theme::semibold(18.0))
                         .color(theme::TEXT),
                 );
             },
@@ -58,8 +58,8 @@ pub fn show(ui: &mut egui::Ui, ctx: &TabCtx, st: &mut DeviceUi) {
                 if widgets::button(
                     ui,
                     &t!("devtabs.add_stage"),
-                    widgets::ButtonKind::Primary,
-                    egui::vec2(96.0, 30.0),
+                    widgets::ButtonKind::Secondary,
+                    egui::vec2(0.0, 30.0),
                 )
                 .clicked()
                     && st.perf.dpi.len() < 8
@@ -80,20 +80,16 @@ pub fn show(ui: &mut egui::Ui, ctx: &TabCtx, st: &mut DeviceUi) {
                 }
             },
         );
-        ui.add_space(theme::SPACE_7);
+        ui.add_space(theme::SPACE_9);
+        changed |= axis(ui, st, lo, hi, dpi.current_index, &available);
+        ui.add_space(theme::SPACE_9);
+        changed |= list(ui, st, lo, hi, dpi.current_index, &available);
+        ui.add_space(theme::SPACE_9);
         ui.label(
             egui::RichText::new(t!("devtabs.dpi_help"))
                 .font(theme::body_sm())
                 .color(theme::TEXT_MUT),
         );
-        ui.add_space(theme::SPACE_9);
-        if axis(ui, st, lo, hi, dpi.current_index, &available) {
-            changed = true;
-        }
-        ui.add_space(22.0);
-        if list(ui, st, lo, hi, dpi.current_index, &available) {
-            changed = true;
-        }
     });
 
     if changed {
@@ -139,42 +135,17 @@ fn dpi_range(dpi: &DpiStatus) -> (u32, u32) {
     (lo.min(100), hi.max(1600))
 }
 
-/// Breakpoint of the piecewise-linear DPI track
-const BREAK_DPI: f32 = 4000.0;
-const BREAK_FRAC: f32 = 0.72;
-
 fn dpi_t(dpi: f32, lo: f32, hi: f32) -> f32 {
-    let t = if hi <= BREAK_DPI {
-        (dpi - lo) / (hi - lo).max(1.0)
-    } else if dpi <= BREAK_DPI {
-        (dpi - lo) / (BREAK_DPI - lo).max(1.0) * BREAK_FRAC
-    } else {
-        BREAK_FRAC + (dpi - BREAK_DPI) / (hi - BREAK_DPI).max(1.0) * (1.0 - BREAK_FRAC)
-    };
-    t.clamp(0.0, 1.0)
+    ((dpi - lo) / (hi - lo).max(1.0)).clamp(0.0, 1.0)
 }
 
 fn t_dpi(t: f32, lo: f32, hi: f32) -> f32 {
-    let t = t.clamp(0.0, 1.0);
-    if hi <= BREAK_DPI || t <= BREAK_FRAC {
-        let lo_max = BREAK_DPI.min(hi);
-        lo + (t / BREAK_FRAC.max(0.001)) * (lo_max - lo)
-    } else {
-        BREAK_DPI + ((t - BREAK_FRAC) / (1.0 - BREAK_FRAC).max(0.001)) * (hi - BREAK_DPI)
-    }
+    lo + t.clamp(0.0, 1.0) * (hi - lo)
 }
 
-fn fmt_dpi(dpi: u32) -> String {
-    if dpi >= 1000 {
-        let k = dpi as f32 / 1000.0;
-        if k.fract() == 0.0 {
-            format!("{}K", k as u32)
-        } else {
-            format!("{k:.1}K")
-        }
-    } else {
-        dpi.to_string()
-    }
+/// The five axis labels: the floor, then quarters of the ceiling.
+fn tick_labels(lo: u32, hi: u32) -> [u32; 5] {
+    [lo, hi / 4, hi / 2, hi * 3 / 4, hi]
 }
 
 fn axis(
@@ -185,43 +156,39 @@ fn axis(
     current: usize,
     available: &[u32],
 ) -> bool {
-    let (rect, _) = ui.allocate_exact_size(Vec2::new(ui.available_width(), 56.0), Sense::hover());
+    let (outer, _) = ui.allocate_exact_size(Vec2::new(ui.available_width(), 90.0), Sense::hover());
+    let rect = outer.shrink2(Vec2::new(12.0, 0.0));
     let p = ui.painter();
-    let track_y = rect.bottom() - 14.0;
-    let track = Rect::from_min_max(
-        Pos2::new(rect.left(), track_y - 2.0),
-        Pos2::new(rect.right(), track_y + 2.0),
+    let track = Rect::from_min_size(
+        Pos2::new(rect.left(), rect.top() + 40.0),
+        Vec2::new(rect.width(), 4.0),
     );
-    p.rect_filled(track, 3.0, theme::hex(0x222b3a));
-
-    // Tick hints: a few representative DPIs, placed on the same scale.
-    let mut ticks = vec![lo, 1000, 2000, BREAK_DPI as u32, hi];
-    ticks.retain(|&t| t >= lo && t <= hi);
-    ticks.sort_unstable();
-    ticks.dedup();
-    for t in ticks {
-        let x = rect.left() + dpi_t(t as f32, lo as f32, hi as f32) * rect.width();
-        p.line_segment(
-            [Pos2::new(x, track_y + 4.0), Pos2::new(x, track_y + 9.0)],
-            Stroke::new(1.0, theme::hex(0x2a3446)),
-        );
+    p.rect_filled(track, 2.0, theme::BORDER);
+    for (k, v) in tick_labels(lo, hi).into_iter().enumerate() {
+        let align = match k {
+            0 => Align2::LEFT_TOP,
+            4 => Align2::RIGHT_TOP,
+            _ => Align2::CENTER_TOP,
+        };
         p.text(
-            Pos2::new(x, rect.bottom()),
-            Align2::CENTER_CENTER,
-            fmt_dpi(t),
-            theme::mono(8.5),
-            theme::TEXT_FAINT2,
+            Pos2::new(
+                rect.left() + rect.width() * k as f32 / 4.0,
+                rect.top() + 70.0,
+            ),
+            align,
+            v.to_string(),
+            theme::caption(),
+            theme::TEXT_FAINT,
         );
     }
 
     let mut changed = false;
     for i in 0..st.perf.dpi.len() {
         let v = st.perf.dpi[i];
-        let t = dpi_t(v as f32, lo as f32, hi as f32);
-        let cx = rect.left() + t * rect.width();
-        let center = Pos2::new(cx, track_y);
-        let hit = Rect::from_center_size(center, Vec2::splat(20.0));
-        let resp = ui.interact(hit, ui.id().with(("dpi", i)), Sense::click_and_drag());
+        let cx = rect.left() + dpi_t(v as f32, lo as f32, hi as f32) * rect.width();
+        let center = Pos2::new(cx, rect.top() + 36.0);
+        let hit = Rect::from_center_size(center, Vec2::splat(24.0));
+        let resp = ui.interact(hit, ui.scope_id().with(("dpi", i)), Sense::drag());
         if resp.dragged() {
             if let Some(pos) = resp.interact_pointer_pos() {
                 let nt = ((pos.x - rect.left()) / rect.width()).clamp(0.0, 1.0);
@@ -231,46 +198,25 @@ fn axis(
                 changed = true;
             }
         }
-        if resp.clicked() {
-            st.perf.dpi_active = i;
-        }
-        // The stage the mouse is currently using (live) gets the cyan glow.
-        let is_current = i == current;
-        let col = if is_current {
-            theme::CYAN
-        } else {
-            theme::hex(0x60a5fa)
-        };
-        if is_current {
-            theme::glow(ui.painter(), center, 10.0, col, 0.45);
-        }
-        ui.painter().circle_filled(center, 8.0, col);
-        ui.painter().circle_stroke(
-            center,
-            8.0,
-            Stroke::new(
-                2.0,
-                if i == st.perf.dpi_active {
-                    theme::TEXT
-                } else {
-                    theme::INNER_BG
-                },
-            ),
-        );
-        ui.painter().text(
-            Pos2::new(cx, track_y - 18.0),
-            Align2::CENTER_CENTER,
-            fmt_dpi(v),
-            theme::value_xs(),
-            if is_current {
-                theme::CYAN
-            } else {
-                theme::TEXT_DIM
-            },
-        );
         if resp.hovered() {
             ui.ctx().set_cursor_icon(egui::CursorIcon::Grab);
         }
+        let is_current = i == current;
+        let (fill, ring, ink) = if is_current {
+            (theme::CYAN, theme::CYAN, theme::ACCENT_INK)
+        } else {
+            (theme::INNER_BG, theme::TEXT_FAINT2, theme::TEXT_DIM)
+        };
+        let p = ui.painter();
+        p.circle_filled(center, 10.0, fill);
+        p.circle_stroke(center, 10.0, Stroke::new(2.0, ring));
+        p.text(
+            Pos2::new(cx, rect.top()),
+            Align2::CENTER_TOP,
+            v.to_string(),
+            theme::medium(13.0),
+            ink,
+        );
     }
     changed
 }
@@ -289,80 +235,78 @@ fn list(
 
     for i in 0..n {
         if i > 0 {
-            ui.add_space(theme::SPACE_1);
-            let (sep, _) =
-                ui.allocate_exact_size(egui::vec2(ui.available_width(), 1.0), Sense::hover());
-            ui.painter().rect_filled(sep, 0.0, theme::hex(0x1e2738));
-            ui.add_space(theme::SPACE_1);
+            ui.add_space(theme::SPACE_4);
         }
-
         let is_current = i == current;
-        ui.horizontal(|ui| {
-            let (dot_rect, _) = ui.allocate_exact_size(egui::vec2(16.0, 34.0), Sense::hover());
-            ui.painter().circle_filled(
-                dot_rect.center(),
-                5.0,
-                if is_current {
-                    theme::CYAN
-                } else {
-                    theme::hex(0x3a4860)
-                },
-            );
-
-            let label = if is_current {
-                t!("devtabs.stage_n_current", n = i + 1)
-            } else {
-                t!("devtabs.stage_n", n = i + 1)
-            };
-            ui.add_sized(
-                [120.0, 34.0],
-                egui::Label::new(egui::RichText::new(label).font(theme::body_sm()).color(
-                    if is_current {
-                        theme::CYAN
-                    } else {
-                        theme::TEXT_MUT
+        let border = if is_current {
+            theme::SELECTED_BORDER
+        } else {
+            theme::BORDER
+        };
+        egui::Frame::NONE
+            .fill(theme::INNER_BG)
+            .stroke(Stroke::new(1.0, border))
+            .corner_radius(theme::RADIUS_SM)
+            .inner_margin(egui::Margin::symmetric(12, 10))
+            .show(ui, |ui| {
+                ui.set_width(ui.available_width());
+                egui::Sides::new().height(32.0).show(
+                    ui,
+                    |ui| {
+                        ui.label(
+                            egui::RichText::new(t!("devtabs.stage_n", n = i + 1))
+                                .font(theme::medium(14.0))
+                                .color(theme::TEXT),
+                        );
+                        if is_current {
+                            ui.label(
+                                egui::RichText::new(t!("devtabs.stage_current"))
+                                    .font(theme::body_sm())
+                                    .color(theme::ACCENT_INK),
+                            );
+                        }
                     },
-                )),
-            );
-
-            // Reserve space for "DPI" label + optional × button on the right.
-            let item_sp = ui.spacing().item_spacing.x;
-            let right_w = 32.0 + item_sp + if n > 1 { 30.0 + item_sp } else { 0.0 };
-            let input_w = (ui.available_width() - right_w).max(40.0);
-
-            let mut v = st.perf.dpi[i] as i32;
-            if ui
-                .add_sized(
-                    [input_w, 30.0],
-                    egui::DragValue::new(&mut v)
-                        .speed(50.0)
-                        .range(lo as i32..=hi as i32),
-                )
-                .changed()
-            {
-                st.perf.dpi[i] = snap_dpi(v.clamp(lo as i32, hi as i32) as u32, available);
-                st.last_edit = ui.input(|inp| inp.time);
-                changed = true;
-            }
-
-            ui.label(
-                egui::RichText::new("DPI")
-                    .font(theme::body_sm())
-                    .color(theme::TEXT_FAINT),
-            );
-
-            if n > 1
-                && widgets::button(ui, "×", widgets::ButtonKind::Ghost, egui::vec2(28.0, 28.0))
-                    .clicked()
-            {
-                remove = Some(i);
-            }
-        });
+                    |ui| {
+                        ui.spacing_mut().item_spacing.x = theme::SPACE_4;
+                        if n > 1
+                            && widgets::button(
+                                ui,
+                                &t!("devtabs.remove"),
+                                widgets::ButtonKind::Ghost,
+                                egui::vec2(0.0, 30.0),
+                            )
+                            .clicked()
+                        {
+                            remove = Some(i);
+                        }
+                        ui.add_space(theme::SPACE_3);
+                        let mut v = st.perf.dpi[i] as i32;
+                        if ui
+                            .add_sized(
+                                [90.0, 32.0],
+                                egui::DragValue::new(&mut v)
+                                    .speed(50.0)
+                                    .range(lo as i32..=hi as i32),
+                            )
+                            .changed()
+                        {
+                            st.perf.dpi[i] =
+                                snap_dpi(v.clamp(lo as i32, hi as i32) as u32, available);
+                            st.last_edit = ui.input(|inp| inp.time);
+                            changed = true;
+                        }
+                        ui.label(
+                            egui::RichText::new("DPI")
+                                .font(theme::body_md())
+                                .color(theme::TEXT_DIM),
+                        );
+                    },
+                );
+            });
     }
 
     if let Some(i) = remove {
         st.perf.dpi.remove(i);
-        st.perf.dpi_active = st.perf.dpi_active.min(st.perf.dpi.len().saturating_sub(1));
         changed = true;
     }
     changed
@@ -370,7 +314,7 @@ fn list(
 
 #[cfg(test)]
 mod tests {
-    use super::{dpi_t, fmt_dpi, should_reseed_dpi, snap_dpi, t_dpi};
+    use super::{dpi_t, should_reseed_dpi, snap_dpi, t_dpi, tick_labels};
 
     #[test]
     fn snap_dpi_rounds_to_nearest_available() {
@@ -401,23 +345,17 @@ mod tests {
     }
 
     #[test]
-    fn dpi_scale_round_trips_across_the_break() {
-        for dpi in [100.0_f32, 800.0, 4000.0, 12000.0, 26000.0] {
-            let t = dpi_t(dpi, 100.0, 26000.0);
-            let back = t_dpi(t, 100.0, 26000.0);
-            assert!((back - dpi).abs() < 1.0, "{dpi} -> {t} -> {back}");
+    fn dpi_scale_round_trips() {
+        for dpi in [100.0_f32, 800.0, 4000.0, 12000.0, 25600.0] {
+            let back = t_dpi(dpi_t(dpi, 100.0, 25600.0), 100.0, 25600.0);
+            assert!((back - dpi).abs() < 1.0, "{dpi} -> {back}");
         }
     }
 
     #[test]
-    fn break_point_sits_at_72_percent() {
-        assert!((dpi_t(4000.0, 100.0, 26000.0) - 0.72).abs() < 0.001);
-    }
-
-    #[test]
-    fn fmt_dpi_uses_k_suffix() {
-        assert_eq!(fmt_dpi(800), "800");
-        assert_eq!(fmt_dpi(1600), "1.6K");
-        assert_eq!(fmt_dpi(4000), "4K");
+    fn tick_labels_span_the_range_in_increasing_order() {
+        let ticks = tick_labels(100, 25600);
+        assert_eq!((ticks[0], ticks[4]), (100, 25600));
+        assert!(ticks.windows(2).all(|w| w[0] < w[1]));
     }
 }

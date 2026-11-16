@@ -1,4 +1,5 @@
 home:
+  title: Dispositivi
   device_name: Nome dispositivo
   save: Salva
   cancel: Annulla
@@ -11,25 +12,16 @@ home:
   remove: Rimuovi
   remove_device_title: Vuoi rimuovere il dispositivo?
   remove_device_confirm: "Vuoi rimuovere %{name} dalla catena? Il dispositivo verrà scollegato e non comparirà più qui."
-  devices_connected: "%{online} di %{total} dispositivi connessi"
-  devices_connected_attention: "%{online} di %{total} dispositivi connessi · %{attention} richiedono attenzione"
-  hide_hidden: Nascondi dispositivi nascosti
-  show_hidden: Mostra dispositivi nascosti
+  devices_count: "%{total} dispositivi"
+  devices_found_so_far: "%{total} trovati finora"
+  devices_count_attention: "%{total} dispositivi · %{attention} richiedono attenzione"
   search_devices: Cerca dispositivi
-  grid: Griglia
-  list: Elenco
   offline: Offline
   conflict_confirmed: Dispositivo duplicato
   conflict_possible: Possibile duplicato
   conflict_recommended: Proprietario consigliato
   conflict_owner: "Proprietario consigliato: %{name}"
   conflict_with: "Potrebbe controllare anche: %{name}. Fai clic per scegliere quale dispositivo mantenere."
-  conflict_dialog_title: Scegli il proprietario del dispositivo
-  conflict_dialog_confirmed: "Queste voci controllano lo stesso dispositivo fisico. Scegli quale mantenere abilitata; le altre verranno disabilitate."
-  conflict_dialog_possible: "Queste voci potrebbero controllare lo stesso dispositivo fisico. Scegli quale mantenere abilitata; le altre verranno disabilitate."
-  conflict_keep: "Mantieni %{name}"
-  conflict_keep_recommended: "Mantieni %{name} (consigliato)"
-  conflict_choose_owner: Scegli questo proprietario del dispositivo
   conflict_source_builtin: Dispositivo host integrato
   conflict_source_plugin: "Plugin: %{name}"
   conflict_source_integration: "Integrazione: %{name}"
@@ -38,12 +30,11 @@ home:
   conflict_banner_sub: Un dispositivo può essere controllato da una sola sorgente. Scegli quale mantiene il controllo.
   conflict_resolve: Risolvi
   conflict_modal_title: Risolvi i conflitti di controllo
-  conflict_modal_intro: "Ogni dispositivo elencato è controllato da più sorgenti. Scegli quale sorgente deve mantenere il controllo; le altre rilasceranno il dispositivo."
-  conflict_modal_note: "Le sorgenti non selezionate continueranno a controllare gli altri dispositivi. La modifica riguarda solo il controllo dei dispositivi elencati qui."
-  conflict_sources: "%{count} sorgenti"
+  conflict_modal_intro: "Ogni dispositivo qui sotto è controllato da più di una fonte. Scegli quale fonte mantiene il controllo. Le altre continuano a controllare i loro altri dispositivi."
   conflict_tag_recommended: Consigliata
   conflict_decide_later: Decidi in seguito
-  conflict_keep_selected: "Applica le selezioni · %{count}"
+  conflict_keep_selected: "Applica %{count} scelte"
+  conflict_keep_selected_one: Applica scelta
   no_matching: Nessun dispositivo trovato
   no_matching_sub: Nessun dispositivo connesso corrisponde alla ricerca
   no_devices: Nessun dispositivo connesso
@@ -58,6 +49,8 @@ home:
   widget_chart: Grafico
   widget_chart_desc: Andamento nel tempo
   widget_gauge: Indicatore
+  widget_meter: Barra
+  widget_meter_desc: Barra segmentata su un intervallo a scelta
   widget_gauge_desc: Quadrante radiale su un intervallo a tua scelta
   widget_battery: Batteria
   widget_battery_desc: Livello di carica per un massimo di tre batterie
@@ -67,6 +60,7 @@ home:
   widget_label: Etichetta
   widget_color: Colore
   widget_range: Intervallo
+  widget_window: "Ultimi %{secs} s"
   widget_min: Minimo
   widget_max: Massimo
   widget_unavailable: Sorgente non disponibile

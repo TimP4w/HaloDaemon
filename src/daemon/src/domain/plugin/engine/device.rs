@@ -1970,7 +1970,7 @@ impl Device for LuaDevice {
         }
         if let Some(w) = &self.worker {
             if let Err(error) = w.close().await {
-                log::warn!(
+                log::debug!(
                     "plugin close hook did not complete for '{}': {error:#}",
                     self.id
                 );

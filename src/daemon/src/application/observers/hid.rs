@@ -409,6 +409,9 @@ async fn add_hid_device(
 
     let _ = scoped;
 
+    crate::application::usecases::registry::registration::release_wireless_twin(app, impl_.id())
+        .await;
+
     // Register as a new primary device via the centralised registration lifecycle.
     let registered =
         crate::application::usecases::registry::registration::register_device(app, impl_.clone())
@@ -448,7 +451,7 @@ mod tests {
     #[tokio::test]
     async fn removing_a_hid_key_closes_children_registered_after_tracking() {
         let root = Arc::new(MockDevice::new("logitech-c547"));
-        let late_child = Arc::new(MockDevice::new("logitech_6B3DD4CD"));
+        let late_child = Arc::new(MockDevice::new("logitech-6B3DD4CD"));
         let unrelated = Arc::new(MockDevice::new("other"));
         let app = app_with(vec![root.clone()]);
         app.hid
@@ -468,7 +471,7 @@ mod tests {
             .await
             .entry("logitech-c547".into())
             .or_default()
-            .insert("logitech_6B3DD4CD".into());
+            .insert("logitech-6B3DD4CD".into());
 
         handle_hid_key_removed(Arc::clone(&app), "046d:c547:".into()).await;
 

@@ -75,29 +75,28 @@ pub struct DecodedEditorRender {
 /// `has_changed()` flag so the UI re-clones only what actually moved.
 #[derive(Clone)]
 pub struct UiRx {
-    pub state: watch::Receiver<TopicStore>,
+    pub state: Synced<TopicStore>,
     pub connected: watch::Receiver<bool>,
-    pub debug: watch::Receiver<Option<halod_shared::debug_info::DebugInfo>>,
-    pub lcd_images: watch::Receiver<Vec<String>>,
+    pub debug: Synced<Option<halod_shared::debug_info::DebugInfo>>,
+    pub lcd_images: Synced<Vec<String>>,
     pub lcd_frames: watch::Receiver<HashMap<String, DecodedFrame>>,
-    pub canvas_frame: watch::Receiver<Option<CanvasFrame>>,
-    pub running_apps: watch::Receiver<Vec<RunningApp>>,
+    pub canvas_frame: Synced<Option<CanvasFrame>>,
+    pub running_apps: Synced<Vec<RunningApp>>,
     /// Decoded plugin display assets, keyed by `plugin_asset_cache_key`.
-    pub plugin_assets: watch::Receiver<HashMap<String, Vec<u8>>>,
-    pub udev_rules: watch::Receiver<Option<halod_shared::types::UdevRulesStatus>>,
-    pub plugin_releases:
-        watch::Receiver<HashMap<String, Vec<halod_shared::types::PluginReleaseInfo>>>,
+    pub plugin_assets: Synced<HashMap<String, Vec<u8>>>,
+    pub udev_rules: Synced<Option<halod_shared::types::UdevRulesStatus>>,
+    pub plugin_releases: Synced<HashMap<String, Vec<halod_shared::types::PluginReleaseInfo>>>,
     /// Host serial ports for the `serial_port` config-field dropdown; empty until
     /// a config screen requests one via `ListSerialPorts`.
-    pub serial_ports: watch::Receiver<Vec<halod_shared::types::SerialPortInfo>>,
+    pub serial_ports: Synced<Vec<halod_shared::types::SerialPortInfo>>,
     /// Stage/percent of the in-flight LCD image upload; `None` when idle.
-    pub lcd_upload: watch::Receiver<Option<LcdUploadProgress>>,
+    pub lcd_upload: Synced<Option<LcdUploadProgress>>,
     /// The most recently loaded named LCD template, pushed in response to
     /// `LoadLcdTemplate`. `None` until one is requested.
     pub lcd_template: watch::Receiver<Option<(String, CustomTemplateDef)>>,
     /// Latest on-demand LCD editor render (per-widget sprites). `None` until the
     /// editor requests one via `RenderLcdEditor`.
-    pub lcd_editor_render: watch::Receiver<Option<DecodedEditorRender>>,
+    pub lcd_editor_render: Synced<Option<DecodedEditorRender>>,
     pub notifications: NotifyQueue,
 }
 
@@ -172,6 +171,44 @@ pub fn take_changed<T: Clone>(rx: &mut watch::Receiver<T>, name: &str) -> Option
     }
 }
 
+/// A watch receiver plus the last value it delivered, re-cloned only on change.
+#[derive(Clone)]
+pub struct Synced<T> {
+    rx: watch::Receiver<T>,
+    value: Arc<T>,
+    name: &'static str,
+}
+
+impl<T: Clone> Synced<T> {
+    fn new(rx: watch::Receiver<T>, name: &'static str) -> Self {
+        let value = Arc::new(rx.borrow().clone());
+        Self { rx, value, name }
+    }
+
+    /// Adopt the channel's new value, if any; true when it changed.
+    pub fn poll(&mut self) -> bool {
+        take_changed(&mut self.rx, self.name)
+            .map(|v| self.value = Arc::new(v))
+            .is_some()
+    }
+
+    pub fn get(&self) -> &T {
+        &self.value
+    }
+
+    pub fn arc(&self) -> Arc<T> {
+        Arc::clone(&self.value)
+    }
+
+    pub fn set(&mut self, value: T) {
+        self.value = Arc::new(value);
+    }
+
+    pub fn subscribe(&self) -> watch::Receiver<T> {
+        self.rx.clone()
+    }
+}
+
 /// Queue a typed command for delivery to the daemon (non-blocking).
 pub fn send(tx: &CommandTx, cmd: DaemonCommand) {
     if tx.send(cmd).is_err() {
@@ -227,20 +264,20 @@ fn channels(hidden: Arc<AtomicBool>) -> (UiTx, UiRx, FrameSinks) {
         event_session_id: Arc::new(AtomicU64::new(0)),
     };
     let rx = UiRx {
-        state: state_r,
+        state: Synced::new(state_r, "state"),
         connected: conn_r,
-        debug: debug_r,
-        lcd_images: imgs_r,
+        debug: Synced::new(debug_r, "debug"),
+        lcd_images: Synced::new(imgs_r, "lcd_images"),
         lcd_frames: frames_r,
-        canvas_frame: canvas_r,
-        running_apps: apps_r,
-        plugin_assets: assets_r,
-        udev_rules: udev_rules_r,
-        plugin_releases: plugin_releases_r,
-        serial_ports: serial_ports_r,
-        lcd_upload: upload_r,
+        canvas_frame: Synced::new(canvas_r, "canvas_frame"),
+        running_apps: Synced::new(apps_r, "running_apps"),
+        plugin_assets: Synced::new(assets_r, "plugin_assets"),
+        udev_rules: Synced::new(udev_rules_r, "udev_rules"),
+        plugin_releases: Synced::new(plugin_releases_r, "plugin_releases"),
+        serial_ports: Synced::new(serial_ports_r, "serial_ports"),
+        lcd_upload: Synced::new(upload_r, "lcd_upload"),
         lcd_template: template_r,
-        lcd_editor_render: editor_render_r,
+        lcd_editor_render: Synced::new(editor_render_r, "lcd_editor_render"),
         notifications,
     };
     (tx, rx, sinks)
@@ -1017,15 +1054,15 @@ mod tests {
 
     #[test]
     fn frame_sinks_release_retained_buffers() {
-        let (tx, rx, sinks) = channels(Arc::new(AtomicBool::new(false)));
+        let (tx, mut rx, sinks) = channels(Arc::new(AtomicBool::new(false)));
         tx.plugin_assets
             .send_replace(HashMap::from([("k".to_string(), vec![0u8; 32])]));
         tx.canvas_frame.send_replace(Some(sample_canvas_frame()));
-        assert!(!rx.plugin_assets.borrow().is_empty());
+        assert!(rx.plugin_assets.poll() && !rx.plugin_assets.get().is_empty());
 
         sinks.clear();
-        assert!(rx.plugin_assets.borrow().is_empty());
-        assert!(rx.canvas_frame.borrow().is_none());
+        assert!(rx.plugin_assets.poll() && rx.plugin_assets.get().is_empty());
+        assert!(rx.canvas_frame.poll() && rx.canvas_frame.get().is_none());
     }
 
     #[test]
@@ -1038,6 +1075,20 @@ mod tests {
         // A closed channel yields None instead of panicking.
         drop(tx);
         assert_eq!(take_changed(&mut rx, "test"), None);
+    }
+
+    #[test]
+    fn synced_adopts_each_change_once_and_keeps_it() {
+        let (tx, rx) = watch::channel(0u32);
+        let mut synced = Synced::new(rx, "test");
+        assert!(!synced.poll());
+        tx.send_replace(7);
+        assert!(synced.poll());
+        assert!(!synced.poll());
+        assert_eq!(*synced.get(), 7);
+        synced.set(0);
+        assert!(!synced.poll());
+        assert_eq!(*synced.get(), 0);
     }
 
     #[test]

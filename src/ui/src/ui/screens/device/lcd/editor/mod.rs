@@ -24,7 +24,7 @@ use halod_shared::lcd_custom::{CustomTemplateDef, WIDGETS_JSON_PARAM};
 use halod_shared::types::EffectParamValue;
 
 use inspector::{empty_selection_card, screen_style_card, selected_widget_card};
-use library::{delete_template_modal, library_card};
+use library::{delete_template_modal, library_card, save_template_modal};
 use stage::stage;
 
 use crate::ui::components as widgets;
@@ -73,7 +73,7 @@ pub struct EditorState {
     /// Active resize gesture's captured start state, so the outline/sprite can
     /// preview the new size instantly rather than lagging the daemon re-render.
     pub resize_preview: Option<ResizePreview>,
-    pub library_collapsed: bool,
+    pub save_open: bool,
 }
 
 impl EditorState {
@@ -139,14 +139,16 @@ pub fn show(
         send_def(ctx, st, id, true);
     }
 
-    // Stage + persistent inspector. Keep object controls beside the stage so
-    // selecting a widget never causes a long form to appear below the canvas.
-    let avail = ui.available_width();
+    const ASIDE_W: f32 = 340.0;
+    let main_w = (ui.available_width() - ASIDE_W - 16.0).max(320.0);
     let mut left_column = Rect::NOTHING;
     let mut inspector_rect = Rect::NOTHING;
-    widgets::split_columns(ui, avail * 0.66, 16.0, |left, right| {
-        widgets::card(left, |ui| stage(ui, ctx, st, id, lcd));
-        // Drop selections whose widgets no longer exist (deleted this frame).
+    widgets::split_columns(ui, main_w, 16.0, |left, right| {
+        left.spacing_mut().item_spacing.y = crate::ui::theme::SPACE_8;
+        widgets::card_with_margin(left, egui::Margin::same(24), |ui| {
+            ui.set_width(ui.available_width());
+            stage(ui, ctx, st, id, lcd);
+        });
         let live: HashSet<String> = st
             .lcd
             .editor
@@ -156,19 +158,18 @@ pub fn show(
             .map(|w| w.id.clone())
             .collect();
         st.lcd.editor.selected.retain(|s| live.contains(s));
-        // Selection is edited in the right-hand inspector below. The stage is
-        // deliberately the only content in the left column.
+        widgets::card_with_margin(left, egui::Margin::same(16), |ui| {
+            library_card(ui, ctx, st, id)
+        });
         left_column = left.min_rect();
 
+        right.spacing_mut().item_spacing.y = crate::ui::theme::SPACE_8;
         let sel = st.lcd.editor.primary().cloned();
-        widgets::card(right, |ui| match &sel {
+        aside_card(right, |ui| match &sel {
             Some(sel) => selected_widget_card(ui, ctx, st, id, sel),
             None => empty_selection_card(ui),
         });
-        right.add_space(crate::ui::theme::SPACE_6);
-        widgets::card(right, |ui| library_card(ui, ctx, st, id));
-        right.add_space(crate::ui::theme::SPACE_6);
-        widgets::card(right, |ui| screen_style_card(ui, ctx, st, id, lcd));
+        aside_card(right, |ui| screen_style_card(ui, ctx, st, id, lcd));
         inspector_rect = right.min_rect();
     });
 
@@ -240,6 +241,15 @@ pub fn show(
     }
 
     delete_template_modal(ui, ctx, st);
+    save_template_modal(ui, ctx, st);
+}
+
+fn aside_card(ui: &mut egui::Ui, body: impl FnOnce(&mut egui::Ui)) {
+    widgets::card_with_margin(ui, egui::Margin::same(18), |ui| {
+        ui.set_width(ui.available_width());
+        ui.spacing_mut().item_spacing.y = crate::ui::theme::SPACE_4;
+        body(ui);
+    });
 }
 
 /// Seed the editor's local `def` from the daemon-reported params once per tab

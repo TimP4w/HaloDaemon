@@ -322,6 +322,21 @@ async fn run_daemon(
         || {},
     );
 
+    let retry_app = Arc::clone(&app);
+    supervisor.register(
+        "Failed device retry",
+        "Retrying devices that failed to open stopped unexpectedly.",
+        move || {
+            let app = Arc::clone(&retry_app);
+            Box::pin(async move {
+                task_supervisor::TaskHandle(tokio::spawn(
+                    plugin::observers::host_scan::retry_failed_opens(app),
+                ))
+            })
+        },
+        || {},
+    );
+
     // Devices that stay enumerated across a host suspend are invisible to both
     // hotplug observers, but their firmware still forgets everything.
     let power_app = Arc::clone(&app);

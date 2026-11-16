@@ -4,7 +4,7 @@
 
 use std::collections::{HashMap, VecDeque};
 
-use egui::{Align2, Color32, Pos2, Rect, Stroke};
+use egui::{Align2, Color32, Pos2, Rect, Stroke, Vec2};
 use halod_shared::types::{
     battery_ref, split_battery_ref, BatteryStatus, DeviceCapability, HomeWidget, HomeWidgetKind,
 };
@@ -16,7 +16,10 @@ use crate::ui::theme;
 
 use super::ellipsize;
 
-pub const TILE_H: f32 = 96.0;
+pub const CELL_H: f32 = 170.0;
+const PAD: Vec2 = Vec2::new(20.0, 18.0);
+const CONTENT_TOP: f32 = 47.0;
+const DIAL: f32 = 104.0;
 
 /// One battery line inside a battery widget.
 pub struct BatteryRow {
@@ -36,34 +39,19 @@ pub enum Data {
         unit: &'static str,
         fraction: f32,
     },
+    Meter {
+        value: f64,
+        unit: &'static str,
+        fraction: f32,
+    },
     Battery(Vec<BatteryRow>),
 }
 
 /// A widget bound to the live values it renders this frame.
 pub struct Resolved {
     pub label: String,
+    pub source: String,
     pub data: Data,
-}
-
-/// A tile's footprint on the dashboard grid, in half-columns and rows.
-#[derive(Clone, Copy, Debug, PartialEq, Eq)]
-pub struct Size {
-    pub cols: usize,
-    pub rows: usize,
-}
-
-impl Size {
-    /// Charts, batteries and the "Add widget" placeholder: full width, one row.
-    pub const FULL: Self = Self { cols: 2, rows: 1 };
-    /// A gauge: a square tile — full width, two rows — so the dial reads large.
-    pub const GAUGE: Self = Self { cols: 2, rows: 2 };
-}
-
-pub fn size(kind: &HomeWidgetKind) -> Size {
-    match kind {
-        HomeWidgetKind::Gauge { .. } => Size::GAUGE,
-        _ => Size::FULL,
-    }
 }
 
 /// Where `value` sits in `[min, max]`, clamped to the unit range.
@@ -89,6 +77,7 @@ pub fn resolve(w: &HomeWidget, sensors: &[SensorView], state: &TopicStore) -> Op
             let s = sensors.iter().find(|s| &s.id == sensor_id)?;
             Some(Resolved {
                 label: named(&s.label),
+                source: s.device.clone(),
                 data: Data::Chart {
                     sensor_id: s.id.clone(),
                     value: s.value,
@@ -104,7 +93,24 @@ pub fn resolve(w: &HomeWidget, sensors: &[SensorView], state: &TopicStore) -> Op
             let s = sensors.iter().find(|s| &s.id == sensor_id)?;
             Some(Resolved {
                 label: named(&s.label),
+                source: s.device.clone(),
                 data: Data::Gauge {
+                    value: s.value,
+                    unit: s.unit,
+                    fraction: gauge_fraction(s.value, *min, *max),
+                },
+            })
+        }
+        HomeWidgetKind::Meter {
+            sensor_id,
+            min,
+            max,
+        } => {
+            let s = sensors.iter().find(|s| &s.id == sensor_id)?;
+            Some(Resolved {
+                label: named(&s.label),
+                source: s.device.clone(),
+                data: Data::Meter {
                     value: s.value,
                     unit: s.unit,
                     fraction: gauge_fraction(s.value, *min, *max),
@@ -118,6 +124,7 @@ pub fn resolve(w: &HomeWidget, sensors: &[SensorView], state: &TopicStore) -> Op
                 .collect();
             (!rows.is_empty()).then(|| Resolved {
                 label: named(&t!("home.widget_battery")),
+                source: String::new(),
                 data: Data::Battery(rows),
             })
         }
@@ -172,8 +179,8 @@ pub fn battery_options(state: &TopicStore) -> Vec<(String, String)> {
         .collect()
 }
 
-/// Draw a widget into `rect`. Pure painting, so the dashboard row and the
-/// configuration dialog's preview stay identical.
+/// Draw a widget's content into its strip cell. Pure painting, so the
+/// dashboard row and the configuration dialog's preview stay identical.
 pub fn paint(
     p: &egui::Painter,
     rect: Rect,
@@ -181,176 +188,208 @@ pub fn paint(
     resolved: Option<&Resolved>,
     history: &HashMap<String, VecDeque<f32>>,
 ) {
+    let Some(resolved) = resolved else {
+        p.text(
+            rect.center(),
+            Align2::CENTER_CENTER,
+            t!("home.widget_unavailable"),
+            theme::body_sm(),
+            theme::TEXT_FAINT,
+        );
+        return;
+    };
     let color = theme::widget_hue(w.color);
-    p.rect_filled(rect, theme::RADIUS_LG, theme::CARD_BG);
-    match resolved.map(|r| (r.label.as_str(), &r.data)) {
-        Some((
-            label,
-            Data::Chart {
-                sensor_id,
-                value,
-                unit,
-            },
-        )) => chart(p, rect, label, *value, unit, color, sensor_id, history),
-        Some((
-            label,
-            Data::Gauge {
-                value,
-                unit,
-                fraction,
-            },
-        )) => gauge(p, rect, label, *value, unit, *fraction, color),
-        Some((label, Data::Battery(rows))) => battery(p, rect, label, rows),
-        None => {
-            p.text(
-                rect.center(),
-                Align2::CENTER_CENTER,
-                t!("home.widget_unavailable"),
-                theme::body_sm(),
-                theme::TEXT_FAINT,
-            );
-        }
+    let inner = rect.shrink2(PAD);
+    header(p, inner, &resolved.label, &resolved.source);
+    let top = Pos2::new(inner.left(), rect.top() + CONTENT_TOP);
+    let samples = |id: &str| -> Vec<f32> {
+        history
+            .get(id)
+            .map(|h| h.iter().copied().collect())
+            .unwrap_or_default()
+    };
+    match &resolved.data {
+        Data::Chart {
+            sensor_id,
+            value,
+            unit,
+        } => chart(p, inner, top, (*value, unit), &samples(sensor_id), color),
+        Data::Gauge {
+            value,
+            unit,
+            fraction,
+        } => gauge(p, top, (*value, unit), *fraction, color),
+        Data::Meter {
+            value,
+            unit,
+            fraction,
+        } => meter(p, inner, top, (*value, unit), *fraction, color),
+        Data::Battery(rows) => battery(p, inner, top, rows),
     }
+}
+
+fn header(p: &egui::Painter, inner: Rect, label: &str, source: &str) {
+    let y = inner.top() + 8.0;
+    let font = theme::body_md();
+    let source = p.text(
+        Pos2::new(inner.right(), y),
+        Align2::RIGHT_CENTER,
+        ellipsize(p, source, &font, inner.width() * 0.5),
+        font.clone(),
+        theme::TEXT_MUT,
+    );
+    let label_font = theme::medium(13.0);
+    p.text(
+        Pos2::new(inner.left(), y),
+        Align2::LEFT_CENTER,
+        ellipsize(p, label, &label_font, source.left() - 12.0 - inner.left()),
+        label_font,
+        theme::TEXT,
+    );
+}
+
+/// The large readout with its unit; returns the number's rect.
+fn big_value(p: &egui::Painter, top: Pos2, value: f64, unit: &str) -> Rect {
+    let v = p.text(
+        top,
+        Align2::LEFT_TOP,
+        format!("{value:.0}"),
+        theme::semibold(44.0),
+        theme::TEXT,
+    );
+    p.text(
+        Pos2::new(v.right() + 4.0, v.bottom() - 10.0),
+        Align2::LEFT_BOTTOM,
+        unit,
+        theme::body(16.0),
+        theme::TEXT_MUT,
+    );
+    v
 }
 
 fn chart(
     p: &egui::Painter,
-    rect: Rect,
-    label: &str,
-    value: f64,
-    unit: &str,
+    inner: Rect,
+    top: Pos2,
+    (value, unit): (f64, &str),
+    samples: &[f32],
     color: Color32,
-    sensor_id: &str,
-    history: &HashMap<String, VecDeque<f32>>,
 ) {
-    let samples: Option<Vec<f32>> = history.get(sensor_id).map(|h| h.iter().copied().collect());
-    if let Some(samples) = &samples {
-        super::sparkline(&p.with_clip_rect(rect), rect, samples, color);
-        theme::round_corners(p, rect, theme::RADIUS_LG, theme::MAIN_BG);
+    let v = big_value(p, top, value, unit);
+    let spark = Rect::from_min_max(
+        Pos2::new(inner.right() - 150.0, v.bottom() - 52.0),
+        Pos2::new(inner.right(), v.bottom() - 8.0),
+    );
+    let pts = super::sparkline_points(spark, samples);
+    if pts.len() >= 2 {
+        p.add(egui::Shape::line(pts, Stroke::new(1.8, color)));
     }
-    let trend = samples.as_deref().and_then(|s| super::trend_label(s, unit));
-    p.circle_filled(Pos2::new(rect.left() + 20.5, rect.top() + 18.0), 2.5, color);
-    let label_x = rect.left() + 28.0;
+    let y = v.bottom() + 4.0;
     p.text(
-        Pos2::new(label_x, rect.top() + 18.0),
-        Align2::LEFT_CENTER,
-        ellipsize(p, label, &theme::body_sm(), rect.right() - 18.0 - label_x),
+        Pos2::new(inner.right(), y),
+        Align2::RIGHT_TOP,
+        t!(
+            "home.widget_window",
+            secs = crate::domain::state::HISTORY_LEN
+        ),
         theme::body_sm(),
         theme::TEXT_MUT,
     );
-    let vrect = p.text(
-        Pos2::new(rect.left() + 18.0, rect.top() + 34.0),
-        Align2::LEFT_TOP,
-        format!("{value:.0}"),
-        theme::mono_bold(24.0),
-        color,
-    );
-    p.text(
-        Pos2::new(vrect.right() + 6.0, vrect.bottom() - 4.0),
-        Align2::LEFT_BOTTOM,
-        unit,
-        theme::body_md(),
-        theme::TEXT_FAINT,
-    );
-    if let Some(trend) = trend {
+}
+
+fn gauge(p: &egui::Painter, top: Pos2, (value, unit): (f64, &str), fraction: f32, color: Color32) {
+    let center = top + Vec2::splat(DIAL / 2.0);
+    widgets::arc_gauge(p, center, DIAL, fraction, color);
+    let degrees = unit.starts_with('°');
+    let readout = if degrees {
+        format!("{value:.0}°")
+    } else {
+        format!("{value:.0}")
+    };
+    let font = theme::semibold(if readout.len() > 3 { 20.0 } else { 26.0 });
+    if degrees {
+        p.text(center, Align2::CENTER_CENTER, readout, font, theme::TEXT);
+    } else {
         p.text(
-            Pos2::new(rect.right() - 14.0, vrect.bottom() - 4.0),
-            Align2::RIGHT_BOTTOM,
-            trend,
-            theme::mono(10.0),
-            theme::TEXT_FAINT,
+            center - Vec2::new(0.0, 6.0),
+            Align2::CENTER_CENTER,
+            readout,
+            font,
+            theme::TEXT,
+        );
+        p.text(
+            center + Vec2::new(0.0, 14.0),
+            Align2::CENTER_CENTER,
+            unit,
+            theme::caption(),
+            theme::TEXT_MUT,
         );
     }
 }
 
-fn gauge(
+const METER_SEGMENTS: usize = 20;
+/// The top quarter of a meter's range reads as a warning.
+const METER_WARN_FROM: f32 = 0.75;
+
+/// Color of meter segment `i`: lit up to `fraction`, amber in the warning band.
+fn meter_segment_color(i: usize, fraction: f32, color: Color32) -> Color32 {
+    let at = i as f32 / (METER_SEGMENTS - 1) as f32;
+    if at > fraction || fraction <= 0.0 {
+        theme::BORDER
+    } else if at >= METER_WARN_FROM {
+        theme::STAT_AMBER
+    } else {
+        color
+    }
+}
+
+fn meter(
     p: &egui::Painter,
-    rect: Rect,
-    label: &str,
-    value: f64,
-    unit: &str,
+    inner: Rect,
+    top: Pos2,
+    (value, unit): (f64, &str),
     fraction: f32,
     color: Color32,
 ) {
-    // Square tile: the dial owns the upper block with the label beneath it.
-    // Nothing sits beside the ring, so it grows to whatever the tile allows.
-    const CAPTION_H: f32 = 30.0;
-    let d = (rect.width() - 28.0).min(rect.height() - CAPTION_H - 24.0);
-    let top = rect.top() + (rect.height() - d - CAPTION_H) / 2.0;
-    let center = Pos2::new(rect.center().x, top + d / 2.0);
-    widgets::ring_gauge(p, center, d, fraction, color);
-
-    // Center the value/unit pair on the ring, rather than hanging the value off
-    // the center line where it reads high inside the hole.
-    let value = format!("{value:.0}");
-    let value_font = theme::mono_bold(d * 0.3);
-    let unit_font = theme::body_sm();
-    let value_h = p
-        .layout_no_wrap(value.clone(), value_font.clone(), color)
-        .rect
-        .height();
-    let unit_h = p
-        .layout_no_wrap(unit.to_owned(), unit_font.clone(), theme::TEXT_FAINT)
-        .rect
-        .height();
-    let stack_top = center.y - (value_h + unit_h) / 2.0;
-    p.text(
-        Pos2::new(center.x, stack_top + value_h),
-        Align2::CENTER_BOTTOM,
-        value,
-        value_font,
-        color,
-    );
-    p.text(
-        Pos2::new(center.x, stack_top + value_h),
-        Align2::CENTER_TOP,
-        unit,
-        unit_font,
-        theme::TEXT_FAINT,
-    );
-    p.text(
-        Pos2::new(center.x, top + d + 18.0),
-        Align2::CENTER_CENTER,
-        ellipsize(p, label, &theme::body_md(), rect.width() - 24.0),
-        theme::body_md(),
-        theme::TEXT_DIM,
-    );
+    let v = big_value(p, top, value, unit);
+    let gap = 3.0;
+    let seg_w = (inner.width() - gap * (METER_SEGMENTS - 1) as f32) / METER_SEGMENTS as f32;
+    let bar_y = v.bottom() + 4.0;
+    for i in 0..METER_SEGMENTS {
+        let seg = Rect::from_min_size(
+            Pos2::new(inner.left() + i as f32 * (seg_w + gap), bar_y),
+            Vec2::new(seg_w, 8.0),
+        );
+        p.rect_filled(seg, 1.0, meter_segment_color(i, fraction, color));
+    }
 }
 
-fn battery(p: &egui::Painter, rect: Rect, label: &str, rows: &[BatteryRow]) {
-    p.text(
-        Pos2::new(rect.left() + 18.0, rect.top() + 18.0),
-        Align2::LEFT_CENTER,
-        ellipsize(p, label, &theme::body_sm(), rect.width() - 36.0),
-        theme::body_sm(),
-        theme::TEXT_MUT,
-    );
-    // Name column shrinks with the tile so the track and readout always fit.
-    let name_w = (rect.width() * 0.36).clamp(48.0, 110.0);
+fn battery(p: &egui::Painter, inner: Rect, top: Pos2, rows: &[BatteryRow]) {
+    let name_w = (inner.width() * 0.4).clamp(48.0, 150.0);
     for (i, row) in rows.iter().enumerate() {
-        let y = rect.top() + 42.0 + i as f32 * 18.0;
+        let y = top.y + 10.0 + i as f32 * 28.0;
         let color = theme::battery_color(row.level, row.charging);
         p.text(
-            Pos2::new(rect.left() + 18.0, y),
+            Pos2::new(inner.left(), y),
             Align2::LEFT_CENTER,
-            ellipsize(p, &row.name, &theme::body_sm(), name_w),
-            theme::body_sm(),
+            ellipsize(p, &row.name, &theme::body_md(), name_w),
+            theme::body_md(),
             theme::TEXT_DIM,
         );
         let track = Rect::from_min_max(
-            Pos2::new(rect.left() + 26.0 + name_w, y - 2.5),
-            Pos2::new(rect.right() - 52.0, y + 2.5),
+            Pos2::new(inner.left() + name_w + 12.0, y - 3.0),
+            Pos2::new(inner.right() - 48.0, y + 3.0),
         );
-        p.rect_filled(track, theme::RADIUS_XS, theme::TRACK);
+        p.rect_filled(track, 1.0, theme::BORDER);
         let mut fill = track;
         fill.set_right(track.left() + track.width() * row.level as f32 / 100.0);
-        p.rect_filled(fill, theme::RADIUS_XS, color);
+        p.rect_filled(fill, 1.0, color);
         p.text(
-            Pos2::new(rect.right() - 18.0, y),
+            Pos2::new(inner.right(), y),
             Align2::RIGHT_CENTER,
             format!("{}%", row.level),
-            theme::mono(10.0),
-            color,
+            theme::medium(13.0),
+            theme::TEXT,
         );
     }
 }
@@ -359,7 +398,7 @@ fn battery(p: &egui::Painter, rect: Rect, label: &str, rows: &[BatteryRow]) {
 pub fn frame(p: &egui::Painter, rect: Rect, color: Color32) {
     p.rect_stroke(
         rect,
-        theme::RADIUS_LG,
+        theme::RADIUS_MD,
         Stroke::new(1.0, color),
         egui::StrokeKind::Middle,
     );
@@ -367,6 +406,23 @@ pub fn frame(p: &egui::Painter, rect: Rect, color: Color32) {
 
 #[cfg(test)]
 mod tests {
+    #[test]
+    fn meter_lights_segments_up_to_the_value_and_warns_at_the_top() {
+        let lit = |f: f32| {
+            (0..METER_SEGMENTS)
+                .filter(|&i| meter_segment_color(i, f, theme::CYAN) != theme::BORDER)
+                .count()
+        };
+        assert_eq!(lit(0.0), 0);
+        assert_eq!(lit(1.0), METER_SEGMENTS);
+        assert!(lit(0.3) < lit(0.6));
+        assert_eq!(
+            meter_segment_color(METER_SEGMENTS - 1, 1.0, theme::CYAN),
+            theme::STAT_AMBER
+        );
+        assert_eq!(meter_segment_color(0, 1.0, theme::CYAN), theme::CYAN);
+    }
+
     use super::*;
     use halod_shared::types::{Battery, WireDevice};
 
@@ -374,6 +430,7 @@ mod tests {
         SensorView {
             id: id.into(),
             label: label.into(),
+            device: String::new(),
             value,
             unit: "°C",
         }

@@ -5,11 +5,11 @@
 use std::collections::{HashMap, HashSet};
 
 use crate::domain::topic_store::TopicStore;
-use egui::{Align2, Color32, Pos2, Rect, Sense, Vec2};
+use egui::{Color32, Sense, Vec2};
 use halod_shared::{
     commands::DaemonCommand,
     effect_designer::DESIGNER_PIXMAP_EFFECT_ID,
-    types::{DeviceCapability, EffectDef, PlacedZone, SamplingMode, ZoneTopology},
+    types::{DeviceCapability, EffectDef, PlacedZone, SamplingMode},
 };
 
 use crate::runtime::ipc::CommandTx;
@@ -17,7 +17,9 @@ use crate::ui::components as widgets;
 use crate::ui::theme;
 
 use super::params::{build_instance_params, instance_params, unroll_cmd, upsert_instance_cmd};
-use super::{CanvasUi, DEBOUNCE, MAX_ZONE_CHIPS};
+use super::{CanvasUi, DEBOUNCE};
+
+const PANEL_PAD: egui::Margin = egui::Margin::same(16);
 
 pub(super) fn right_panel(
     ui: &mut egui::Ui,
@@ -28,56 +30,65 @@ pub(super) fn right_panel(
     designer_ui: &mut crate::ui::screens::effect_designer::DesignerUi,
     page: &mut crate::domain::state::Page,
 ) {
-    let rack = ui.scope(|ui| instance_rack(ui, state, canvas_ui, cmd, time, designer_ui, page));
+    let effects = &state.lighting.canvas.effects;
+    let mut ids: Vec<String> = effects.keys().cloned().collect();
+    ids.sort();
+    prune_stale_instance_refs(canvas_ui, &ids);
+
+    if let Some(id) = canvas_ui.selected_instance.clone() {
+        let idx = ids.iter().position(|i| *i == id).unwrap_or(0);
+        layer_params(ui, state, canvas_ui, cmd, time, &id, idx, designer_ui, page);
+        return;
+    }
+    default_effect_card(
+        ui,
+        effects,
+        &ids,
+        state.lighting.canvas.default_effect.clone(),
+        cmd,
+    );
+    ui.add_space(theme::SPACE_6);
+    let rack = ui.scope(|ui| layers_card(ui, state, canvas_ui, &ids));
     crate::domain::tour::anchor(
         ui.ctx(),
         crate::domain::tour::AnchorId::CanvasInstanceRack,
         rack.response.rect,
     );
-    ui.add_space(theme::SPACE_7);
+    ui.add_space(theme::SPACE_6);
     sampling_card(ui, state, canvas_ui, time);
 }
 
 // ── Sampling card ─────────────────────────────────────────────────────────────
 /// Sampling-radius control: how large an area around each LED is averaged from
-/// the canvas. Mirrors the GTK "Sampling Radius" control (0.5–32 px).
+/// the canvas (0.5–32 px).
 fn sampling_card(ui: &mut egui::Ui, state: &TopicStore, canvas_ui: &mut CanvasUi, time: f64) {
     // Re-seed from daemon state unless the user is mid-edit (mirrors LiveGuard).
     if time - canvas_ui.sample_edit_at >= 1.0 {
         canvas_ui.sample_radius = state.lighting.canvas.sample_radius;
     }
-    widgets::card_titled(
-        ui,
-        &t!("canvas.sampling"),
-        |_ui| {},
-        |ui| {
-            ui.label(
-                egui::RichText::new(t!("canvas.sampling_desc").to_string())
-                    .font(theme::body_sm())
-                    .color(theme::TEXT_FAINT),
+    widgets::card_with_margin(ui, PANEL_PAD, |ui| {
+        let mut v = canvas_ui.sample_radius;
+        let readout = format!("{v:.1} px");
+        if widgets::slider_row(
+            ui,
+            &t!("canvas.sampling_area"),
+            &mut v,
+            0.5..=32.0,
+            &readout,
+        ) {
+            let snapped = widgets::snap_to_step(v, 0.5, 32.0, 0.5);
+            canvas_ui.sample_radius = snapped;
+            canvas_ui.sample_edit_at = time;
+            canvas_ui.pending.queue(
+                super::SAMPLE_KEY,
+                DaemonCommand::CanvasSetSampleRadius {
+                    radius: snapped as f64,
+                },
+                time,
+                DEBOUNCE,
             );
-            ui.add_space(theme::SPACE_5);
-            let mut v = canvas_ui.sample_radius;
-            let readout = format!("{v:.1} px");
-            if widgets::slider_row(
-                ui,
-                &t!("canvas.sampling_area"),
-                &mut v,
-                0.5..=32.0,
-                &readout,
-            ) {
-                let snapped = widgets::snap_to_step(v, 0.5, 32.0, 0.5);
-                canvas_ui.sample_radius = snapped;
-                canvas_ui.sample_edit_at = time;
-                canvas_ui.pending.sample = Some((
-                    DaemonCommand::CanvasSetSampleRadius {
-                        radius: snapped as f64,
-                    },
-                    time + DEBOUNCE,
-                ));
-            }
-        },
-    );
+        }
+    });
 }
 
 // ── Animation card ────────────────────────────────────────────────────────────
@@ -89,32 +100,6 @@ const INSTANCE_PALETTE: [u32; 8] = [
 pub(super) fn instance_color(idx: usize) -> Color32 {
     theme::hex(INSTANCE_PALETTE[idx % INSTANCE_PALETTE.len()])
 }
-
-/// The swatch colour for a zone's resolved effect instance (its own, else the
-/// canvas default), matching the rack. Gray when the zone resolves to nothing.
-pub(super) fn instance_color_for(state: &TopicStore, effect: Option<&str>) -> Color32 {
-    let Some(id) = effect.or(state.lighting.canvas.default_effect.as_deref()) else {
-        return theme::hex(0x39414f);
-    };
-    instance_indices(state)
-        .get(id)
-        .map(|&i| instance_color(i))
-        .unwrap_or(theme::hex(0x39414f))
-}
-
-pub(super) fn instance_indices(state: &TopicStore) -> HashMap<&str, usize> {
-    let mut ids: Vec<&str> = state
-        .lighting
-        .canvas
-        .effects
-        .keys()
-        .map(String::as_str)
-        .collect();
-    ids.sort_unstable();
-    ids.into_iter().enumerate().map(|(i, id)| (id, i)).collect()
-}
-
-use crate::ui::components::truncate_to_width;
 
 /// Clear any per-instance UI selection (rename target, edit-channels modal,
 /// buffered param edits, pending debounced upsert) that no longer names a
@@ -144,14 +129,9 @@ fn prune_stale_instance_refs(canvas_ui: &mut CanvasUi, ids: &[String]) {
         canvas_ui.selected_instance = None;
     }
     canvas_ui.param_edits.retain(|id, _| is_live(id));
-    if canvas_ui
+    canvas_ui
         .pending
-        .effect
-        .as_ref()
-        .is_some_and(|(id, _, _)| !is_live(id))
-    {
-        canvas_ui.pending.effect = None;
-    }
+        .retain(|k, _| k.strip_prefix("effect:").is_none_or(is_live));
 }
 
 /// An instance's display label: its user-set name, falling back to the id.
@@ -172,7 +152,11 @@ fn device_name<'a>(state: &'a TopicStore, device_id: &'a str) -> &'a str {
         .unwrap_or(device_id)
 }
 
-fn zone_name<'a>(state: &'a TopicStore, device_id: &'a str, channel_id: &'a str) -> &'a str {
+pub(super) fn zone_name<'a>(
+    state: &'a TopicStore,
+    device_id: &'a str,
+    channel_id: &'a str,
+) -> &'a str {
     state
         .devices
         .iter()
@@ -230,160 +214,11 @@ pub(super) fn ring_zone_context_menu(ui: &mut egui::Ui, cmd: &CommandTx, z: &Pla
     }
 }
 
-/// Layer-first authoring: a rack of named pixmap-effect layers, each assigned
-/// to channels; channels with no layer use the base effect.
-fn instance_rack(
-    ui: &mut egui::Ui,
-    state: &TopicStore,
-    canvas_ui: &mut CanvasUi,
-    cmd: &CommandTx,
-    time: f64,
-    designer_ui: &mut crate::ui::screens::effect_designer::DesignerUi,
-    page: &mut crate::domain::state::Page,
-) {
-    let effects = &state.lighting.canvas.effects;
-    let mut ids: Vec<String> = effects.keys().cloned().collect();
-    ids.sort();
-    prune_stale_instance_refs(canvas_ui, &ids);
-
-    // Widget 1: default / fallback effect dropdown.
-    default_effect_card(
-        ui,
-        effects,
-        &ids,
-        state.lighting.canvas.default_effect.clone(),
-        cmd,
-    );
-    ui.add_space(theme::SPACE_8);
-
-    // "Effect instances" header + New — a bare row, outside any card. Each
-    // instance below is then its own widget.
-    egui::Sides::new().show(
-        ui,
-        |ui| {
-            ui.label(
-                egui::RichText::new(t!("canvas.effect_instances").to_string())
-                    .font(theme::semibold(12.5))
-                    .color(theme::TEXT),
-            );
-        },
-        |ui| {
-            if widgets::button(
-                ui,
-                &t!("canvas.new_button"),
-                widgets::ButtonKind::Ghost,
-                egui::vec2(94.0, 24.0),
-            )
-            .clicked()
-            {
-                canvas_ui.new_instance_modal = true;
-            }
-        },
-    );
-    ui.add_space(theme::SPACE_5);
-
-    if ids.is_empty() {
-        ui.label(
-            egui::RichText::new(t!("canvas.no_instances").to_string())
-                .font(theme::body_sm())
-                .color(theme::TEXT_FAINT),
-        );
-        return;
-    }
-    for (idx, id) in ids.iter().enumerate() {
-        let def = &effects[id];
-        widgets::card(ui, |ui| {
-            instance_row(
-                ui,
-                state,
-                canvas_ui,
-                cmd,
-                time,
-                id,
-                def,
-                idx,
-                designer_ui,
-                page,
-            );
-        });
-        ui.add_space(theme::SPACE_4);
-    }
-}
-
-/// The default / fallback effect: a dropdown selecting the instance unassigned
-/// channels use (and the canvas background shows).
-fn default_effect_card(
-    ui: &mut egui::Ui,
-    effects: &HashMap<String, EffectDef>,
-    ids: &[String],
-    current: Option<String>,
-    cmd: &CommandTx,
-) {
-    widgets::card_titled(
-        ui,
-        &t!("canvas.default_effect_title"),
-        |_ui| {},
-        |ui| {
-            let opts: Vec<(String, String)> = ids
-                .iter()
-                .map(|id| (id.clone(), instance_name(effects, id).to_string()))
-                .collect();
-            let selected = widgets::combo_picker_full(
-                ui,
-                "canvas_default_effect",
-                &opts,
-                current.as_deref().unwrap_or(""),
-                Some(&t!("canvas.off")),
-            )
-            .map(|id| (!id.is_empty()).then_some(id))
-            .unwrap_or_else(|| current.clone());
-            if selected != current {
-                crate::runtime::ipc::send(
-                    cmd,
-                    halod_shared::commands::DaemonCommand::CanvasSetDefaultEffect {
-                        instance_id: selected,
-                    },
-                );
-            }
-            ui.add_space(theme::SPACE_3);
-            ui.label(
-                egui::RichText::new(t!("canvas.default_effect_hint").to_string())
-                    .font(theme::caption())
-                    .color(theme::TEXT_FAINT),
-            );
-        },
-    );
-}
-
-/// One instance card: swatch, name, effect + assigned-zone count; expands to an
-/// effect picker, param sliders, per-zone assignment chips, and delete.
-fn instance_row(
-    ui: &mut egui::Ui,
-    state: &TopicStore,
-    canvas_ui: &mut CanvasUi,
-    cmd: &CommandTx,
-    time: f64,
-    id: &str,
-    def: &EffectDef,
-    idx: usize,
-    designer_ui: &mut crate::ui::screens::effect_designer::DesignerUi,
-    page: &mut crate::domain::state::Page,
-) {
-    let color = instance_color(idx);
-    let expanded = canvas_ui.selected_instance.as_deref() == Some(id);
-    let eff = state
-        .lighting
-        .canvas
-        .available_effects
-        .iter()
-        .find(|e| e.id == def.effect_id);
-    let eff_name: std::borrow::Cow<str> = match eff {
-        Some(e) => std::borrow::Cow::Borrowed(e.name.as_str()),
-        None if def.effect_id == DESIGNER_PIXMAP_EFFECT_ID => t!("canvas.designer"),
-        None => std::borrow::Cow::Borrowed(def.effect_id.as_str()),
-    };
+/// Zones driven by layer `id`: its own assignments, plus the unassigned ones
+/// when it is the base layer.
+fn layer_zones<'a>(state: &'a TopicStore, id: &str) -> Vec<&'a PlacedZone> {
     let is_default = state.lighting.canvas.default_effect.as_deref() == Some(id);
-    let channels: Vec<&PlacedZone> = state
+    state
         .lighting
         .canvas
         .placed_zones
@@ -392,373 +227,400 @@ fn instance_row(
             Some(e) => e == id,
             None => is_default,
         })
-        .collect();
-    let zone_count = channels.len();
-    let device_count = channels
-        .iter()
-        .map(|z| z.device_id.as_str())
-        .collect::<HashSet<_>>()
-        .len();
-    let synced = zone_count > 1;
-    // Tracks the name across a same-frame rename commit so a param edit or
-    // effect switch below can't resend the pre-rename value from `def`.
-    let mut effective_name = def.name.clone();
+        .collect()
+}
 
-    let (head, head_resp) =
-        ui.allocate_exact_size(Vec2::new(ui.available_width(), 42.0), Sense::click());
-    let p = ui.painter().clone();
-    let top_y = head.top() + 13.0;
-    let bot_y = head.top() + 30.0;
-    // Row 1: swatch, name, chevron.
-    p.rect_filled(
-        Rect::from_center_size(Pos2::new(head.left() + 11.0, top_y), Vec2::splat(13.0)),
-        theme::RADIUS_XS,
-        color,
-    );
-    p.text(
-        Pos2::new(head.right() - 6.0, top_y),
-        Align2::RIGHT_CENTER,
-        if expanded { "▾" } else { "▸" },
-        theme::micro(),
-        theme::TEXT_FAINT,
-    );
-    // Row 2: effect · channels · devices, truncated to leave room for SYNCED.
-    let sub_font = theme::value_xs();
-    let synced_font = theme::body(8.5);
-    let synced_label = format!("⛓ {}", t!("canvas.synced"));
-    let synced_w = if synced {
-        p.layout_no_wrap(synced_label.clone(), synced_font.clone(), color)
-            .size()
-            .x
-    } else {
-        0.0
-    };
-    let sub_max_w =
-        (head.right() - 6.0 - (head.left() + 26.0) - if synced { synced_w + 10.0 } else { 0.0 })
-            .max(20.0);
-    let zone_word = if zone_count == 1 {
+fn zone_count_label(n: usize) -> String {
+    let word = if n == 1 {
         t!("canvas.unit_zone")
     } else {
         t!("canvas.unit_zones")
     };
-    let device_word = if device_count == 1 {
-        t!("canvas.unit_device")
-    } else {
-        t!("canvas.unit_devices")
-    };
-    let sub_full = format!("{eff_name} · {zone_count} {zone_word} · {device_count} {device_word}");
-    let sub = truncate_to_width(&sub_full, sub_max_w, |s| {
-        p.layout_no_wrap(s.to_string(), sub_font.clone(), theme::TEXT_FAINT)
-            .size()
-            .x
-    });
-    p.text(
-        Pos2::new(head.left() + 26.0, bot_y),
-        Align2::LEFT_CENTER,
-        sub,
-        sub_font,
-        theme::TEXT_FAINT,
-    );
-    if synced {
-        p.text(
-            Pos2::new(head.right() - 6.0, bot_y),
-            Align2::RIGHT_CENTER,
-            &synced_label,
-            synced_font,
-            color,
-        );
-    }
-    // Name area: inline rename editor when active, else painted name + pencil.
-    let renaming = canvas_ui.rename_instance.as_deref() == Some(id);
-    let mut pencil_clicked = false;
-    if renaming {
-        let left = head.left() + 22.0;
-        let input_rect = Rect::from_min_size(
-            Pos2::new(left, top_y - 12.0),
-            Vec2::new((head.right() - 40.0 - left).max(120.0), 24.0),
-        );
-        let te_resp = ui.put(
-            input_rect,
-            egui::TextEdit::singleline(&mut canvas_ui.rename_buf)
-                .font(theme::semibold(12.5))
-                .margin(egui::Margin::symmetric(8, 4)),
-        );
-        if canvas_ui.rename_just_started {
-            te_resp.request_focus();
-            canvas_ui.rename_just_started = false;
-        }
-        if ui.input(|i| i.key_pressed(egui::Key::Escape)) {
-            canvas_ui.rename_instance = None;
-        } else if te_resp.lost_focus() {
-            // Blank (or exactly the id) clears the name back to the id.
-            let new_name = rename_value(&canvas_ui.rename_buf).filter(|n| n != id);
-            if new_name != def.name {
-                effective_name = new_name.clone();
-                // Fold in any buffered param edits and drop this instance's
-                // pending upsert (built with the old name) so it can't
-                // overwrite the rename; other instances' pending edits are
-                // left untouched since the slot is tagged by instance id.
-                let params = eff
-                    .map(|e| build_instance_params(e, def, id, canvas_ui))
-                    .unwrap_or_else(|| def.params.clone());
-                if canvas_ui
-                    .pending
-                    .effect
-                    .as_ref()
-                    .is_some_and(|(pid, _, _)| pid == id)
-                {
-                    canvas_ui.pending.effect = None;
-                }
-                crate::runtime::ipc::send(
-                    cmd,
-                    upsert_instance_cmd(id.to_string(), def.effect_id.clone(), new_name, params),
-                );
-            }
-            canvas_ui.rename_instance = None;
-        }
-    } else {
-        let display = instance_name(&state.lighting.canvas.effects, id);
-        let name_left = head.left() + 26.0;
-        let reserved_right = 22.0;
-        let max_name_w = (head.right() - reserved_right - name_left).max(20.0);
-        let name_font = theme::semibold(12.5);
-        let shown = truncate_to_width(display, max_name_w, |s| {
-            p.layout_no_wrap(s.to_string(), name_font.clone(), theme::TEXT)
-                .size()
-                .x
-        });
-        let name_w = p
-            .layout_no_wrap(shown.clone(), name_font.clone(), theme::TEXT)
-            .size()
-            .x;
-        let pencil_rect = Rect::from_center_size(
-            Pos2::new(
-                (name_left + name_w + 16.0).min(head.right() - reserved_right + 8.0),
-                top_y,
-            ),
-            Vec2::splat(20.0),
-        );
-        let pencil_resp = ui.interact(
-            pencil_rect,
-            egui::Id::new(("inst_rename_btn", id)),
-            Sense::click(),
-        );
-        let t = ui
-            .ctx()
-            .animate_bool_with_time(pencil_resp.id, pencil_resp.hovered(), 0.12);
-        let icon_col = theme::lerp_color(theme::TEXT_FAINT, theme::CYAN, t);
-        if pencil_resp.hovered() {
-            ui.ctx().set_cursor_icon(egui::CursorIcon::PointingHand);
-        }
-        if pencil_resp.clicked() {
-            pencil_clicked = true;
-            canvas_ui.rename_instance = Some(id.to_string());
-            canvas_ui.rename_just_started = true;
-            canvas_ui.rename_buf = display.to_string();
-        }
-        p.text(
-            Pos2::new(name_left, top_y),
-            Align2::LEFT_CENTER,
-            shown,
-            name_font,
-            theme::TEXT,
-        );
-        crate::ui::icons::draw_pencil(&p, pencil_rect.shrink(3.0), icon_col);
-    }
+    format!("{n} {word}")
+}
 
-    if head_resp.hovered() {
-        ui.ctx().set_cursor_icon(egui::CursorIcon::PointingHand);
-    }
-    if head_resp.clicked() && !pencil_clicked && !renaming {
-        canvas_ui.selected_instance = if expanded { None } else { Some(id.to_string()) };
-    }
-    if !expanded {
-        return;
-    }
-
-    // Effect dropdown.
-    ui.add_space(theme::SPACE_4);
-    widgets::caps_label(ui, &t!("canvas.effect_caps"));
-    ui.add_space(theme::SPACE_3);
+fn effect_name<'a>(state: &'a TopicStore, def: &'a EffectDef) -> std::borrow::Cow<'a, str> {
+    match state
+        .lighting
+        .canvas
+        .available_effects
+        .iter()
+        .find(|e| e.id == def.effect_id)
     {
-        let opts: Vec<(String, String)> = state
-            .lighting
-            .canvas
-            .available_effects
+        Some(e) => std::borrow::Cow::Borrowed(e.name.as_str()),
+        None if def.effect_id == DESIGNER_PIXMAP_EFFECT_ID => t!("canvas.designer"),
+        None => std::borrow::Cow::Borrowed(def.effect_id.as_str()),
+    }
+}
+
+/// Distinct device names across `zones`, in first-seen order.
+fn target_devices(state: &TopicStore, zones: &[&PlacedZone]) -> String {
+    let mut seen = HashSet::new();
+    zones
+        .iter()
+        .filter(|z| seen.insert(z.device_id.as_str()))
+        .map(|z| device_name(state, &z.device_id))
+        .collect::<Vec<_>>()
+        .join(" · ")
+}
+
+fn swatch(ui: &mut egui::Ui, color: Color32) {
+    let (rect, _) = ui.allocate_exact_size(Vec2::new(28.0, 16.0), Sense::hover());
+    ui.painter().rect_filled(rect, 3.0, color);
+}
+
+/// The base layer: a dropdown selecting the instance unassigned zones use.
+fn default_effect_card(
+    ui: &mut egui::Ui,
+    effects: &HashMap<String, EffectDef>,
+    ids: &[String],
+    current: Option<String>,
+    cmd: &CommandTx,
+) {
+    widgets::card_with_margin(ui, PANEL_PAD, |ui| {
+        ui.spacing_mut().item_spacing.y = theme::SPACE_5;
+        ui.label(
+            egui::RichText::new(t!("canvas.default_effect_title"))
+                .font(theme::heading())
+                .color(theme::TEXT),
+        );
+        let opts: Vec<(String, String)> = ids
             .iter()
-            .map(|e| (e.id.clone(), e.name.clone()))
+            .map(|id| (id.clone(), instance_name(effects, id).to_string()))
             .collect();
-        let sel = widgets::combo_picker_full(ui, ("inst_effect", id), &opts, &def.effect_id, None)
-            .unwrap_or_else(|| def.effect_id.clone());
-        if sel != def.effect_id {
-            canvas_ui.param_edits.remove(id);
-            let params = state
+        let selected = widgets::combo_picker_full(
+            ui,
+            "canvas_default_effect",
+            &opts,
+            current.as_deref().unwrap_or(""),
+            Some(&t!("canvas.off")),
+        )
+        .map(|id| (!id.is_empty()).then_some(id))
+        .unwrap_or_else(|| current.clone());
+        if selected != current {
+            crate::runtime::ipc::send(
+                cmd,
+                DaemonCommand::CanvasSetDefaultEffect {
+                    instance_id: selected,
+                },
+            );
+        }
+        ui.label(
+            egui::RichText::new(t!("canvas.default_effect_hint"))
+                .font(theme::body_sm())
+                .color(theme::TEXT_MUT),
+        );
+    });
+}
+
+/// The layer list: one row per instance with its targets and the two drill-in
+/// actions (zones modal, parameters view).
+fn layers_card(ui: &mut egui::Ui, state: &TopicStore, canvas_ui: &mut CanvasUi, ids: &[String]) {
+    widgets::card_with_margin(ui, PANEL_PAD, |ui| {
+        ui.spacing_mut().item_spacing.y = theme::SPACE_5;
+        egui::Sides::new().show(
+            ui,
+            |ui| {
+                ui.label(
+                    egui::RichText::new(t!("canvas.effect_instances"))
+                        .font(theme::heading())
+                        .color(theme::TEXT),
+                );
+            },
+            |ui| {
+                if widgets::button(
+                    ui,
+                    &t!("canvas.new_button"),
+                    widgets::ButtonKind::Secondary,
+                    egui::vec2(0.0, 30.0),
+                )
+                .clicked()
+                {
+                    canvas_ui.new_instance_modal = true;
+                }
+            },
+        );
+        if ids.is_empty() {
+            ui.label(
+                egui::RichText::new(t!("canvas.no_instances"))
+                    .font(theme::body_sm())
+                    .color(theme::TEXT_MUT),
+            );
+            return;
+        }
+        for (idx, id) in ids.iter().enumerate() {
+            let def = &state.lighting.canvas.effects[id];
+            let zones = layer_zones(state, id);
+            widgets::inset(ui, egui::Margin::same(12), |ui| {
+                ui.spacing_mut().item_spacing.y = theme::SPACE_5;
+                ui.horizontal(|ui| {
+                    ui.spacing_mut().item_spacing.x = theme::SPACE_5;
+                    swatch(ui, instance_color(idx));
+                    ui.label(
+                        egui::RichText::new(instance_name(&state.lighting.canvas.effects, id))
+                            .font(theme::medium(14.0))
+                            .color(theme::TEXT),
+                    );
+                    ui.with_layout(egui::Layout::right_to_left(egui::Align::Center), |ui| {
+                        widgets::tag(
+                            ui,
+                            &zone_count_label(zones.len()),
+                            widgets::TagTone::Neutral,
+                        );
+                    });
+                });
+                let targets = target_devices(state, &zones);
+                ui.label(
+                    egui::RichText::new(if targets.is_empty() {
+                        effect_name(state, def).into_owned()
+                    } else {
+                        targets
+                    })
+                    .font(theme::body_sm())
+                    .color(theme::TEXT_DIM),
+                );
+                ui.horizontal(|ui| {
+                    ui.spacing_mut().item_spacing.x = theme::SPACE_3;
+                    let size = egui::vec2(0.0, 30.0);
+                    let kind = widgets::ButtonKind::Secondary;
+                    if widgets::button(ui, &t!("canvas.edit_zones"), kind, size).clicked() {
+                        canvas_ui.zones_modal = Some(id.clone());
+                    }
+                    if widgets::button(ui, &t!("canvas.parameters"), kind, size).clicked() {
+                        canvas_ui.selected_instance = Some(id.clone());
+                    }
+                });
+            });
+        }
+    });
+}
+
+/// The parameters view for one layer, replacing the sidebar: effect picker,
+/// its params, and the layer actions. The layer name renames inline on click.
+#[allow(clippy::too_many_arguments)]
+fn layer_params(
+    ui: &mut egui::Ui,
+    state: &TopicStore,
+    canvas_ui: &mut CanvasUi,
+    cmd: &CommandTx,
+    time: f64,
+    id: &str,
+    idx: usize,
+    designer_ui: &mut crate::ui::screens::effect_designer::DesignerUi,
+    page: &mut crate::domain::state::Page,
+) {
+    let Some(def) = state.lighting.canvas.effects.get(id) else {
+        return;
+    };
+    let eff = state
+        .lighting
+        .canvas
+        .available_effects
+        .iter()
+        .find(|e| e.id == def.effect_id);
+    let zone_count = layer_zones(state, id).len();
+    // Tracks the name across a same-frame rename commit so a param edit or
+    // effect switch below can't resend the pre-rename value from `def`.
+    let mut effective_name = def.name.clone();
+
+    widgets::card_with_margin(ui, PANEL_PAD, |ui| {
+        ui.spacing_mut().item_spacing.y = theme::SPACE_7;
+        if widgets::back_link(ui, &t!("canvas.effect_instances"), None) {
+            canvas_ui.selected_instance = None;
+        }
+        ui.horizontal(|ui| {
+            ui.spacing_mut().item_spacing.x = theme::SPACE_5;
+            swatch(ui, instance_color(idx));
+            if canvas_ui.rename_instance.as_deref() == Some(id) {
+                let te = ui.add(
+                    egui::TextEdit::singleline(&mut canvas_ui.rename_buf)
+                        .font(theme::title())
+                        .desired_width(ui.available_width() - 90.0),
+                );
+                if canvas_ui.rename_just_started {
+                    te.request_focus();
+                    canvas_ui.rename_just_started = false;
+                }
+                if ui.input(|i| i.key_pressed(egui::Key::Escape)) {
+                    canvas_ui.rename_instance = None;
+                } else if te.lost_focus() {
+                    // Blank (or exactly the id) clears the name back to the id.
+                    let new_name = rename_value(&canvas_ui.rename_buf).filter(|n| n != id);
+                    if new_name != def.name {
+                        effective_name = new_name.clone();
+                        // Fold in buffered edits and drop the pending upsert
+                        // (built with the old name) so it can't undo the rename.
+                        let params = eff
+                            .map(|e| build_instance_params(e, def, id, canvas_ui))
+                            .unwrap_or_else(|| def.params.clone());
+                        canvas_ui.pending.remove(&super::effect_key(id));
+                        crate::runtime::ipc::send(
+                            cmd,
+                            upsert_instance_cmd(
+                                id.to_string(),
+                                def.effect_id.clone(),
+                                new_name,
+                                params,
+                            ),
+                        );
+                    }
+                    canvas_ui.rename_instance = None;
+                }
+            } else {
+                let name = instance_name(&state.lighting.canvas.effects, id);
+                let resp = ui.add(
+                    egui::Label::new(
+                        egui::RichText::new(name)
+                            .font(theme::title())
+                            .color(theme::TEXT),
+                    )
+                    .sense(Sense::click()),
+                );
+                if resp.hovered() {
+                    ui.ctx().set_cursor_icon(egui::CursorIcon::Text);
+                }
+                if resp.clicked() {
+                    canvas_ui.rename_instance = Some(id.to_string());
+                    canvas_ui.rename_just_started = true;
+                    canvas_ui.rename_buf = name.to_string();
+                }
+            }
+            ui.with_layout(egui::Layout::right_to_left(egui::Align::Center), |ui| {
+                widgets::tag(ui, &zone_count_label(zone_count), widgets::TagTone::Accent);
+            });
+        });
+
+        ui.vertical(|ui| {
+            widgets::field_label(ui, &t!("canvas.effect"));
+            let opts: Vec<(String, String)> = state
                 .lighting
                 .canvas
                 .available_effects
                 .iter()
-                .find(|e| e.id == sel)
-                .map(|e| {
-                    e.params
-                        .iter()
-                        .map(|p| (p.id.clone(), p.default.clone()))
-                        .collect()
-                })
-                .unwrap_or_default();
-            crate::runtime::ipc::send(
-                cmd,
-                upsert_instance_cmd(id.to_string(), sel, effective_name.clone(), params),
-            );
-        }
-    }
-
-    // Params (color, speed, …).
-    if let Some(eff) = eff {
-        if instance_params(ui, canvas_ui, id, def, eff) {
-            let params = build_instance_params(eff, def, id, canvas_ui);
-            canvas_ui.pending.effect = Some((
-                id.to_string(),
-                upsert_instance_cmd(
-                    id.to_string(),
-                    def.effect_id.clone(),
-                    effective_name.clone(),
-                    params,
-                ),
-                time + DEBOUNCE,
-            ));
-        }
-    }
-
-    // Assigned channels: chips only; assignment happens in the Edit channels modal.
-    ui.add_space(theme::SPACE_5);
-    egui::Sides::new().show(
-        ui,
-        |ui| widgets::caps_label(ui, &t!("canvas.assigned_zones")),
-        |ui| {
-            let link = ui.add(
-                egui::Label::new(
-                    egui::RichText::new(t!("canvas.edit_zones").to_string())
-                        .font(theme::semibold(10.5))
-                        .color(theme::CYAN),
-                )
-                .sense(Sense::click()),
-            );
-            if link.hovered() {
-                ui.ctx().set_cursor_icon(egui::CursorIcon::PointingHand);
-            }
-            if link.clicked() {
-                canvas_ui.zones_modal = Some(id.to_string());
-            }
-        },
-    );
-    ui.add_space(theme::SPACE_3);
-    if channels.is_empty() {
-        if widgets::button(
-            ui,
-            &t!("canvas.add_zones"),
-            widgets::ButtonKind::Ghost,
-            egui::vec2(ui.available_width(), 34.0),
-        )
-        .clicked()
-        {
-            canvas_ui.zones_modal = Some(id.to_string());
-        }
-    } else {
-        // Render up to MAX_ZONE_CHIPS chips inline; ring channels get a
-        // right-click context menu for unroll/roll. Overflow folds into a
-        // single "+N more" chip.
-        let max = MAX_ZONE_CHIPS.min(channels.len());
-        let shown = &channels[..max];
-        let overflow = if channels.len() > max {
-            Some(t!("canvas.overflow_more", n = channels.len() - max).to_string())
-        } else {
-            None
-        };
-        ui.horizontal_wrapped(|ui| {
-            ui.spacing_mut().item_spacing = egui::vec2(5.0, 5.0);
-            for z in shown {
-                let label = format!(
-                    "{} · {}",
-                    device_name(state, &z.device_id),
-                    zone_name(state, &z.device_id, &z.channel_id)
-                );
-                let is_ring = rgb_zone_descriptor(state, &z.device_id, &z.channel_id)
-                    .map(|rz| {
-                        matches!(rz.topology, ZoneTopology::Ring | ZoneTopology::Rings { .. })
+                .map(|e| (e.id.clone(), e.name.clone()))
+                .collect();
+            let sel =
+                widgets::combo_picker_full(ui, ("inst_effect", id), &opts, &def.effect_id, None)
+                    .unwrap_or_else(|| def.effect_id.clone());
+            if sel != def.effect_id {
+                canvas_ui.param_edits.remove(id);
+                let params = state
+                    .lighting
+                    .canvas
+                    .available_effects
+                    .iter()
+                    .find(|e| e.id == sel)
+                    .map(|e| {
+                        e.params
+                            .iter()
+                            .map(|p| (p.id.clone(), p.default.clone()))
+                            .collect()
                     })
-                    .unwrap_or(false);
-                let chip_resp = widgets::chip_colored(ui, &label, color);
-                if is_ring {
-                    chip_resp.context_menu(|ui| ring_zone_context_menu(ui, cmd, z));
-                }
-            }
-            if let Some(more) = &overflow {
-                widgets::chip(ui, more);
+                    .unwrap_or_default();
+                crate::runtime::ipc::send(
+                    cmd,
+                    upsert_instance_cmd(id.to_string(), sel, effective_name.clone(), params),
+                );
             }
         });
-    }
 
-    if def.effect_id == DESIGNER_PIXMAP_EFFECT_ID {
-        ui.add_space(theme::SPACE_5);
-        if widgets::button(
-            ui,
-            &t!("canvas.edit_in_designer"),
-            widgets::ButtonKind::Ghost,
-            egui::vec2(ui.available_width(), 30.0),
-        )
-        .clicked()
-        {
-            *designer_ui =
-                crate::ui::screens::effect_designer::DesignerUi::edit_for_canvas_instance(
-                    def,
-                    id.to_string(),
-                    instance_name(&state.lighting.canvas.effects, id).to_string(),
+        if let Some(eff) = eff {
+            let changed = ui
+                .vertical(|ui| instance_params(ui, canvas_ui, id, def, eff))
+                .inner;
+            if changed {
+                let params = build_instance_params(eff, def, id, canvas_ui);
+                canvas_ui.pending.queue(
+                    &super::effect_key(id),
+                    upsert_instance_cmd(
+                        id.to_string(),
+                        def.effect_id.clone(),
+                        effective_name.clone(),
+                        params,
+                    ),
+                    time,
+                    DEBOUNCE,
                 );
-            *page = crate::domain::state::Page::EffectDesigner;
+            }
         }
-    }
 
-    ui.add_space(theme::SPACE_5);
-    if widgets::button(
-        ui,
-        &t!("canvas.delete_instance"),
-        widgets::ButtonKind::Ghost,
-        egui::vec2(ui.available_width(), 26.0),
-    )
-    .clicked()
-    {
-        canvas_ui.selected_instance = None;
-        canvas_ui.param_edits.remove(id);
-        if canvas_ui.rename_instance.as_deref() == Some(id) {
-            canvas_ui.rename_instance = None;
-        }
-        if canvas_ui.zones_modal.as_deref() == Some(id) {
-            canvas_ui.zones_modal = None;
-        }
-        crate::runtime::ipc::send(
-            cmd,
-            halod_shared::commands::DaemonCommand::CanvasRemoveEffect {
-                instance_id: id.to_string(),
-            },
+        let line_y = ui.cursor().top();
+        ui.painter().hline(
+            ui.max_rect().x_range(),
+            line_y,
+            egui::Stroke::new(1.0, theme::BORDER_SOFT),
         );
-    }
-}
-
-// ── Settings card ─────────────────────────────────────────────────────────────
-pub(super) fn toggle_switch(ui: &mut egui::Ui, on: bool, id: egui::Id) -> bool {
-    let (rect, resp) = ui.allocate_exact_size(Vec2::new(28.0, 15.0), Sense::click());
-    let t = ui.ctx().animate_bool_with_time(id, on, 0.15);
-    widgets::paint_toggle(ui.painter(), rect, t);
-    if resp.hovered() {
-        ui.ctx().set_cursor_icon(egui::CursorIcon::PointingHand);
-    }
-    resp.clicked()
+        ui.add_space(theme::SPACE_1);
+        ui.horizontal_wrapped(|ui| {
+            ui.spacing_mut().item_spacing = egui::vec2(theme::SPACE_3, theme::SPACE_3);
+            let size = egui::vec2(0.0, 30.0);
+            let kind = widgets::ButtonKind::Secondary;
+            if widgets::button(ui, &t!("canvas.edit_zones"), kind, size).clicked() {
+                canvas_ui.zones_modal = Some(id.to_string());
+            }
+            if def.effect_id == DESIGNER_PIXMAP_EFFECT_ID
+                && widgets::button(ui, &t!("canvas.edit_in_designer"), kind, size).clicked()
+            {
+                *designer_ui =
+                    crate::ui::screens::effect_designer::DesignerUi::edit_for_canvas_instance(
+                        def,
+                        id.to_string(),
+                        instance_name(&state.lighting.canvas.effects, id).to_string(),
+                    );
+                *page = crate::domain::state::Page::EffectDesigner;
+            }
+            ui.with_layout(egui::Layout::right_to_left(egui::Align::Center), |ui| {
+                if widgets::button(
+                    ui,
+                    &t!("canvas.delete_instance"),
+                    widgets::ButtonKind::Danger,
+                    size,
+                )
+                .clicked()
+                {
+                    canvas_ui.selected_instance = None;
+                    canvas_ui.param_edits.remove(id);
+                    canvas_ui.rename_instance = None;
+                    if canvas_ui.zones_modal.as_deref() == Some(id) {
+                        canvas_ui.zones_modal = None;
+                    }
+                    crate::runtime::ipc::send(
+                        cmd,
+                        DaemonCommand::CanvasRemoveEffect {
+                            instance_id: id.to_string(),
+                        },
+                    );
+                }
+            });
+        });
+    });
 }
 
 #[cfg(test)]
 mod tests {
     use super::*;
-    use crate::ui::screens::canvas::test_fixtures::def_of;
+    use crate::ui::screens::canvas::test_fixtures::zone_with;
+
+    #[test]
+    fn base_layer_also_drives_unassigned_zones() {
+        let mut s = TopicStore::default();
+        s.lighting.canvas.placed_zones = vec![
+            zone_with("a", Some("x")),
+            zone_with("b", None),
+            zone_with("c", Some("y")),
+        ];
+        let ids = |id: &str, s: &TopicStore| -> Vec<String> {
+            layer_zones(s, id)
+                .iter()
+                .map(|z| z.channel_id.clone())
+                .collect()
+        };
+        assert_eq!(ids("x", &s), ["a"]);
+        s.lighting.canvas.default_effect = Some("x".into());
+        assert_eq!(ids("x", &s), ["a", "b"]);
+        assert_eq!(ids("y", &s), ["c"]);
+        assert_eq!(target_devices(&s, &layer_zones(&s, "x")), "d");
+    }
 
     #[test]
     fn instance_name_prefers_name_and_falls_back_to_id() {
@@ -794,7 +656,12 @@ mod tests {
         ui.selected_instance = Some("live".into());
         ui.param_edits.insert("dead".into(), HashMap::new());
         ui.param_edits.insert("live".into(), HashMap::new());
-        ui.pending.effect = Some(("dead".into(), DaemonCommand::CanvasStop, 0.0));
+        ui.pending.queue(
+            &super::super::effect_key("dead"),
+            DaemonCommand::CanvasStop,
+            0.0,
+            0.0,
+        );
 
         prune_stale_instance_refs(&mut ui, &["live".to_string()]);
 
@@ -803,15 +670,26 @@ mod tests {
         assert_eq!(ui.selected_instance, Some("live".to_string()));
         assert!(!ui.param_edits.contains_key("dead"));
         assert!(ui.param_edits.contains_key("live"));
-        assert!(ui.pending.effect.is_none());
+        assert!(ui.pending.is_empty());
     }
 
     #[test]
     fn prune_stale_instance_refs_keeps_pending_for_live_instance() {
         let mut ui = CanvasUi::default();
-        ui.pending.effect = Some(("live".to_string(), DaemonCommand::CanvasStop, 0.0));
+        ui.pending.queue(
+            &super::super::effect_key("live"),
+            DaemonCommand::CanvasStop,
+            0.0,
+            0.0,
+        );
+        ui.pending.queue(
+            super::super::SAMPLE_KEY,
+            DaemonCommand::CanvasStop,
+            0.0,
+            0.0,
+        );
         prune_stale_instance_refs(&mut ui, &["live".to_string()]);
-        assert!(ui.pending.effect.is_some());
+        assert_eq!(ui.pending.len(), 2);
     }
 
     #[test]
@@ -825,27 +703,5 @@ mod tests {
     fn instance_color_cycles_the_palette() {
         assert_eq!(instance_color(0), instance_color(INSTANCE_PALETTE.len()));
         assert_ne!(instance_color(0), instance_color(1));
-    }
-
-    #[test]
-    fn instance_color_for_matches_rack_index_and_grays_unknown() {
-        let mut s = TopicStore::default();
-        s.lighting
-            .canvas
-            .effects
-            .insert("a".into(), def_of("static_color"));
-        s.lighting
-            .canvas
-            .effects
-            .insert("b".into(), def_of("rainbow"));
-        // sorted ids: a=0, b=1 — same order the rack colours by.
-        assert_eq!(instance_color_for(&s, Some("a")), instance_color(0));
-        assert_eq!(instance_color_for(&s, Some("b")), instance_color(1));
-        // unknown ref / nothing resolved → gray.
-        assert_eq!(
-            instance_color_for(&s, Some("missing")),
-            theme::hex(0x39414f)
-        );
-        assert_eq!(instance_color_for(&s, None), theme::hex(0x39414f));
     }
 }

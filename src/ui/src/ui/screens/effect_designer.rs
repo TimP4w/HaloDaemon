@@ -26,6 +26,10 @@ pub struct DesignerUi {
     /// `(instance_id, effect_id)` — Save also pushes CanvasUpsertEffect.
     canvas_instance: Option<(String, String)>,
     error: Option<String>,
+    /// Preview rig index: strip, ring, matrix, triple ring.
+    rig: usize,
+    /// Color slot the picker edits (A, B, ambient); `usize::MAX` = closed.
+    color_slot: usize,
     /// Set when Save succeeds; consumed by the RGB Lighting page to apply immediately.
     pub result: Option<(String, HashMap<String, EffectParamValue>)>,
 }
@@ -39,6 +43,8 @@ impl DesignerUi {
             back_page: Page::Lighting,
             canvas_instance: None,
             error: None,
+            rig: 0,
+            color_slot: 0,
             result: None,
         }
     }
@@ -52,6 +58,8 @@ impl DesignerUi {
             back_page: Page::Lighting,
             canvas_instance: None,
             error: None,
+            rig: 0,
+            color_slot: 0,
             result: None,
         }
     }
@@ -74,6 +82,8 @@ impl DesignerUi {
             back_page: Page::Lighting,
             canvas_instance: Some((instance_id, def.effect_id.clone())),
             error: None,
+            rig: 0,
+            color_slot: 0,
             result: None,
         }
     }
@@ -89,234 +99,222 @@ impl DesignerUi {
                     } else {
                         t!("misc.designer_back_lighting")
                     };
-                    if widgets::back_link(ui, &back_label) {
+                    if widgets::back_link(ui, &back_label, None) {
                         *page = self.back_page.clone();
                     }
                     self.title_row(ui, cmd, page);
-                    ui.add_space(theme::SPACE_3);
-                    self.subtitle_row(ui);
-                    ui.add_space(20.0);
 
                     let t = ui.input(|i| i.time) as f32;
-                    let gap = 20.0;
-                    let left_w = (ui.available_width() * 0.45).min(520.0);
+                    let gap = theme::SPACE_8;
+                    let aside_w = (ui.available_width() * 0.32).clamp(360.0, 420.0);
+                    let left_w = ui.available_width() - aside_w - gap;
                     let ctx_ref = ui.ctx().clone();
                     widgets::split_columns(ui, left_w, gap, |left, right| {
-                        let preview_rect = left.min_rect();
+                        let preview = left.scope(|ui| self.preview(ui, t)).response.rect;
                         crate::domain::tour::anchor(
                             &ctx_ref,
                             crate::domain::tour::AnchorId::EffectDesignerPreview,
-                            preview_rect,
+                            preview,
                         );
-                        self.preview(left, t);
-                        let controls_rect = right.min_rect();
+                        let controls = right.scope(|ui| self.controls(ui)).response.rect;
                         crate::domain::tour::anchor(
                             &ctx_ref,
                             crate::domain::tour::AnchorId::EffectDesignerControls,
-                            controls_rect,
+                            controls,
                         );
-                        self.controls(right);
                     });
                 });
             });
     }
 
-    /// "Effect Designer" title (left) + Save/Reset (right), one row.
+    /// Title + name field (left), Reset + Save (right).
     fn title_row(&mut self, ui: &mut egui::Ui, cmd: &CommandTx, page: &mut Page) {
-        ui.horizontal(|ui| {
-            ui.label(
-                egui::RichText::new(t!("misc.designer_title"))
-                    .font(theme::bold(22.0))
-                    .color(theme::TEXT),
-            );
-            ui.with_layout(egui::Layout::right_to_left(egui::Align::Center), |ui| {
+        let mut save = false;
+        let mut reset = false;
+        widgets::page_title_with(
+            ui,
+            &t!("misc.designer_title"),
+            |ui| {
+                ui.add_space(theme::SPACE_1);
+                widgets::text_field(ui, &mut self.name, &t!("misc.designer_name_hint"), 240.0);
+                if let Some(err) = &self.error {
+                    ui.label(
+                        egui::RichText::new(err)
+                            .font(theme::body_sm())
+                            .color(theme::OFFLINE),
+                    );
+                }
+            },
+            |ui| {
                 let save_btn = widgets::button(
                     ui,
                     &t!("misc.designer_save"),
                     widgets::ButtonKind::Primary,
-                    egui::vec2(120.0, 32.0),
+                    egui::vec2(0.0, 36.0),
                 );
                 crate::domain::tour::anchor(
                     ui.ctx(),
                     crate::domain::tour::AnchorId::EffectDesignerSave,
                     save_btn.rect,
                 );
-                if save_btn.clicked() {
-                    let name = self.name.trim().to_string();
-                    if validate_effect_name(&name) {
-                        let params = self.params.to_params();
-                        crate::runtime::ipc::send(
-                            cmd,
-                            halod_shared::commands::DaemonCommand::SaveCustomEffect {
-                                name: name.clone(),
-                                params: params.clone(),
-                            },
-                        );
-                        if let Some(old) = &self.editing {
-                            if old != &name {
-                                crate::runtime::ipc::send(
-                                    cmd,
-                                    halod_shared::commands::DaemonCommand::DeleteCustomEffect {
-                                        name: old.clone(),
-                                    },
-                                );
-                            }
-                        }
-                        if let Some((instance_id, effect_id)) = &self.canvas_instance {
-                            crate::runtime::ipc::send(
-                                cmd,
-                                halod_shared::commands::DaemonCommand::CanvasUpsertEffect {
-                                    instance_id: instance_id.clone(),
-                                    def: EffectDef {
-                                        effect_id: effect_id.clone(),
-                                        name: Some(name.clone()),
-                                        params: params.clone(),
-                                    },
-                                },
-                            );
-                        }
-                        // Only the Direct Effects tab drains `result` (on the
-                        // frame after navigating back to it) — leaving it set
-                        // when returning to a canvas instance would misapply it
-                        // whenever the user later opens Direct Effects.
-                        if self.canvas_instance.is_none() {
-                            self.result = Some((name, params));
-                        }
-                        *page = self.back_page.clone();
-                    } else {
-                        self.error = Some(t!("misc.designer_invalid_name").to_string());
-                    }
-                }
-                ui.add_space(theme::SPACE_4);
-                if widgets::button(
+                save = save_btn.clicked();
+                reset = widgets::button(
                     ui,
                     &t!("misc.designer_reset"),
-                    widgets::ButtonKind::Ghost,
-                    egui::vec2(80.0, 32.0),
+                    widgets::ButtonKind::Secondary,
+                    egui::vec2(0.0, 36.0),
                 )
-                .clicked()
-                {
-                    self.params = DesignerParams::default();
-                }
-            });
-        });
+                .clicked();
+            },
+        );
+        if reset {
+            self.params = DesignerParams::default();
+        }
+        if save {
+            self.save(cmd, page);
+        }
     }
 
-    /// Subtitle (left) + name field/validation error (right), one row.
-    fn subtitle_row(&mut self, ui: &mut egui::Ui) {
-        ui.horizontal(|ui| {
-            ui.label(
-                egui::RichText::new(t!("misc.designer_subtitle"))
-                    .font(theme::body_md())
-                    .color(theme::TEXT_MUT),
+    fn save(&mut self, cmd: &CommandTx, page: &mut Page) {
+        let name = self.name.trim().to_string();
+        if !validate_effect_name(&name) {
+            self.error = Some(t!("misc.designer_invalid_name").to_string());
+            return;
+        }
+        let params = self.params.to_params();
+        crate::runtime::ipc::send(
+            cmd,
+            halod_shared::commands::DaemonCommand::SaveCustomEffect {
+                name: name.clone(),
+                params: params.clone(),
+            },
+        );
+        if let Some(old) = &self.editing {
+            if old != &name {
+                crate::runtime::ipc::send(
+                    cmd,
+                    halod_shared::commands::DaemonCommand::DeleteCustomEffect { name: old.clone() },
+                );
+            }
+        }
+        if let Some((instance_id, effect_id)) = &self.canvas_instance {
+            crate::runtime::ipc::send(
+                cmd,
+                halod_shared::commands::DaemonCommand::CanvasUpsertEffect {
+                    instance_id: instance_id.clone(),
+                    def: EffectDef {
+                        effect_id: effect_id.clone(),
+                        name: Some(name.clone()),
+                        params: params.clone(),
+                    },
+                },
             );
-            ui.with_layout(egui::Layout::right_to_left(egui::Align::Center), |ui| {
-                widgets::text_field(ui, &mut self.name, &t!("misc.designer_name_hint"), 240.0);
-                if let Some(err) = &self.error {
-                    ui.label(
-                        egui::RichText::new(err)
-                            .font(theme::body_sm())
-                            .color(theme::hex(0xef5f63)),
-                    );
-                }
-            });
-        });
+        }
+        // Only the Direct Effects tab drains `result` (on the frame after
+        // navigating back to it) — leaving it set when returning to a canvas
+        // instance would misapply it whenever the user later opens Direct Effects.
+        if self.canvas_instance.is_none() {
+            self.result = Some((name, params));
+        }
+        *page = self.back_page.clone();
     }
 
     // ── Preview ───────────────────────────────────────────────────────────
 
-    fn preview(&self, ui: &mut egui::Ui, t: f32) {
-        widgets::card_titled(
-            ui,
-            &t!("misc.designer_live_preview"),
-            |_ui| {},
-            |ui| {
-                self.rig(
-                    ui,
-                    &t!("misc.designer_rig_strip"),
-                    &strip_positions(40),
-                    120.0,
-                    None,
-                    t,
-                );
-                ui.add_space(theme::SPACE_6);
-                self.rig(
-                    ui,
-                    &t!("misc.designer_rig_ring"),
+    fn preview(&mut self, ui: &mut egui::Ui, t: f32) {
+        widgets::card_with_margin(ui, PANEL_PAD, |ui| {
+            egui::Sides::new().show(
+                ui,
+                |ui| {
+                    ui.label(
+                        egui::RichText::new(t!("misc.designer_live_preview"))
+                            .font(theme::heading())
+                            .color(theme::TEXT),
+                    );
+                },
+                |ui| {
+                    let labels = [
+                        t!("misc.designer_rig_strip"),
+                        t!("misc.designer_rig_ring"),
+                        t!("misc.designer_rig_matrix"),
+                        t!("misc.designer_rig_triple"),
+                    ];
+                    let refs: Vec<&str> = labels.iter().map(|l| l.as_ref()).collect();
+                    widgets::segmented(ui, &refs, &mut self.rig, false);
+                },
+            );
+            ui.add_space(theme::SPACE_8);
+            let (rect, _) =
+                ui.allocate_exact_size(Vec2::new(ui.available_width(), 180.0), Sense::hover());
+            ui.painter().rect_filled(rect, 8.0, theme::STAGE_BG);
+            let inner = rect.shrink2(Vec2::new(20.0, 16.0));
+            match self.rig {
+                0 => self.strip(ui.painter(), inner, 40, t),
+                1 => self.rig(
+                    ui.painter(),
+                    inner,
                     &ring_positions(32),
-                    180.0,
                     Some((1.0, 1.0)),
                     t,
-                );
-                ui.add_space(theme::SPACE_6);
-                self.rig(
-                    ui,
-                    &t!("misc.designer_rig_matrix"),
+                ),
+                2 => self.rig(
+                    ui.painter(),
+                    inner,
                     &matrix_positions(8, 4),
-                    140.0,
                     Some((8.0, 4.0)),
                     t,
-                );
-                ui.add_space(theme::SPACE_6);
-                self.rig(
-                    ui,
-                    &t!("misc.designer_rig_triple"),
+                ),
+                _ => self.rig(
+                    ui.painter(),
+                    inner,
                     &multi_ring_positions(3, 12),
-                    110.0,
                     Some((3.0, 1.0)),
                     t,
-                );
-                ui.add_space(theme::SPACE_5);
-                ui.separator();
-                ui.add_space(theme::SPACE_4);
-                self.pixmap_strip(ui, t);
-            },
-        );
-        ui.add_space(theme::SPACE_6);
-        widgets::card_titled(
-            ui,
-            &t!("misc.designer_brightness_formula"),
-            |ui| {
-                ui.label(
-                    egui::RichText::new(formula_text(self.params.generator))
-                        .font(theme::mono_semibold(11.0))
-                        .color(theme::CYAN),
-                );
-            },
-            |ui| self.brightness_graph(ui, t),
-        );
+                ),
+            }
+        });
+        ui.add_space(theme::SPACE_8);
+        widgets::card_with_margin(ui, PANEL_PAD, |ui| {
+            egui::Sides::new().show(
+                ui,
+                |ui| {
+                    ui.label(
+                        egui::RichText::new(t!("misc.designer_brightness_formula"))
+                            .font(theme::heading())
+                            .color(theme::TEXT),
+                    );
+                },
+                |ui| {
+                    ui.label(
+                        egui::RichText::new(t!("misc.designer_curve_caption"))
+                            .font(theme::body_sm())
+                            .color(theme::TEXT_MUT),
+                    );
+                },
+            );
+            ui.add_space(theme::SPACE_6);
+            self.brightness_graph(ui, t);
+        });
     }
 
-    /// A thin horizontal strip showing the pixmap effect as it would appear
-    /// on the canvas: `color(p, p, 0.5, t)` sampled across the width.
-    fn pixmap_strip(&self, ui: &mut egui::Ui, t: f32) {
-        let w = ui.available_width();
-        let h = 28.0;
-        let (rect, _resp) = ui.allocate_exact_size(Vec2::new(w, h), Sense::hover());
-        let p = ui.painter();
-        let steps = rect.width() as usize;
-        if steps > 0 {
-            for i in 0..steps {
-                let x = rect.left() + i as f32;
-                let px = i as f32 / (steps - 1).max(1) as f32;
-                let (r, g, b) = self.params.color(px, px, 0.5, t);
-                let col = Color32::from_rgb(
-                    (r.clamp(0.0, 1.0) * 255.0) as u8,
-                    (g.clamp(0.0, 1.0) * 255.0) as u8,
-                    (b.clamp(0.0, 1.0) * 255.0) as u8,
-                );
-                p.line_segment(
-                    [Pos2::new(x, rect.top()), Pos2::new(x, rect.bottom())],
-                    Stroke::new(1.0, col),
-                );
-            }
+    /// The strip rig: `n` round LEDs filling the row, `gap` px apart.
+    fn strip(&self, painter: &egui::Painter, inner: egui::Rect, n: usize, t: f32) {
+        let gap = 6.0;
+        let d = ((inner.width() - gap * (n - 1) as f32) / n as f32).max(2.0);
+        for (i, &(p_zone, p_ring, nx, ny)) in strip_positions(n).iter().enumerate() {
+            let c = Pos2::new(
+                inner.left() + d / 2.0 + i as f32 * (d + gap),
+                inner.center().y,
+            );
+            let p = self.effective_p(p_zone, p_ring);
+            painter.circle_filled(c, d / 2.0, self.led_color(p, nx, ny, t));
         }
-        p.rect_stroke(
-            rect,
-            0.0,
-            Stroke::new(1.0, theme::hex(0x2e3a50)),
-            egui::StrokeKind::Inside,
-        );
+    }
+
+    fn led_color(&self, p: f32, nx: f32, ny: f32, t: f32) -> Color32 {
+        let (r, g, b) = self.params.color(p, nx, ny, t);
+        let ch = |v: f32| (v.clamp(0.0, 1.0) * 255.0) as u8;
+        Color32::from_rgb(ch(r), ch(g), ch(b))
     }
 
     /// The `p` this instance's `ring_scope` selects for a LED at whole-zone
@@ -334,37 +332,16 @@ impl DesignerUi {
     /// its own ring respectively (see `effective_p`, matching the daemon's
     /// real LED order); `(nx, ny)` is its normalized on-screen position
     /// (matches the daemon's spatial coordinates, used only for the twinkle
-    /// hash) — inside the allocated rig area. `aspect`, when set, keeps the
-    /// plotted region at that width:height ratio (e.g. `(1,1)` so a ring
-    /// stays a circle, never stretched into an ellipse by an arbitrary rect)
-    /// instead of filling the whole rect.
+    /// hash) — inside `inner`. `aspect`, when set, keeps the plotted region
+    /// at that width:height ratio (e.g. `(1,1)` so a ring stays a circle).
     fn rig(
         &self,
-        ui: &mut egui::Ui,
-        label: &str,
+        painter: &egui::Painter,
+        inner: egui::Rect,
         positions: &[(f32, f32, f32, f32)],
-        height: f32,
         aspect: Option<(f32, f32)>,
         t: f32,
     ) {
-        ui.label(
-            egui::RichText::new(label)
-                .font(theme::caption())
-                .color(theme::TEXT_FAINT),
-        );
-        ui.add_space(theme::SPACE_2);
-        let (rect, _) =
-            ui.allocate_exact_size(Vec2::new(ui.available_width(), height), Sense::hover());
-        let painter = ui.painter();
-        painter.rect_filled(rect, 8.0, theme::hex(0x070a0f));
-        painter.rect_stroke(
-            rect,
-            8.0,
-            Stroke::new(1.0, theme::BORDER),
-            egui::StrokeKind::Middle,
-        );
-        let margin = 16.0;
-        let inner = rect.shrink(margin);
         let plot = match aspect {
             Some((aw, ah)) => widgets::letterbox(inner, aw / ah),
             None => inner,
@@ -375,290 +352,250 @@ impl DesignerUi {
                 plot.top() + ny * plot.height(),
             );
             let p = self.effective_p(p_zone, p_ring);
-            let (r, g, b) = self.params.color(p, nx, ny, t);
-            let color = Color32::from_rgb((r * 255.0) as u8, (g * 255.0) as u8, (b * 255.0) as u8);
-            painter.circle_filled(pos, 4.0, color);
+            painter.circle_filled(pos, 5.0, self.led_color(p, nx, ny, t));
         }
     }
 
     fn brightness_graph(&self, ui: &mut egui::Ui, t: f32) {
-        let (rect, _) =
-            ui.allocate_exact_size(Vec2::new(ui.available_width(), 90.0), Sense::hover());
+        let w = ui.available_width();
+        let (rect, _) = ui.allocate_exact_size(Vec2::new(w, w / 4.0), Sense::hover());
         let p = ui.painter();
-        p.rect_filled(rect, 6.0, theme::hex(0x070a0f));
-        const SAMPLES: usize = 64;
-        let mut pts = Vec::with_capacity(SAMPLES);
-        for i in 0..SAMPLES {
-            let x = i as f32 / (SAMPLES - 1) as f32;
-            let b = self.params.brightness(x, x, 0.5, t);
-            pts.push(Pos2::new(
-                rect.left() + x * rect.width(),
-                rect.bottom() - 6.0 - b * (rect.height() - 12.0),
-            ));
+        p.rect_filled(rect, 8.0, theme::INNER_BG);
+        let grid = Stroke::new(1.0, theme::STAGE_GRID);
+        p.hline(rect.x_range(), rect.center().y, grid);
+        for q in 1..4 {
+            p.vline(
+                rect.left() + rect.width() * q as f32 / 4.0,
+                rect.y_range(),
+                grid,
+            );
         }
-        // Faded primary accent under the curve, solid primary for the line.
-        widgets::fill_under_line(p, &pts, rect.bottom(), theme::a(theme::CYAN, 0.12));
-        p.add(egui::Shape::line(pts, Stroke::new(1.6, theme::CYAN)));
+        const SAMPLES: usize = 61;
+        let pts: Vec<Pos2> = (0..SAMPLES)
+            .map(|i| {
+                let x = i as f32 / (SAMPLES - 1) as f32;
+                let b = self.params.brightness(x, x, 0.5, t);
+                Pos2::new(
+                    rect.left() + x * rect.width(),
+                    rect.bottom() - rect.height() * (10.0 + b * 125.0) / 150.0,
+                )
+            })
+            .collect();
+        p.add(egui::Shape::line(pts, Stroke::new(2.0, theme::CYAN)));
     }
 
     // ── Controls ──────────────────────────────────────────────────────────
 
     fn controls(&mut self, ui: &mut egui::Ui) {
-        widgets::card_titled(
-            ui,
-            &t!("misc.designer_generator"),
-            |_ui| {},
-            |ui| {
-                let gap = 8.0;
-                let cols = 3usize;
-                let cell_w =
-                    ((ui.available_width() - gap * (cols as f32 - 1.0)) / cols as f32).max(60.0);
-                for (row, chunk) in Generator::ALL.chunks(cols).enumerate() {
-                    if row > 0 {
-                        ui.add_space(gap);
-                    }
-                    ui.horizontal(|ui| {
-                        ui.spacing_mut().item_spacing.x = gap;
-                        for &g in chunk {
-                            let active = self.params.generator == g;
-                            let shape = generator_shape_samples(&self.params, g, 64);
-                            if widgets::effect_cell(
-                                ui,
-                                &generator_label(g),
-                                active,
-                                widgets::CellPreview::Curve(shape),
-                                cell_w,
-                                58.0,
-                                26.0,
-                                true,
-                            ) {
-                                self.params.generator = g;
-                            }
-                        }
-                    });
+        widgets::card_with_margin(ui, PANEL_PAD, |ui| {
+            ui.spacing_mut().item_spacing.y = theme::SPACE_5;
+            ui.vertical(|ui| {
+                field(ui, &t!("misc.designer_generator"));
+                let options: Vec<_> = Generator::ALL
+                    .iter()
+                    .map(|&g| (generator_label(g), g))
+                    .collect();
+                if let Some(g) = widgets::option_grid_value(ui, &options, &self.params.generator, 4)
+                {
+                    self.params.generator = g;
                 }
-            },
-        );
+            });
+            let rel = slider_relevance(self.params.generator);
+            let p = &mut self.params;
+            pct_slider(ui, &t!("misc.designer_speed"), &mut p.speed, "", true);
+            let mut density = p.density;
+            let readout = format!("{}×", density.round() as i32);
+            if widgets::slider_row(
+                ui,
+                &t!("misc.designer_repeats"),
+                &mut density,
+                1.0..=8.0,
+                &readout,
+            ) {
+                p.density = density.round();
+            }
+            pct_slider(ui, &t!("misc.designer_decay"), &mut p.decay, "%", rel.decay);
+            pct_slider(ui, &t!("misc.designer_width"), &mut p.width, "%", rel.width);
+            pct_slider(
+                ui,
+                &t!("misc.designer_brightness_floor"),
+                &mut p.floor,
+                "%",
+                true,
+            );
+            let gradient = p.color_mode == ColorMode::Gradient;
+            ui.add_enabled_ui(!gradient, |ui| {
+                let mut hue = p.hue_drift;
+                let readout = hue_readout(hue);
+                if widgets::slider_row(
+                    ui,
+                    &t!("misc.designer_hue_drift"),
+                    &mut hue,
+                    -100.0..=100.0,
+                    &readout,
+                ) {
+                    p.hue_drift = hue;
+                }
+            });
+            self.color_section(ui);
+            self.motion_section(ui);
+        });
+    }
 
-        ui.add_space(theme::SPACE_8);
-        widgets::card_titled(
+    /// Color mode, the color slots sharing one picker, and the color sliders.
+    fn color_section(&mut self, ui: &mut egui::Ui) {
+        ui.vertical(|ui| {
+            field(ui, &t!("misc.designer_color"));
+            let labels: Vec<_> = ColorMode::ALL
+                .iter()
+                .map(|&m| color_mode_label(m))
+                .collect();
+            let refs: Vec<&str> = labels.iter().map(|l| l.as_ref()).collect();
+            let mut idx = ColorMode::ALL
+                .iter()
+                .position(|&m| m == self.params.color_mode)
+                .unwrap_or(0);
+            if widgets::segmented(ui, &refs, &mut idx, false) {
+                self.params.color_mode = ColorMode::ALL[idx];
+            }
+            ui.add_space(theme::SPACE_4);
+            let gradient = self.params.color_mode == ColorMode::Gradient;
+            let slots = [
+                (t!("misc.designer_color_a"), self.params.color_a, true),
+                (t!("misc.designer_color_b"), self.params.color_b, gradient),
+                (
+                    t!("misc.designer_ambient_color"),
+                    self.params.ambient_color,
+                    true,
+                ),
+            ];
+            let shown: Vec<usize> = (0..slots.len()).filter(|&i| slots[i].2).collect();
+            if !shown.contains(&self.color_slot) {
+                self.color_slot = 0;
+            }
+            let gap = theme::SPACE_5;
+            let w = (ui.available_width() - gap * (shown.len() - 1) as f32) / shown.len() as f32;
+            ui.horizontal(|ui| {
+                ui.spacing_mut().item_spacing.x = gap;
+                for &i in &shown {
+                    let (label, c, _) = &slots[i];
+                    let color = widgets::rgb_to_color32(*c);
+                    let active = self.color_slot == i;
+                    if widgets::color_slot_button(ui, label, color, active, w).clicked() {
+                        self.color_slot = if active { usize::MAX } else { i };
+                    }
+                }
+            });
+            let target = match self.color_slot {
+                0 => Some(&mut self.params.color_a),
+                1 => Some(&mut self.params.color_b),
+                2 => Some(&mut self.params.ambient_color),
+                _ => None,
+            };
+            if let Some(target) = target {
+                ui.add_space(theme::SPACE_4);
+                if let Some(c) = widgets::color_picker(ui, *target) {
+                    *target = c;
+                }
+            }
+        });
+        let p = &mut self.params;
+        let gradient = p.color_mode == ColorMode::Gradient;
+        ui.add_enabled_ui(!gradient, |ui| {
+            pct_slider(
+                ui,
+                &t!("misc.designer_saturation"),
+                &mut p.saturation,
+                "%",
+                true,
+            );
+        });
+        pct_slider(
             ui,
-            &t!("misc.designer_motion"),
-            |_ui| {},
-            |ui| {
-                ui.label(
-                    egui::RichText::new(t!("misc.designer_direction"))
-                        .font(theme::caption())
-                        .color(theme::TEXT_MUT),
-                );
-                ui.add_space(theme::SPACE_3);
-                ui.horizontal(|ui| {
-                    ui.spacing_mut().item_spacing.x = 6.0;
-                    for &d in Direction::ALL.iter() {
-                        if widgets::pill(ui, &direction_label(d), self.params.direction == d) {
-                            self.params.direction = d;
-                        }
-                    }
-                });
-                ui.add_space(theme::SPACE_7);
-                let mut speed = self.params.speed;
-                let readout = format!("{}", speed.round() as i32);
-                if widgets::slider_row(
-                    ui,
-                    &t!("misc.designer_speed"),
-                    &mut speed,
-                    0.0..=100.0,
-                    &readout,
-                ) {
-                    self.params.speed = speed;
-                }
-                ui.add_space(theme::SPACE_7);
-                let mut density = self.params.density;
-                let readout = format!("{}x", density.round() as i32);
-                if widgets::slider_row(
-                    ui,
-                    &t!("misc.designer_repeats"),
-                    &mut density,
-                    1.0..=8.0,
-                    &readout,
-                ) {
-                    self.params.density = density.round();
-                }
-                ui.add_space(theme::SPACE_7);
-                ui.label(
-                    egui::RichText::new(t!("misc.designer_ring_scope"))
-                        .font(theme::caption())
-                        .color(theme::TEXT_MUT),
-                );
-                ui.add_space(theme::SPACE_3);
-                ui.horizontal(|ui| {
-                    ui.spacing_mut().item_spacing.x = 6.0;
-                    for &s in RingScope::ALL.iter() {
-                        if widgets::pill(ui, &ring_scope_label(s), self.params.ring_scope == s) {
-                            self.params.ring_scope = s;
-                        }
-                    }
-                });
-                ui.add_space(theme::SPACE_7);
-                let mut spread = self.params.phase_spread;
-                let readout = format!("{}%", spread.round() as i32);
-                if widgets::slider_row(
-                    ui,
-                    &t!("misc.designer_phase_spread"),
-                    &mut spread,
-                    0.0..=100.0,
-                    &readout,
-                ) {
-                    self.params.phase_spread = spread;
-                }
-            },
+            &t!("misc.designer_color_cycle_speed"),
+            &mut p.color_cycle_speed,
+            "%",
+            true,
         );
+    }
 
-        ui.add_space(theme::SPACE_8);
-        let rel = slider_relevance(self.params.generator);
-        widgets::card_titled(
+    /// Direction, multi-ring scope, phase spread and sharpness.
+    fn motion_section(&mut self, ui: &mut egui::Ui) {
+        let p = &mut self.params;
+        ui.vertical(|ui| {
+            field(ui, &t!("misc.designer_direction"));
+            let labels: Vec<_> = Direction::ALL.iter().map(|&d| direction_label(d)).collect();
+            let refs: Vec<&str> = labels.iter().map(|l| l.as_ref()).collect();
+            let mut idx = Direction::ALL
+                .iter()
+                .position(|&d| d == p.direction)
+                .unwrap_or(0);
+            if widgets::segmented(ui, &refs, &mut idx, false) {
+                p.direction = Direction::ALL[idx];
+            }
+        });
+        ui.vertical(|ui| {
+            field(ui, &t!("misc.designer_ring_scope"));
+            let labels: Vec<_> = RingScope::ALL
+                .iter()
+                .map(|&s| ring_scope_label(s))
+                .collect();
+            let refs: Vec<&str> = labels.iter().map(|l| l.as_ref()).collect();
+            let mut idx = RingScope::ALL
+                .iter()
+                .position(|&s| s == p.ring_scope)
+                .unwrap_or(0);
+            if widgets::segmented(ui, &refs, &mut idx, false) {
+                p.ring_scope = RingScope::ALL[idx];
+            }
+        });
+        pct_slider(
             ui,
-            &t!("misc.designer_shape"),
-            |_ui| {},
-            |ui| {
-                ui.add_enabled_ui(rel.decay, |ui| {
-                    let mut decay = self.params.decay;
-                    let readout = format!("{}%", decay.round() as i32);
-                    if widgets::slider_row(
-                        ui,
-                        &t!("misc.designer_decay"),
-                        &mut decay,
-                        0.0..=100.0,
-                        &readout,
-                    ) {
-                        self.params.decay = decay;
-                    }
-                });
-                ui.add_space(theme::SPACE_7);
-                ui.add_enabled_ui(rel.width, |ui| {
-                    let mut width = self.params.width;
-                    let readout = format!("{}%", width.round() as i32);
-                    if widgets::slider_row(
-                        ui,
-                        &t!("misc.designer_width"),
-                        &mut width,
-                        0.0..=100.0,
-                        &readout,
-                    ) {
-                        self.params.width = width;
-                    }
-                });
-                ui.add_space(theme::SPACE_7);
-                let mut sharp = self.params.sharpness;
-                let readout = format!("{}%", sharp.round() as i32);
-                if widgets::slider_row(
-                    ui,
-                    &t!("misc.designer_sharpness"),
-                    &mut sharp,
-                    0.0..=100.0,
-                    &readout,
-                ) {
-                    self.params.sharpness = sharp;
-                }
-            },
+            &t!("misc.designer_phase_spread"),
+            &mut p.phase_spread,
+            "%",
+            true,
         );
+        pct_slider(
+            ui,
+            &t!("misc.designer_sharpness"),
+            &mut p.sharpness,
+            "%",
+            true,
+        );
+    }
+}
 
-        ui.add_space(theme::SPACE_8);
-        widgets::card_titled(
-            ui,
-            &t!("misc.designer_color"),
-            |_ui| {},
-            |ui| {
-                ui.horizontal(|ui| {
-                    ui.spacing_mut().item_spacing.x = 6.0;
-                    for &m in ColorMode::ALL.iter() {
-                        if widgets::pill(ui, &color_mode_label(m), self.params.color_mode == m) {
-                            self.params.color_mode = m;
-                        }
-                    }
-                });
-                ui.add_space(theme::SPACE_6);
-                ui.label(
-                    egui::RichText::new(t!("misc.designer_color_a"))
-                        .font(theme::caption())
-                        .color(theme::TEXT_MUT),
-                );
-                if let Some(c) = widgets::color_picker(ui, self.params.color_a) {
-                    self.params.color_a = c;
-                }
-                if self.params.color_mode == ColorMode::Gradient {
-                    ui.add_space(theme::SPACE_5);
-                    ui.label(
-                        egui::RichText::new(t!("misc.designer_color_b"))
-                            .font(theme::caption())
-                            .color(theme::TEXT_MUT),
-                    );
-                    if let Some(c) = widgets::color_picker(ui, self.params.color_b) {
-                        self.params.color_b = c;
-                    }
-                }
-                ui.add_space(theme::SPACE_7);
-                let mut floor = self.params.floor;
-                let readout = format!("{}%", floor.round() as i32);
-                if widgets::slider_row(
-                    ui,
-                    &t!("misc.designer_brightness_floor"),
-                    &mut floor,
-                    0.0..=100.0,
-                    &readout,
-                ) {
-                    self.params.floor = floor;
-                }
-                if self.params.color_mode != ColorMode::Gradient {
-                    ui.add_space(theme::SPACE_7);
-                    let mut sat = self.params.saturation;
-                    let readout = format!("{}%", sat.round() as i32);
-                    if widgets::slider_row(
-                        ui,
-                        &t!("misc.designer_saturation"),
-                        &mut sat,
-                        0.0..=100.0,
-                        &readout,
-                    ) {
-                        self.params.saturation = sat;
-                    }
-                    ui.add_space(theme::SPACE_7);
-                    let mut hue = self.params.hue_drift;
-                    let sign = if hue > 0.0 { "+" } else { "" };
-                    let readout = format!("{sign}{}", hue.round() as i32);
-                    if widgets::slider_row(
-                        ui,
-                        &t!("misc.designer_hue_drift"),
-                        &mut hue,
-                        -100.0..=100.0,
-                        &readout,
-                    ) {
-                        self.params.hue_drift = hue;
-                    }
-                }
-                ui.add_space(theme::SPACE_7);
-                let mut ccs = self.params.color_cycle_speed;
-                let readout = format!("{}%", ccs.round() as i32);
-                if widgets::slider_row(
-                    ui,
-                    &t!("misc.designer_color_cycle_speed"),
-                    &mut ccs,
-                    0.0..=100.0,
-                    &readout,
-                ) {
-                    self.params.color_cycle_speed = ccs;
-                }
-                ui.add_space(theme::SPACE_7);
-                ui.label(
-                    egui::RichText::new(t!("misc.designer_ambient_color"))
-                        .font(theme::caption())
-                        .color(theme::TEXT_MUT),
-                );
-                if let Some(c) = widgets::color_picker(ui, self.params.ambient_color) {
-                    self.params.ambient_color = c;
-                }
-            },
-        );
+/// Inner padding of the designer's cards.
+const PANEL_PAD: egui::Margin = egui::Margin::same(18);
+
+/// A muted 12 px label above a control group.
+fn field(ui: &mut egui::Ui, label: &str) {
+    ui.label(
+        egui::RichText::new(label)
+            .font(theme::body_sm())
+            .color(theme::TEXT_MUT),
+    );
+    ui.add_space(theme::SPACE_4);
+}
+
+/// A 0–100 slider row reading `"{v}{unit}"`, greyed out when not `enabled`.
+fn pct_slider(ui: &mut egui::Ui, label: &str, v: &mut f32, unit: &str, enabled: bool) {
+    ui.add_enabled_ui(enabled, |ui| {
+        let mut x = *v;
+        let readout = format!("{}{unit}", x.round() as i32);
+        if widgets::slider_row(ui, label, &mut x, 0.0..=100.0, &readout) {
+            *v = x;
+        }
+    });
+}
+
+fn hue_readout(hue: f32) -> String {
+    let h = hue.round() as i32;
+    if h == 0 {
+        t!("misc.designer_off").to_string()
+    } else {
+        format!("{h:+}")
     }
 }
 
@@ -873,47 +810,6 @@ fn ring_scope_label(s: RingScope) -> std::borrow::Cow<'static, str> {
     }
 }
 
-/// `n` brightness samples of `base` with its generator swapped to `g`, for
-/// the generator picker's shape preview — shows the actual waveform rather
-/// than a generic swatch, and reflects the instance's own decay/width/
-/// sharpness/floor so it updates live as those sliders move. Density is
-/// pinned to a few repeats regardless of the instance's own setting — at
-/// density 1 most waveforms show only a single hump in the small cell,
-/// which reads as a blob rather than a recognizable shape. Callers must
-/// pass enough samples (`n`) to render `PREVIEW_DENSITY` repeats smoothly —
-/// each repeat needs several samples or the straight line segments between
-/// points make the curve look jagged instead of round.
-fn generator_shape_samples(base: &DesignerParams, g: Generator, n: usize) -> Vec<f32> {
-    const PREVIEW_DENSITY: f32 = 3.0;
-    let params = DesignerParams {
-        generator: g,
-        density: PREVIEW_DENSITY,
-        ..*base
-    };
-    (0..n)
-        .map(|i| {
-            let p = i as f32 / (n.max(2) - 1) as f32;
-            params.brightness(p, p, 0.5, 0.0)
-        })
-        .collect()
-}
-
-fn formula_text(g: Generator) -> &'static str {
-    match g {
-        Generator::Sine => {
-            "b = \u{00BD} + \u{00BD}\u{00B7}sin(2\u{03C0}(p\u{00B7}\u{03C1} \u{2212} v\u{00B7}t))"
-        }
-        Generator::Pulse => {
-            "b = e^(\u{2212}\u{0394}\u{00B2}/2w\u{00B2}) \u{2228} e^(\u{2212}\u{0394}/decay)"
-        }
-        Generator::Comet => "b = e^(\u{2212}\u{03B4}/decay) \u{00B7} head(w)",
-        Generator::Sawtooth => "b = frac(p\u{00B7}\u{03C1} \u{2212} v\u{00B7}t) ^ sharp",
-        Generator::Twinkle => "b = e^(\u{2212}local k\u{00B7}(6\u{2212}decay))",
-        Generator::Noise => "b = noise(p\u{00B7}\u{03C1} + v\u{00B7}t) ^ sharp",
-        Generator::Rain => "b = \u{03A3} drop(i, p, t) \u{00B7} life(i)",
-    }
-}
-
 #[cfg(test)]
 mod tests {
     use super::*;
@@ -980,29 +876,6 @@ mod tests {
             assert!((0.0..=1.0).contains(&nx));
             assert!((0.0..=1.0).contains(&ny));
         }
-    }
-
-    #[test]
-    fn generator_shape_samples_has_len_and_stays_in_unit_range() {
-        let base = DesignerParams::default();
-        for &g in Generator::ALL.iter() {
-            let samples = generator_shape_samples(&base, g, 24);
-            assert_eq!(samples.len(), 24);
-            for &v in &samples {
-                assert!((0.0..=1.0).contains(&v), "generator={g:?} v={v}");
-            }
-        }
-    }
-
-    #[test]
-    fn generator_shape_samples_reflects_the_requested_generator_not_base() {
-        let base = DesignerParams {
-            generator: Generator::Sine,
-            ..Default::default()
-        };
-        let sine = generator_shape_samples(&base, Generator::Sine, 16);
-        let sawtooth = generator_shape_samples(&base, Generator::Sawtooth, 16);
-        assert_ne!(sine, sawtooth);
     }
 
     #[test]

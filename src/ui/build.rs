@@ -258,7 +258,12 @@ fn append_bundled_asset_licenses(workspace: &std::path::Path, buf: &mut Vec<u8>)
             "https://github.com/JetBrains/JetBrainsMono",
         ),
         (
-            "Inter Tight (proportional, GUI)",
+            "Geist (proportional, GUI)",
+            "2026 The Geist Project Authors",
+            "https://github.com/vercel/geist-font",
+        ),
+        (
+            "Inter Tight (proportional, LCD engine)",
             "2016 The Inter Project Authors",
             "https://github.com/rsms/inter",
         ),
@@ -281,10 +286,10 @@ fn append_bundled_asset_licenses(workspace: &std::path::Path, buf: &mut Vec<u8>)
            Copyright: Google LLC\n\
            License: Apache-2.0\n\
            URL: https://fonts.google.com/icons\n\n\
-         Boxicons (verified badge SVG)\n\
-           Copyright: 2015-2021 Aniket Suvarna\n\
+         Bootstrap Icons (computer device SVG)\n\
+           Copyright: 2019-2024 The Bootstrap Authors\n\
            License: MIT\n\
-           URL: https://github.com/box-icons/boxicons-core\n\n\
+           URL: https://github.com/twbs/icons\n\n\
          Visual Studio Code Codicons (integrity shield SVG)\n\
            Copyright: Microsoft Corporation\n\
            License: CC-BY-4.0\n\

@@ -132,7 +132,12 @@ struct PerFanState {
     failsafe_error_logged: bool,
     presence: Presence,
     probe: Option<ProbeState>,
+    sensor_missing_since: Option<std::time::Instant>,
 }
+
+/// How long a curve keeps its last duty while its sensor is absent, so a
+/// sensor that is still starting or briefly drops out does not flap the fan.
+const SENSOR_GRACE: std::time::Duration = std::time::Duration::from_secs(10);
 
 pub struct FanCurveEngine {
     app_state: Arc<AppState>,
@@ -197,9 +202,18 @@ impl FanCurveEngine {
     fn update_control_temp(&self, fan_id: &str, sensor_value: f32) -> f32 {
         let mut map = Self::lock_mutex(&self.per_fan);
         let state = map.entry(fan_id.to_string()).or_default();
+        state.sensor_missing_since = None;
         let eff = hysteresis_temp(state.control_temp, sensor_value);
         state.control_temp = Some(eff);
         eff
+    }
+
+    fn sensor_missing_within_grace(&self, fan_id: &str) -> bool {
+        let now = std::time::Instant::now();
+        let mut map = Self::lock_mutex(&self.per_fan);
+        let state = map.entry(fan_id.to_string()).or_default();
+        let since = *state.sensor_missing_since.get_or_insert(now);
+        now.duration_since(since) < SENSOR_GRACE
     }
 
     fn clear_missing_device(&self, fan_id: &str) {
@@ -299,6 +313,14 @@ impl FanCurveEngine {
             .entry(fan_id.to_string())
             .or_default()
             .stall = Some(StallState { since, notified });
+    }
+
+    #[cfg(test)]
+    fn expire_sensor_grace(&self, fan_id: &str) {
+        Self::lock_mutex(&self.per_fan)
+            .entry(fan_id.to_string())
+            .or_default()
+            .sensor_missing_since = std::time::Instant::now().checked_sub(SENSOR_GRACE);
     }
 
     #[cfg(test)]
@@ -458,7 +480,9 @@ impl FanCurveEngine {
             };
             let Some(sensor) = sensors.get(sensor_id) else {
                 log::debug!("[FanCurve] Sensor not found: {sensor_id}");
-                self.apply_failsafe(key, curve_target, failsafe_duty).await;
+                if !self.sensor_missing_within_grace(key) {
+                    self.apply_failsafe(key, curve_target, failsafe_duty).await;
+                }
                 return FanCurveStatus::NoSensor;
             };
             if sensor.sensor_type != halod_shared::types::SensorType::Temperature {
@@ -468,7 +492,9 @@ impl FanCurveEngine {
             }
             if !sensor.value.is_finite() {
                 log::warn!("[FanCurve] Sensor {sensor_id} returned a non-finite temperature");
-                self.apply_failsafe(key, curve_target, failsafe_duty).await;
+                if !self.sensor_missing_within_grace(key) {
+                    self.apply_failsafe(key, curve_target, failsafe_duty).await;
+                }
                 return FanCurveStatus::NoSensor;
             }
             let temp = self.update_control_temp(key, sensor.value as f32);
@@ -980,8 +1006,33 @@ mod tests {
         let fan = Arc::new(fan("fan_0").with_curve(record));
         let app = app_with(vec![fan.clone()]);
         let engine = FanCurveEngine::new(app);
+        engine.expire_sensor_grace(&curve_key("fan_0", "default"));
         engine.tick(75).await;
         assert_eq!(fan.fan_duty(), 75);
+    }
+
+    #[tokio::test]
+    async fn missing_sensor_keeps_duty_during_grace() {
+        let record = FanCurveRecord {
+            sensor_id: Some("late_sensor".to_string()),
+            points: vec![(0.0, 50.0), (100.0, 100.0)],
+        };
+        let fan = Arc::new(fan("fan_0").with_curve(record));
+        let app = app_with(vec![fan.clone()]);
+        let engine = FanCurveEngine::new(app);
+        engine.tick(75).await;
+        engine.tick(75).await;
+        assert_eq!(fan.fan_duty(), 20);
+    }
+
+    #[tokio::test]
+    async fn sensor_reading_restarts_grace() {
+        let key = curve_key("fan_0", "default");
+        let app = Arc::new(AppState::new(Config::default()));
+        let engine = FanCurveEngine::new(app);
+        engine.expire_sensor_grace(&key);
+        engine.update_control_temp(&key, 40.0);
+        assert!(engine.sensor_missing_within_grace(&key));
     }
 
     #[tokio::test]
@@ -996,6 +1047,7 @@ mod tests {
         crate::application::usecases::device::telemetry::observe(&app).await;
 
         let engine = FanCurveEngine::new(app.clone());
+        engine.expire_sensor_grace(&curve_key("fan_0", "default"));
         engine.tick(75).await;
 
         assert_eq!(fan.fan_duty(), 75);

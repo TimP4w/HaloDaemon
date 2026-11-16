@@ -1016,7 +1016,7 @@ impl RgbEngine {
                         })
                         .collect();
                     if let Err(e) = rgb.write_frame_batch(&encoded).await {
-                        log::warn!("write_frame_batch failed for {}: {e}", dev.id());
+                        log::debug!("write_frame_batch failed for {}: {e}", dev.id());
                     }
                 }
             });

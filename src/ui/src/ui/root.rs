@@ -10,18 +10,17 @@ use crate::domain::state::Page;
 const DEPCHECK_GRACE_SECS: f64 = 4.0;
 
 impl App {
-    pub(crate) fn accept_state(&mut self, state: crate::domain::topic_store::TopicStore) {
-        crate::ui::screens::settings::apply_locale(&state.gui.language);
-        self.state_cache = std::sync::Arc::new(state);
+    pub(crate) fn sync_state(&mut self) {
+        if self.ui.state.poll() {
+            crate::ui::screens::settings::apply_locale(&self.ui.state.get().gui.language);
+        }
     }
 
     #[cfg(windows)]
     pub(crate) fn draw_background(&mut self, ctx: &egui::Context) {
         ctx.request_repaint_after(std::time::Duration::from_millis(250));
-        if let Some(state) = crate::runtime::ipc::take_changed(&mut self.ui.state, "state") {
-            self.accept_state(state);
-        }
-        self.tray.sync(ctx, &self.state_cache);
+        self.sync_state();
+        self.tray.sync(ctx, self.ui.state.get());
     }
 
     /// Re-deliver an active integrity alert when a tray-resident Linux window
@@ -29,9 +28,8 @@ impl App {
     /// native counterpart must not be limited to the toast's original ingest.
     #[cfg(target_os = "linux")]
     pub(crate) fn replay_integrity_native_on_reopen(&self) {
-        let state = self.ui.state.borrow();
         let Some(alert) = crate::domain::models::plugin_issues::repository_integrity_alert(
-            &state,
+            self.ui.state.get(),
             &std::collections::HashSet::new(),
         ) else {
             return;
@@ -57,11 +55,8 @@ impl App {
     pub(crate) fn draw(&mut self, ui: &mut egui::Ui) {
         let ctx = ui.ctx().clone();
         let ctx = &ctx;
-        // Only re-clone when the watch channel reports a change.
-        if let Some(state) = crate::runtime::ipc::take_changed(&mut self.ui.state, "state") {
-            self.accept_state(state);
-        }
-        let state = std::sync::Arc::clone(&self.state_cache);
+        self.sync_state();
+        let state = self.ui.state.arc();
         let connected = *self.ui.connected.borrow();
         let onboarding_active = onboarding_is_active(
             state.gui_present,
@@ -71,10 +66,11 @@ impl App {
         self.tray.sync(ctx, &state);
         // Close handling (hide-to-tray vs quit) is decided by `close_action` and
         // applied by each backend after `draw` — not here, so it isn't run twice.
-        if let Some(debug) = crate::runtime::ipc::take_changed(&mut self.ui.debug, "debug") {
-            self.debug_cache = debug;
+        if self.ui.debug.poll() {
             let failing: Vec<_> = self
-                .debug_cache
+                .ui
+                .debug
+                .get()
                 .as_ref()
                 .map(|i| {
                     crate::ui::screens::depcheck::failing(i)
@@ -85,49 +81,27 @@ impl App {
                 .unwrap_or_default();
             self.depcheck_grace.observe(&failing);
         }
-        if let Some(status) =
-            crate::runtime::ipc::take_changed(&mut self.ui.udev_rules, "udev_rules")
-        {
-            self.udev_rules_cache = status;
-        }
-        let debug = self.debug_cache.as_ref();
-        let udev_rules = self.udev_rules_cache.as_ref();
-        if let Some(imgs) = crate::runtime::ipc::take_changed(&mut self.ui.lcd_images, "lcd_images")
-        {
-            self.lcd_images_cache = std::sync::Arc::new(imgs);
-        }
-        let lcd_images = std::sync::Arc::clone(&self.lcd_images_cache);
-        if let Some(assets) =
-            crate::runtime::ipc::take_changed(&mut self.ui.plugin_assets, "plugin_assets")
-        {
-            self.plugin_assets_cache = std::sync::Arc::new(assets);
-        }
-        let plugin_assets = std::sync::Arc::clone(&self.plugin_assets_cache);
-        if let Some(releases) =
-            crate::runtime::ipc::take_changed(&mut self.ui.plugin_releases, "plugin_releases")
-        {
-            self.plugin_releases_cache = releases;
-        }
-        if let Some(ports) =
-            crate::runtime::ipc::take_changed(&mut self.ui.serial_ports, "serial_ports")
-        {
-            self.serial_ports_cache = ports;
-        }
+        self.ui.udev_rules.poll();
+        self.ui.lcd_images.poll();
+        self.ui.plugin_assets.poll();
+        self.ui.plugin_releases.poll();
+        self.ui.serial_ports.poll();
+        self.ui.lcd_editor_render.poll();
+        self.ui.canvas_frame.poll();
+        self.ui.running_apps.poll();
+        let debug = self.ui.debug.get().as_ref();
+        let udev_rules = self.ui.udev_rules.get().as_ref();
+        let lcd_images = self.ui.lcd_images.arc();
+        let plugin_assets = self.ui.plugin_assets.arc();
         let lcd_preview = if let Page::Device(ref id) = self.page {
             self.ui.lcd_frames.borrow().get(id).cloned()
         } else {
             None
         };
-        // A delta reply is one small message per ~200ms; cloning it every
-        // frame (as with a plain `.borrow()`) churns the allocator for
-        // nothing on the ~60 idle frames between updates.
-        if let Some(render) =
-            crate::runtime::ipc::take_changed(&mut self.ui.lcd_editor_render, "lcd_editor_render")
-        {
-            self.lcd_editor_render_cache = render;
-        }
         let lcd_editor_render = if let Page::Device(ref id) = self.page {
-            self.lcd_editor_render_cache
+            self.ui
+                .lcd_editor_render
+                .get()
                 .clone()
                 .filter(|r| &r.device_id == id)
         } else {
@@ -136,11 +110,12 @@ impl App {
         // A terminal (`Done`/`Failed`) is consumed as a one-shot edge: `Some`
         // only on the frame it newly arrives, so a retained stale terminal
         // can't clear a freshly-armed upload spinner.
-        let lcd_upload_changed =
-            crate::runtime::ipc::take_changed(&mut self.ui.lcd_upload, "lcd_upload");
-        let lcd_upload_terminal = lcd_upload_changed
-            .as_ref()
-            .and_then(|progress| progress.clone())
+        let lcd_upload_terminal = self
+            .ui
+            .lcd_upload
+            .poll()
+            .then(|| self.ui.lcd_upload.get().clone())
+            .flatten()
             .filter(|p| {
                 matches!(
                     p.stage,
@@ -148,28 +123,15 @@ impl App {
                         | halod_shared::types::LcdUploadStage::Failed
                 )
             });
-        if let Some(progress) = lcd_upload_changed {
-            self.lcd_upload_cache = progress;
-        }
-        let lcd_upload = self.lcd_upload_cache.clone();
+        let lcd_upload = self.ui.lcd_upload.get().clone();
         if let Some(template) =
             crate::runtime::ipc::take_changed(&mut self.ui.lcd_template, "lcd_template")
         {
             self.pending_lcd_template = template;
         }
         let lcd_template = self.pending_lcd_template.take();
-        if let Some(frame) =
-            crate::runtime::ipc::take_changed(&mut self.ui.canvas_frame, "canvas_frame")
-        {
-            self.canvas_frame_cache = frame;
-        }
-        let canvas_frame = self.canvas_frame_cache.as_ref();
-        if let Some(apps) =
-            crate::runtime::ipc::take_changed(&mut self.ui.running_apps, "running_apps")
-        {
-            self.running_apps_cache = apps;
-        }
-        let running_apps = &self.running_apps_cache;
+        let canvas_frame = self.ui.canvas_frame.get().as_ref();
+        let running_apps = self.ui.running_apps.get();
         let time = ctx.input(|i| i.time);
 
         // Suppress the startup healthcheck dialog until a settled snapshot.
@@ -274,14 +236,14 @@ impl App {
                 };
                 let h = self.write_rate_history.entry(dev.id.clone()).or_default();
                 h.push_back(wr.current_bytes_per_sec);
-                if h.len() > domain::state::HISTORY_LEN {
+                if h.len() > domain::state::WRITE_RATE_HISTORY_LEN {
                     h.pop_front();
                 }
             }
         }
 
         if !self.entered {
-            if crate::ui::screens::radar::show(ui, &state, connected, time) {
+            if crate::ui::screens::startup::show(ui, &state, connected) {
                 self.entered = true;
             }
             ctx.request_repaint();
@@ -312,7 +274,7 @@ impl App {
         // otherwise square off.
         let border = ctx.layer_painter(egui::LayerId::new(
             egui::Order::Foreground,
-            egui::Id::new("win_border"),
+            egui::Id::unique("win_border"),
         ));
         border.rect_filled(
             egui::Rect::from_min_max(
@@ -337,7 +299,7 @@ impl App {
         resize_grips(ctx);
 
         egui::Panel::top("title")
-            .exact_size(46.0)
+            .exact_size(52.0)
             .frame(egui::Frame::NONE)
             .show(ui, |ui| {
                 ui.painter().rect_filled(
@@ -356,6 +318,8 @@ impl App {
                     &self.cmd,
                     &mut self.profile_ui,
                     &mut self.page,
+                    udev_rules,
+                    &mut self.toasts,
                 );
             });
 
@@ -391,32 +355,6 @@ impl App {
         // resumes on the frame after onboarding is explicitly completed.
         let tour_active = !onboarding_active && domain::tour::is_active(&self.tour);
 
-        egui::Panel::left("sidebar")
-            .exact_size(236.0)
-            .resizable(false)
-            .frame(egui::Frame::NONE)
-            .show(ui, |ui| {
-                ui.painter().rect_filled(
-                    ui.max_rect(),
-                    egui::CornerRadius {
-                        nw: 0,
-                        ne: 0,
-                        sw: 12,
-                        se: 0,
-                    },
-                    crate::ui::theme::SIDEBAR_BG,
-                );
-                crate::ui::shell::sidebar(
-                    ui,
-                    &state,
-                    connected,
-                    &mut self.page,
-                    &state.plugins.updates,
-                    &state.plugins.repo_updates,
-                    udev_rules,
-                );
-            });
-
         egui::CentralPanel::default()
             .frame(egui::Frame::NONE)
             .show(ui, |ui| {
@@ -425,7 +363,7 @@ impl App {
                     egui::CornerRadius {
                         nw: 0,
                         ne: 0,
-                        sw: 0,
+                        sw: 12,
                         se: 12,
                     },
                     crate::ui::theme::MAIN_BG,
@@ -475,8 +413,6 @@ impl App {
                             ui,
                             &state,
                             &self.cmd,
-                            &self.sensor_history,
-                            time,
                             &mut self.page,
                             &mut self.cooling_ui,
                         );
@@ -505,21 +441,10 @@ impl App {
                             connected,
                             debug,
                             &mut self.settings_ui,
+                            &mut self.home_ui.show_hidden,
                         );
                     }
                     Page::Plugins => {
-                        self.plugins_ui.show(
-                            ui,
-                            &state,
-                            &self.cmd,
-                            &plugin_assets,
-                            &state.plugins.repo_updates,
-                            &state.plugins.updates,
-                            &self.plugin_releases_cache,
-                            udev_rules,
-                        );
-                    }
-                    Page::Integrations => {
                         if !self.serial_ports_requested {
                             self.serial_ports_requested = true;
                             crate::runtime::ipc::send(
@@ -527,13 +452,15 @@ impl App {
                                 halod_shared::commands::DaemonCommand::ListSerialPorts,
                             );
                         }
-                        self.integrations_ui.show(
-                            ui,
-                            &state,
-                            &self.cmd,
-                            &plugin_assets,
-                            &self.serial_ports_cache,
-                        );
+                        let cx = crate::ui::screens::plugins::PluginsCtx {
+                            state: &state,
+                            cmd: &self.cmd,
+                            assets: &plugin_assets,
+                            releases: self.ui.plugin_releases.get(),
+                            udev: udev_rules,
+                            serial_ports: self.ui.serial_ports.get(),
+                        };
+                        self.plugins_ui.show(ui, &cx, &mut self.page);
                     }
                     Page::Profile(name) => {
                         let name = name.clone();
@@ -714,7 +641,6 @@ fn tour_key_for(
         }
         Page::EffectDesigner => Some(domain::tour::TourKey::EffectDesigner),
         Page::Plugins => Some(domain::tour::TourKey::PagePlugins),
-        Page::Integrations => Some(domain::tour::TourKey::PageIntegrations),
     }
 }
 
@@ -799,12 +725,12 @@ fn resize_grips(ctx: &egui::Context) {
         ),
     ];
 
-    egui::Area::new(Id::new("resize_grips"))
+    egui::Area::new(Id::unique("resize_grips"))
         .order(egui::Order::Foreground)
         .fixed_pos(screen.min)
         .show(ctx, |ui| {
             for (i, (rect, dir, cursor)) in grips.into_iter().enumerate() {
-                let resp = ui.interact(rect, Id::new(("resize_grip_region", i)), Sense::drag());
+                let resp = ui.interact(rect, Id::unique(("resize_grip_region", i)), Sense::drag());
                 if resp.hovered() || resp.dragged() {
                     ui.ctx().set_cursor_icon(cursor);
                 }

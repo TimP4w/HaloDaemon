@@ -19,10 +19,11 @@ pub fn hover_row(ui: &mut egui::Ui, height: f32, selected: bool) -> (egui::Rect,
         egui::Sense::click(),
     );
     if selected {
-        ui.painter().rect_filled(rect, 9.0, theme::ROW_ACTIVE);
+        ui.painter()
+            .rect_filled(rect, theme::RADIUS_SM, theme::ROW_ACTIVE);
     } else if resp.hovered() {
         ui.painter()
-            .rect_filled(rect, 9.0, theme::a(theme::ROW_ACTIVE, 0.55));
+            .rect_filled(rect, theme::RADIUS_SM, theme::a(theme::ROW_ACTIVE, 0.6));
     }
     if resp.hovered() {
         ui.ctx().set_cursor_icon(egui::CursorIcon::PointingHand);
@@ -30,12 +31,58 @@ pub fn hover_row(ui: &mut egui::Ui, height: f32, selected: bool) -> (egui::Rect,
     (rect, resp)
 }
 
-/// The 28 px leading icon/logo tile every [`hover_row`] list row shares.
-pub fn row_tile_rect(rect: egui::Rect) -> egui::Rect {
-    egui::Rect::from_min_size(
-        egui::Pos2::new(rect.left() + 8.0, rect.center().y - 14.0),
-        egui::Vec2::splat(28.0),
-    )
+/// A full-width 38 px selectable row: label left, muted `note` right, accent
+/// ring when `selected` (EQ presets).
+pub fn choice_row(ui: &mut egui::Ui, label: &str, note: &str, selected: bool) -> egui::Response {
+    let (rect, resp) = ui.allocate_exact_size(
+        egui::Vec2::new(ui.available_width(), 38.0),
+        egui::Sense::click(),
+    );
+    let (fill, border) = if selected {
+        (theme::CHECKED_BG, theme::SELECTED_BORDER)
+    } else if resp.hovered() {
+        (theme::RAISED_BG, theme::BORDER_INNER)
+    } else {
+        (theme::INNER_BG, theme::BORDER)
+    };
+    let p = ui.painter();
+    theme::paint_surface(p, rect, 8.0, fill, border);
+    p.text(
+        egui::pos2(rect.left() + 12.0, rect.center().y),
+        egui::Align2::LEFT_CENTER,
+        label,
+        theme::body_lg(),
+        theme::TEXT,
+    );
+    p.text(
+        egui::pos2(rect.right() - 12.0, rect.center().y),
+        egui::Align2::RIGHT_CENTER,
+        note,
+        theme::body_sm(),
+        theme::TEXT_MUT,
+    );
+    if resp.hovered() {
+        ui.ctx().set_cursor_icon(egui::CursorIcon::PointingHand);
+    }
+    resp
+}
+
+/// A recessed panel inside a card (wells, sub-sections, list items).
+pub fn inset<R>(
+    ui: &mut egui::Ui,
+    margin: egui::Margin,
+    body: impl FnOnce(&mut egui::Ui) -> R,
+) -> R {
+    egui::Frame::NONE
+        .fill(theme::INNER_BG)
+        .stroke(Stroke::new(1.0, theme::BORDER))
+        .corner_radius(theme::RADIUS_SM)
+        .inner_margin(margin)
+        .show(ui, |ui| {
+            ui.set_width(ui.available_width());
+            body(ui)
+        })
+        .inner
 }
 
 /// A card surface with no inner margin, for bodies that lay out edge-to-edge
@@ -97,22 +144,31 @@ pub fn card_titled<R>(
     })
 }
 
-/// Tracked-caps faint section label (`CURVE SENSOR`, `ZONE`, …).
-pub fn caps_label(ui: &mut egui::Ui, text: &str) {
-    ui.label(
-        egui::RichText::new(text)
-            .font(theme::caption())
-            .color(theme::TEXT_FAINT2),
+pub fn divider(ui: &mut egui::Ui) {
+    let (rect, _) =
+        ui.allocate_exact_size(egui::vec2(ui.available_width(), 1.0), egui::Sense::hover());
+    ui.painter().hline(
+        rect.x_range(),
+        rect.center().y,
+        Stroke::new(1.0, theme::BORDER_SOFT),
     );
 }
 
-/// [`caps_label`] sized to the [`super::PILL_H`] control-row height so it
+pub fn section_label(ui: &mut egui::Ui, text: &str) {
+    ui.label(
+        egui::RichText::new(text)
+            .font(theme::body_sm())
+            .color(theme::TEXT_MUT),
+    );
+}
+
+/// [`section_label`] sized to the [`super::PILL_H`] control-row height so it
 /// vertically centers against pills/buttons laid out beside it in a horizontal
 /// row (a plain `ui.label` is text-height and rides high next to taller pills).
-pub fn caps_label_inline(ui: &mut egui::Ui, text: &str) {
-    let galley =
-        ui.painter()
-            .layout_no_wrap(text.to_string(), theme::caption(), theme::TEXT_FAINT2);
+pub fn section_label_inline(ui: &mut egui::Ui, text: &str) {
+    let galley = ui
+        .painter()
+        .layout_no_wrap(text.to_string(), theme::body_sm(), theme::TEXT_MUT);
     let (rect, _) = ui.allocate_exact_size(
         egui::vec2(galley.size().x, super::PILL_H),
         egui::Sense::hover(),
@@ -120,20 +176,20 @@ pub fn caps_label_inline(ui: &mut egui::Ui, text: &str) {
     ui.painter().galley(
         egui::pos2(rect.left(), rect.center().y - galley.size().y / 2.0),
         galley,
-        theme::TEXT_FAINT2,
+        theme::TEXT_MUT,
     );
 }
 
 #[cfg(test)]
 mod tests {
-    use super::caps_label_inline;
+    use super::section_label_inline;
     use crate::ui::components::{pill, PILL_H};
     use crate::ui::theme;
 
-    /// The inline caps label occupies the same row height as a pill, so the two
+    /// The inline section label occupies the same row height as a pill, so the two
     /// vertically center against each other in a shared horizontal row.
     #[test]
-    fn inline_caps_label_matches_pill_row_height() {
+    fn inline_section_label_matches_pill_row_height() {
         let ctx = egui::Context::default();
         theme::install_fonts(&ctx);
         let input = egui::RawInput {
@@ -145,9 +201,9 @@ mod tests {
         };
         let mut label_h = 0.0;
         let mut pill_h = 0.0;
-        let _ = ctx.run_ui(input, |ui| {
+        let _ = crate::ui::run_headless(&ctx, input, |ui| {
             label_h = ui
-                .horizontal(|ui| caps_label_inline(ui, "ZONE"))
+                .horizontal(|ui| section_label_inline(ui, "Zone"))
                 .response
                 .rect
                 .height();

@@ -4,7 +4,7 @@
 
 use std::collections::HashMap;
 
-use egui::{Rect, Sense, Stroke, Vec2};
+use egui::{Rect, Sense, Vec2};
 use halod_shared::commands::DaemonCommand;
 use halod_shared::lcd_custom::WidgetDef;
 use halod_shared::types::EffectParamValue;
@@ -19,15 +19,27 @@ pub(super) fn library_card(ui: &mut egui::Ui, ctx: &TabCtx, st: &mut DeviceUi, i
         crate::domain::tour::AnchorId::LcdEditorPalette,
         ui.max_rect(),
     );
-    if library_header(ui, st.lcd.editor.library_collapsed).clicked() {
-        st.lcd.editor.library_collapsed = !st.lcd.editor.library_collapsed;
-    }
-    if st.lcd.editor.library_collapsed {
-        return;
-    }
-    ui.add_space(theme::SPACE_7);
+    ui.set_width(ui.available_width());
+    ui.spacing_mut().item_spacing.y = theme::SPACE_5;
+    egui::Sides::new().show(
+        ui,
+        |ui| {
+            ui.label(
+                egui::RichText::new(t!("lcd.add_a_widget"))
+                    .font(theme::heading())
+                    .color(theme::TEXT),
+            );
+        },
+        |ui| {
+            ui.label(
+                egui::RichText::new(t!("lcd.drag_onto_screen"))
+                    .font(theme::body_sm())
+                    .color(theme::TEXT_MUT),
+            );
+        },
+    );
     ui.horizontal_wrapped(|ui| {
-        ui.spacing_mut().item_spacing = egui::vec2(9.0, 9.0);
+        ui.spacing_mut().item_spacing = egui::vec2(6.0, 6.0);
         for descriptor in &ctx.state.lcd.engine.available_widgets {
             let asset_key = format!("lcd/{}", descriptor.id);
             if !ctx.plugin_assets.contains_key(&asset_key)
@@ -58,12 +70,8 @@ pub(super) fn library_card(ui: &mut egui::Ui, ctx: &TabCtx, st: &mut DeviceUi, i
                     }
                 }
             }
-            let label =
-                std::borrow::Cow::Borrowed(descriptor.localized_name(&ctx.state.gui.language));
-            let resp = match st.lcd.editor.widget_icon_tex.get(&descriptor.id) {
-                Some(texture) => library_texture_tile(ui, texture, &label),
-                None => library_tile(ui, "…", &label),
-            };
+            let label = descriptor.localized_name(&ctx.state.gui.language);
+            let resp = library_tile(ui, st.lcd.editor.widget_icon_tex.get(&descriptor.id), label);
             if resp.drag_started() {
                 st.lcd.editor.dragging_new = Some(descriptor.id.clone());
             }
@@ -74,69 +82,31 @@ pub(super) fn library_card(ui: &mut egui::Ui, ctx: &TabCtx, st: &mut DeviceUi, i
             }
         }
     });
-    ui.add_space(theme::SPACE_7);
-    ui.label(
-        egui::RichText::new(t!("lcd.start_from_preset"))
-            .font(theme::micro())
-            .color(theme::TEXT_FAINT),
-    );
-    ui.add_space(theme::SPACE_3);
-    widgets::pill_strip(ui, |ui| {
-        for preset in &ctx.state.lcd.engine.available_presets {
-            if widgets::pill(ui, &preset.name, false) {
-                crate::runtime::ipc::send(
-                    ctx.cmd,
-                    DaemonCommand::GetLcdPluginPreset {
-                        catalog_id: preset.id.clone(),
-                    },
-                );
+    if !ctx.state.lcd.engine.available_presets.is_empty() {
+        widgets::section_label(ui, &t!("lcd.start_from_preset"));
+        widgets::pill_strip(ui, |ui| {
+            for preset in &ctx.state.lcd.engine.available_presets {
+                if widgets::pill(ui, &preset.name, false) {
+                    crate::runtime::ipc::send(
+                        ctx.cmd,
+                        DaemonCommand::GetLcdPluginPreset {
+                            catalog_id: preset.id.clone(),
+                        },
+                    );
+                }
             }
-        }
-    });
-    ui.add_space(theme::SPACE_7);
+        });
+    }
     my_templates_section(ui, ctx, st);
 }
 
-/// Save-as field plus the list of the user's own saved templates, sitting
-/// alongside the built-in presets. Loading/deleting go straight to the
-/// daemon; a load round-trips back on `ctx.lcd_template` (drained in `show`).
+/// The user's saved templates: click loads (round-trips back on
+/// `ctx.lcd_template`, drained in `show`), × asks to delete.
 pub(super) fn my_templates_section(ui: &mut egui::Ui, ctx: &TabCtx, st: &mut DeviceUi) {
-    ui.label(
-        egui::RichText::new(t!("lcd.my_templates"))
-            .font(theme::micro())
-            .color(theme::TEXT_FAINT),
-    );
-    ui.add_space(theme::SPACE_3);
-    ui.horizontal(|ui| {
-        widgets::text_field(
-            ui,
-            &mut st.lcd.editor.template_name,
-            &t!("lcd.template_name_hint"),
-            160.0,
-        );
-        let can_save = !st.lcd.editor.template_name.trim().is_empty();
-        if widgets::button(
-            ui,
-            &t!("lcd.save"),
-            widgets::ButtonKind::Ghost,
-            egui::vec2(64.0, 35.0),
-        )
-        .clicked()
-            && can_save
-        {
-            crate::runtime::ipc::send(
-                ctx.cmd,
-                halod_shared::commands::DaemonCommand::SaveLcdTemplate {
-                    name: st.lcd.editor.template_name.trim().to_string(),
-                    def: st.lcd.editor.def.clone(),
-                },
-            );
-        }
-    });
     if ctx.state.lcd.templates.is_empty() {
         return;
     }
-    ui.add_space(theme::SPACE_4);
+    widgets::section_label(ui, &t!("lcd.my_templates"));
     widgets::pill_strip(ui, |ui| {
         for name in &ctx.state.lcd.templates {
             let (load, delete) = widgets::chip_closable(ui, name);
@@ -151,6 +121,65 @@ pub(super) fn my_templates_section(ui: &mut egui::Ui, ctx: &TabCtx, st: &mut Dev
             }
         }
     });
+}
+
+/// "Save as template" dialog: names the current layout and saves it.
+pub(super) fn save_template_modal(ui: &mut egui::Ui, ctx: &TabCtx, st: &mut DeviceUi) {
+    if !st.lcd.editor.save_open {
+        return;
+    }
+    let mut name = std::mem::take(&mut st.lcd.editor.template_name);
+    let can_save = !name.trim().is_empty();
+    let (mut entered, mut saved, mut cancelled) = (false, false, false);
+    let dismissed = widgets::dialog(
+        ui.ctx(),
+        "lcd_save_template",
+        &t!("lcd.save_as_template"),
+        360.0,
+        |ui| {
+            widgets::field_label(ui, &t!("lcd.template_name"));
+            let resp = widgets::text_field(
+                ui,
+                &mut name,
+                &t!("lcd.template_name_hint"),
+                ui.available_width(),
+            );
+            entered = resp.lost_focus() && ui.input(|i| i.key_pressed(egui::Key::Enter));
+        },
+        |ui| {
+            saved = widgets::button_enabled(
+                ui,
+                &t!("lcd.save"),
+                widgets::ButtonKind::Primary,
+                egui::vec2(72.0, 32.0),
+                can_save,
+            );
+            cancelled = widgets::button(
+                ui,
+                &t!("lcd.cancel"),
+                widgets::ButtonKind::Ghost,
+                egui::vec2(72.0, 32.0),
+            )
+            .clicked();
+        },
+    );
+    st.lcd.editor.template_name = name;
+    let save = saved || entered;
+    let mut close = cancelled;
+    let name = st.lcd.editor.template_name.trim().to_string();
+    if save && !name.is_empty() {
+        crate::runtime::ipc::send(
+            ctx.cmd,
+            DaemonCommand::SaveLcdTemplate {
+                name,
+                def: st.lcd.editor.def.clone(),
+            },
+        );
+        close = true;
+    }
+    if dismissed || close {
+        st.lcd.editor.save_open = false;
+    }
 }
 
 pub(super) fn delete_template_modal(ui: &mut egui::Ui, ctx: &TabCtx, st: &mut DeviceUi) {
@@ -172,101 +201,51 @@ pub(super) fn delete_template_modal(ui: &mut egui::Ui, ctx: &TabCtx, st: &mut De
     }
 }
 
-fn library_header(ui: &mut egui::Ui, collapsed: bool) -> egui::Response {
-    let (rect, resp) =
-        ui.allocate_exact_size(egui::vec2(ui.available_width(), 22.0), Sense::click());
-    let cy = rect.center().y;
+/// A widget-library chip: the plugin's own icon and the widget name.
+/// Click adds at the centre; press-and-drag drops it onto the stage.
+fn library_tile(
+    ui: &mut egui::Ui,
+    icon: Option<&egui::TextureHandle>,
+    label: &str,
+) -> egui::Response {
+    let galley = ui
+        .painter()
+        .layout_no_wrap(label.to_owned(), theme::body_md(), theme::TEXT_SOFT);
+    let w = 8.0 + 18.0 + 8.0 + galley.size().x + 12.0;
+    let (rect, resp) = ui.allocate_exact_size(egui::vec2(w, 32.0), Sense::click_and_drag());
+    let (fill, border) = if resp.hovered() {
+        (theme::RAISED_BG, theme::BORDER_INNER)
+    } else {
+        (theme::INNER_BG, theme::TRACK)
+    };
     let p = ui.painter();
-    p.text(
-        egui::pos2(rect.left(), cy),
-        egui::Align2::LEFT_CENTER,
-        t!("lcd.add_a_widget"),
-        theme::heading(),
-        theme::TEXT,
+    theme::paint_surface(p, rect, 6.0, fill, border);
+    let icon_rect = Rect::from_min_size(
+        egui::pos2(rect.left() + 8.0, rect.center().y - 9.0),
+        Vec2::splat(18.0),
     );
-    let box_rect = Rect::from_min_size(
-        egui::pos2(rect.right() - 22.0, cy - 11.0),
-        Vec2::splat(22.0),
-    );
-    p.rect_stroke(
-        box_rect,
-        6.0,
-        Stroke::new(1.0, theme::BORDER),
-        egui::StrokeKind::Middle,
-    );
-    p.text(
-        box_rect.center(),
-        egui::Align2::CENTER_CENTER,
-        if collapsed { "▸" } else { "▾" },
-        theme::body(12.0),
-        theme::TEXT_MUT,
-    );
-    p.text(
-        egui::pos2(box_rect.left() - 10.0, cy),
-        egui::Align2::RIGHT_CENTER,
-        t!("lcd.drag_onto_screen"),
-        theme::caption(),
-        theme::TEXT_FAINT,
-    );
-    if resp.hovered() {
-        ui.ctx().set_cursor_icon(egui::CursorIcon::PointingHand);
+    if let Some(texture) = icon {
+        p.image(
+            texture.id(),
+            icon_rect,
+            Rect::from_min_max(egui::Pos2::ZERO, egui::pos2(1.0, 1.0)),
+            egui::Color32::WHITE,
+        );
+    } else {
+        p.rect_filled(icon_rect, 4.0, theme::TILE_BG);
     }
-    resp
-}
-
-/// A library tile: an icon badge over a label, matching the design's
-/// `lcd.palette` tiles. Press-and-drag onto the stage to spawn a widget there.
-fn library_tile(ui: &mut egui::Ui, badge: &str, label: &str) -> egui::Response {
-    let size = egui::vec2(80.0, 74.0);
-    let (rect, resp) = ui.allocate_exact_size(size, Sense::click_and_drag());
-    let p = ui.painter();
-    theme::paint_well(p, rect, theme::RADIUS_MD);
-    let badge_rect =
-        Rect::from_center_size(rect.center() - egui::vec2(0.0, 10.0), Vec2::splat(34.0));
-    p.rect_filled(badge_rect, 9.0, theme::a(theme::CYAN, 0.12));
-    p.text(
-        badge_rect.center(),
-        egui::Align2::CENTER_CENTER,
-        badge,
-        theme::body(17.0),
-        theme::CYAN,
-    );
-    p.text(
-        rect.center() + egui::vec2(0.0, 22.0),
-        egui::Align2::CENTER_CENTER,
-        label,
-        theme::caption(),
-        theme::TEXT_MUT,
+    p.galley(
+        egui::pos2(
+            icon_rect.right() + 8.0,
+            rect.center().y - galley.size().y / 2.0,
+        ),
+        galley,
+        theme::TEXT_SOFT,
     );
     if resp.hovered() {
         ui.ctx().set_cursor_icon(egui::CursorIcon::Grab);
     }
     resp
-}
-
-fn library_texture_tile(
-    ui: &mut egui::Ui,
-    texture: &egui::TextureHandle,
-    label: &str,
-) -> egui::Response {
-    let size = egui::vec2(80.0, 74.0);
-    let (rect, response) = ui.allocate_exact_size(size, Sense::click_and_drag());
-    theme::paint_well(ui.painter(), rect, theme::RADIUS_MD);
-    let icon = Rect::from_center_size(rect.center() - egui::vec2(0.0, 10.0), Vec2::splat(34.0));
-    ui.painter().image(
-        texture.id(),
-        icon,
-        Rect::from_min_max(egui::Pos2::ZERO, egui::pos2(1.0, 1.0)),
-        egui::Color32::WHITE,
-    );
-    ui.painter().text(
-        rect.center() + egui::vec2(0.0, 22.0),
-        egui::Align2::CENTER_CENTER,
-        label,
-        theme::caption(),
-        theme::TEXT_MUT,
-    );
-    response
 }
 
 /// Push a catalog widget at normalized `(x, y)`, seeded from its descriptor.
