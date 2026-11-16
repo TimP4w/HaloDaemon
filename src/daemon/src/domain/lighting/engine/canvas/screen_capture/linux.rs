@@ -31,10 +31,13 @@ impl MmapCache {
     /// Ensure the mapping covers `fd` (with size `len` at offset 0). Reuses
     /// an existing mapping when the fd matches, otherwise unmaps the old and
     /// maps the new. Returns a pointer to the mapped memory.
-    fn ensure(&mut self, fd: i32, len: usize) -> Result<*mut libc::c_void, String> {
+    fn ensure(&mut self, fd: i32, len: usize) -> anyhow::Result<*mut libc::c_void> {
         let mut stat = std::mem::MaybeUninit::<libc::stat>::uninit();
         if unsafe { libc::fstat(fd, stat.as_mut_ptr()) } != 0 {
-            return Err(format!("fstat failed: {}", std::io::Error::last_os_error()));
+            return Err(anyhow::anyhow!(
+                "fstat failed: {}",
+                std::io::Error::last_os_error()
+            ));
         }
         let stat = unsafe { stat.assume_init() };
         let identity = (stat.st_dev, stat.st_ino);
@@ -55,7 +58,10 @@ impl MmapCache {
             )
         };
         if ptr == libc::MAP_FAILED {
-            return Err(format!("mmap failed: {}", std::io::Error::last_os_error()));
+            return Err(anyhow::anyhow!(
+                "mmap failed: {}",
+                std::io::Error::last_os_error()
+            ));
         }
         self.ptr = ptr;
         self.len = len;
@@ -108,7 +114,7 @@ fn dmabuf_sync(fd: i32, flags: u64) {
 /// Builds an SPA_PARAM_EnumFormat pod for video/raw BGRA without DRM modifiers.
 /// Omitting the modifier tells the compositor to use MemFd (shared memory)
 /// rather than DMA-BUF, so MAP_BUFFERS can map the data directly.
-fn build_enum_format_pod() -> Result<Vec<u8>, String> {
+fn build_enum_format_pod() -> anyhow::Result<Vec<u8>> {
     use pipewire::spa::{
         param::{
             format::{FormatProperties, MediaSubtype, MediaType},
@@ -171,7 +177,7 @@ fn build_enum_format_pod() -> Result<Vec<u8>, String> {
     });
 
     let (cursor, _) = PodSerializer::serialize(std::io::Cursor::new(Vec::new()), &obj)
-        .map_err(|e| format!("PodSerializer::serialize: {e}"))?;
+        .map_err(|e| anyhow::anyhow!("PodSerializer::serialize: {e}"))?;
     Ok(cursor.into_inner())
 }
 
@@ -185,11 +191,11 @@ pub fn start(
     _monitor_index: usize,
     frame_slot: Arc<Mutex<Option<RawFrame>>>,
     stop: Arc<AtomicBool>,
-) -> Result<(), String> {
+) -> anyhow::Result<()> {
     let rt = tokio::runtime::Handle::try_current()
-        .map_err(|e| format!("no tokio runtime available: {e}"))?;
+        .map_err(|e| anyhow::anyhow!("no tokio runtime available: {e}"))?;
 
-    let (pw_tx, pw_rx) = std::sync::mpsc::sync_channel::<Result<(i32, u32, u32, u32), String>>(1);
+    let (pw_tx, pw_rx) = std::sync::mpsc::sync_channel::<anyhow::Result<(i32, u32, u32, u32)>>(1);
 
     // The portal task owns the screencast session for its whole lifetime and
     // closes it when `stop` is set — dropping the Session does NOT close it, so
@@ -232,11 +238,11 @@ type Portal = (
 /// tears down the screencast on the compositor and clears the sharing indicator.
 async fn run_portal(
     stop: Arc<AtomicBool>,
-    pw_tx: std::sync::mpsc::SyncSender<Result<(i32, u32, u32, u32), String>>,
+    pw_tx: std::sync::mpsc::SyncSender<anyhow::Result<(i32, u32, u32, u32)>>,
 ) {
     let negotiated = tokio::time::timeout(std::time::Duration::from_secs(60), acquire_portal())
         .await
-        .map_err(|_| "portal dialog timed out after 60 s".to_string())
+        .map_err(|_| anyhow::anyhow!("portal dialog timed out after 60 s"))
         .and_then(|r| r);
 
     let (proxy, session, fd, node_id, width, height) = match negotiated {
@@ -264,7 +270,7 @@ async fn run_portal(
     log::info!("Screen capture portal session closed");
 }
 
-async fn acquire_portal() -> Result<Portal, String> {
+async fn acquire_portal() -> anyhow::Result<Portal> {
     use ashpd::desktop::screencast::{
         CursorMode, OpenPipeWireRemoteOptions, Screencast, SelectSourcesOptions, SourceType,
         StartCastOptions,
@@ -273,11 +279,11 @@ async fn acquire_portal() -> Result<Portal, String> {
 
     let proxy = Screencast::new()
         .await
-        .map_err(|e| format!("Screencast::new: {e}"))?;
+        .map_err(|e| anyhow::anyhow!("Screencast::new: {e}"))?;
     let session = proxy
         .create_session(CreateSessionOptions::default())
         .await
-        .map_err(|e| format!("create_session: {e}"))?;
+        .map_err(|e| anyhow::anyhow!("create_session: {e}"))?;
 
     proxy
         .select_sources(
@@ -289,19 +295,19 @@ async fn acquire_portal() -> Result<Portal, String> {
                 .set_persist_mode(PersistMode::DoNot),
         )
         .await
-        .map_err(|e| format!("select_sources: {e}"))?;
+        .map_err(|e| anyhow::anyhow!("select_sources: {e}"))?;
 
     let response = proxy
         .start(&session, None, StartCastOptions::default())
         .await
-        .map_err(|e| format!("portal start: {e}"))?
+        .map_err(|e| anyhow::anyhow!("portal start: {e}"))?
         .response()
-        .map_err(|e| format!("portal response: {e}"))?;
+        .map_err(|e| anyhow::anyhow!("portal response: {e}"))?;
 
     let stream = response
         .streams()
         .first()
-        .ok_or("portal returned no streams")?;
+        .ok_or_else(|| anyhow::anyhow!("portal returned no streams"))?;
     let node_id = stream.pipe_wire_node_id();
 
     // Some compositors return (0, 0) when size isn't known ahead of negotiation;
@@ -318,7 +324,7 @@ async fn acquire_portal() -> Result<Portal, String> {
     let fd: OwnedFd = proxy
         .open_pipe_wire_remote(&session, OpenPipeWireRemoteOptions::default())
         .await
-        .map_err(|e| format!("open_pipe_wire_remote: {e}"))?;
+        .map_err(|e| anyhow::anyhow!("open_pipe_wire_remote: {e}"))?;
 
     Ok((proxy, session, fd.into_raw_fd(), node_id, width, height))
 }

@@ -8,8 +8,8 @@ use std::time::{Duration, Instant};
 use anyhow::{anyhow, bail, Context, Result};
 use halod_hwaccess::pawnio::PawnioModule;
 use halod_hwaccess::proto::{
-    self, CapabilityScope, Request, Response, CAPABILITY_TTL_MS, MAX_OPERATIONS_PER_CAPABILITY,
-    MAX_OPERATIONS_PER_SECOND, MAX_SCOPE_ADDRESSES, PIPE_NAME,
+    self, BrokerError, CapabilityScope, Request, Response, CAPABILITY_TTL_MS,
+    MAX_OPERATIONS_PER_CAPABILITY, MAX_OPERATIONS_PER_SECOND, MAX_SCOPE_ADDRESSES, PIPE_NAME,
 };
 use halod_hwaccess::smbus::{self, SmBusSyncOps, SMBUS_BLOCK_MAX};
 use halod_hwaccess::winsec;
@@ -263,7 +263,7 @@ impl Conn {
             bootstrap_token.as_bytes(),
             config()?.bootstrap_token.as_bytes(),
         ) {
-            bail!("invalid broker bootstrap token");
+            bail!(BrokerError::InvalidBootstrapToken);
         }
         let scope = validate_scope(scope)?;
         let id = random_token()?;
@@ -293,7 +293,7 @@ impl Conn {
             bail!("invalid capability");
         }
         if Instant::now() >= cap.expires {
-            bail!("capability expired");
+            bail!(BrokerError::CapabilityExpired);
         }
         cap.id = random_token()?;
         cap.expires = Instant::now() + Duration::from_millis(CAPABILITY_TTL_MS);
@@ -312,7 +312,7 @@ impl Conn {
             .as_mut()
             .ok_or_else(|| anyhow!("authenticate before requesting broker operations"))?;
         if Instant::now() >= cap.expires {
-            bail!("capability expired");
+            bail!(BrokerError::CapabilityExpired);
         }
         request_allowed(&cap.scope, req)?;
         if cap.remaining == 0 {
@@ -402,7 +402,7 @@ fn serve(mut stream: PipeStream, first_request: Request) {
             Request::Renew { capability } => ok_or_err(conn.renew(&capability)),
             operation => match conn.authorize(&operation) {
                 Ok(scope) => dispatch(&mut conn, &scope, operation),
-                Err(e) => Response::Error(format!("{e:#}")),
+                Err(e) => Response::Error(broker_error(e)),
             },
         };
         if let Err(e) = proto::write_frame(&mut stream, &resp) {
@@ -417,7 +417,12 @@ fn serve(mut stream: PipeStream, first_request: Request) {
 }
 
 fn ok_or_err(r: Result<Response>) -> Response {
-    r.unwrap_or_else(|e| Response::Error(format!("{e:#}")))
+    r.unwrap_or_else(|e| Response::Error(broker_error(e)))
+}
+
+fn broker_error(e: anyhow::Error) -> BrokerError {
+    e.downcast()
+        .unwrap_or_else(|e| BrokerError::Failed(format!("{e:#}")))
 }
 
 fn dispatch(conn: &mut Conn, scope: &CapabilityScope, req: Request) -> Response {
@@ -529,9 +534,9 @@ fn dispatch(conn: &mut Conn, scope: &CapabilityScope, req: Request) -> Response 
             )?;
             Ok(Response::Unit)
         }),
-        Request::Authenticate { .. } | Request::Renew { .. } => {
-            Response::Error("operation not available in this state".into())
-        }
+        Request::Authenticate { .. } | Request::Renew { .. } => Response::Error(
+            BrokerError::Failed("operation not available in this state".into()),
+        ),
     }
 }
 
@@ -564,15 +569,19 @@ fn with_register_io(
     f: impl FnOnce(&PawnioModule) -> Result<Response>,
 ) -> Response {
     match conn.register_io.get(&handle) {
-        Some(entry) if !handle_kind_allows(entry.kind(), want) => Response::Error(format!(
-            "register-I/O handle {handle} is {:?}, not {:?}",
-            entry.kind(),
-            want
-        )),
+        Some(entry) if !handle_kind_allows(entry.kind(), want) => {
+            Response::Error(BrokerError::Failed(format!(
+                "register-I/O handle {handle} is {:?}, not {:?}",
+                entry.kind(),
+                want
+            )))
+        }
         Some(RegisterIoHandle::AmdSmn(module) | RegisterIoHandle::LpcIo(module)) => {
             ok_or_err(f(module))
         }
-        None => Response::Error(format!("unknown register-I/O handle {handle}")),
+        None => Response::Error(BrokerError::Failed(format!(
+            "unknown register-I/O handle {handle}"
+        ))),
     }
 }
 
@@ -599,7 +608,7 @@ fn with_bus(
 ) -> Response {
     match conn.buses.get_mut(&bus) {
         Some(b) => ok_or_err(f(b.as_mut())),
-        None => Response::Error(format!("unknown bus handle {bus}")),
+        None => Response::Error(BrokerError::Failed(format!("unknown bus handle {bus}"))),
     }
 }
 

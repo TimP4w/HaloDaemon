@@ -418,7 +418,7 @@ impl LcdEngine {
             }
 
             let tr = std::time::Instant::now();
-            let render_result = blocking_section(|| {
+            blocking_section(|| {
                 let DeviceSlot {
                     template,
                     frame_buf,
@@ -426,13 +426,6 @@ impl LcdEngine {
                 } = &mut *slot;
                 template.render(&ctx, frame_buf)
             });
-            if let Err(e) = render_result {
-                if slot.fail_streak % BACKOFF_TICKS == 0 {
-                    log::warn!("LCD engine: template render error for {device_id}: {e}");
-                }
-                bump_fail_streak(&mut slot.fail_streak);
-                continue;
-            };
             slot.last_sig = sig;
             let (frame_w, frame_h) = slot.frame_buf.dimensions();
             log::trace!(

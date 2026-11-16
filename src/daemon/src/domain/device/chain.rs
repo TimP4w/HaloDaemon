@@ -417,7 +417,7 @@ impl LightingDivisionHost {
         topology: ZoneTopology,
         led_count: u32,
     ) -> Result<Arc<dyn Device>> {
-        validate_led_count(&topology, led_count).map_err(|e| anyhow::anyhow!("{e}"))?;
+        validate_led_count(&topology, led_count)?;
         let max_leds = self
             .max_leds(channel_id)
             .ok_or_else(|| anyhow::anyhow!("unknown chainable channel: {channel_id}"))?;
@@ -666,21 +666,21 @@ fn encode_frame(order: ColorOrder, colors: &[RgbColor]) -> Vec<u8> {
 }
 
 /// Returns a user-facing reason on failure.
-pub fn validate_led_count(topology: &ZoneTopology, led_count: u32) -> Result<(), String> {
+pub fn validate_led_count(topology: &ZoneTopology, led_count: u32) -> anyhow::Result<()> {
     if led_count == 0 {
-        return Err("LED count must be at least 1".to_string());
+        return Err(anyhow::anyhow!("LED count must be at least 1"));
     }
     match topology {
         ZoneTopology::Linear | ZoneTopology::Ring | ZoneTopology::Grid => Ok(()),
         ZoneTopology::Rings { count } => {
             let n = *count as u32;
             if n == 0 {
-                return Err("Rings count must be at least 1".to_string());
+                return Err(anyhow::anyhow!("Rings count must be at least 1"));
             }
             if !led_count.is_multiple_of(n) {
                 let prev = (led_count / n).saturating_mul(n);
                 let next = (led_count / n).saturating_add(1).saturating_mul(n);
-                Err(format!(
+                Err(anyhow::anyhow!(
                     "Rings ×{n} requires the LED count to be a multiple of {n} \
                      (you have {led_count}; closest valid values are {prev} or {next})",
                 ))
@@ -688,9 +688,9 @@ pub fn validate_led_count(topology: &ZoneTopology, led_count: u32) -> Result<(),
                 Ok(())
             }
         }
-        ZoneTopology::Keyboard { .. } => {
-            Err("keyboard topology is not valid for a chain link".to_string())
-        }
+        ZoneTopology::Keyboard { .. } => Err(anyhow::anyhow!(
+            "keyboard topology is not valid for a chain link"
+        )),
     }
 }
 
@@ -809,7 +809,7 @@ mod tests {
     fn validate_rings_count_rejects_non_divisible() {
         let topology = ZoneTopology::Rings { count: 3 };
         let err = validate_led_count(&topology, 8).unwrap_err();
-        assert!(err.contains("multiple of 3"), "got: {err}");
+        assert!(err.to_string().contains("multiple of 3"), "got: {err}");
     }
 
     #[test]

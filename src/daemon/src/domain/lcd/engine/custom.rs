@@ -114,7 +114,7 @@ impl CustomTemplate {
         Self::new(def, images_dir)
     }
 
-    pub(super) fn render(&mut self, ctx: &TemplateCtx, buf: &mut RgbaImage) -> Result<(), String> {
+    pub(super) fn render(&mut self, ctx: &TemplateCtx, buf: &mut RgbaImage) {
         let (w, h) = (ctx.width, ctx.height);
         let accent = self.def.style.accent;
 
@@ -142,7 +142,6 @@ impl CustomTemplate {
         // caller reuses the same allocation on the next tick and we drop
         // the old (now-empty) allocation.
         std::mem::swap(buf, &mut img);
-        Ok(())
     }
 
     pub(super) fn content_signature(&self, ctx: &TemplateCtx) -> Option<u64> {

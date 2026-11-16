@@ -16,8 +16,8 @@ use std::time::{Duration, Instant};
 use anyhow::{anyhow, bail, Context, Result};
 
 use halod_hwaccess::proto::{
-    self, CapabilityScope, Request, Response, BROKER_IDLE_GRACE_MS, BROKER_SERVICE_NAME,
-    MAX_OPERATIONS_PER_CAPABILITY, MAX_OPERATIONS_PER_SECOND, PIPE_NAME,
+    self, BrokerError, CapabilityScope, Request, Response, BROKER_IDLE_GRACE_MS,
+    BROKER_SERVICE_NAME, MAX_OPERATIONS_PER_CAPABILITY, MAX_OPERATIONS_PER_SECOND, PIPE_NAME,
 };
 use halod_hwaccess::smbus::{BusInfo, SmBusSyncOps};
 
@@ -132,10 +132,6 @@ fn ensure_broker_running(auth: &BrokerAuth) {
     }
 }
 
-fn is_stale_broker_token_error(error: &str) -> bool {
-    error.contains("invalid broker bootstrap token")
-}
-
 /// A demand-start service that is already running ignores new start arguments,
 /// including this daemon's bootstrap token. After a fast daemon restart, wait
 /// without touching the old pipe so the broker can complete its idle shutdown,
@@ -212,16 +208,16 @@ fn connect_or_spawn(scope: &CapabilityScope) -> Result<AuthorizedPipe> {
                                     + Duration::from_millis(expires_in_ms / 2),
                             });
                         }
+                        Ok(Response::Error(BrokerError::InvalidBootstrapToken)) => {
+                            drop(pipe);
+                            log::info!(
+                                "[register_ops] found a broker from the previous daemon; waiting for it to exit"
+                            );
+                            wait_for_stale_broker_exit()?;
+                            ensure_broker_running(auth);
+                            continue;
+                        }
                         Ok(Response::Error(error)) => {
-                            if is_stale_broker_token_error(&error) {
-                                drop(pipe);
-                                log::info!(
-                                    "[register_ops] found a broker from the previous daemon; waiting for it to exit"
-                                );
-                                wait_for_stale_broker_exit()?;
-                                ensure_broker_running(auth);
-                                continue;
-                            }
                             bail!("halod-broker rejected this daemon's bootstrap token: {error}");
                         }
                         Ok(other) => log::debug!(
@@ -372,8 +368,8 @@ impl BrokerBus {
     fn request(&mut self, make_request: impl Fn(u32) -> Request) -> Result<Response> {
         let first = self.pipe.request(&make_request(self.bus_id));
         let reason = match first {
-            Ok(Response::Error(ref error)) if error == "capability expired" => {
-                format!("broker capability expired: {error}")
+            Ok(Response::Error(BrokerError::CapabilityExpired)) => {
+                "broker capability expired".to_owned()
             }
             Err(ref error) if error.is::<BrokerSessionLost>() => format!("{error:#}"),
             _ => return first,
@@ -610,18 +606,4 @@ pub fn open_lpc_io() -> Result<LpcIoBrokerClient> {
         pipe: Mutex::new(pipe),
         handle,
     })
-}
-
-#[cfg(test)]
-mod tests {
-    use super::is_stale_broker_token_error;
-
-    #[test]
-    fn recognizes_only_the_stale_bootstrap_session_error() {
-        assert!(is_stale_broker_token_error(
-            "invalid broker bootstrap token"
-        ));
-        assert!(!is_stale_broker_token_error("invalid capability"));
-        assert!(!is_stale_broker_token_error("capability expired"));
-    }
 }

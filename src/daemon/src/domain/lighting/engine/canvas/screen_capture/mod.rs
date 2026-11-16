@@ -73,7 +73,7 @@ pub fn list_monitors() -> Vec<MonitorInfo> {
 
 /// Spawns the platform capture backend. Returns immediately; frames arrive
 /// asynchronously and can be read via `CaptureHandle::latest_frame()`.
-pub fn start_capture(monitor_index: usize) -> Result<CaptureHandle, String> {
+pub fn start_capture(monitor_index: usize) -> anyhow::Result<CaptureHandle> {
     let frame_slot: Arc<Mutex<Option<RawFrame>>> = Arc::new(Mutex::new(None));
     let stop = Arc::new(AtomicBool::new(false));
 
@@ -84,7 +84,9 @@ pub fn start_capture(monitor_index: usize) -> Result<CaptureHandle, String> {
     windows::start(monitor_index, Arc::clone(&frame_slot), Arc::clone(&stop))?;
 
     #[cfg(not(any(target_os = "linux", target_os = "windows")))]
-    return Err("screen capture is not supported on this platform".into());
+    return Err(anyhow::anyhow!(
+        "screen capture is not supported on this platform"
+    ));
 
     Ok(CaptureHandle { frame_slot, stop })
 }

@@ -20,8 +20,8 @@ pub fn start(
     monitor_index: usize,
     frame_slot: Arc<Mutex<Option<RawFrame>>>,
     stop: Arc<AtomicBool>,
-) -> Result<(), String> {
-    let (setup_tx, setup_rx) = std::sync::mpsc::sync_channel::<Result<(), String>>(1);
+) -> anyhow::Result<()> {
+    let (setup_tx, setup_rx) = std::sync::mpsc::sync_channel::<anyhow::Result<()>>(1);
     std::thread::spawn(move || {
         if let Err(e) = run_dxgi_capture(monitor_index, frame_slot, stop, setup_tx) {
             log::error!("DXGI capture error: {e}");
@@ -29,7 +29,7 @@ pub fn start(
     });
     setup_rx
         .recv()
-        .unwrap_or_else(|_| Err("DXGI capture thread exited before setup".into()))
+        .unwrap_or_else(|_| Err(anyhow::anyhow!("DXGI capture thread exited before setup")))
 }
 
 fn dxgi_to_frame_rotation(
@@ -46,18 +46,20 @@ fn dxgi_to_frame_rotation(
     }
 }
 
-fn enumerate_dxgi_monitors() -> Result<Vec<MonitorInfo>, String> {
+fn enumerate_dxgi_monitors() -> anyhow::Result<Vec<MonitorInfo>> {
     use windows::Win32::Graphics::Dxgi::{CreateDXGIFactory1, IDXGIFactory1};
 
     let mut monitors = Vec::new();
     unsafe {
         let factory: IDXGIFactory1 =
-            CreateDXGIFactory1().map_err(|e| format!("CreateDXGIFactory1: {e}"))?;
+            CreateDXGIFactory1().map_err(|e| anyhow::anyhow!("CreateDXGIFactory1: {e}"))?;
         let mut a = 0u32;
         while let Ok(adapter) = factory.EnumAdapters1(a) {
             let mut o = 0u32;
             while let Ok(output) = adapter.EnumOutputs(o) {
-                let desc = output.GetDesc().map_err(|e| format!("GetDesc: {e}"))?;
+                let desc = output
+                    .GetDesc()
+                    .map_err(|e| anyhow::anyhow!("GetDesc: {e}"))?;
                 let w =
                     (desc.DesktopCoordinates.right - desc.DesktopCoordinates.left).unsigned_abs();
                 let h =
@@ -83,8 +85,8 @@ fn run_dxgi_capture(
     monitor_index: usize,
     frame_slot: Arc<Mutex<Option<RawFrame>>>,
     stop: Arc<AtomicBool>,
-    setup_done: std::sync::mpsc::SyncSender<Result<(), String>>,
-) -> Result<(), String> {
+    setup_done: std::sync::mpsc::SyncSender<anyhow::Result<()>>,
+) -> anyhow::Result<()> {
     use windows::{
         core::Interface,
         Win32::Graphics::{
@@ -116,12 +118,12 @@ fn run_dxgi_capture(
                 None,
                 Some(&mut ctx),
             )
-            .map_err(|e| format!("D3D11CreateDevice: {e}"))?;
+            .map_err(|e| anyhow::anyhow!("D3D11CreateDevice: {e}"))?;
             (dev.unwrap(), ctx.unwrap())
         };
 
         let factory: IDXGIFactory1 =
-            CreateDXGIFactory1().map_err(|e| format!("CreateDXGIFactory1: {e}"))?;
+            CreateDXGIFactory1().map_err(|e| anyhow::anyhow!("CreateDXGIFactory1: {e}"))?;
         let mut output1: Option<IDXGIOutput1> = None;
         let mut flat = 0usize;
         'search: {
@@ -130,7 +132,10 @@ fn run_dxgi_capture(
                 let mut o = 0u32;
                 while let Ok(out) = adapter.EnumOutputs(o) {
                     if flat == monitor_index {
-                        output1 = Some(out.cast().map_err(|e| format!("IDXGIOutput1: {e}"))?);
+                        output1 = Some(
+                            out.cast()
+                                .map_err(|e| anyhow::anyhow!("IDXGIOutput1: {e}"))?,
+                        );
                         break 'search;
                     }
                     flat += 1;
@@ -144,15 +149,18 @@ fn run_dxgi_capture(
             None => {
                 let a = factory
                     .EnumAdapters1(0)
-                    .map_err(|e| format!("EnumAdapters1: {e}"))?;
-                let o = a.EnumOutputs(0).map_err(|e| format!("EnumOutputs: {e}"))?;
-                o.cast().map_err(|e| format!("IDXGIOutput1 cast: {e}"))?
+                    .map_err(|e| anyhow::anyhow!("EnumAdapters1: {e}"))?;
+                let o = a
+                    .EnumOutputs(0)
+                    .map_err(|e| anyhow::anyhow!("EnumOutputs: {e}"))?;
+                o.cast()
+                    .map_err(|e| anyhow::anyhow!("IDXGIOutput1 cast: {e}"))?
             }
         };
 
         let mut duplication = output1
             .DuplicateOutput(&device)
-            .map_err(|e| format!("DuplicateOutput: {e}"))?;
+            .map_err(|e| anyhow::anyhow!("DuplicateOutput: {e}"))?;
 
         // DXGI returns the buffer in the source surface's natural (landscape)
         // layout; the rotation hint is applied when the buffer is consumed.

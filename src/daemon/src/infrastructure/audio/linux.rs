@@ -209,7 +209,7 @@ fn run_session(handle: &Arc<AudioHandle>) {
 }
 
 /// Builds an SPA_PARAM_EnumFormat pod for interleaved F32 audio, any rate.
-fn build_enum_format_pod() -> Result<Vec<u8>, String> {
+fn build_enum_format_pod() -> anyhow::Result<Vec<u8>> {
     use pipewire::spa::{
         param::{
             audio::AudioFormat,
@@ -240,6 +240,6 @@ fn build_enum_format_pod() -> Result<Vec<u8>, String> {
     });
 
     let (cursor, _) = PodSerializer::serialize(std::io::Cursor::new(Vec::new()), &obj)
-        .map_err(|e| format!("PodSerializer::serialize: {e}"))?;
+        .map_err(|e| anyhow::anyhow!("PodSerializer::serialize: {e}"))?;
     Ok(cursor.into_inner())
 }

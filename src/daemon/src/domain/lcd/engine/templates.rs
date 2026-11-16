@@ -45,39 +45,39 @@ struct GifFrame {
     delay_ms: f64,
 }
 
-fn add_decoded_frame_bytes(total: u64, width: u32, height: u32) -> Result<u64, String> {
+fn add_decoded_frame_bytes(total: u64, width: u32, height: u32) -> anyhow::Result<u64> {
     let total = total
         .checked_add(u64::from(width) * u64::from(height) * 4)
-        .ok_or_else(|| "GIF decoded-byte count overflow".to_string())?;
+        .ok_or_else(|| anyhow::anyhow!("GIF decoded-byte count overflow"))?;
     if total > crate::util::image::MAX_DECODE_RGBA_BYTES {
-        return Err("GIF frames exceed the cumulative decoded-byte limit".into());
+        return Err(anyhow::anyhow!(
+            "GIF frames exceed the cumulative decoded-byte limit"
+        ));
     }
     Ok(total)
 }
 
 /// Decode image bytes into `(frame, delay_ms)` pairs — one infinitely-held
 /// frame for a static image, one per frame for an animated GIF.
-pub(super) fn decode_image_frames(data: &[u8]) -> Result<Vec<(RgbaImage, f64)>, String> {
+pub(super) fn decode_image_frames(data: &[u8]) -> anyhow::Result<Vec<(RgbaImage, f64)>> {
     use image::{codecs::gif::GifDecoder, AnimationDecoder, ImageDecoder};
     use std::io::Cursor;
     if !(data.starts_with(b"GIF87a") || data.starts_with(b"GIF89a")) {
         // Decode under dimension limits: `data` is an uploaded LCD background,
         // attacker-controlled, and a valid header can declare enormous dimensions
         // that balloon allocation before any downscale (decompression bomb).
-        let img = crate::util::image::decode_limited(data)
-            .map_err(|e| e.to_string())?
-            .to_rgba8();
+        let img = crate::util::image::decode_limited(data)?.to_rgba8();
         return Ok(vec![(img, f64::INFINITY)]);
     }
-    let mut decoder = GifDecoder::new(Cursor::new(data)).map_err(|e| e.to_string())?;
+    let mut decoder = GifDecoder::new(Cursor::new(data))?;
     let mut limits = image::Limits::default();
     limits.max_image_width = Some(crate::util::image::MAX_DECODE_DIM);
     limits.max_image_height = Some(crate::util::image::MAX_DECODE_DIM);
-    decoder.set_limits(limits).map_err(|e| e.to_string())?;
+    decoder.set_limits(limits)?;
     let mut out = Vec::new();
     let mut decoded_bytes = 0u64;
     for frame in decoder.into_frames() {
-        let frame = frame.map_err(|e| e.to_string())?;
+        let frame = frame?;
         let (num, den) = frame.delay().numer_denom_ms();
         let delay_ms = if den == 0 {
             100.0
@@ -161,7 +161,7 @@ impl Background {
         })
     }
 
-    fn decode_frames(data: &[u8]) -> Result<Vec<GifFrame>, String> {
+    fn decode_frames(data: &[u8]) -> anyhow::Result<Vec<GifFrame>> {
         Ok(decode_image_frames(data)?
             .into_iter()
             .map(|(image, delay_ms)| GifFrame { image, delay_ms })
@@ -243,7 +243,7 @@ pub(super) fn dim_color(c: RgbColor, factor: f32) -> RgbColor {
 /// engine. PNG is only for the UI preview. Fast compression keeps the per-tick
 /// cost low. `buf` is cleared before writing so the caller can reuse it across
 /// ticks.
-pub fn encode_png_into(img: &RgbaImage, buf: &mut Vec<u8>) -> Result<(), String> {
+pub fn encode_png_into(img: &RgbaImage, buf: &mut Vec<u8>) -> anyhow::Result<()> {
     use image::codecs::png::{CompressionType, FilterType, PngEncoder};
     use image::{ExtendedColorType, ImageEncoder};
 
@@ -255,13 +255,13 @@ pub fn encode_png_into(img: &RgbaImage, buf: &mut Vec<u8>) -> Result<(), String>
             img.height(),
             ExtendedColorType::Rgba8,
         )
-        .map_err(|e| format!("PNG encode: {e}"))?;
+        .map_err(|e| anyhow::anyhow!("PNG encode: {e}"))?;
     Ok(())
 }
 
 /// Convenience wrapper that allocates; prefer [`encode_png_into`] in hot paths.
 #[cfg(test)]
-pub(crate) fn encode_png(img: &RgbaImage) -> Result<Vec<u8>, String> {
+pub(crate) fn encode_png(img: &RgbaImage) -> anyhow::Result<Vec<u8>> {
     let mut buf = Vec::new();
     encode_png_into(img, &mut buf)?;
     Ok(buf)

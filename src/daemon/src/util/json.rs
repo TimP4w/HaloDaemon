@@ -4,22 +4,22 @@
 
 use serde_json::Value;
 
-pub fn check_bounds(v: &Value, max_depth: usize, max_nodes: usize) -> Result<(), String> {
+pub fn check_bounds(v: &Value, max_depth: usize, max_nodes: usize) -> anyhow::Result<()> {
     fn walk(
         v: &Value,
         depth: usize,
         nodes: &mut usize,
         max_depth: usize,
         max_nodes: usize,
-    ) -> Result<(), String> {
+    ) -> anyhow::Result<()> {
         if depth > max_depth {
-            return Err(format!("nesting exceeds {max_depth}"));
+            return Err(anyhow::anyhow!("nesting exceeds {max_depth}"));
         }
         match v {
             Value::Array(a) => {
                 *nodes += a.len();
                 if *nodes > max_nodes {
-                    return Err(format!("collection nodes exceed {max_nodes}"));
+                    return Err(anyhow::anyhow!("collection nodes exceed {max_nodes}"));
                 }
                 for e in a {
                     walk(e, depth + 1, nodes, max_depth, max_nodes)?;
@@ -28,7 +28,7 @@ pub fn check_bounds(v: &Value, max_depth: usize, max_nodes: usize) -> Result<(),
             Value::Object(o) => {
                 *nodes += o.len();
                 if *nodes > max_nodes {
-                    return Err(format!("collection nodes exceed {max_nodes}"));
+                    return Err(anyhow::anyhow!("collection nodes exceed {max_nodes}"));
                 }
                 for e in o.values() {
                     walk(e, depth + 1, nodes, max_depth, max_nodes)?;

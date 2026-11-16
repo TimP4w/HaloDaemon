@@ -159,8 +159,28 @@ pub enum Request {
     },
 }
 
+/// Why the broker refused a request.
+#[derive(Debug, Clone, PartialEq, Eq, Serialize, Deserialize)]
+pub enum BrokerError {
+    InvalidBootstrapToken,
+    CapabilityExpired,
+    Failed(String),
+}
+
+impl std::fmt::Display for BrokerError {
+    fn fmt(&self, f: &mut std::fmt::Formatter<'_>) -> std::fmt::Result {
+        match self {
+            Self::InvalidBootstrapToken => f.write_str("invalid broker bootstrap token"),
+            Self::CapabilityExpired => f.write_str("capability expired"),
+            Self::Failed(message) => f.write_str(message),
+        }
+    }
+}
+
+impl std::error::Error for BrokerError {}
+
 /// A reply from the broker to the daemon. Every op can instead fail with
-/// [`Response::Error`], carrying the broker-side error string.
+/// [`Response::Error`].
 #[derive(Debug, Clone, PartialEq, Eq, Serialize, Deserialize)]
 pub enum Response {
     Authorized {
@@ -172,7 +192,7 @@ pub enum Response {
     Byte(u8),
     Bool(bool),
     Unit,
-    Error(String),
+    Error(BrokerError),
 }
 
 /// Upper bound on a single framed message, guarding the broker against a
@@ -348,7 +368,9 @@ mod tests {
             any::<u8>().prop_map(Response::Byte),
             any::<bool>().prop_map(Response::Bool),
             Just(Response::Unit),
-            ".*".prop_map(Response::Error),
+            Just(Response::Error(BrokerError::InvalidBootstrapToken)),
+            Just(Response::Error(BrokerError::CapabilityExpired)),
+            ".*".prop_map(|message| Response::Error(BrokerError::Failed(message))),
         ]
     }
 

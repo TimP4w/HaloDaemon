@@ -19,7 +19,7 @@ const IPC_MAX_NODES: usize = 200_000;
 
 /// Reject a command whose JSON nests too deep or holds too many collection nodes,
 /// so a small frame can't expand into excessive nested work.
-fn check_ipc_bounds(v: &Value) -> Result<(), String> {
+fn check_ipc_bounds(v: &Value) -> anyhow::Result<()> {
     crate::util::json::check_bounds(v, IPC_MAX_DEPTH, IPC_MAX_NODES)
 }
 
@@ -102,9 +102,8 @@ pub async fn handle_message(msg: Value, client: ClientHandle, app: Arc<AppState>
         reply_error(
             &client,
             &cmd,
+            &anyhow::anyhow!("frame rejected: {e}"),
             req_id,
-            anyhow::anyhow!("frame rejected: {e}"),
-            false,
         );
         return;
     }
@@ -118,9 +117,8 @@ pub async fn handle_message(msg: Value, client: ClientHandle, app: Arc<AppState>
             reply_error(
                 &client,
                 &cmd,
+                &anyhow::anyhow!("failed to parse: {e}"),
                 req_id,
-                anyhow::anyhow!("failed to parse: {e}"),
-                false,
             );
             return;
         }
@@ -139,10 +137,9 @@ pub async fn handle_message(msg: Value, client: ClientHandle, app: Arc<AppState>
                 let lock = app.device_lock(&id).await;
                 let _guard = lock.lock().await;
                 if let Err(e) = dispatch(command, client.clone(), Arc::clone(&app)).await {
-                    let plugin_handled = e
-                        .downcast_ref::<crate::domain::plugin::SurfacedPluginError>()
-                        .is_some();
-                    if writes_device && !plugin_handled {
+                    log::warn!("command '{cmd}' failed: {e:#}");
+                    let mut error = ipc_error(&e, request_id);
+                    if writes_device && !error.handled {
                         let device = {
                             let devices = app.device_registry.read().await;
                             devices
@@ -160,13 +157,14 @@ pub async fn handle_message(msg: Value, client: ClientHandle, app: Arc<AppState>
                         )
                         .await;
                     }
-                    reply_error(&client, &cmd, request_id, e, writes_device);
+                    error.handled |= writes_device;
+                    client.send(&DaemonMessage::Error(error));
                 }
             });
         }
         None => {
             if let Err(e) = dispatch(command, client.clone(), app).await {
-                reply_error(&client, &cmd, request_id, e, false);
+                reply_error(&client, &cmd, &e, request_id);
             }
         }
     }
@@ -188,24 +186,22 @@ fn catalog_error_code(
     }
 }
 
-fn reply_error(
-    client: &ClientHandle,
-    cmd: &str,
-    request_id: Option<String>,
-    e: anyhow::Error,
-    handled: bool,
-) {
-    log::warn!("command '{cmd}' failed: {e:#}");
-    client.send(&DaemonMessage::Error(IpcError {
+fn ipc_error(e: &anyhow::Error, request_id: Option<String>) -> IpcError {
+    IpcError {
         message: e.to_string(),
         code: e
             .downcast_ref::<halod_plugin_signing::CatalogError>()
             .map(catalog_error_code),
-        handled: handled
-            || e.downcast_ref::<crate::domain::plugin::SurfacedPluginError>()
-                .is_some(),
+        handled: e
+            .downcast_ref::<crate::domain::plugin::SurfacedPluginError>()
+            .is_some(),
         request_id,
-    }));
+    }
+}
+
+fn reply_error(client: &ClientHandle, cmd: &str, e: &anyhow::Error, request_id: Option<String>) {
+    log::warn!("command '{cmd}' failed: {e:#}");
+    client.send(&DaemonMessage::Error(ipc_error(e, request_id)));
 }
 
 fn command_writes_device(cmd: &DaemonCommand) -> bool {
@@ -945,9 +941,8 @@ mod tests {
         reply_error(
             &client,
             "add_plugin_repo",
+            &halod_plugin_signing::CatalogError::SignatureMismatch.into(),
             None,
-            halod_plugin_signing::CatalogError::SignatureMismatch.into(),
-            false,
         );
 
         let frame = rx.recv().await.unwrap();
