@@ -7,6 +7,7 @@ pub mod widget_row;
 mod widget_view;
 
 use crate::ui::components as widgets;
+use halod_shared::commands::DeviceOp;
 use std::collections::{HashMap, HashSet, VecDeque};
 
 use crate::domain::topic_store::TopicStore;
@@ -383,9 +384,11 @@ fn conflict_modal(
         for id in disables_for(&groups) {
             crate::runtime::ipc::send(
                 cmd,
-                halod_shared::commands::DaemonCommand::SetDeviceVisibility {
+                halod_shared::commands::DaemonCommand::Device {
                     device_id: id,
-                    state: VisibilityState::Disabled,
+                    op: DeviceOp::SetDeviceVisibility {
+                        state: VisibilityState::Disabled,
+                    },
                 },
             );
         }
@@ -562,10 +565,12 @@ fn remove_confirm_modal(
     ) {
         crate::runtime::ipc::send(
             cmd,
-            halod_shared::commands::DaemonCommand::LightingRemoveSegment {
-                id: target.parent_id,
-                channel_id: target.channel_id,
-                device_id: target.child_id,
+            halod_shared::commands::DaemonCommand::Device {
+                device_id: target.parent_id,
+                op: DeviceOp::LightingRemoveSegment {
+                    channel_id: target.channel_id,
+                    segment_id: target.child_id,
+                },
             },
         );
     }
@@ -609,9 +614,9 @@ fn card_menu(
         if save && !trimmed.is_empty() {
             crate::runtime::ipc::send(
                 cmd,
-                halod_shared::commands::DaemonCommand::SetDeviceName {
+                halod_shared::commands::DaemonCommand::Device {
                     device_id: d.id.clone(),
-                    name: trimmed,
+                    op: DeviceOp::SetDeviceName { name: trimmed },
                 },
             );
             *rename = None;
@@ -674,9 +679,9 @@ fn card_menu(
 fn set_vis(ui: &mut egui::Ui, cmd: &CommandTx, id: &str, state: VisibilityState) {
     crate::runtime::ipc::send(
         cmd,
-        halod_shared::commands::DaemonCommand::SetDeviceVisibility {
+        halod_shared::commands::DaemonCommand::Device {
             device_id: id.to_string(),
-            state,
+            op: DeviceOp::SetDeviceVisibility { state },
         },
     );
     ui.close();

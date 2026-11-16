@@ -406,6 +406,7 @@ fn new_instance_id(effects: &HashMap<String, halod_shared::types::EffectDef>) ->
 mod tests {
     use super::*;
     use crate::ui::screens::canvas::test_fixtures::zone_with;
+    use halod_shared::commands::DeviceOp;
     use halod_shared::types::EffectDef;
 
     #[test]
@@ -447,10 +448,10 @@ mod tests {
         let cmds = draft_commands(&state, "effect-1", false, &draft);
         assert_eq!(cmds.len(), 2);
         assert!(matches!(&cmds[0],
-            DaemonCommand::CanvasMoveZone { channel_id, effect: Some(e), .. }
+            DaemonCommand::Device { op: DeviceOp::CanvasMoveZone { channel_id, effect: Some(e), .. }, .. }
                 if channel_id == "b" && e == "effect-1"));
         assert!(matches!(&cmds[1],
-            DaemonCommand::CanvasRemoveZone { channel_id, .. } if channel_id == "c"));
+            DaemonCommand::Device { op: DeviceOp::CanvasRemoveZone { channel_id, .. }, .. } if channel_id == "c"));
     }
 
     #[test]

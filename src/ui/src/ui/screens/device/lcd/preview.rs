@@ -3,7 +3,7 @@
 //! rotation, and raw-streaming toggle.
 
 use egui::{Color32, Rect, Sense, Stroke, Vec2};
-use halod_shared::commands::DaemonCommand;
+use halod_shared::commands::{DaemonCommand, DeviceOp};
 use halod_shared::types::{LcdStatus, LcdUploadProgress, ScreenRotation, ScreenShape};
 
 use super::{drive_preview, preview_key, rot_label, DeviceUi, TabCtx};
@@ -209,7 +209,10 @@ pub(super) fn display_card(
             {
                 crate::runtime::ipc::send(
                     ctx.cmd,
-                    halod_shared::commands::DaemonCommand::SetScreenDefault { id: id.to_string() },
+                    halod_shared::commands::DaemonCommand::Device {
+                        device_id: id.to_string(),
+                        op: DeviceOp::SetScreenDefault,
+                    },
                 );
             }
         },
@@ -232,9 +235,11 @@ pub(super) fn display_controls(
         st.set(key, b, ctx.time);
         st.queue(
             key,
-            DaemonCommand::SetScreenBrightness {
-                id: id.to_string(),
-                brightness: b.round() as u8,
+            DaemonCommand::Device {
+                device_id: id.to_string(),
+                op: DeviceOp::SetScreenBrightness {
+                    brightness: b.round() as u8,
+                },
             },
             ctx.time,
         );
@@ -267,9 +272,11 @@ pub(super) fn display_controls(
             if widgets::segmented(ui, &labels, &mut idx, false) {
                 crate::runtime::ipc::send(
                     ctx.cmd,
-                    DaemonCommand::SetScreenRotation {
-                        id: id.to_string(),
-                        rotation: rots[idx],
+                    DaemonCommand::Device {
+                        device_id: id.to_string(),
+                        op: DeviceOp::SetScreenRotation {
+                            rotation: rots[idx],
+                        },
                     },
                 );
             }
@@ -297,9 +304,9 @@ pub(super) fn raw_streaming_row(ui: &mut egui::Ui, ctx: &TabCtx, id: &str, lcd: 
     if next != on {
         crate::runtime::ipc::send(
             ctx.cmd,
-            halod_shared::commands::DaemonCommand::SetScreenRawStreaming {
-                id: id.to_string(),
-                enabled: next,
+            halod_shared::commands::DaemonCommand::Device {
+                device_id: id.to_string(),
+                op: DeviceOp::SetScreenRawStreaming { enabled: next },
             },
         );
     }

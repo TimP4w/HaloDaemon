@@ -3,7 +3,7 @@
 
 use crate::ui::components as widgets;
 use egui::{Align2, Sense, Stroke, Vec2};
-use halod_shared::commands::DaemonCommand;
+use halod_shared::commands::{DaemonCommand, DeviceOp};
 use halod_shared::types::{
     DeviceCapability, LightingChannel, LightingDivision, LightingSegmentInfo, ZoneTopology,
 };
@@ -246,9 +246,11 @@ fn discover_button(ui: &mut egui::Ui, ctx: &TabCtx, dev_id: &str, channels: &[&L
         for channel in channels {
             crate::runtime::ipc::send(
                 ctx.cmd,
-                DaemonCommand::LightingDetectSegments {
-                    id: dev_id.to_string(),
-                    channel_id: channel.id.clone(),
+                DaemonCommand::Device {
+                    device_id: dev_id.to_string(),
+                    op: DeviceOp::LightingDetectSegments {
+                        channel_id: channel.id.clone(),
+                    },
                 },
             );
         }
@@ -310,10 +312,12 @@ fn link_row(
                 if widgets::glyph_button_at(ui, rect, id, widgets::paint_close_glyph).clicked() {
                     crate::runtime::ipc::send(
                         ctx.cmd,
-                        DaemonCommand::LightingRemoveSegment {
-                            id: dev_id.to_string(),
-                            channel_id: channel_id.to_string(),
-                            device_id: link.device_id.clone(),
+                        DaemonCommand::Device {
+                            device_id: dev_id.to_string(),
+                            op: DeviceOp::LightingRemoveSegment {
+                                channel_id: channel_id.to_string(),
+                                segment_id: link.device_id.clone(),
+                            },
                         },
                     );
                 }
@@ -366,9 +370,9 @@ fn name_field(ui: &mut egui::Ui, ctx: &TabCtx, link: &LightingSegmentInfo) {
         if !trimmed.is_empty() && trimmed != link.name {
             crate::runtime::ipc::send(
                 ctx.cmd,
-                DaemonCommand::SetDeviceName {
+                DaemonCommand::Device {
                     device_id: link.device_id.clone(),
-                    name: trimmed,
+                    op: DeviceOp::SetDeviceName { name: trimmed },
                 },
             );
         }
@@ -482,12 +486,14 @@ fn add_link_panel(
                         if let Some(led_count) = parsed {
                             crate::runtime::ipc::send(
                                 ctx.cmd,
-                                DaemonCommand::LightingAddSegment {
-                                    id: dev_id.to_string(),
-                                    channel_id: channel.id.clone(),
-                                    name: name.trim().to_string(),
-                                    led_count,
-                                    topology: topology_from_idx(topo_idx),
+                                DaemonCommand::Device {
+                                    device_id: dev_id.to_string(),
+                                    op: DeviceOp::LightingAddSegment {
+                                        channel_id: channel.id.clone(),
+                                        name: name.trim().to_string(),
+                                        led_count,
+                                        topology: topology_from_idx(topo_idx),
+                                    },
                                 },
                             );
                         }

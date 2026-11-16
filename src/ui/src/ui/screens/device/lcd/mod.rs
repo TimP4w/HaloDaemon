@@ -26,6 +26,7 @@ mod library;
 mod params;
 mod preview;
 
+use halod_shared::commands::DeviceOp;
 use halod_shared::types::{DeviceCapability, LcdMode, LcdStatus, ScreenRotation};
 
 use gif::{advance_gif, clear_gif, rgba_texture};
@@ -168,9 +169,9 @@ fn activate_video_mode(ctx: &TabCtx, id: &str, lcd: &LcdStatus) {
     };
     crate::runtime::ipc::send(
         ctx.cmd,
-        halod_shared::commands::DaemonCommand::SetScreenVideo {
-            id: id.to_string(),
-            path,
+        halod_shared::commands::DaemonCommand::Device {
+            device_id: id.to_string(),
+            op: DeviceOp::SetScreenVideo { path },
         },
     );
 }
@@ -301,7 +302,7 @@ mod tests {
     use crate::domain::topic_store::TopicStore;
     use crate::runtime::ipc::DecodedFrame;
     use crate::ui::screens::device::{DeviceUi, LcdMediaTab, PickerTarget, TabCtx};
-    use halod_shared::commands::DaemonCommand;
+    use halod_shared::commands::{DaemonCommand, DeviceOp};
     use halod_shared::types::LcdUploadProgress;
     use halod_shared::types::{
         DeviceCapability, LcdDescriptor, LcdEngineTemplateDescriptor, LcdMode, LcdStatus,
@@ -536,7 +537,7 @@ mod tests {
         assert!(
             cmds.iter().any(|c| matches!(
                 c,
-                DaemonCommand::SetScreenVideo { path, .. } if path == "/tmp/movie.mp4"
+                DaemonCommand::Device { op: DeviceOp::SetScreenVideo { path, .. }, .. } if path == "/tmp/movie.mp4"
             )),
             "the picked path must be sent to the daemon: {cmds:?}"
         );
@@ -557,10 +558,15 @@ mod tests {
         assert!(st.lcd.picker.is_none(), "the picker slot is cleared");
         assert!(st.lcd.upload_base.is_some(), "the upload spinner is armed");
         let deadline = Instant::now() + Duration::from_secs(5);
-        while !cmds
-            .iter()
-            .any(|c| matches!(c, DaemonCommand::SetScreenImage { .. }))
-        {
+        while !cmds.iter().any(|c| {
+            matches!(
+                c,
+                DaemonCommand::Device {
+                    op: DeviceOp::SetScreenImage { .. },
+                    ..
+                }
+            )
+        }) {
             assert!(Instant::now() < deadline, "upload never sent: {cmds:?}");
             std::thread::sleep(Duration::from_millis(2));
             cmds.extend(fx.frame(&mut st));
@@ -581,7 +587,13 @@ mod tests {
         assert!(
             !cmds.iter().any(|c| matches!(
                 c,
-                DaemonCommand::SetScreenImage { .. } | DaemonCommand::SetScreenVideo { .. }
+                DaemonCommand::Device {
+                    op: DeviceOp::SetScreenImage { .. },
+                    ..
+                } | DaemonCommand::Device {
+                    op: DeviceOp::SetScreenVideo { .. },
+                    ..
+                }
             )),
             "no command from a cancelled dialog: {cmds:?}"
         );
@@ -821,7 +833,10 @@ mod tests {
         let cmd = fx.rx.try_recv().expect("command dispatched");
         assert!(matches!(
             cmd,
-            DaemonCommand::SetScreenImageFromLibrary { .. }
+            DaemonCommand::Device {
+                op: DeviceOp::SetScreenImageFromLibrary { .. },
+                ..
+            }
         ));
     }
 
@@ -848,11 +863,20 @@ mod tests {
         };
         super::select_image(&ctx, &mut st, "lcd", "bg.png", Some("custom"));
         let first = fx.rx.try_recv().expect("deactivate dispatched");
-        assert!(matches!(first, DaemonCommand::LcdEngineDeactivate { .. }));
+        assert!(matches!(
+            first,
+            DaemonCommand::Device {
+                op: DeviceOp::LcdEngineDeactivate,
+                ..
+            }
+        ));
         let second = fx.rx.try_recv().expect("image command dispatched");
         assert!(matches!(
             second,
-            DaemonCommand::SetScreenImageFromLibrary { .. }
+            DaemonCommand::Device {
+                op: DeviceOp::SetScreenImageFromLibrary { .. },
+                ..
+            }
         ));
     }
 

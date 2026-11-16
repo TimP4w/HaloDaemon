@@ -6,7 +6,7 @@
 use crate::ui::components as widgets;
 use std::collections::{BTreeMap, HashMap};
 
-use halod_shared::commands::DaemonCommand;
+use halod_shared::commands::{DaemonCommand, DeviceOp};
 use halod_shared::types::{
     CategoryLayout, ChoiceDisplay, DeviceCapability, RangeDisplay, VisibleWhen,
 };
@@ -276,10 +276,12 @@ fn setting_row(ui: &mut egui::Ui, id: &str, ctx: &TabCtx, st: &mut DeviceUi, s: 
                         st.set(&edit_key, pick as f32, ctx.time);
                         crate::runtime::ipc::send(
                             ctx.cmd,
-                            halod_shared::commands::DaemonCommand::SetChoice {
-                                id: id.to_string(),
-                                key: c.key.clone(),
-                                selected: pick,
+                            halod_shared::commands::DaemonCommand::Device {
+                                device_id: id.to_string(),
+                                op: DeviceOp::SetChoice {
+                                    key: c.key.clone(),
+                                    selected: pick,
+                                },
                             },
                         );
                     }
@@ -305,10 +307,12 @@ fn setting_row(ui: &mut egui::Ui, id: &str, ctx: &TabCtx, st: &mut DeviceUi, s: 
                                 st.set(&edit_key, idx as f32, ctx.time);
                                 crate::runtime::ipc::send(
                                     ctx.cmd,
-                                    halod_shared::commands::DaemonCommand::SetChoice {
-                                        id: id.to_string(),
-                                        key: c.key.clone(),
-                                        selected: idx,
+                                    halod_shared::commands::DaemonCommand::Device {
+                                        device_id: id.to_string(),
+                                        op: DeviceOp::SetChoice {
+                                            key: c.key.clone(),
+                                            selected: idx,
+                                        },
                                     },
                                 );
                             }
@@ -331,10 +335,12 @@ fn setting_row(ui: &mut egui::Ui, id: &str, ctx: &TabCtx, st: &mut DeviceUi, s: 
                                 st.set(&edit_key, usize::from(!on) as f32, ctx.time);
                                 crate::runtime::ipc::send(
                                     ctx.cmd,
-                                    halod_shared::commands::DaemonCommand::SetChoice {
-                                        id: id.to_string(),
-                                        key: c.key.clone(),
-                                        selected: if on { 0 } else { 1 },
+                                    halod_shared::commands::DaemonCommand::Device {
+                                        device_id: id.to_string(),
+                                        op: DeviceOp::SetChoice {
+                                            key: c.key.clone(),
+                                            selected: if on { 0 } else { 1 },
+                                        },
                                     },
                                 );
                             }
@@ -365,10 +371,12 @@ fn setting_row(ui: &mut egui::Ui, id: &str, ctx: &TabCtx, st: &mut DeviceUi, s: 
                         st.set(&key, snapped, ctx.time);
                         st.queue(
                             &key,
-                            DaemonCommand::SetRange {
-                                id: id.to_string(),
-                                key: r.key.clone(),
-                                value: snapped.round() as i32,
+                            DaemonCommand::Device {
+                                device_id: id.to_string(),
+                                op: DeviceOp::SetRange {
+                                    key: r.key.clone(),
+                                    value: snapped.round() as i32,
+                                },
                             },
                             ctx.time,
                         );
@@ -387,10 +395,12 @@ fn setting_row(ui: &mut egui::Ui, id: &str, ctx: &TabCtx, st: &mut DeviceUi, s: 
                         st.set(&key, snapped, ctx.time);
                         st.queue(
                             &key,
-                            DaemonCommand::SetRange {
-                                id: id.to_string(),
-                                key: r.key.clone(),
-                                value: snapped.round() as i32,
+                            DaemonCommand::Device {
+                                device_id: id.to_string(),
+                                op: DeviceOp::SetRange {
+                                    key: r.key.clone(),
+                                    value: snapped.round() as i32,
+                                },
                             },
                             ctx.time,
                         );
@@ -416,10 +426,12 @@ fn setting_row(ui: &mut egui::Ui, id: &str, ctx: &TabCtx, st: &mut DeviceUi, s: 
                         st.set(&edit_key, if on { 0.0 } else { 1.0 }, ctx.time);
                         crate::runtime::ipc::send(
                             ctx.cmd,
-                            halod_shared::commands::DaemonCommand::SetBoolean {
-                                id: id.to_string(),
-                                key: b.key.clone(),
-                                value: !on,
+                            halod_shared::commands::DaemonCommand::Device {
+                                device_id: id.to_string(),
+                                op: DeviceOp::SetBoolean {
+                                    key: b.key.clone(),
+                                    value: !on,
+                                },
                             },
                         );
                     }
@@ -438,9 +450,9 @@ fn setting_row(ui: &mut egui::Ui, id: &str, ctx: &TabCtx, st: &mut DeviceUi, s: 
             {
                 crate::runtime::ipc::send(
                     ctx.cmd,
-                    halod_shared::commands::DaemonCommand::TriggerAction {
-                        id: id.to_string(),
-                        key: a.key.clone(),
+                    halod_shared::commands::DaemonCommand::Device {
+                        device_id: id.to_string(),
+                        op: DeviceOp::TriggerAction { key: a.key.clone() },
                     },
                 );
             }

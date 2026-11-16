@@ -8,7 +8,7 @@ use std::collections::{HashMap, HashSet};
 use crate::domain::state::Page;
 use crate::domain::topic_store::TopicStore;
 use egui::{Align2, Margin, Pos2, Rect, RichText, Sense, Stroke, Vec2};
-use halod_shared::commands::DaemonCommand;
+use halod_shared::commands::{DaemonCommand, DeviceOp};
 use halod_shared::types::{
     IntegrationLifecycleState, IntegrationSetupMode, IntegrationSetupPhase, PluginInfo,
     PluginIssue, PluginIssueKind, WireDevice,
@@ -166,7 +166,13 @@ impl IntegrationPanel {
             ) {
                 self.setup_candidate = None;
                 self.config_edit = None;
-                ipc::send(cmd, DaemonCommand::ResetIntegrationSetup { id });
+                ipc::send(
+                    cmd,
+                    DaemonCommand::Device {
+                        device_id: id,
+                        op: DeviceOp::ResetIntegrationSetup,
+                    },
+                );
             }
         }
         widgets::issue_modal_slot(ctx, "integration_issue", &mut self.issue_modal);
@@ -208,7 +214,10 @@ impl IntegrationPanel {
                 {
                     ipc::send(
                         cmd,
-                        DaemonCommand::BeginIntegrationSetup { id: p.id.clone() },
+                        DaemonCommand::Device {
+                            device_id: p.id.clone(),
+                            op: DeviceOp::BeginIntegrationSetup,
+                        },
                     );
                 }
             }
@@ -409,7 +418,10 @@ impl IntegrationPanel {
     pub fn cancel_setup(&mut self, cmd: &CommandTx, id: &str) {
         ipc::send(
             cmd,
-            DaemonCommand::CancelIntegrationSetup { id: id.to_owned() },
+            DaemonCommand::Device {
+                device_id: id.to_owned(),
+                op: DeviceOp::CancelIntegrationSetup,
+            },
         );
         self.setup_candidate = None;
         self.config_edit = None;
@@ -488,10 +500,12 @@ impl IntegrationPanel {
                 let values = config_values_to_send(edits, &plugin.config_fields);
                 crate::runtime::ipc::send(
                     cmd,
-                    halod_shared::commands::DaemonCommand::SubmitIntegrationSetup {
-                        id: plugin.id.clone(),
-                        candidate_id: None,
-                        values,
+                    halod_shared::commands::DaemonCommand::Device {
+                        device_id: plugin.id.clone(),
+                        op: DeviceOp::SubmitIntegrationSetup {
+                            candidate_id: None,
+                            values,
+                        },
                     },
                 );
             }
@@ -547,10 +561,12 @@ impl IntegrationPanel {
                 if let Some(candidate_id) = self.setup_candidate.clone() {
                     crate::runtime::ipc::send(
                         cmd,
-                        halod_shared::commands::DaemonCommand::SubmitIntegrationSetup {
-                            id: plugin.id.clone(),
-                            candidate_id: Some(candidate_id),
-                            values: HashMap::new(),
+                        halod_shared::commands::DaemonCommand::Device {
+                            device_id: plugin.id.clone(),
+                            op: DeviceOp::SubmitIntegrationSetup {
+                                candidate_id: Some(candidate_id),
+                                values: HashMap::new(),
+                            },
                         },
                     );
                 }
@@ -659,8 +675,9 @@ impl IntegrationPanel {
             {
                 crate::runtime::ipc::send(
                     cmd,
-                    halod_shared::commands::DaemonCommand::RetryIntegrationPairing {
-                        id: plugin.id.clone(),
+                    halod_shared::commands::DaemonCommand::Device {
+                        device_id: plugin.id.clone(),
+                        op: DeviceOp::RetryIntegrationPairing,
                     },
                 );
             }
@@ -1101,9 +1118,9 @@ fn can_reset_setup(plugin: &PluginInfo) -> bool {
 fn send_setup_mode(cmd: &CommandTx, id: &str, mode: IntegrationSetupMode) {
     crate::runtime::ipc::send(
         cmd,
-        halod_shared::commands::DaemonCommand::SelectIntegrationSetupMode {
-            id: id.to_owned(),
-            mode,
+        halod_shared::commands::DaemonCommand::Device {
+            device_id: id.to_owned(),
+            op: DeviceOp::SelectIntegrationSetupMode { mode },
         },
     );
 }

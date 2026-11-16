@@ -2,6 +2,7 @@
 //! Info tab — throughput chart, device details, capabilities, diagnostics
 //! (`GetDebugInfo` snapshot as JSON) and visibility management.
 
+use halod_shared::commands::DeviceOp;
 use std::collections::VecDeque;
 
 use crate::ui::components as widgets;
@@ -415,9 +416,9 @@ fn full_button(ui: &mut egui::Ui, label: &str, kind: widgets::ButtonKind) -> boo
 fn set_visibility(ctx: &TabCtx, state: VisibilityState) {
     crate::runtime::ipc::send(
         ctx.cmd,
-        halod_shared::commands::DaemonCommand::SetDeviceVisibility {
+        halod_shared::commands::DaemonCommand::Device {
             device_id: ctx.dev.id.clone(),
-            state,
+            op: DeviceOp::SetDeviceVisibility { state },
         },
     );
 }

@@ -4,7 +4,7 @@
 
 use crate::ui::components as widgets;
 use egui::{Align2, Pos2, Rect, Sense, Vec2};
-use halod_shared::commands::DaemonCommand;
+use halod_shared::commands::{DaemonCommand, DeviceOp};
 use halod_shared::types::{
     ChannelKind, CoolingChannel, DeviceCapability, FanCurveStatus, Sensor, VisibilityState,
 };
@@ -383,11 +383,13 @@ fn curve_points_command(
     points: Vec<[f32; 2]>,
     sensor_id: Option<String>,
 ) -> DaemonCommand {
-    DaemonCommand::SetCoolingCurvePoints {
+    DaemonCommand::Device {
         device_id,
-        channel_id,
-        points,
-        sensor_id,
+        op: DeviceOp::SetCoolingCurvePoints {
+            channel_id,
+            points,
+            sensor_id,
+        },
     }
 }
 
@@ -397,11 +399,13 @@ fn curve_preset_command(
     preset: String,
     sensor_id: Option<String>,
 ) -> DaemonCommand {
-    DaemonCommand::SetCoolingCurvePreset {
+    DaemonCommand::Device {
         device_id,
-        channel_id,
-        preset,
-        sensor_id,
+        op: DeviceOp::SetCoolingCurvePreset {
+            channel_id,
+            preset,
+            sensor_id,
+        },
     }
 }
 

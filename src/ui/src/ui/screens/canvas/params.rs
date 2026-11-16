@@ -1,6 +1,7 @@
 // SPDX-License-Identifier: GPL-3.0-or-later
 //! Effect-instance command builders and per-effect param editing widgets.
 
+use halod_shared::commands::DeviceOp;
 use std::collections::HashMap;
 
 use halod_shared::{
@@ -60,20 +61,22 @@ pub(super) fn build_instance_params(
 pub(super) fn unroll_cmd(cmd: &CommandTx, zone: &PlacedZone, currently_unrolled: bool) {
     crate::runtime::ipc::send(
         cmd,
-        DaemonCommand::CanvasMoveZone {
+        DaemonCommand::Device {
             device_id: zone.device_id.clone(),
-            channel_id: zone.channel_id.clone(),
-            x: zone.x as f64,
-            y: zone.y as f64,
-            w: None,
-            h: None,
-            rotation: None,
-            effect: None,
-            sampling_mode: Some(if currently_unrolled {
-                SamplingMode::Spatial
-            } else {
-                SamplingMode::Unrolled
-            }),
+            op: DeviceOp::CanvasMoveZone {
+                channel_id: zone.channel_id.clone(),
+                x: zone.x as f64,
+                y: zone.y as f64,
+                w: None,
+                h: None,
+                rotation: None,
+                effect: None,
+                sampling_mode: Some(if currently_unrolled {
+                    SamplingMode::Spatial
+                } else {
+                    SamplingMode::Unrolled
+                }),
+            },
         },
     );
 }
@@ -88,47 +91,55 @@ pub(super) fn assign_zone_cmd(
 ) -> DaemonCommand {
     let effect = assign.map(str::to_string);
     if on {
-        DaemonCommand::CanvasRemoveZone {
+        DaemonCommand::Device {
             device_id: device_id.to_string(),
-            channel_id: channel_id.to_string(),
+            op: DeviceOp::CanvasRemoveZone {
+                channel_id: channel_id.to_string(),
+            },
         }
     } else if let Some(p) = placed {
         // MoveZone treats `effect: None` as "leave unchanged"; clearing needs PlaceZone.
         match effect {
-            Some(_) => DaemonCommand::CanvasMoveZone {
+            Some(_) => DaemonCommand::Device {
                 device_id: device_id.to_string(),
-                channel_id: channel_id.to_string(),
-                x: p.x as f64,
-                y: p.y as f64,
-                w: Some(p.w as f64),
-                h: Some(p.h as f64),
-                rotation: Some(p.rotation as f64),
-                effect,
-                sampling_mode: None,
+                op: DeviceOp::CanvasMoveZone {
+                    channel_id: channel_id.to_string(),
+                    x: p.x as f64,
+                    y: p.y as f64,
+                    w: Some(p.w as f64),
+                    h: Some(p.h as f64),
+                    rotation: Some(p.rotation as f64),
+                    effect,
+                    sampling_mode: None,
+                },
             },
-            None => DaemonCommand::CanvasPlaceZone {
+            None => DaemonCommand::Device {
                 device_id: device_id.to_string(),
-                channel_id: channel_id.to_string(),
-                x: Some(p.x as f64),
-                y: Some(p.y as f64),
-                w: Some(p.w as f64),
-                h: Some(p.h as f64),
-                rotation: Some(p.rotation as f64),
-                effect: None,
-                sampling_mode: None,
+                op: DeviceOp::CanvasPlaceZone {
+                    channel_id: channel_id.to_string(),
+                    x: Some(p.x as f64),
+                    y: Some(p.y as f64),
+                    w: Some(p.w as f64),
+                    h: Some(p.h as f64),
+                    rotation: Some(p.rotation as f64),
+                    effect: None,
+                    sampling_mode: None,
+                },
             },
         }
     } else {
-        DaemonCommand::CanvasPlaceZone {
+        DaemonCommand::Device {
             device_id: device_id.to_string(),
-            channel_id: channel_id.to_string(),
-            x: None,
-            y: None,
-            w: None,
-            h: None,
-            rotation: None,
-            effect,
-            sampling_mode: None,
+            op: DeviceOp::CanvasPlaceZone {
+                channel_id: channel_id.to_string(),
+                x: None,
+                y: None,
+                w: None,
+                h: None,
+                rotation: None,
+                effect,
+                sampling_mode: None,
+            },
         }
     }
 }

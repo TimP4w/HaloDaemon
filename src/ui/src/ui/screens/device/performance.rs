@@ -3,7 +3,7 @@
 
 use crate::ui::components as widgets;
 use egui::{Align2, Pos2, Rect, Sense, Stroke, Vec2};
-use halod_shared::commands::DaemonCommand;
+use halod_shared::commands::{DaemonCommand, DeviceOp};
 use halod_shared::types::{DeviceCapability, DpiStatus};
 
 use super::{editing, DeviceUi, TabCtx};
@@ -97,9 +97,11 @@ pub fn show(ui: &mut egui::Ui, ctx: &TabCtx, st: &mut DeviceUi) {
         // default UI window to coalesce a drag / a run of keystrokes into one write.
         st.queue_debounced(
             "dpi",
-            DaemonCommand::SetDpiSteps {
-                id,
-                steps: st.perf.dpi.clone(),
+            DaemonCommand::Device {
+                device_id: id,
+                op: DeviceOp::SetDpiSteps {
+                    steps: st.perf.dpi.clone(),
+                },
             },
             ctx.time,
             DPI_DEBOUNCE_SECS,

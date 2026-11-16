@@ -12,7 +12,7 @@
 
 use crate::ui::components as widgets;
 use egui::{Align2, Color32, Pos2, Rect, Sense, Stroke, Vec2};
-use halod_shared::commands::DaemonCommand;
+use halod_shared::commands::{DaemonCommand, DeviceOp};
 use halod_shared::keycodes;
 use halod_shared::types::{
     ButtonAction, ButtonMapping, MacroAtom, MacroStep, MouseBtn, MACRO_MAX_DELAY_MS,
@@ -307,11 +307,17 @@ fn commit_action(
 ) {
     let (base, shifted) = layer.pair(st, action.clone());
     layer.set(st, action);
-    let cmd = DaemonCommand::SetButtonMapping {
-        id: id.to_string(),
-        mapping: ButtonMapping { cid, base, shifted },
+    let cmd = DaemonCommand::Device {
+        device_id: id.to_string(),
+        op: DeviceOp::SetButtonMapping {
+            mapping: ButtonMapping { cid, base, shifted },
+        },
     };
-    let DaemonCommand::SetButtonMapping { mapping, .. } = &cmd else {
+    let DaemonCommand::Device {
+        op: DeviceOp::SetButtonMapping { mapping, .. },
+        ..
+    } = &cmd
+    else {
         unreachable!()
     };
     if !super::keys::mapping_is_complete(&mapping.base, &mapping.shifted) {
@@ -1285,7 +1291,10 @@ mod tests {
             })
         );
         match rx.try_recv().unwrap() {
-            DaemonCommand::SetButtonMapping { id, mapping } => {
+            DaemonCommand::Device {
+                device_id: id,
+                op: DeviceOp::SetButtonMapping { mapping },
+            } => {
                 assert_eq!(id, "dev1");
                 assert_eq!(mapping.cid, 7);
                 assert_eq!(mapping.base, ButtonAction::Macro { steps });
@@ -1340,7 +1349,10 @@ mod tests {
 
         assert_eq!(Layer::Base.get(&st), Some(ButtonAction::Native));
         match rx.try_recv().unwrap() {
-            DaemonCommand::SetButtonMapping { mapping, .. } => {
+            DaemonCommand::Device {
+                op: DeviceOp::SetButtonMapping { mapping, .. },
+                ..
+            } => {
                 assert_eq!(mapping.base, ButtonAction::Native);
                 assert_eq!(mapping.shifted, ButtonAction::Disable);
             }
@@ -1370,7 +1382,10 @@ mod tests {
 
         assert!(st.keys.macro_rec.is_none());
         match rx.try_recv().unwrap() {
-            DaemonCommand::SetButtonMapping { mapping, .. } => {
+            DaemonCommand::Device {
+                op: DeviceOp::SetButtonMapping { mapping, .. },
+                ..
+            } => {
                 assert_eq!(mapping.cid, 1, "must commit to the recording's button");
                 assert_eq!(mapping.base, ButtonAction::Macro { steps });
             }

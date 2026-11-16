@@ -3,7 +3,7 @@
 
 use crate::ui::components as widgets;
 use egui::{Align2, Pos2, Rect, Sense, Vec2};
-use halod_shared::commands::DaemonCommand;
+use halod_shared::commands::{DaemonCommand, DeviceOp};
 use halod_shared::types::{DeviceCapability, EqBand, Equalizer};
 
 use super::{editing, DeviceUi, TabCtx};
@@ -63,9 +63,9 @@ pub fn show(ui: &mut egui::Ui, ctx: &TabCtx, st: &mut DeviceUi) {
                         st.last_edit = ctx.time;
                         crate::runtime::ipc::send(
                             ctx.cmd,
-                            DaemonCommand::SetEqBands {
-                                id: id.clone(),
-                                values: flat,
+                            DaemonCommand::Device {
+                                device_id: id.clone(),
+                                op: DeviceOp::SetEqBands { values: flat },
                             },
                         );
                     }
@@ -112,9 +112,9 @@ fn preset_list(ui: &mut egui::Ui, ctx: &TabCtx, id: &str, eq: &Equalizer) {
         {
             crate::runtime::ipc::send(
                 ctx.cmd,
-                DaemonCommand::SetEqPreset {
-                    id: id.to_string(),
-                    preset_index: idx,
+                DaemonCommand::Device {
+                    device_id: id.to_string(),
+                    op: DeviceOp::SetEqPreset { preset_index: idx },
                 },
             );
         }
@@ -200,9 +200,11 @@ fn bands(ui: &mut egui::Ui, ctx: &TabCtx, st: &mut DeviceUi, id: &str, eq: &Equa
     if changed {
         st.queue(
             "eq",
-            DaemonCommand::SetEqBands {
-                id: id.to_string(),
-                values: st.equalizer.eq.clone(),
+            DaemonCommand::Device {
+                device_id: id.to_string(),
+                op: DeviceOp::SetEqBands {
+                    values: st.equalizer.eq.clone(),
+                },
             },
             ctx.time,
         );

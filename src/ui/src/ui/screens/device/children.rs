@@ -3,6 +3,7 @@
 
 use crate::ui::components as widgets;
 use egui::{Align2, Pos2, Rect, Sense, Stroke, Vec2};
+use halod_shared::commands::DeviceOp;
 use halod_shared::types::{DeviceCapability, PairingSlot, PairingState, PairingStatus, WireDevice};
 
 use super::TabCtx;
@@ -218,8 +219,9 @@ fn receiver_panel(ui: &mut egui::Ui, id: &str, ctx: &TabCtx, ps: &PairingStatus,
                     ui.ctx().data_mut(|d| d.insert_temp(cancel_key, true));
                     crate::runtime::ipc::send(
                         ctx.cmd,
-                        halod_shared::commands::DaemonCommand::ReceiverStopPairing {
-                            id: id.to_string(),
+                        halod_shared::commands::DaemonCommand::Device {
+                            device_id: id.to_string(),
+                            op: DeviceOp::ReceiverStopPairing,
                         },
                     );
                 }
@@ -241,9 +243,11 @@ fn receiver_panel(ui: &mut egui::Ui, id: &str, ctx: &TabCtx, ps: &PairingStatus,
                     ui.ctx().data_mut(|d| d.remove::<bool>(cancel_key));
                     crate::runtime::ipc::send(
                         ctx.cmd,
-                        halod_shared::commands::DaemonCommand::ReceiverStartPairing {
-                            id: id.to_string(),
-                            timeout_secs: PAIR_TIMEOUT_SECS,
+                        halod_shared::commands::DaemonCommand::Device {
+                            device_id: id.to_string(),
+                            op: DeviceOp::ReceiverStartPairing {
+                                timeout_secs: PAIR_TIMEOUT_SECS,
+                            },
                         },
                     );
                 }
@@ -330,9 +334,9 @@ fn pair_slot_row(
     {
         crate::runtime::ipc::send(
             ctx.cmd,
-            halod_shared::commands::DaemonCommand::ReceiverUnpair {
-                id: id.to_string(),
-                slot: slot_idx,
+            halod_shared::commands::DaemonCommand::Device {
+                device_id: id.to_string(),
+                op: DeviceOp::ReceiverUnpair { slot: slot_idx },
             },
         );
     }

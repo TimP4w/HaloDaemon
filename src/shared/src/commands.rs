@@ -70,29 +70,15 @@ impl ScreenRotation {
 #[derive(Debug, Clone, Serialize, Deserialize)]
 #[serde(tag = "type", rename_all = "snake_case")]
 pub enum DaemonCommand {
+    /// A command scoped to one device; it runs under that device's lock.
+    Device {
+        device_id: String,
+        op: DeviceOp,
+    },
     /// No-op keepalive
     Ping,
 
     // Device capability settings
-    SetChoice {
-        id: String,
-        key: String,
-        selected: usize,
-    },
-    SetRange {
-        id: String,
-        key: String,
-        value: i32,
-    },
-    SetBoolean {
-        id: String,
-        key: String,
-        value: bool,
-    },
-    TriggerAction {
-        id: String,
-        key: String,
-    },
 
     // Profile management
     AddProfile {
@@ -188,33 +174,6 @@ pub enum DaemonCommand {
         id: String,
         values: HashMap<String, String>,
     },
-    /// Open the daemon-owned setup flow for an integration.
-    BeginIntegrationSetup {
-        id: String,
-    },
-    /// Delete an integration's persisted setup data and start its setup flow again.
-    ResetIntegrationSetup {
-        id: String,
-    },
-    /// Choose automatic discovery or manual configuration.
-    SelectIntegrationSetupMode {
-        id: String,
-        mode: IntegrationSetupMode,
-    },
-    /// Select an automatic candidate or submit manual/configuration values.
-    SubmitIntegrationSetup {
-        id: String,
-        candidate_id: Option<String>,
-        values: HashMap<String, String>,
-    },
-    /// Retry the manifest-declared button-pairing hook.
-    RetryIntegrationPairing {
-        id: String,
-    },
-    /// Close and discard transient setup progress. Persisted credentials are untouched.
-    CancelIntegrationSetup {
-        id: String,
-    },
     SetLogLevel {
         level: String,
     },
@@ -244,29 +203,6 @@ pub enum DaemonCommand {
     SetFanFailsafeDuty {
         duty: u8,
     },
-    ResetAllButtonMappings {
-        id: String,
-    },
-    ResetButtonMapping {
-        id: String,
-        cid: u16,
-    },
-    SetEqPreset {
-        id: String,
-        preset_index: usize,
-    },
-    SetEqBands {
-        id: String,
-        values: Vec<f32>,
-    },
-    SetDpiSteps {
-        id: String,
-        steps: Vec<u32>,
-    },
-    SetDeviceVisibility {
-        device_id: String,
-        state: VisibilityState,
-    },
     /// Hide or disable one of a device's lighting or cooling channels. Channel
     /// ids are only unique per capability, hence `kind`.
     SetChannelVisibility {
@@ -275,127 +211,18 @@ pub enum DaemonCommand {
         channel_id: String,
         state: VisibilityState,
     },
-    SetDeviceName {
-        device_id: String,
-        name: String,
-    },
-    /// Choose a keyboard's physical variant and/or language layout. Either axis
-    /// absent (Auto) resolves from the firmware-detected language.
-    SetKeyboardLayout {
-        id: String,
-        selection: crate::keyboard::KeyboardLayoutSelection,
-    },
-
-    /// Channel-addressed curve commands for devices that expose `cooling`.
-    SetCoolingCurvePoints {
-        device_id: String,
-        channel_id: String,
-        points: Vec<[f32; 2]>,
-        #[serde(default, skip_serializing_if = "Option::is_none")]
-        sensor_id: Option<String>,
-    },
-    SetCoolingCurvePreset {
-        device_id: String,
-        channel_id: String,
-        preset: String,
-        #[serde(default, skip_serializing_if = "Option::is_none")]
-        sensor_id: Option<String>,
-    },
-    RemoveCoolingCurve {
-        device_id: String,
-        channel_id: String,
-    },
 
     // RGB
-    LightingApply {
-        id: String,
-        state: LightingState,
-    },
-    LightingSetChannelTransform {
-        id: String,
-        channel_id: String,
-        transform: ZoneContentTransform,
-    },
-    LightingAddSegment {
-        id: String,
-        channel_id: String,
-        name: String,
-        led_count: u32,
-        topology: ZoneTopology,
-    },
-    LightingRemoveSegment {
-        id: String,
-        channel_id: String,
-        device_id: String,
-    },
-    LightingReorderSegment {
-        id: String,
-        channel_id: String,
-        device_id: String,
-        new_index: usize,
-    },
-    LightingDetectSegments {
-        id: String,
-        channel_id: String,
-    },
 
     // Key remap
-    SetButtonMapping {
-        id: String,
-        mapping: ButtonMapping,
-    },
-    SetSoftwareDpiSteps {
-        id: String,
-        steps: Vec<u32>,
-    },
     /// Run a macro on the host immediately (editor test play); no device id.
     PlayMacro {
         steps: Vec<MacroStep>,
     },
 
     // Onboard profiles
-    OnboardProfileSwitch {
-        id: String,
-        slot: u16,
-    },
-    OnboardProfileRestore {
-        id: String,
-        slot: u16,
-    },
-    OnboardProfileSetEnabled {
-        id: String,
-        slot: u16,
-        enabled: bool,
-    },
 
     // LCD screen
-    SetScreenImage {
-        id: String,
-        data_b64: String,
-    },
-    SetScreenImageFromLibrary {
-        id: String,
-        filename: String,
-    },
-    SetScreenRotation {
-        id: String,
-        rotation: ScreenRotation,
-    },
-    SetScreenBrightness {
-        id: String,
-        brightness: u8,
-    },
-    SetScreenDefault {
-        id: String,
-    },
-    SetScreenRawStreaming {
-        id: String,
-        enabled: bool,
-    },
-    SetScreenVideo {
-        id: String,
-        path: String,
-    },
     ListLcdImages,
     DeleteLcdImage {
         filename: String,
@@ -429,8 +256,78 @@ pub enum DaemonCommand {
         #[serde(default, skip_serializing_if = "Option::is_none")]
         instance_id: Option<String>,
     },
+    CanvasSetSampleRadius {
+        radius: f64,
+    },
+    /// Disable the canvas engine and blank every RGB device it was driving.
+    CanvasStop,
+    CanvasSubscribe,
+
+    // LCD engine
+    LcdEngineSubscribe,
+    SaveLcdTemplate {
+        name: String,
+        def: crate::lcd_custom::CustomTemplateDef,
+    },
+    LoadLcdTemplate {
+        name: String,
+    },
+    DeleteLcdTemplate {
+        name: String,
+    },
+
+    // Custom "Designer" direct effects
+    SaveCustomEffect {
+        name: String,
+        params: HashMap<String, EffectParamValue>,
+    },
+    DeleteCustomEffect {
+        name: String,
+    },
+
+    // Receiver pairing
+
+    // Misc
+    ListRunningApps,
+    GetDebugInfo,
+    SetEngineConfig {
+        engine: EngineKind,
+        #[serde(default, skip_serializing_if = "Option::is_none")]
+        enabled: Option<bool>,
+        #[serde(default, skip_serializing_if = "Option::is_none")]
+        tick_ms: Option<u64>,
+        #[serde(default, skip_serializing_if = "Option::is_none")]
+        fps: Option<u64>,
+        #[serde(default, skip_serializing_if = "Option::is_none")]
+        failsafe_duty: Option<u8>,
+    },
+    Shutdown,
+}
+
+/// Device-scoped operations, carried by [`DaemonCommand::Device`].
+#[derive(Debug, Clone, Serialize, Deserialize)]
+#[serde(tag = "type", rename_all = "snake_case")]
+pub enum DeviceOp {
+    /// Open the daemon-owned setup flow for an integration.
+    BeginIntegrationSetup,
+    /// Close and discard transient setup progress. Persisted credentials are untouched.
+    CancelIntegrationSetup,
+    CanvasMoveZone {
+        channel_id: String,
+        x: f64,
+        y: f64,
+        #[serde(default, skip_serializing_if = "Option::is_none")]
+        w: Option<f64>,
+        #[serde(default, skip_serializing_if = "Option::is_none")]
+        h: Option<f64>,
+        #[serde(default, skip_serializing_if = "Option::is_none")]
+        rotation: Option<f64>,
+        #[serde(default, skip_serializing_if = "Option::is_none")]
+        effect: Option<String>,
+        #[serde(default, skip_serializing_if = "Option::is_none")]
+        sampling_mode: Option<SamplingMode>,
+    },
     CanvasPlaceZone {
-        device_id: String,
         channel_id: String,
         #[serde(default, skip_serializing_if = "Option::is_none")]
         x: Option<f64>,
@@ -448,51 +345,57 @@ pub enum DaemonCommand {
         sampling_mode: Option<SamplingMode>,
     },
     CanvasRemoveZone {
-        device_id: String,
         channel_id: String,
     },
-    CanvasMoveZone {
-        device_id: String,
-        channel_id: String,
-        x: f64,
-        y: f64,
-        #[serde(default, skip_serializing_if = "Option::is_none")]
-        w: Option<f64>,
-        #[serde(default, skip_serializing_if = "Option::is_none")]
-        h: Option<f64>,
-        #[serde(default, skip_serializing_if = "Option::is_none")]
-        rotation: Option<f64>,
-        #[serde(default, skip_serializing_if = "Option::is_none")]
-        effect: Option<String>,
-        #[serde(default, skip_serializing_if = "Option::is_none")]
-        sampling_mode: Option<SamplingMode>,
-    },
-    CanvasSetSampleRadius {
-        radius: f64,
-    },
-    /// Disable the canvas engine and blank every RGB device it was driving.
-    CanvasStop,
-    CanvasSubscribe,
-
-    // LCD engine
+    LcdEngineDeactivate,
     LcdEngineSetTemplate {
-        device_id: String,
         template_id: String,
         params: HashMap<String, EffectParamValue>,
     },
-    LcdEngineDeactivate {
-        device_id: String,
-    },
-    LcdEngineSubscribe,
-    SaveLcdTemplate {
+    LightingAddSegment {
+        channel_id: String,
         name: String,
-        def: crate::lcd_custom::CustomTemplateDef,
+        led_count: u32,
+        topology: ZoneTopology,
     },
-    LoadLcdTemplate {
-        name: String,
+    LightingApply {
+        state: LightingState,
     },
-    DeleteLcdTemplate {
-        name: String,
+    LightingDetectSegments {
+        channel_id: String,
+    },
+    LightingRemoveSegment {
+        channel_id: String,
+        segment_id: String,
+    },
+    LightingReorderSegment {
+        channel_id: String,
+        segment_id: String,
+        new_index: usize,
+    },
+    LightingSetChannelTransform {
+        channel_id: String,
+        transform: ZoneContentTransform,
+    },
+    OnboardProfileRestore {
+        slot: u16,
+    },
+    OnboardProfileSetEnabled {
+        slot: u16,
+        enabled: bool,
+    },
+    OnboardProfileSwitch {
+        slot: u16,
+    },
+    ReceiverStartPairing {
+        timeout_secs: u8,
+    },
+    ReceiverStopPairing,
+    ReceiverUnpair {
+        slot: u8,
+    },
+    RemoveCoolingCurve {
+        channel_id: String,
     },
     /// Editor request: render each widget of `def` to its own sprite bitmap
     /// against the device's canvas. `known` is the signature (id → content
@@ -500,48 +403,156 @@ pub enum DaemonCommand {
     /// with only the widgets that changed. The daemon replies with an
     /// `lcd_editor_render` frame carrying an [`LcdEditorRender`].
     RenderLcdEditor {
-        device_id: String,
         def: crate::lcd_custom::CustomTemplateDef,
         known: HashMap<String, u64>,
     },
-
-    // Custom "Designer" direct effects
-    SaveCustomEffect {
+    ResetAllButtonMappings,
+    ResetButtonMapping {
+        cid: u16,
+    },
+    /// Delete an integration's persisted setup data and start its setup flow again.
+    ResetIntegrationSetup,
+    /// Retry the manifest-declared button-pairing hook.
+    RetryIntegrationPairing,
+    /// Choose automatic discovery or manual configuration.
+    SelectIntegrationSetupMode {
+        mode: IntegrationSetupMode,
+    },
+    SetBoolean {
+        key: String,
+        value: bool,
+    },
+    SetButtonMapping {
+        mapping: ButtonMapping,
+    },
+    SetChoice {
+        key: String,
+        selected: usize,
+    },
+    /// Channel-addressed curve commands for devices that expose `cooling`.
+    SetCoolingCurvePoints {
+        channel_id: String,
+        points: Vec<[f32; 2]>,
+        #[serde(default, skip_serializing_if = "Option::is_none")]
+        sensor_id: Option<String>,
+    },
+    SetCoolingCurvePreset {
+        channel_id: String,
+        preset: String,
+        #[serde(default, skip_serializing_if = "Option::is_none")]
+        sensor_id: Option<String>,
+    },
+    SetDeviceName {
         name: String,
-        params: HashMap<String, EffectParamValue>,
     },
-    DeleteCustomEffect {
-        name: String,
+    SetDeviceVisibility {
+        state: VisibilityState,
     },
+    SetDpiSteps {
+        steps: Vec<u32>,
+    },
+    SetEqBands {
+        values: Vec<f32>,
+    },
+    SetEqPreset {
+        preset_index: usize,
+    },
+    /// Choose a keyboard's physical variant and/or language layout. Either axis
+    /// absent (Auto) resolves from the firmware-detected language.
+    SetKeyboardLayout {
+        selection: crate::keyboard::KeyboardLayoutSelection,
+    },
+    SetRange {
+        key: String,
+        value: i32,
+    },
+    SetScreenBrightness {
+        brightness: u8,
+    },
+    SetScreenDefault,
+    SetScreenImage {
+        data_b64: String,
+    },
+    SetScreenImageFromLibrary {
+        filename: String,
+    },
+    SetScreenRawStreaming {
+        enabled: bool,
+    },
+    SetScreenRotation {
+        rotation: ScreenRotation,
+    },
+    SetScreenVideo {
+        path: String,
+    },
+    SetSoftwareDpiSteps {
+        steps: Vec<u32>,
+    },
+    /// Select an automatic candidate or submit manual/configuration values.
+    SubmitIntegrationSetup {
+        candidate_id: Option<String>,
+        values: HashMap<String, String>,
+    },
+    TriggerAction {
+        key: String,
+    },
+}
 
-    // Receiver pairing
-    ReceiverStartPairing {
-        id: String,
-        timeout_secs: u8,
-    },
-    ReceiverStopPairing {
-        id: String,
-    },
-    ReceiverUnpair {
-        id: String,
-        slot: u8,
-    },
-
-    // Misc
-    ListRunningApps,
-    GetDebugInfo,
-    SetEngineConfig {
-        engine: EngineKind,
-        #[serde(default, skip_serializing_if = "Option::is_none")]
-        enabled: Option<bool>,
-        #[serde(default, skip_serializing_if = "Option::is_none")]
-        tick_ms: Option<u64>,
-        #[serde(default, skip_serializing_if = "Option::is_none")]
-        fps: Option<u64>,
-        #[serde(default, skip_serializing_if = "Option::is_none")]
-        failsafe_duty: Option<u8>,
-    },
-    Shutdown,
+impl DeviceOp {
+    /// Whether a failure means a requested hardware write did not reach the
+    /// device; configuration-only operations stay on the generic error path.
+    pub fn writes_device(&self) -> bool {
+        match self {
+            Self::LightingApply { .. }
+            | Self::LightingDetectSegments { .. }
+            | Self::OnboardProfileRestore { .. }
+            | Self::OnboardProfileSetEnabled { .. }
+            | Self::OnboardProfileSwitch { .. }
+            | Self::ReceiverStartPairing { .. }
+            | Self::ReceiverStopPairing
+            | Self::ReceiverUnpair { .. }
+            | Self::ResetAllButtonMappings
+            | Self::ResetButtonMapping { .. }
+            | Self::SetBoolean { .. }
+            | Self::SetButtonMapping { .. }
+            | Self::SetChoice { .. }
+            | Self::SetDpiSteps { .. }
+            | Self::SetEqBands { .. }
+            | Self::SetEqPreset { .. }
+            | Self::SetKeyboardLayout { .. }
+            | Self::SetRange { .. }
+            | Self::SetScreenBrightness { .. }
+            | Self::SetScreenDefault
+            | Self::SetScreenImage { .. }
+            | Self::SetScreenImageFromLibrary { .. }
+            | Self::SetScreenRawStreaming { .. }
+            | Self::SetScreenRotation { .. }
+            | Self::SetScreenVideo { .. }
+            | Self::SetSoftwareDpiSteps { .. }
+            | Self::TriggerAction { .. } => true,
+            Self::BeginIntegrationSetup
+            | Self::CancelIntegrationSetup
+            | Self::CanvasMoveZone { .. }
+            | Self::CanvasPlaceZone { .. }
+            | Self::CanvasRemoveZone { .. }
+            | Self::LcdEngineDeactivate
+            | Self::LcdEngineSetTemplate { .. }
+            | Self::LightingAddSegment { .. }
+            | Self::LightingRemoveSegment { .. }
+            | Self::LightingReorderSegment { .. }
+            | Self::LightingSetChannelTransform { .. }
+            | Self::RemoveCoolingCurve { .. }
+            | Self::RenderLcdEditor { .. }
+            | Self::ResetIntegrationSetup
+            | Self::RetryIntegrationPairing
+            | Self::SelectIntegrationSetupMode { .. }
+            | Self::SetCoolingCurvePoints { .. }
+            | Self::SetCoolingCurvePreset { .. }
+            | Self::SetDeviceName { .. }
+            | Self::SetDeviceVisibility { .. }
+            | Self::SubmitIntegrationSetup { .. } => false,
+        }
+    }
 }
 
 impl DaemonCommand {
@@ -646,35 +657,43 @@ mod tests {
                 }]}),
             ),
             (
-                DaemonCommand::SetChoice {
-                    id: "dev1".into(),
-                    key: "profile".into(),
-                    selected: 2,
+                DaemonCommand::Device {
+                    device_id: "dev1".into(),
+                    op: DeviceOp::SetChoice {
+                        key: "profile".into(),
+                        selected: 2,
+                    },
                 },
-                json!({"type": "set_choice", "id": "dev1", "key": "profile", "selected": 2}),
+                json!({"type": "device", "device_id": "dev1", "op": {"type": "set_choice", "key": "profile", "selected": 2}}),
             ),
             (
-                DaemonCommand::SetRange {
-                    id: "dev2".into(),
-                    key: "brightness".into(),
-                    value: 75,
+                DaemonCommand::Device {
+                    device_id: "dev2".into(),
+                    op: DeviceOp::SetRange {
+                        key: "brightness".into(),
+                        value: 75,
+                    },
                 },
-                json!({"type": "set_range", "id": "dev2", "key": "brightness", "value": 75}),
+                json!({"type": "device", "device_id": "dev2", "op": {"type": "set_range", "key": "brightness", "value": 75}}),
             ),
             (
-                DaemonCommand::SetBoolean {
-                    id: "dev3".into(),
-                    key: "enabled".into(),
-                    value: true,
+                DaemonCommand::Device {
+                    device_id: "dev3".into(),
+                    op: DeviceOp::SetBoolean {
+                        key: "enabled".into(),
+                        value: true,
+                    },
                 },
-                json!({"type": "set_boolean", "id": "dev3", "key": "enabled", "value": true}),
+                json!({"type": "device", "device_id": "dev3", "op": {"type": "set_boolean", "key": "enabled", "value": true}}),
             ),
             (
-                DaemonCommand::TriggerAction {
-                    id: "dev4".into(),
-                    key: "reboot".into(),
+                DaemonCommand::Device {
+                    device_id: "dev4".into(),
+                    op: DeviceOp::TriggerAction {
+                        key: "reboot".into(),
+                    },
                 },
-                json!({"type": "trigger_action", "id": "dev4", "key": "reboot"}),
+                json!({"type": "device", "device_id": "dev4", "op": {"type": "trigger_action", "key": "reboot"}}),
             ),
             (DaemonCommand::Rediscover, json!({"type": "rediscover"})),
             (
@@ -744,31 +763,37 @@ mod tests {
                 json!({"type": "set_integration_config", "id": "openrgb", "values": {"host": "127.0.0.1"}}),
             ),
             (
-                DaemonCommand::BeginIntegrationSetup {
-                    id: "nanoleaf".into(),
+                DaemonCommand::Device {
+                    device_id: "nanoleaf".into(),
+                    op: DeviceOp::BeginIntegrationSetup,
                 },
-                json!({"type": "begin_integration_setup", "id": "nanoleaf"}),
+                json!({"type": "device", "device_id": "nanoleaf", "op": {"type": "begin_integration_setup"}}),
             ),
             (
-                DaemonCommand::ResetIntegrationSetup {
-                    id: "nanoleaf".into(),
+                DaemonCommand::Device {
+                    device_id: "nanoleaf".into(),
+                    op: DeviceOp::ResetIntegrationSetup,
                 },
-                json!({"type": "reset_integration_setup", "id": "nanoleaf"}),
+                json!({"type": "device", "device_id": "nanoleaf", "op": {"type": "reset_integration_setup"}}),
             ),
             (
-                DaemonCommand::SelectIntegrationSetupMode {
-                    id: "nanoleaf".into(),
-                    mode: crate::types::IntegrationSetupMode::Automatic,
+                DaemonCommand::Device {
+                    device_id: "nanoleaf".into(),
+                    op: DeviceOp::SelectIntegrationSetupMode {
+                        mode: crate::types::IntegrationSetupMode::Automatic,
+                    },
                 },
-                json!({"type": "select_integration_setup_mode", "id": "nanoleaf", "mode": "automatic"}),
+                json!({"type": "device", "device_id": "nanoleaf", "op": {"type": "select_integration_setup_mode", "mode": "automatic"}}),
             ),
             (
-                DaemonCommand::SubmitIntegrationSetup {
-                    id: "nanoleaf".into(),
-                    candidate_id: Some("device-1".into()),
-                    values: HashMap::new(),
+                DaemonCommand::Device {
+                    device_id: "nanoleaf".into(),
+                    op: DeviceOp::SubmitIntegrationSetup {
+                        candidate_id: Some("device-1".into()),
+                        values: HashMap::new(),
+                    },
                 },
-                json!({"type": "submit_integration_setup", "id": "nanoleaf", "candidate_id": "device-1", "values": {}}),
+                json!({"type": "device", "device_id": "nanoleaf", "op": {"type": "submit_integration_setup", "candidate_id": "device-1", "values": {}}}),
             ),
             (
                 DaemonCommand::LoadLcdTemplate {
@@ -817,70 +842,80 @@ mod tests {
                 json!({"type": "rename_profile", "old_name": "old", "new_name": "new"}),
             ),
             (
-                DaemonCommand::SetCoolingCurvePoints {
+                DaemonCommand::Device {
                     device_id: "kraken".into(),
-                    channel_id: "pump".into(),
-                    points: vec![[30.0, 20.0], [80.0, 100.0]],
-                    sensor_id: None,
-                },
-                json!({
-                    "type": "set_cooling_curve_points", "device_id": "kraken", "channel_id": "pump",
-                    "points": [[30.0, 20.0], [80.0, 100.0]]
-                }),
-            ),
-            (
-                DaemonCommand::LightingApply {
-                    id: "d".into(),
-                    state: LightingState::Static {
-                        color: RgbColor { r: 1, g: 2, b: 3 },
+                    op: DeviceOp::SetCoolingCurvePoints {
+                        channel_id: "pump".into(),
+                        points: vec![[30.0, 20.0], [80.0, 100.0]],
+                        sensor_id: None,
                     },
                 },
-                json!({"type": "lighting_apply", "id": "d", "state": {"mode": "static", "color": {"r": 1, "g": 2, "b": 3}}}),
+                json!({"type": "device", "device_id": "kraken", "op": {"type": "set_cooling_curve_points", "channel_id": "pump", "points": [[30.0, 20.0], [80.0, 100.0]]}}),
             ),
             (
-                DaemonCommand::LightingApply {
-                    id: "d".into(),
-                    state: LightingState::DirectEffect {
-                        id: "rainbow".into(),
-                        params: HashMap::new(),
+                DaemonCommand::Device {
+                    device_id: "d".into(),
+                    op: DeviceOp::LightingApply {
+                        state: LightingState::Static {
+                            color: RgbColor { r: 1, g: 2, b: 3 },
+                        },
                     },
                 },
-                json!({"type": "lighting_apply", "id": "d", "state": {"mode": "direct_effect", "id": "rainbow", "params": {}}}),
+                json!({"type": "device", "device_id": "d", "op": {"type": "lighting_apply", "state": {"mode": "static", "color": {"r": 1, "g": 2, "b": 3}}}}),
             ),
             (
-                DaemonCommand::ReceiverStartPairing {
-                    id: "rcv".into(),
-                    timeout_secs: 30,
-                },
-                json!({"type": "receiver_start_pairing", "id": "rcv", "timeout_secs": 30}),
-            ),
-            (
-                DaemonCommand::ReceiverStopPairing { id: "rcv".into() },
-                json!({"type": "receiver_stop_pairing", "id": "rcv"}),
-            ),
-            (
-                DaemonCommand::ReceiverUnpair {
-                    id: "rcv".into(),
-                    slot: 2,
-                },
-                json!({"type": "receiver_unpair", "id": "rcv", "slot": 2}),
-            ),
-            (
-                DaemonCommand::SetKeyboardLayout {
-                    id: "kbd".into(),
-                    selection: crate::keyboard::KeyboardLayoutSelection {
-                        variant: Some(crate::keyboard::KeyVariant::Iso),
-                        language: Some(crate::types::KeyboardLayout::CH),
+                DaemonCommand::Device {
+                    device_id: "d".into(),
+                    op: DeviceOp::LightingApply {
+                        state: LightingState::DirectEffect {
+                            id: "rainbow".into(),
+                            params: HashMap::new(),
+                        },
                     },
                 },
-                json!({"type": "set_keyboard_layout", "id": "kbd", "selection": {"variant": "iso", "language": "c_h"}}),
+                json!({"type": "device", "device_id": "d", "op": {"type": "lighting_apply", "state": {"mode": "direct_effect", "id": "rainbow", "params": {}}}}),
             ),
             (
-                DaemonCommand::SetKeyboardLayout {
-                    id: "kbd".into(),
-                    selection: Default::default(),
+                DaemonCommand::Device {
+                    device_id: "rcv".into(),
+                    op: DeviceOp::ReceiverStartPairing { timeout_secs: 30 },
                 },
-                json!({"type": "set_keyboard_layout", "id": "kbd", "selection": {}}),
+                json!({"type": "device", "device_id": "rcv", "op": {"type": "receiver_start_pairing", "timeout_secs": 30}}),
+            ),
+            (
+                DaemonCommand::Device {
+                    device_id: "rcv".into(),
+                    op: DeviceOp::ReceiverStopPairing,
+                },
+                json!({"type": "device", "device_id": "rcv", "op": {"type": "receiver_stop_pairing"}}),
+            ),
+            (
+                DaemonCommand::Device {
+                    device_id: "rcv".into(),
+                    op: DeviceOp::ReceiverUnpair { slot: 2 },
+                },
+                json!({"type": "device", "device_id": "rcv", "op": {"type": "receiver_unpair", "slot": 2}}),
+            ),
+            (
+                DaemonCommand::Device {
+                    device_id: "kbd".into(),
+                    op: DeviceOp::SetKeyboardLayout {
+                        selection: crate::keyboard::KeyboardLayoutSelection {
+                            variant: Some(crate::keyboard::KeyVariant::Iso),
+                            language: Some(crate::types::KeyboardLayout::CH),
+                        },
+                    },
+                },
+                json!({"type": "device", "device_id": "kbd", "op": {"type": "set_keyboard_layout", "selection": {"variant": "iso", "language": "c_h"}}}),
+            ),
+            (
+                DaemonCommand::Device {
+                    device_id: "kbd".into(),
+                    op: DeviceOp::SetKeyboardLayout {
+                        selection: Default::default(),
+                    },
+                },
+                json!({"type": "device", "device_id": "kbd", "op": {"type": "set_keyboard_layout", "selection": {}}}),
             ),
             (DaemonCommand::Shutdown, json!({"type": "shutdown"})),
             (DaemonCommand::Ping, json!({"type": "ping"})),
@@ -929,18 +964,24 @@ mod tests {
             serde_json::from_value(json!({"type": "canvas_subscribe", "ignored": true})).unwrap();
         assert!(matches!(cmd, DaemonCommand::CanvasSubscribe));
         let cmd: DaemonCommand = serde_json::from_value(
-            json!({"type": "canvas_place_zone", "device_id": "d", "channel_id": "z", "x": 0.1, "y": 0.2}),
+            json!({"type": "device", "device_id": "d", "op": {"type": "canvas_place_zone", "channel_id": "z", "x": 0.1, "y": 0.2}}),
         )
         .unwrap();
-        assert!(matches!(cmd, DaemonCommand::CanvasPlaceZone { .. }));
+        assert!(matches!(
+            cmd,
+            DaemonCommand::Device {
+                op: DeviceOp::CanvasPlaceZone { .. },
+                ..
+            }
+        ));
     }
 
     #[test]
     fn parses_ui_payloads() {
         for payload in [
-            json!({"type": "set_device_visibility", "device_id": "d", "state": "hidden"}),
+            json!({"type": "device", "device_id": "d", "op": {"type": "set_device_visibility", "state": "hidden"}}),
             json!({"type": "set_channel_visibility", "device_id": "d", "kind": "cooling", "channel_id": "fan1", "state": "disabled"}),
-            json!({"type": "set_device_name", "device_id": "d", "name": "My Fan"}),
+            json!({"type": "device", "device_id": "d", "op": {"type": "set_device_name", "name": "My Fan"}}),
             json!({"type": "remove_profile_override", "profile": "Gaming",
                 "target": { "kind": "device_capability", "device_id": "d", "state_key": "fan_curve" }}),
             json!({"type": "remove_profile_override", "profile": "Gaming", "target": { "kind": "canvas" }}),

@@ -4,6 +4,7 @@
 //! that maps a sprite (or its fallback nominal box) onto the stage.
 
 use egui::{Rect, Vec2};
+use halod_shared::commands::DeviceOp;
 use halod_shared::lcd_geometry::MAX_SCALE;
 
 use super::{DeviceUi, TabCtx};
@@ -28,10 +29,12 @@ pub(super) fn request_editor_render(ui: &egui::Ui, ctx: &TabCtx, st: &mut Device
     let known = known_signatures(&ed.sprite_tex);
     crate::runtime::ipc::send(
         ctx.cmd,
-        halod_shared::commands::DaemonCommand::RenderLcdEditor {
+        halod_shared::commands::DaemonCommand::Device {
             device_id: id.to_string(),
-            def: ed.def.clone(),
-            known,
+            op: DeviceOp::RenderLcdEditor {
+                def: ed.def.clone(),
+                known,
+            },
         },
     );
 }

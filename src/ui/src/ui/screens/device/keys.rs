@@ -4,7 +4,7 @@
 
 use crate::ui::components as widgets;
 use egui::{Align2, Pos2, Rect, Sense, Stroke, Vec2};
-use halod_shared::commands::DaemonCommand;
+use halod_shared::commands::{DaemonCommand, DeviceOp};
 use halod_shared::keycodes;
 use halod_shared::types::{
     ButtonAction, ButtonMapping, CycleDir, DeviceCapability, DeviceType, KeyRemapStatus,
@@ -208,7 +208,10 @@ fn button_list_card(
                         {
                             crate::runtime::ipc::send(
                                 ctx.cmd,
-                                DaemonCommand::ResetAllButtonMappings { id: id.to_string() },
+                                DaemonCommand::Device {
+                                    device_id: id.to_string(),
+                                    op: DeviceOp::ResetAllButtonMappings,
+                                },
                             );
                         }
                     },
@@ -421,9 +424,9 @@ fn editor_card(
                     st.last_edit = ctx.time;
                     crate::runtime::ipc::send(
                         ctx.cmd,
-                        DaemonCommand::ResetButtonMapping {
-                            id: id.to_string(),
-                            cid,
+                        DaemonCommand::Device {
+                            device_id: id.to_string(),
+                            op: DeviceOp::ResetButtonMapping { cid },
                         },
                     );
                 }
@@ -476,9 +479,11 @@ fn action_grid(
             if mapping_is_complete(&base, &shifted) {
                 crate::runtime::ipc::send(
                     ctx.cmd,
-                    DaemonCommand::SetButtonMapping {
-                        id: id.to_string(),
-                        mapping: ButtonMapping { cid, base, shifted },
+                    DaemonCommand::Device {
+                        device_id: id.to_string(),
+                        op: DeviceOp::SetButtonMapping {
+                            mapping: ButtonMapping { cid, base, shifted },
+                        },
                     },
                 );
             }
@@ -576,9 +581,11 @@ fn params_editor(
             Layer::Base => (act, other.clone()),
             Layer::Shifted => (other.clone(), act),
         };
-        DaemonCommand::SetButtonMapping {
-            id: id.to_string(),
-            mapping: ButtonMapping { cid, base, shifted },
+        DaemonCommand::Device {
+            device_id: id.to_string(),
+            op: DeviceOp::SetButtonMapping {
+                mapping: ButtonMapping { cid, base, shifted },
+            },
         }
     };
     let tag = layer.tag();
@@ -588,7 +595,11 @@ fn params_editor(
         layer.set(st, a.clone());
         st.last_edit = ctx.time;
         let cmd = make_cmd(a);
-        if let DaemonCommand::SetButtonMapping { mapping, .. } = &cmd {
+        if let DaemonCommand::Device {
+            op: DeviceOp::SetButtonMapping { mapping, .. },
+            ..
+        } = &cmd
+        {
             if mapping_is_complete(&mapping.base, &mapping.shifted) {
                 crate::runtime::ipc::send(ctx.cmd, cmd);
             }
@@ -597,7 +608,11 @@ fn params_editor(
     let queue = |st: &mut DeviceUi, field: &str, a: ButtonAction| {
         layer.set(st, a.clone());
         let cmd = make_cmd(a);
-        if let DaemonCommand::SetButtonMapping { mapping, .. } = &cmd {
+        if let DaemonCommand::Device {
+            op: DeviceOp::SetButtonMapping { mapping, .. },
+            ..
+        } = &cmd
+        {
             if mapping_is_complete(&mapping.base, &mapping.shifted) {
                 st.queue(&format!("btn:{field}:{cid}:{tag}"), cmd, ctx.time);
             }

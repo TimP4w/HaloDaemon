@@ -9,6 +9,7 @@ mod params;
 mod rack;
 mod viewport;
 
+use halod_shared::commands::DeviceOp;
 use std::collections::{HashMap, HashSet};
 
 use crate::domain::state::Debouncer;
@@ -119,16 +120,18 @@ fn queue_move(pending: &mut Debouncer, z: &PlacedZone, time: f64) {
             "{MOVE_PREFIX}{}",
             geometry::zone_key(&z.device_id, &z.channel_id)
         ),
-        halod_shared::commands::DaemonCommand::CanvasMoveZone {
+        halod_shared::commands::DaemonCommand::Device {
             device_id: z.device_id.clone(),
-            channel_id: z.channel_id.clone(),
-            x: z.x as f64,
-            y: z.y as f64,
-            w: Some(z.w as f64),
-            h: Some(z.h as f64),
-            rotation: Some(z.rotation as f64),
-            effect: None,
-            sampling_mode: None,
+            op: DeviceOp::CanvasMoveZone {
+                channel_id: z.channel_id.clone(),
+                x: z.x as f64,
+                y: z.y as f64,
+                w: Some(z.w as f64),
+                h: Some(z.h as f64),
+                rotation: Some(z.rotation as f64),
+                effect: None,
+                sampling_mode: None,
+            },
         },
         time,
         DEBOUNCE,
@@ -340,9 +343,9 @@ pub(crate) fn body(
         for (dev, zone) in to_remove {
             crate::runtime::ipc::send(
                 cmd,
-                halod_shared::commands::DaemonCommand::CanvasRemoveZone {
+                halod_shared::commands::DaemonCommand::Device {
                     device_id: dev,
-                    channel_id: zone,
+                    op: DeviceOp::CanvasRemoveZone { channel_id: zone },
                 },
             );
         }
@@ -528,7 +531,10 @@ mod tests {
         flush_moves(&mut pending, &tx, 1.0);
         assert!(matches!(
             rx.try_recv(),
-            Ok(DaemonCommand::CanvasMoveZone { .. })
+            Ok(DaemonCommand::Device {
+                op: DeviceOp::CanvasMoveZone { .. },
+                ..
+            })
         ));
         assert!(rx.try_recv().is_err());
         assert_eq!(pending.keys().collect::<Vec<_>>(), [FPS_KEY]);

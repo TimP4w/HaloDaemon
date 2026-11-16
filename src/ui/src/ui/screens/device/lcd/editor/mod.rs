@@ -19,7 +19,7 @@ use std::collections::{HashMap, HashSet};
 #[cfg(test)]
 use crate::domain::topic_store::TopicStore;
 use egui::{Pos2, Rect, Vec2};
-use halod_shared::commands::DaemonCommand;
+use halod_shared::commands::{DaemonCommand, DeviceOp};
 use halod_shared::lcd_custom::{CustomTemplateDef, WIDGETS_JSON_PARAM};
 use halod_shared::types::EffectParamValue;
 
@@ -301,17 +301,21 @@ fn send_def(ctx: &TabCtx, st: &mut DeviceUi, id: &str, immediate: bool) {
         st.last_edit = ctx.time;
         crate::runtime::ipc::send(
             ctx.cmd,
-            halod_shared::commands::DaemonCommand::LcdEngineSetTemplate {
+            halod_shared::commands::DaemonCommand::Device {
                 device_id: id.to_string(),
-                template_id: "custom".to_string(),
-                params,
+                op: DeviceOp::LcdEngineSetTemplate {
+                    template_id: "custom".to_string(),
+                    params,
+                },
             },
         );
     } else {
-        let cmd = DaemonCommand::LcdEngineSetTemplate {
+        let cmd = DaemonCommand::Device {
             device_id: id.to_string(),
-            template_id: "custom".to_string(),
-            params,
+            op: DeviceOp::LcdEngineSetTemplate {
+                template_id: "custom".to_string(),
+                params,
+            },
         };
         st.queue("lcd_editor_def", cmd, ctx.time);
     }

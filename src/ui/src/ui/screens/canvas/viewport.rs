@@ -2,6 +2,7 @@
 //! Canvas viewport: the interactive zone stage — drag/marquee/rotate/resize
 //! input handling, zone + LED rendering, and hit-testing.
 
+use halod_shared::commands::DeviceOp;
 use std::collections::HashSet;
 
 use crate::domain::topic_store::TopicStore;
@@ -223,9 +224,9 @@ pub(super) fn canvas_view(
             if let Some((d, z)) = badge_hit(canvas_ui, state, norm, canvas_rect) {
                 crate::runtime::ipc::send(
                     cmd,
-                    halod_shared::commands::DaemonCommand::CanvasRemoveZone {
+                    halod_shared::commands::DaemonCommand::Device {
                         device_id: d,
-                        channel_id: z,
+                        op: DeviceOp::CanvasRemoveZone { channel_id: z },
                     },
                 );
                 canvas_ui.selected.clear();

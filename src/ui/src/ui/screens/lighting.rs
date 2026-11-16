@@ -13,7 +13,7 @@ use crate::ui::components as widgets;
 use std::collections::HashMap;
 
 use crate::domain::topic_store::TopicStore;
-use halod_shared::commands::DaemonCommand;
+use halod_shared::commands::{DaemonCommand, DeviceOp};
 use halod_shared::effect_designer::DESIGNER_EFFECT_ID;
 use halod_shared::types::{
     Animation, CanvasFrame, ColorStep, DeviceCapability, EffectDef, EffectParamDescriptor,
@@ -969,11 +969,13 @@ fn apply_direct_params(
         }
         crate::runtime::ipc::send(
             cmd,
-            DaemonCommand::LightingApply {
-                id: dev.id.clone(),
-                state: LightingState::DirectEffect {
-                    id: DESIGNER_EFFECT_ID.to_string(),
-                    params: params.clone(),
+            DaemonCommand::Device {
+                device_id: dev.id.clone(),
+                op: DeviceOp::LightingApply {
+                    state: LightingState::DirectEffect {
+                        id: DESIGNER_EFFECT_ID.to_string(),
+                        params: params.clone(),
+                    },
                 },
             },
         );
@@ -984,10 +986,12 @@ fn apply_direct_params(
 fn release_device(cmd: &CommandTx, id: &str) {
     crate::runtime::ipc::send(
         cmd,
-        DaemonCommand::LightingApply {
-            id: id.to_string(),
-            state: LightingState::Static {
-                color: RgbColor { r: 0, g: 0, b: 0 },
+        DaemonCommand::Device {
+            device_id: id.to_string(),
+            op: DeviceOp::LightingApply {
+                state: LightingState::Static {
+                    color: RgbColor { r: 0, g: 0, b: 0 },
+                },
             },
         },
     );
@@ -1051,9 +1055,9 @@ fn send_to_selected(state: &TopicStore, cmd: &CommandTx, st: &LightingUi) {
 
         crate::runtime::ipc::send(
             cmd,
-            DaemonCommand::LightingApply {
-                id: dev.id.clone(),
-                state: rgb_state,
+            DaemonCommand::Device {
+                device_id: dev.id.clone(),
+                op: DeviceOp::LightingApply { state: rgb_state },
             },
         );
     }
@@ -1761,12 +1765,9 @@ mod tests {
         let cmd = rx.try_recv().expect("expected a queued command");
         assert!(matches!(
             cmd,
-            DaemonCommand::LightingApply {
-                id,
-                state: LightingState::Static {
+            DaemonCommand::Device { device_id: id, op: DeviceOp::LightingApply { state: LightingState::Static {
                     color: RgbColor { r: 0, g: 0, b: 0 }
-                }
-            } if id == "dev1"
+                } } } if id == "dev1"
         ));
     }
 

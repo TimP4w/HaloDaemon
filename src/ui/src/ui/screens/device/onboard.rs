@@ -3,6 +3,7 @@
 
 use crate::ui::components as widgets;
 use egui::{Align2, Pos2, Rect, Sense, Stroke, Vec2};
+use halod_shared::commands::DeviceOp;
 use halod_shared::types::{Boolean, DeviceCapability, OnboardProfileSlot, OnboardProfiles};
 
 use super::TabCtx;
@@ -80,10 +81,12 @@ fn host_mode_row(ui: &mut egui::Ui, id: &str, ctx: &TabCtx, b: &Boolean) {
                 if !b.read_only && widgets::toggle(ui, b.value) != b.value {
                     crate::runtime::ipc::send(
                         ctx.cmd,
-                        halod_shared::commands::DaemonCommand::SetBoolean {
-                            id: id.to_string(),
-                            key: b.key.clone(),
-                            value: !b.value,
+                        halod_shared::commands::DaemonCommand::Device {
+                            device_id: id.to_string(),
+                            op: DeviceOp::SetBoolean {
+                                key: b.key.clone(),
+                                value: !b.value,
+                            },
                         },
                     );
                 }
@@ -169,9 +172,9 @@ fn slot_row(
             {
                 crate::runtime::ipc::send(
                     ctx.cmd,
-                    halod_shared::commands::DaemonCommand::OnboardProfileSwitch {
-                        id: id.to_string(),
-                        slot: slot.index,
+                    halod_shared::commands::DaemonCommand::Device {
+                        device_id: id.to_string(),
+                        op: DeviceOp::OnboardProfileSwitch { slot: slot.index },
                     },
                 );
             }
@@ -184,10 +187,12 @@ fn slot_row(
                 if widgets::button(ui, &label, kind, egui::vec2(68.0, 28.0)).clicked() {
                     crate::runtime::ipc::send(
                         ctx.cmd,
-                        halod_shared::commands::DaemonCommand::OnboardProfileSetEnabled {
-                            id: id.to_string(),
-                            slot: slot.index,
-                            enabled: enabled_after,
+                        halod_shared::commands::DaemonCommand::Device {
+                            device_id: id.to_string(),
+                            op: DeviceOp::OnboardProfileSetEnabled {
+                                slot: slot.index,
+                                enabled: enabled_after,
+                            },
                         },
                     );
                 }
@@ -203,9 +208,9 @@ fn slot_row(
             {
                 crate::runtime::ipc::send(
                     ctx.cmd,
-                    halod_shared::commands::DaemonCommand::OnboardProfileRestore {
-                        id: id.to_string(),
-                        slot: slot.index,
+                    halod_shared::commands::DaemonCommand::Device {
+                        device_id: id.to_string(),
+                        op: DeviceOp::OnboardProfileRestore { slot: slot.index },
                     },
                 );
             }

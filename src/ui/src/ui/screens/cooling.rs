@@ -4,6 +4,7 @@
 //! preview) for every fan/pump device.
 
 use crate::ui::components as widgets;
+use halod_shared::commands::DeviceOp;
 
 use crate::domain::topic_store::TopicStore;
 use egui::{Align2, Color32, Pos2, Rect, Sense, Stroke, Vec2};
@@ -41,11 +42,13 @@ fn curve_points_command(
     points: Vec<[f32; 2]>,
     sensor_id: Option<String>,
 ) -> halod_shared::commands::DaemonCommand {
-    halod_shared::commands::DaemonCommand::SetCoolingCurvePoints {
+    halod_shared::commands::DaemonCommand::Device {
         device_id,
-        channel_id,
-        points,
-        sensor_id,
+        op: DeviceOp::SetCoolingCurvePoints {
+            channel_id,
+            points,
+            sensor_id,
+        },
     }
 }
 
@@ -55,11 +58,13 @@ fn curve_preset_command(
     preset: String,
     sensor_id: Option<String>,
 ) -> halod_shared::commands::DaemonCommand {
-    halod_shared::commands::DaemonCommand::SetCoolingCurvePreset {
+    halod_shared::commands::DaemonCommand::Device {
         device_id,
-        channel_id,
-        preset,
-        sensor_id,
+        op: DeviceOp::SetCoolingCurvePreset {
+            channel_id,
+            preset,
+            sensor_id,
+        },
     }
 }
 

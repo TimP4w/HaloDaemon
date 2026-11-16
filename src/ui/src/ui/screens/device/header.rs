@@ -2,6 +2,7 @@
 //! Device page header: name/badge row, status chips, battery chips.
 
 use egui::{Align2, Pos2, Rect, Stroke, Vec2};
+use halod_shared::commands::DeviceOp;
 use halod_shared::types::{Battery, BatteryStatus, ConnectionType, DeviceCapability, WireDevice};
 
 use crate::ui::theme;
@@ -89,9 +90,9 @@ pub(super) fn header(
             if !trimmed.is_empty() {
                 crate::runtime::ipc::send(
                     cmd,
-                    halod_shared::commands::DaemonCommand::SetDeviceName {
+                    halod_shared::commands::DaemonCommand::Device {
                         device_id: dev.id.clone(),
-                        name: trimmed,
+                        op: DeviceOp::SetDeviceName { name: trimmed },
                     },
                 );
             }

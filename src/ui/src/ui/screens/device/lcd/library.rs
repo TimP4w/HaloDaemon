@@ -2,6 +2,7 @@
 //! Media card: the Images/GIFs library grid, Video source picker, and the
 //! background upload/native-file-picker plumbing they share.
 
+use halod_shared::commands::DeviceOp;
 use std::path::PathBuf;
 use std::sync::mpsc::TryRecvError;
 
@@ -285,15 +286,19 @@ pub(super) fn select_none(
     if active_template_id.is_some() {
         crate::runtime::ipc::send(
             ctx.cmd,
-            halod_shared::commands::DaemonCommand::LcdEngineDeactivate {
+            halod_shared::commands::DaemonCommand::Device {
                 device_id: id.to_string(),
+                op: DeviceOp::LcdEngineDeactivate,
             },
         );
         st.lcd.template_params.clear();
     }
     crate::runtime::ipc::send(
         ctx.cmd,
-        halod_shared::commands::DaemonCommand::SetScreenDefault { id: id.to_string() },
+        halod_shared::commands::DaemonCommand::Device {
+            device_id: id.to_string(),
+            op: DeviceOp::SetScreenDefault,
+        },
     );
 }
 
@@ -315,8 +320,9 @@ pub(super) fn select_image(
     if active_template_id.is_some() {
         crate::runtime::ipc::send(
             ctx.cmd,
-            halod_shared::commands::DaemonCommand::LcdEngineDeactivate {
+            halod_shared::commands::DaemonCommand::Device {
                 device_id: id.to_string(),
+                op: DeviceOp::LcdEngineDeactivate,
             },
         );
         st.lcd.template_params.clear();
@@ -324,9 +330,11 @@ pub(super) fn select_image(
     st.lcd.preview_pending = Some(filename.to_string());
     crate::runtime::ipc::send(
         ctx.cmd,
-        halod_shared::commands::DaemonCommand::SetScreenImageFromLibrary {
-            id: id.to_string(),
-            filename: filename.to_string(),
+        halod_shared::commands::DaemonCommand::Device {
+            device_id: id.to_string(),
+            op: DeviceOp::SetScreenImageFromLibrary {
+                filename: filename.to_string(),
+            },
         },
     );
 }
@@ -389,9 +397,11 @@ pub(super) fn poll_picker(ui: &egui::Ui, ctx: &TabCtx, st: &mut DeviceUi, id: &s
             PickerTarget::Image => start_upload(ui, ctx, st, id, path),
             PickerTarget::Video => crate::runtime::ipc::send(
                 ctx.cmd,
-                halod_shared::commands::DaemonCommand::SetScreenVideo {
-                    id: id.to_string(),
-                    path: path.to_string_lossy().into_owned(),
+                halod_shared::commands::DaemonCommand::Device {
+                    device_id: id.to_string(),
+                    op: DeviceOp::SetScreenVideo {
+                        path: path.to_string_lossy().into_owned(),
+                    },
                 },
             ),
         },
@@ -428,9 +438,9 @@ fn start_upload(ui: &egui::Ui, ctx: &TabCtx, st: &mut DeviceUi, id: &str, path: 
                 let b64 = base64::engine::general_purpose::STANDARD.encode(&bytes);
                 crate::runtime::ipc::send(
                     &cmd,
-                    halod_shared::commands::DaemonCommand::SetScreenImage {
-                        id: device_id,
-                        data_b64: b64,
+                    halod_shared::commands::DaemonCommand::Device {
+                        device_id,
+                        op: DeviceOp::SetScreenImage { data_b64: b64 },
                     },
                 );
             }

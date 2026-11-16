@@ -12,7 +12,7 @@ use crate::ui::components as widgets;
 use std::collections::HashMap;
 
 use egui::{Color32, Pos2, Rect, Sense, Stroke, Vec2};
-use halod_shared::commands::DaemonCommand;
+use halod_shared::commands::{DaemonCommand, DeviceOp};
 use halod_shared::effect_designer::DESIGNER_EFFECT_ID;
 use halod_shared::types::{
     Animation, ColorStep, DeviceCapability, EffectParamDescriptor, EffectParamValue,
@@ -846,9 +846,9 @@ fn layout_selector(
 
     let opts = kbv::layout_options(status);
     let emit = |sel: KeyboardLayoutSelection| {
-        let _ = ctx.cmd.send(DaemonCommand::SetKeyboardLayout {
-            id: ctx.dev.id.clone(),
-            selection: sel,
+        let _ = ctx.cmd.send(DaemonCommand::Device {
+            device_id: ctx.dev.id.clone(),
+            op: DeviceOp::SetKeyboardLayout { selection: sel },
         });
     };
     ui.horizontal_wrapped(|ui| {
@@ -1232,10 +1232,12 @@ fn pick_cmd(
 }
 
 fn solid_cmd(ctx: &TabCtx, st: &DeviceUi) -> DaemonCommand {
-    DaemonCommand::LightingApply {
-        id: ctx.dev.id.clone(),
-        state: LightingState::Static {
-            color: st.lighting.paint_color.unwrap_or_default(),
+    DaemonCommand::Device {
+        device_id: ctx.dev.id.clone(),
+        op: DeviceOp::LightingApply {
+            state: LightingState::Static {
+                color: st.lighting.paint_color.unwrap_or_default(),
+            },
         },
     }
 }
@@ -1250,9 +1252,11 @@ fn paint_cmd(ctx: &TabCtx, st: &DeviceUi) -> DaemonCommand {
             (z.clone(), m)
         })
         .collect();
-    DaemonCommand::LightingApply {
-        id: ctx.dev.id.clone(),
-        state: LightingState::PerLed { channels },
+    DaemonCommand::Device {
+        device_id: ctx.dev.id.clone(),
+        op: DeviceOp::LightingApply {
+            state: LightingState::PerLed { channels },
+        },
     }
 }
 
@@ -1341,11 +1345,13 @@ fn effect_cmd(
     rgb: &LightingStatus,
     eff: &NativeEffect,
 ) -> DaemonCommand {
-    DaemonCommand::LightingApply {
-        id: ctx.dev.id.clone(),
-        state: LightingState::NativeEffect {
-            id: eff.id.clone(),
-            params: collect_effect_params(st, rgb, EffectSource::Native, &eff.id, &eff.params),
+    DaemonCommand::Device {
+        device_id: ctx.dev.id.clone(),
+        op: DeviceOp::LightingApply {
+            state: LightingState::NativeEffect {
+                id: eff.id.clone(),
+                params: collect_effect_params(st, rgb, EffectSource::Native, &eff.id, &eff.params),
+            },
         },
     }
 }
@@ -1356,34 +1362,46 @@ fn direct_cmd(
     rgb: &LightingStatus,
     anim: &Animation,
 ) -> DaemonCommand {
-    DaemonCommand::LightingApply {
-        id: ctx.dev.id.clone(),
-        state: LightingState::DirectEffect {
-            id: anim.id.clone(),
-            params: collect_effect_params(st, rgb, EffectSource::Direct, &anim.id, &anim.params),
+    DaemonCommand::Device {
+        device_id: ctx.dev.id.clone(),
+        op: DeviceOp::LightingApply {
+            state: LightingState::DirectEffect {
+                id: anim.id.clone(),
+                params: collect_effect_params(
+                    st,
+                    rgb,
+                    EffectSource::Direct,
+                    &anim.id,
+                    &anim.params,
+                ),
+            },
         },
     }
 }
 
 fn place_on_canvas_cmd(ctx: &TabCtx, st: &DeviceUi) -> DaemonCommand {
-    DaemonCommand::CanvasPlaceZone {
+    DaemonCommand::Device {
         device_id: ctx.dev.id.clone(),
-        channel_id: st.lighting.zone.clone(),
-        x: None,
-        y: None,
-        w: None,
-        h: None,
-        rotation: None,
-        effect: None,
-        sampling_mode: None,
+        op: DeviceOp::CanvasPlaceZone {
+            channel_id: st.lighting.zone.clone(),
+            x: None,
+            y: None,
+            w: None,
+            h: None,
+            rotation: None,
+            effect: None,
+            sampling_mode: None,
+        },
     }
 }
 
 fn tx_cmd(ctx: &TabCtx, channel_id: &str, transform: ZoneContentTransform) -> DaemonCommand {
-    DaemonCommand::LightingSetChannelTransform {
-        id: ctx.dev.id.clone(),
-        channel_id: channel_id.to_string(),
-        transform,
+    DaemonCommand::Device {
+        device_id: ctx.dev.id.clone(),
+        op: DeviceOp::LightingSetChannelTransform {
+            channel_id: channel_id.to_string(),
+            transform,
+        },
     }
 }
 
@@ -1552,8 +1570,12 @@ mod tests {
         let cmd = pick_cmd(&ctx, &st, &rgb, &EffectPick::Solid)
             .expect("an active pick must still produce an apply");
         match cmd {
-            DaemonCommand::LightingApply {
-                state: LightingState::Static { color },
+            DaemonCommand::Device {
+                op:
+                    DeviceOp::LightingApply {
+                        state: LightingState::Static { color },
+                        ..
+                    },
                 ..
             } => assert_eq!(color, violet),
             other => panic!("unexpected command: {other:?}"),
