@@ -177,7 +177,6 @@ fn build_enum_format_pod() -> Result<Vec<u8>, String> {
 
 pub fn list_monitors() -> Vec<MonitorInfo> {
     vec![MonitorInfo {
-        index: 0,
         label: "Default (select in portal dialog)".to_string(),
     }]
 }
@@ -622,7 +621,6 @@ mod tests {
     fn list_monitors_returns_exactly_one_entry() {
         let monitors = list_monitors();
         assert_eq!(monitors.len(), 1);
-        assert_eq!(monitors[0].index, 0);
         assert!(!monitors[0].label.is_empty());
     }
 

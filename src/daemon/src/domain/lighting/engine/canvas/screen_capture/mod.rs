@@ -31,8 +31,6 @@ pub struct RawFrame {
 }
 
 pub struct MonitorInfo {
-    #[cfg_attr(not(target_os = "windows"), allow(dead_code))]
-    pub index: usize,
     /// Human-readable label for the UI dropdown, e.g. "Monitor 0: 1920×1080".
     pub label: String,
 }

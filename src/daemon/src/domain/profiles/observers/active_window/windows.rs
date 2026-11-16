@@ -44,15 +44,13 @@ unsafe extern "system" fn hook_proc(
     );
     let event = resolve_foreground(hwnd);
     if let Some(guard) = BRIDGE.get() {
-        if let Ok(lock) = guard.lock() {
-            if let Some(tx) = &*lock {
-                match tx.send(event) {
-                    Ok(()) => log::trace!("[FocusWatcher/Windows] event sent to bridge"),
-                    Err(e) => log::warn!("[FocusWatcher/Windows] bridge send failed: {e}"),
-                }
-            } else {
-                log::warn!("[FocusWatcher/Windows] BRIDGE is None in hook_proc thread");
+        if let Some(tx) = &*guard.lock() {
+            match tx.send(event) {
+                Ok(()) => log::trace!("[FocusWatcher/Windows] event sent to bridge"),
+                Err(e) => log::warn!("[FocusWatcher/Windows] bridge send failed: {e}"),
             }
+        } else {
+            log::warn!("[FocusWatcher/Windows] BRIDGE is None in hook_proc thread");
         }
     } else {
         log::warn!("[FocusWatcher/Windows] BRIDGE not yet initialized in hook_proc thread");
@@ -136,10 +134,7 @@ pub async fn spawn() -> anyhow::Result<mpsc::Receiver<FocusEvent>> {
         log::info!("[FocusWatcher/Windows] hook thread started");
         hook_thread_id_for_hook.store(unsafe { GetCurrentThreadId() }, Ordering::Release);
         let still_active = BRIDGE_GENERATION.load(Ordering::Acquire) == generation
-            && BRIDGE
-                .get()
-                .and_then(|bridge| bridge.lock().ok())
-                .is_some_and(|bridge| bridge.is_some());
+            && BRIDGE.get().is_some_and(|bridge| bridge.lock().is_some());
         if !still_active {
             return;
         }

@@ -186,6 +186,7 @@ impl<T: Clone> Synced<T> {
         self.value = Arc::new(value);
     }
 
+    #[cfg(target_os = "linux")]
     pub fn subscribe(&self) -> watch::Receiver<T> {
         self.rx.clone()
     }

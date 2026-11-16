@@ -11,7 +11,6 @@ pub fn list_monitors() -> Vec<MonitorInfo> {
     enumerate_dxgi_monitors().unwrap_or_else(|e| {
         log::warn!("DXGI monitor enumeration failed: {e}");
         vec![MonitorInfo {
-            index: 0,
             label: "Monitor 0".to_string(),
         }]
     })
@@ -65,7 +64,6 @@ fn enumerate_dxgi_monitors() -> Result<Vec<MonitorInfo>, String> {
                     (desc.DesktopCoordinates.bottom - desc.DesktopCoordinates.top).unsigned_abs();
                 let idx = monitors.len();
                 monitors.push(MonitorInfo {
-                    index: idx,
                     label: format!("Monitor {idx}: {w}×{h}"),
                 });
                 o += 1;
@@ -75,7 +73,6 @@ fn enumerate_dxgi_monitors() -> Result<Vec<MonitorInfo>, String> {
     }
     if monitors.is_empty() {
         monitors.push(MonitorInfo {
-            index: 0,
             label: "Monitor 0".to_string(),
         });
     }
@@ -298,17 +295,6 @@ mod tests {
             !monitors.is_empty(),
             "list_monitors should always return at least one entry"
         );
-    }
-
-    #[test]
-    fn list_monitors_indices_match_position() {
-        let monitors = list_monitors();
-        for (pos, m) in monitors.iter().enumerate() {
-            assert_eq!(
-                m.index, pos,
-                "monitor at position {pos} should have index {pos}"
-            );
-        }
     }
 
     #[test]
