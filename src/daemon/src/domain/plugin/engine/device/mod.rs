@@ -554,6 +554,11 @@ impl LuaDevice {
         self.worker.as_ref().is_some_and(|worker| worker.is_child())
     }
 
+    fn enumerates_controllers(&self) -> bool {
+        (self.plugin_type == PluginKind::Integration || self.dynamic_children)
+            && !self.is_dynamic_child()
+    }
+
     /// Record a call outcome against the device that made it: only a root
     /// writes the shared runtime state.
     fn record_call_outcome(&self, failed: bool, reason: DegradeReason) {
@@ -1534,7 +1539,7 @@ impl Device for LuaDevice {
                 }
             }
         }
-        if self.plugin_type == PluginKind::Integration || self.dynamic_children {
+        if self.enumerates_controllers() {
             caps.push(CapabilityRef::Controller(self));
         }
         caps
@@ -1732,7 +1737,7 @@ impl SensorCapability for LuaDevice {
 #[async_trait]
 impl Controller for LuaDevice {
     async fn discover_children(&self) -> Vec<Arc<dyn Device>> {
-        if self.plugin_type == PluginKind::Integration || self.dynamic_children {
+        if self.enumerates_controllers() {
             return self.discover_controllers().await;
         }
         let mut children = Vec::new();
@@ -3304,6 +3309,13 @@ mod tests {
         assert!(caps
             .iter()
             .any(|cap| matches!(cap, CapabilityRef::Controller(_))));
+
+        let children = Controller::discover_children(&dev).await;
+        assert_eq!(children.len(), 1);
+        assert!(
+            children[0].as_controller().is_none(),
+            "only the root enumerates controllers"
+        );
         dev.close().await;
     }
 
