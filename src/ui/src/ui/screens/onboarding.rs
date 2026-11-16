@@ -34,9 +34,14 @@ pub struct OnboardingUi {
     /// Plugin id → selected for installation.
     selected: HashMap<String, bool>,
     start_on_boot: Option<bool>,
+    enable_after_install: Vec<String>,
 }
 
 impl OnboardingUi {
+    pub fn take_enable_requests(&mut self) -> Vec<String> {
+        std::mem::take(&mut self.enable_after_install)
+    }
+
     /// The wizard opened on step `step` (0 = welcome … 5 = done).
     #[cfg(all(test, feature = "screenshots"))]
     pub fn at_step(step: u8) -> Self {
@@ -645,9 +650,10 @@ fn advance_primary(
                     cmd,
                     DaemonCommand::InstallPlugin {
                         repo: OFFICIAL_REPO_SLUG.to_owned(),
-                        id,
+                        id: id.clone(),
                     },
                 );
+                st.enable_after_install.push(id);
             }
             st.step = DONE;
         }
@@ -773,6 +779,7 @@ mod tests {
             Ok(DaemonCommand::InstallPlugin { repo, id }) if repo == OFFICIAL_REPO_SLUG && id == "a"
         ));
         assert!(rx.try_recv().is_err());
+        assert_eq!(st.take_enable_requests(), ["a"]);
 
         advance_primary(&mut st, &state, &cmd, &mut outcome);
         assert_eq!(outcome, Outcome::Finished);

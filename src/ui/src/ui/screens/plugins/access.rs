@@ -1,10 +1,6 @@
 // SPDX-License-Identifier: GPL-3.0-or-later
 use super::*;
 
-/// True when `p` declares permissions the user hasn't consented to (never
-/// granted, or the script changed since it was granted). It stays inert until
-/// the user grants them. Shared with the Integrations screen, whose
-/// integrations are plugins too.
 pub(super) fn permission_label(
     perm: halod_shared::types::Permission,
 ) -> std::borrow::Cow<'static, str> {
@@ -126,7 +122,16 @@ pub(super) fn uses_section(ui: &mut egui::Ui, p: &PluginInfo) {
     let top = ui.cursor().min;
     widgets::section_label(ui, &t!("plugins.uses"));
     ui.add_space(theme::SPACE_4);
-    for (title, desc) in &rows {
+    access_list(ui, &rows);
+    crate::domain::tour::anchor(
+        ui.ctx(),
+        crate::domain::tour::AnchorId::PluginsPermissions,
+        egui::Rect::from_min_max(top, ui.cursor().min + Vec2::new(ui.available_width(), 0.0)),
+    );
+}
+
+fn access_list(ui: &mut egui::Ui, rows: &[(String, String)]) {
+    for (title, desc) in rows {
         ui.label(
             egui::RichText::new(title)
                 .font(theme::medium(14.0))
@@ -139,11 +144,99 @@ pub(super) fn uses_section(ui: &mut egui::Ui, p: &PluginInfo) {
         );
         ui.add_space(theme::SPACE_4);
     }
-    crate::domain::tour::anchor(
-        ui.ctx(),
-        crate::domain::tour::AnchorId::PluginsPermissions,
-        egui::Rect::from_min_max(top, ui.cursor().min + Vec2::new(ui.available_width(), 0.0)),
-    );
+}
+
+/// Plugins waiting for the user to confirm enabling them.
+#[derive(Default)]
+pub(crate) struct EnablePrompt {
+    queue: Vec<String>,
+}
+
+impl EnablePrompt {
+    pub(crate) fn request(&mut self, id: &str) {
+        if !self.queue.iter().any(|queued| queued == id) {
+            self.queue.push(id.to_owned());
+        }
+    }
+
+    pub(super) fn current<'a>(&mut self, plugins: &'a [PluginInfo]) -> Option<&'a PluginInfo> {
+        self.queue
+            .retain(|id| !plugins.iter().any(|p| &p.id == id && p.enabled));
+        self.queue
+            .iter()
+            .find_map(|id| plugins.iter().find(|p| &p.id == id))
+    }
+
+    pub(super) fn resolve(&mut self, cmd: &CommandTx, id: &str, enable: bool) -> bool {
+        self.queue.retain(|queued| queued != id);
+        if enable {
+            ipc::send(
+                cmd,
+                DaemonCommand::SetPluginEnabled {
+                    id: id.to_owned(),
+                    enabled: true,
+                },
+            );
+        }
+        enable
+    }
+
+    /// Returns the id the user just enabled.
+    pub(crate) fn show(
+        &mut self,
+        ctx: &egui::Context,
+        plugins: &[PluginInfo],
+        cmd: &CommandTx,
+    ) -> Option<String> {
+        let plugin = self.current(plugins)?;
+        let rows = access_rows(&plugin.access);
+        let mut choice = None;
+        let dismissed = widgets::dialog(
+            ctx,
+            "plugin_enable_prompt",
+            &t!("plugins.enable_prompt_title", name = plugin_name(plugin)),
+            460.0,
+            |ui| {
+                let intro = if rows.is_empty() {
+                    t!("plugins.enable_prompt_nothing")
+                } else {
+                    t!("plugins.enable_prompt_intro")
+                };
+                ui.label(
+                    egui::RichText::new(intro)
+                        .font(theme::body_md())
+                        .color(theme::TEXT_SOFT),
+                );
+                ui.add_space(theme::SPACE_6);
+                access_list(ui, &rows);
+            },
+            |ui| {
+                if widgets::button(
+                    ui,
+                    &t!("plugins.enable_prompt_confirm"),
+                    ButtonKind::Primary,
+                    Vec2::new(0.0, 36.0),
+                )
+                .clicked()
+                {
+                    choice = Some(true);
+                }
+                if widgets::button(
+                    ui,
+                    &t!("plugins.enable_prompt_decline"),
+                    ButtonKind::Secondary,
+                    Vec2::new(0.0, 36.0),
+                )
+                .clicked()
+                {
+                    choice = Some(false);
+                }
+            },
+        );
+        let enable = choice.or(dismissed.then_some(false))?;
+        let id = plugin.id.clone();
+        self.resolve(cmd, &id, enable).then_some(id)
+    }
 }
 
 #[cfg(test)]

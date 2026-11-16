@@ -22,6 +22,7 @@ mod access;
 mod repo;
 mod udev;
 
+pub(crate) use access::EnablePrompt;
 use access::*;
 use udev::*;
 
@@ -81,6 +82,7 @@ pub struct PluginsUi {
     filter: usize,
     search: String,
     integration: crate::ui::screens::plugin_integration::IntegrationPanel,
+    pub(crate) enable_prompt: EnablePrompt,
 }
 
 /// The plugin list's type filter.
@@ -253,15 +255,29 @@ impl PluginsUi {
     }
 
     fn toggle(&mut self, cmd: &CommandTx, p: &PluginInfo) {
-        let target = !p.enabled;
+        if !p.enabled {
+            self.enable_prompt.request(&p.id);
+            return;
+        }
         ipc::send(
             cmd,
             DaemonCommand::SetPluginEnabled {
                 id: p.id.clone(),
-                enabled: target,
+                enabled: false,
             },
         );
-        self.in_flight.insert(p.id.clone(), target);
+        self.in_flight.insert(p.id.clone(), false);
+    }
+
+    pub fn show_enable_prompt(
+        &mut self,
+        ctx: &egui::Context,
+        plugins: &[PluginInfo],
+        cmd: &CommandTx,
+    ) {
+        if let Some(id) = self.enable_prompt.show(ctx, plugins, cmd) {
+            self.in_flight.insert(id, true);
+        }
     }
 
     fn install(&mut self, now: f64, cmd: &CommandTx, repo: &str, id: &str) {
@@ -1375,6 +1391,60 @@ mod tests {
         }]);
         assert!(screen.installing.is_empty());
         assert!(screen.updating_all.is_none());
+    }
+
+    fn queued(screen: &mut PluginsUi, plugins: &[PluginInfo]) -> Option<String> {
+        screen
+            .enable_prompt
+            .current(plugins)
+            .map(|plugin| plugin.id.clone())
+    }
+
+    #[test]
+    fn confirming_the_prompt_sends_exactly_one_enable() {
+        let (cmd, mut rx) = tokio::sync::mpsc::unbounded_channel();
+        let mut screen = PluginsUi::default();
+        let plugins = [info("acme", false)];
+        screen.toggle(&cmd, &plugins[0]);
+        assert!(rx.try_recv().is_err());
+        assert_eq!(queued(&mut screen, &plugins).as_deref(), Some("acme"));
+
+        assert!(screen.enable_prompt.resolve(&cmd, "acme", true));
+        assert!(matches!(
+            rx.try_recv(),
+            Ok(DaemonCommand::SetPluginEnabled { id, enabled: true }) if id == "acme"
+        ));
+        assert!(rx.try_recv().is_err());
+        assert_eq!(queued(&mut screen, &plugins), None);
+    }
+
+    #[test]
+    fn declining_sends_nothing_and_asks_again_next_time() {
+        let (cmd, mut rx) = tokio::sync::mpsc::unbounded_channel();
+        let mut screen = PluginsUi::default();
+        let plugins = [info("acme", false)];
+        screen.toggle(&cmd, &plugins[0]);
+
+        assert!(!screen.enable_prompt.resolve(&cmd, "acme", false));
+        assert!(rx.try_recv().is_err());
+        assert_eq!(screen.locked_target(&plugins[0]), None);
+        assert_eq!(queued(&mut screen, &plugins), None);
+
+        screen.toggle(&cmd, &plugins[0]);
+        assert_eq!(queued(&mut screen, &plugins).as_deref(), Some("acme"));
+    }
+
+    #[test]
+    fn disabling_never_prompts() {
+        let (cmd, mut rx) = tokio::sync::mpsc::unbounded_channel();
+        let mut screen = PluginsUi::default();
+        let plugins = [info("acme", true)];
+        screen.toggle(&cmd, &plugins[0]);
+        assert!(matches!(
+            rx.try_recv(),
+            Ok(DaemonCommand::SetPluginEnabled { id, enabled: false }) if id == "acme"
+        ));
+        assert_eq!(queued(&mut screen, &plugins), None);
     }
 
     pub(super) fn info(id: &str, enabled: bool) -> PluginInfo {

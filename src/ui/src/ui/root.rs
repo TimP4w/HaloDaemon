@@ -423,8 +423,8 @@ impl App {
                 }
             });
 
-        // Onboarding owns first-run health, plugin selection, and authority
-        // consent, so their standalone surfaces are suppressed for this session.
+        // Onboarding owns first-run health and plugin selection, so their
+        // standalone surfaces are suppressed for this session.
         let mut onboarding_shown = false;
         if onboarding_active {
             use crate::ui::screens::plugins as plugins_screen;
@@ -440,6 +440,9 @@ impl App {
                 &mut self.onboarding_ui,
                 time,
             );
+            for id in self.onboarding_ui.take_enable_requests() {
+                self.plugins_ui.enable_prompt.request(&id);
+            }
             if !matches!(outcome, crate::ui::screens::onboarding::Outcome::Pending) {
                 self.onboarding_completed = true;
                 crate::runtime::ipc::send(
@@ -455,6 +458,9 @@ impl App {
                 }
             }
         }
+
+        self.plugins_ui
+            .show_enable_prompt(ctx, &state.plugins.plugins, &self.cmd);
 
         if !onboarding_shown && !tour_active {
             crate::ui::screens::depcheck::show(

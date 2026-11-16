@@ -129,7 +129,11 @@ plugins:
   permission_data_reads_desc: "Reads data published by the host or by other plugins:"
   # Config fields
   secret_set_hint: (a secret is stored)
-  # Permission consent dialog (shown when enabling a plugin that declares permissions)
+  enable_prompt_title: "Enable %{name}?"
+  enable_prompt_intro: "This plugin will use…"
+  enable_prompt_nothing: "This plugin doesn't use any devices, programs or network access."
+  enable_prompt_confirm: "Enable"
+  enable_prompt_decline: "Don't enable"
   # Add dialog
   cancel: Cancel
   # Delete confirmation
