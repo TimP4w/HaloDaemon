@@ -37,11 +37,13 @@ mod dpi;
 mod health;
 mod key_remap;
 mod lcd;
+mod status;
 
 use dpi::DpiFacet;
 use health::Health;
 use key_remap::KeyRemapFacet;
 use lcd::LcdFacet;
+use status::StatusCache;
 
 use super::chain_leaf::ChainLeaf;
 use super::manifest::{
@@ -230,74 +232,6 @@ impl StatusPollCaps {
             || self.equalizer
             || self.always
     }
-}
-
-/// Sample dynamic status through the worker into the host caches that
-/// serialization reads, keeping fresh hardware I/O off the serialize path.
-/// Runs only on the status-poll cadence; a failed read keeps the last value.
-async fn sample_status(
-    worker: &PluginHandle,
-    caps: StatusPollCaps,
-    cooling_channels: &OnceLock<Vec<CoolingChannel>>,
-    cooling_cache: &Mutex<HashMap<String, CoolingChannel>>,
-    sensor_cache: &Mutex<Vec<Sensor>>,
-    boolean_cache: &Mutex<Vec<Boolean>>,
-    battery_cache: &Mutex<Vec<Battery>>,
-    connection_cache: &Mutex<Option<ConnectionStatus>>,
-    eq_cache: &Mutex<Option<Equalizer>>,
-) -> bool {
-    let mut changed = false;
-    if caps.cooling {
-        if let Some(channels) = cooling_channels.get() {
-            let mut observed = HashMap::with_capacity(channels.len());
-            for channel in channels {
-                if let Ok(status) = worker.cooling_status(&channel.id).await {
-                    observed.insert(channel.id.clone(), status);
-                }
-            }
-            if !observed.is_empty() {
-                changed |= replace_if_changed(cooling_cache, observed);
-            }
-        }
-    }
-    if caps.sensor {
-        if let Ok(sensors) = worker.get_sensors().await {
-            changed |= replace_if_changed(sensor_cache, sensors);
-        }
-    }
-    if caps.boolean {
-        if let Ok(booleans) = worker.boolean_get().await {
-            changed |= replace_if_changed(boolean_cache, booleans);
-        }
-    }
-    if caps.battery {
-        if let Ok(batteries) = worker.battery_get().await {
-            changed |= replace_if_changed(battery_cache, batteries);
-        }
-    }
-    if caps.connection {
-        if let Ok(connection) = worker.connection_get().await {
-            changed |= replace_if_changed(connection_cache, connection);
-        }
-    }
-    if caps.equalizer {
-        if let Ok(equalizer) = worker.equalizer_get().await {
-            changed |= replace_if_changed(eq_cache, Some(equalizer));
-        }
-    }
-    changed
-}
-
-fn replace_if_changed<T: serde::Serialize>(cache: &Mutex<T>, next: T) -> bool {
-    let mut current = cache.lock();
-    let changed = match (serde_json::to_value(&*current), serde_json::to_value(&next)) {
-        (Ok(current), Ok(next)) => current != next,
-        _ => true,
-    };
-    if changed {
-        *current = next;
-    }
-    changed
 }
 
 #[cfg(test)]
@@ -527,13 +461,7 @@ pub struct LuaDevice {
     controls: Controls,
     dynamic_controls: Arc<OnceLock<Controls>>,
 
-    /// Last status samples. Full IPC serialization reads these caches instead
-    /// of queueing callbacks on the worker used by interactive commands.
-    eq_cache: Arc<Mutex<Option<Equalizer>>>,
-    boolean_cache: Arc<Mutex<Vec<Boolean>>>,
-    battery_cache: Arc<Mutex<Vec<Battery>>>,
-    connection_cache: Arc<Mutex<Option<ConnectionStatus>>>,
-    cooling_cache: Arc<Mutex<HashMap<String, CoolingChannel>>>,
+    status: Arc<StatusCache>,
 
     key_remap: Option<KeyRemapFacet>,
     keyboard_layout: KeyboardLayoutSlot,
@@ -550,10 +478,6 @@ pub struct LuaDevice {
     dynamic_rgb_iso_descriptor: OnceLock<LightingDescriptor>,
     rgb_slot: LightingStateSlot,
     cooling_slot: CoolingStateSlot,
-    cooling_channels: Arc<OnceLock<Vec<CoolingChannel>>>,
-
-    /// Last sensor telemetry sampled by the status poll.
-    sensor_cache: Arc<Mutex<Vec<Sensor>>>,
 
     /// Host-run status poll: aborted on drop. `poll_paused` lets a future LCD
     /// path silence polling during a bulk transfer without tearing it down.
@@ -912,14 +836,8 @@ impl LuaDevice {
             let interval = Duration::from_millis(manifest.poll_interval_ms);
             let paused = dev.poll_paused.clone();
             let poll_caps = Arc::clone(&dev.caps);
-            let sensor_cache = dev.sensor_cache.clone();
-            let boolean_cache = dev.boolean_cache.clone();
-            let battery_cache = dev.battery_cache.clone();
-            let connection_cache = dev.connection_cache.clone();
-            let eq_cache = dev.eq_cache.clone();
+            let status = Arc::clone(&dev.status);
             let dynamic_controls = Arc::clone(&dev.dynamic_controls);
-            let cooling_cache = Arc::clone(&dev.cooling_cache);
-            let cooling_channels = Arc::clone(&dev.cooling_channels);
             let health = Arc::clone(&dev.health);
             let runtime = dev.runtime.clone();
             let poll_transport = dev.transport.clone();
@@ -980,15 +898,8 @@ impl LuaDevice {
                                 }
                             }
                             if !events.cooling.is_empty() {
-                                observed_changed |= replace_if_changed(
-                                    &cooling_cache,
-                                    events
-                                        .cooling
-                                        .iter()
-                                        .cloned()
-                                        .map(|channel| (channel.id.clone(), channel))
-                                        .collect(),
-                                );
+                                observed_changed |=
+                                    status.observe_cooling(events.cooling.iter().cloned());
                             }
                             let recovered = consecutive_failures >= POLL_FAILURE_DEGRADE_THRESHOLD;
                             consecutive_failures = 0;
@@ -1081,18 +992,7 @@ impl LuaDevice {
                         let caps = poll_caps.read();
                         StatusPollCaps::from_caps(&caps)
                     };
-                    observed_changed |= sample_status(
-                        &worker,
-                        current_poll_caps,
-                        &cooling_channels,
-                        &cooling_cache,
-                        &sensor_cache,
-                        &boolean_cache,
-                        &battery_cache,
-                        &connection_cache,
-                        &eq_cache,
-                    )
-                    .await;
+                    observed_changed |= status.sample(&worker, current_poll_caps).await;
                     if observed_changed {
                         if let Some(app) = poll_notify.upgrade() {
                             crate::application::usecases::plugin::runtime::device_changed(
@@ -1156,11 +1056,7 @@ impl LuaDevice {
             // initialize. Keep the pre-initialize surface empty.
             controls: Controls::default(),
             dynamic_controls: Arc::new(OnceLock::new()),
-            eq_cache: Arc::new(Mutex::new(None)),
-            boolean_cache: Arc::new(Mutex::new(Vec::new())),
-            battery_cache: Arc::new(Mutex::new(Vec::new())),
-            connection_cache: Arc::new(Mutex::new(None)),
-            cooling_cache: Arc::new(Mutex::new(HashMap::new())),
+            status: Arc::default(),
             key_remap: device_caps(manifest, spec)
                 .contains(&Cap::KeyRemap)
                 .then(KeyRemapFacet::default),
@@ -1174,8 +1070,6 @@ impl LuaDevice {
             dynamic_rgb_iso_descriptor: OnceLock::new(),
             rgb_slot: LightingStateSlot::default(),
             cooling_slot: CoolingStateSlot::default(),
-            cooling_channels: Arc::new(OnceLock::new()),
-            sensor_cache: Arc::new(Mutex::new(Vec::new())),
             poll_task: None,
             poll_paused: Arc::new(AtomicBool::new(false)),
             event_task: None,
@@ -1268,18 +1162,7 @@ impl LuaDevice {
     async fn refresh_status_cache(&self) {
         let Some(worker) = &self.worker else { return };
         let caps = StatusPollCaps::from_caps(&self.caps.read());
-        sample_status(
-            worker,
-            caps,
-            &self.cooling_channels,
-            &self.cooling_cache,
-            &self.sensor_cache,
-            &self.boolean_cache,
-            &self.battery_cache,
-            &self.connection_cache,
-            &self.eq_cache,
-        )
-        .await;
+        self.status.sample(worker, caps).await;
     }
 
     #[cfg(feature = "plugin-test")]
@@ -1294,14 +1177,7 @@ impl LuaDevice {
             }
         }
         if !outcome.cooling.is_empty() {
-            replace_if_changed(
-                &self.cooling_cache,
-                outcome
-                    .cooling
-                    .into_iter()
-                    .map(|channel| (channel.id.clone(), channel))
-                    .collect(),
-            );
+            self.status.observe_cooling(outcome.cooling);
         }
         self.refresh_status_cache().await;
         Ok(())
@@ -1769,7 +1645,7 @@ impl Device for LuaDevice {
             facet.install(&dpi);
         }
         if let Some(cooling) = outcome.cooling {
-            let _ = self.cooling_channels.set(
+            let _ = self.status.cooling_channels.set(
                 cooling
                     .channels
                     .into_iter()
@@ -2041,10 +1917,15 @@ fn apply_per_led_transforms(
 #[async_trait]
 impl CoolingCapability for LuaDevice {
     fn cooling_channels(&self) -> Vec<CoolingChannel> {
-        let mut channels = self.cooling_channels.get().cloned().unwrap_or_default();
+        let mut channels = self
+            .status
+            .cooling_channels
+            .get()
+            .cloned()
+            .unwrap_or_default();
         let claimed = self.claimed_cooling_channels();
         channels.retain(|channel| !claimed.contains(&channel.id));
-        let observed = self.cooling_cache.lock();
+        let observed = self.status.cooling.lock();
         for channel in &mut channels {
             if let Some(current) = observed.get(&channel.id) {
                 *channel = current.clone();
@@ -2062,12 +1943,13 @@ impl CoolingCapability for LuaDevice {
             let polled = worker.poll().await;
             self.track(polled).await?;
             let channel = self.track(worker.cooling_status(channel_id).await).await?;
-            self.cooling_cache
+            self.status
+                .cooling
                 .lock()
                 .insert(channel_id.to_owned(), channel.clone());
             return Ok(channel);
         }
-        if let Some(channel) = self.cooling_cache.lock().get(channel_id).cloned() {
+        if let Some(channel) = self.status.cooling.lock().get(channel_id).cloned() {
             return Ok(channel);
         }
         self.track(self.worker()?.cooling_status(channel_id).await)
@@ -2108,7 +1990,7 @@ impl CoolingCapability for LuaDevice {
     }
 
     fn cached_cooling_status(&self) -> Vec<CoolingChannel> {
-        let mut channels: Vec<_> = self.cooling_cache.lock().values().cloned().collect();
+        let mut channels: Vec<_> = self.status.cooling.lock().values().cloned().collect();
         let claimed = self.claimed_cooling_channels();
         channels.retain(|channel| !claimed.contains(&channel.id));
         channels
@@ -2127,10 +2009,10 @@ impl SensorCapability for LuaDevice {
             let polled = worker.poll().await;
             self.track(polled).await?;
             let sensors = self.track(worker.get_sensors().await).await?;
-            replace_if_changed(&self.sensor_cache, sensors.clone());
+            self.status.observe_sensors(sensors.clone());
             return Ok(sensors);
         }
-        Ok(self.sensor_cache.lock().clone())
+        Ok(self.status.sensors.lock().clone())
     }
 }
 
@@ -2695,7 +2577,7 @@ impl BooleanCapability for LuaDevice {
     }
 
     async fn get_booleans(&self) -> Result<Vec<Boolean>> {
-        let mut live = self.boolean_cache.lock().clone();
+        let mut live = self.status.booleans.lock().clone();
         self.active_controls().backfill_booleans(&mut live);
         Ok(live)
     }
@@ -2705,7 +2587,8 @@ impl BooleanCapability for LuaDevice {
         self.track(result).await?;
         self.active_controls().bool_cache.record(key, value);
         if let Some(current) = self
-            .boolean_cache
+            .status
+            .booleans
             .lock()
             .iter_mut()
             .find(|boolean| boolean.key == key)
@@ -2748,21 +2631,22 @@ impl ActionCapability for LuaDevice {
 #[async_trait]
 impl BatteryCapability for LuaDevice {
     async fn get_batteries(&self) -> Result<Vec<Battery>> {
-        Ok(self.battery_cache.lock().clone())
+        Ok(self.status.batteries.lock().clone())
     }
 }
 
 #[async_trait]
 impl ConnectionCapability for LuaDevice {
     async fn connection_status(&self) -> Option<ConnectionStatus> {
-        self.connection_cache.lock().clone()
+        self.status.connection.lock().clone()
     }
 }
 
 #[async_trait]
 impl EqualizerCapability for LuaDevice {
     async fn get_equalizer(&self) -> Result<Equalizer> {
-        self.eq_cache
+        self.status
+            .equalizer
             .lock()
             .clone()
             .ok_or_else(|| anyhow::anyhow!("equalizer not sampled yet"))
@@ -2773,9 +2657,9 @@ impl EqualizerCapability for LuaDevice {
         let result = worker.equalizer_set_preset(preset_index).await;
         self.track(result).await?;
         match worker.equalizer_get().await {
-            Ok(equalizer) => *self.eq_cache.lock() = Some(equalizer),
+            Ok(equalizer) => *self.status.equalizer.lock() = Some(equalizer),
             Err(_) => {
-                if let Some(equalizer) = self.eq_cache.lock().as_mut() {
+                if let Some(equalizer) = self.status.equalizer.lock().as_mut() {
                     equalizer.selected_preset = preset_index;
                 }
             }
@@ -2788,13 +2672,13 @@ impl EqualizerCapability for LuaDevice {
         let result = worker.equalizer_set_bands(values).await;
         self.track(result).await?;
         if let Ok(equalizer) = worker.equalizer_get().await {
-            *self.eq_cache.lock() = Some(equalizer);
+            *self.status.equalizer.lock() = Some(equalizer);
         }
         Ok(())
     }
 
     fn current_state(&self) -> Option<Equalizer> {
-        self.eq_cache.lock().clone()
+        self.status.equalizer.lock().clone()
     }
 }
 
@@ -3013,7 +2897,7 @@ impl LightingDivisionAdapter for LuaDevice {
 #[async_trait]
 impl CoolingHub for LuaDevice {
     async fn get_cooling_status(&self, channel: &str) -> Result<CoolingChannel> {
-        if let Some(status) = self.cooling_cache.lock().get(channel).cloned() {
+        if let Some(status) = self.status.cooling.lock().get(channel).cloned() {
             return Ok(status);
         }
         self.track(self.worker()?.cooling_status(channel).await)
@@ -3024,7 +2908,7 @@ impl CoolingHub for LuaDevice {
             .await
     }
     fn cached_cooling_status(&self, channel: &str) -> Option<CoolingChannel> {
-        self.cooling_cache.lock().get(channel).cloned()
+        self.status.cooling.lock().get(channel).cloned()
     }
 }
 
@@ -4111,10 +3995,13 @@ mod tests {
         assert!(dev.initialize().await.unwrap());
 
         dev.refresh_status_cache().await;
-        assert_eq!(dev.eq_cache.lock().as_ref().unwrap().bands[0].value, 0.0);
+        assert_eq!(
+            dev.status.equalizer.lock().as_ref().unwrap().bands[0].value,
+            0.0
+        );
 
         dev.set_eq_preset(1).await.unwrap();
-        let eq = dev.eq_cache.lock().clone().unwrap();
+        let eq = dev.status.equalizer.lock().clone().unwrap();
         assert_eq!(eq.selected_preset, 1);
         assert_eq!(eq.bands[0].value, 5.0);
         dev.close().await;
@@ -4149,7 +4036,10 @@ mod tests {
         dev.refresh_status_cache().await;
 
         dev.set_eq_bands(&[-20.0]).await.unwrap();
-        assert_eq!(dev.eq_cache.lock().as_ref().unwrap().bands[0].value, -10.0);
+        assert_eq!(
+            dev.status.equalizer.lock().as_ref().unwrap().bands[0].value,
+            -10.0
+        );
         dev.close().await;
     }
 
