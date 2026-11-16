@@ -1689,7 +1689,7 @@ mod tests {
         std::fs::create_dir_all(&plugin_dir).unwrap();
         std::fs::write(
             plugin_dir.join("plugin.yaml"),
-            "id: engine_sensor_fx\ntype: effect\nconsumes: [host.sensors.*]\neffects:\n  - kind: direct\n    id: probe\n    name: Probe\n",
+            "id: engine_sensor_fx\nversion: 1.0.0\napi: \"3.0\"\ntype: effect\nconsumes: [host.sensors.*]\neffects:\n  - kind: direct\n    id: probe\n    name: Probe\n",
         )
         .unwrap();
         std::fs::write(
@@ -1719,19 +1719,9 @@ mod tests {
             "#,
         )
         .unwrap();
-        app.registry.load_all(tmp.path());
+        app.registry.load_dir(tmp.path());
         app.registry.replace_policy(&crate::config::PluginPolicy {
             enabled: vec!["engine_sensor_fx".into()],
-            accepted_authorities: [(
-                "engine_sensor_fx".into(),
-                halod_shared::types::PluginAuthority {
-                    permissions: vec![],
-                    transport_scopes: vec![],
-                    data_reads: vec!["host.sensors.*".into()],
-                },
-            )]
-            .into_iter()
-            .collect(),
             ..Default::default()
         });
         tmp
@@ -2175,7 +2165,7 @@ mod tests {
         std::fs::create_dir_all(&plugin_dir).unwrap();
         std::fs::write(
             plugin_dir.join("plugin.yaml"),
-            "id: engine_test_fx\ntype: effect\neffects:\n  - kind: pixmap\n    id: solid\n    name: Solid\n  - kind: direct\n    id: ramp\n    name: Ramp\n",
+            "id: engine_test_fx\nversion: 1.0.0\napi: \"3.0\"\ntype: effect\neffects:\n  - kind: pixmap\n    id: solid\n    name: Solid\n  - kind: direct\n    id: ramp\n    name: Ramp\n",
         )
         .unwrap();
         std::fs::write(
@@ -2196,7 +2186,7 @@ mod tests {
             "#,
         )
         .unwrap();
-        app.registry.load_all(tmp.path());
+        app.registry.load_dir(tmp.path());
         app.registry.replace_policy(&crate::config::PluginPolicy {
             enabled: vec!["engine_test_fx".into()],
             ..Default::default()

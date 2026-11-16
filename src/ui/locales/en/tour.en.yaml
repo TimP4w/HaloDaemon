@@ -20,7 +20,7 @@ tour:
       body: "View fan and pump curves, sensor readings, and cooling presets across all devices."
     sidebar_plugins:
       title: "Plugins"
-      body: "Extend HaloDaemon with hardware support, effects, and integrations. Review plugin updates, errors, and permissions here."
+      body: "Extend HaloDaemon with hardware support, effects, and integrations. Review plugin updates, errors, and what each plugin uses here."
     sidebar_settings:
       title: "Settings"
       body: "Configure application preferences, engine controls, and close-to-tray behavior here."
@@ -175,19 +175,19 @@ tour:
   page_plugins:
     overview:
       title: "What are plugins?"
-      body: "Plugins add hardware support, effects, and integrations. They run as separate, permission-controlled extensions."
+      body: "Plugins add hardware support, effects, and integrations. Each one can only reach what its manifest declares."
     official_repo:
       title: "The official repository"
-      body: "The official repository is the trusted source for HaloDaemon-maintained plugins. Its plugins can be updated together from this page."
+      body: "The official repository is the signed source for HaloDaemon-maintained plugins. Install and update them from its detail view."
     add_plugin:
       title: "Add a plugin source"
-      body: "Add a remote Git repository, local Git folder, or repository archive. Review package details and permissions before enabling anything."
+      body: "Add a plugin catalog URL or a local folder of plugin packages. Check what a plugin uses before you install it."
     add_repo:
       title: "Add a repository"
-      body: "Add another Git repository when you need community or private plugins. Choose a branch when the repository supports one."
+      body: "Add another catalog when you need community or private plugins. Signed catalogs keep the key they were first added with."
     toggle:
       title: "Enable or disable a plugin"
       body: "Use the switch on a plugin row to control whether it is active. Disabling a plugin removes the devices or effects it provides."
     permissions:
-      title: "Plugin permissions"
-      body: "Permissions explain what a plugin can access, such as the network or system clock. Grant only what you trust, and revoke access from the details view."
+      title: "What a plugin uses"
+      body: "This list shows what the plugin declares, such as USB devices or the network. It can reach nothing else. Disable or uninstall it to stop it."

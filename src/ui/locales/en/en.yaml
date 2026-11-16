@@ -33,8 +33,6 @@ notify:
     title: "Fan stalled: %{fan}"
     message: "Fan is not spinning (0 RPM) while the curve duty is applied. Check fan connections or replace the fan."
   plugin_content_changed:
-    title: Plugin changed on disk
-    message: "%{plugin}'s files changed on disk, so it was disabled for safety. Open the Plugins screen to review and re-enable it."
   plugin_runtime_error:
     title: "An error occurred in plugin %{plugin}"
     message: "Open Details for the full error."
@@ -46,8 +44,6 @@ notify:
     title: Recommended plugin available
     message: "%{plugin} is recommended for this system. Open Plugins to enable it."
   repository_integrity:
-    title: Repository integrity error
-    message: "Something is not right. Package %{package} from repository %{repository} failed validation and was not loaded."
 
 tray:
   open: Open HaloDaemon
@@ -91,14 +87,12 @@ onboarding:
   plugins_loading: Official plugins are still downloading. You can enable them later from the Plugins tab.
   plugins_error: We couldn't download the official plugins. Check your internet connection, then try again.
   plugins_retry: Retry
-  plugins_retrying: Retrying the official plugin download…
-  permissions_none: No additional system access required.
   done_title: You're all set
   back: Back
   please_wait: Scanning…
   p_get_started: Get started
   p_scan: Find plugins
-  p_grant_enable: "Grant access and enable %{n}"
+  p_install: "Install %{n}"
   p_finish: Finish
   p_enter: Open halod
   p_continue: Continue

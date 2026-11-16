@@ -217,7 +217,11 @@ mod tests {
     fn write_plugin_dir(root: &Path, id: &str, yaml_extra: &str) -> PathBuf {
         let dir = root.join(id);
         std::fs::create_dir_all(&dir).unwrap();
-        std::fs::write(dir.join("plugin.yaml"), format!("id: {id}\n{yaml_extra}")).unwrap();
+        std::fs::write(
+            dir.join("plugin.yaml"),
+            format!("id: {id}\nversion: 1.0.0\napi: \"3.0\"\n{yaml_extra}"),
+        )
+        .unwrap();
         std::fs::write(dir.join("main.lua"), "return {}").unwrap();
         dir
     }
@@ -237,7 +241,7 @@ mod tests {
         }
     }
 
-    const COOLER: &str = "permissions: [hid]\ncapabilities: [lighting]\ndevices:\n  - vendor: Acme\n    model: Cooler\n    type: led_strip\n    match:\n      hid: { vid: 0x1e71, pid: 0x2007 }\n";
+    const COOLER: &str = "capabilities: [lighting]\ndevices:\n  - vendor: Acme\n    model: Cooler\n    type: led_strip\n    match:\n      hid: { vid: 0x1e71, pid: 0x2007 }\n";
 
     #[test]
     fn concrete_match_recommends_a_disabled_plugin() {
@@ -290,7 +294,7 @@ mod tests {
     fn wildcard_match_never_recommends() {
         let m = manifest(
             "wild",
-            "permissions: [hid]\ncapabilities: [lighting]\ndevices:\n  - vendor: X\n    model: Y\n    type: led_strip\n    match:\n      hid: { any: true }\n",
+            "capabilities: [lighting]\ndevices:\n  - vendor: X\n    model: Y\n    type: led_strip\n    match:\n      hid: { any: true }\n",
         );
         assert!(
             recommendations(&[m], &|_| false, &[hid_entry(1, 2)], &[], &[], &|_| false,).is_empty()
@@ -301,7 +305,7 @@ mod tests {
     fn usage_constraint_is_honored_and_duplicates_collapse() {
         let m = manifest(
             "usage_gated",
-            "permissions: [hid]\ncapabilities: [lighting]\ndevices:\n  - vendor: X\n    model: Y\n    type: led_strip\n    match:\n      hid: { vid: 0x1234, pid: 0x5678, usage_page: 0xffab }\n",
+            "capabilities: [lighting]\ndevices:\n  - vendor: X\n    model: Y\n    type: led_strip\n    match:\n      hid: { vid: 0x1234, pid: 0x5678, usage_page: 0xffab }\n",
         );
         // Wrong usage_page → no match.
         assert!(recommendations(
@@ -328,7 +332,7 @@ mod tests {
     fn usb_match_honors_interface() {
         let m = manifest(
             "usb",
-            "permissions: [usb]\ncapabilities: [controls]\ndevices:\n  - vendor: X\n    model: Y\n    type: monitor\n    match:\n      usb: { vid: 0x1234, pid: 0x5678, interface: 2 }\ntransports:\n  usb:\n    devices:\n      - id: primary\n        interface: 2\n        control: { max_transfer_size: 64, max_timeout_ms: 1000 }\n",
+            "capabilities: [controls]\ndevices:\n  - vendor: X\n    model: Y\n    type: monitor\n    match:\n      usb: { vid: 0x1234, pid: 0x5678, interface: 2 }\ntransports:\n  usb:\n    devices:\n      - id: primary\n        interface: 2\n        control: { max_transfer_size: 64, max_timeout_ms: 1000 }\n",
         );
         let wrong = UsbEntry {
             vid: 0x1234,
@@ -360,7 +364,7 @@ mod tests {
     fn usb_family_pids_recommend_each_declared_pid() {
         let m = manifest(
             "usb_family",
-            "permissions: [usb]\ncapabilities: [controls]\ndevices:\n  - vendor: X\n    model: Y\n    type: monitor\n    match:\n      usb: { vid: 0x1234, pids: [0x1, 0x2], interface: 0 }\ntransports:\n  usb:\n    devices:\n      - id: primary\n        interface: 0\n        control: { max_transfer_size: 64, max_timeout_ms: 1000 }\n",
+            "capabilities: [controls]\ndevices:\n  - vendor: X\n    model: Y\n    type: monitor\n    match:\n      usb: { vid: 0x1234, pids: [0x1, 0x2], interface: 0 }\ntransports:\n  usb:\n    devices:\n      - id: primary\n        interface: 0\n        control: { max_transfer_size: 64, max_timeout_ms: 1000 }\n",
         );
         let family_member = UsbEntry {
             vid: 0x1234,
@@ -395,7 +399,7 @@ mod tests {
     fn gpu_smbus_match_is_passive_and_pci_gated() {
         let m = manifest(
             "gpu_smbus",
-            "permissions: [smbus]\ncapabilities: [lighting]\ndevices:\n  - vendor: X\n    model: GPU\n    type: gpu\n    match:\n      smbus:\n        bus: gpu\n        addresses: [0x67]\n        pci_match: [{ vendor: 0x10de, sub_vendor: 0x1043 }]\n",
+            "capabilities: [lighting]\ndevices:\n  - vendor: X\n    model: GPU\n    type: gpu\n    match:\n      smbus:\n        bus: gpu\n        addresses: [0x67]\n        pci_match: [{ vendor: 0x10de, sub_vendor: 0x1043 }]\n",
         );
         let bus = BusInfo {
             bus_number: 1,
@@ -417,7 +421,7 @@ mod tests {
     fn stock_effects_are_always_recommended_when_disabled() {
         let m = manifest(
             "halo_effects",
-            "type: integration\npermissions: [network]\ntransports:\n  tcp: {}\nconfig:\n  fields:\n    - { key: host, label: Host, kind: host }\n    - { key: port, label: Port, kind: port }\n",
+            "type: integration\ntransports:\n  tcp: {}\nconfig:\n  fields:\n    - { key: host, label: Host, kind: host }\n    - { key: port, label: Port, kind: port }\n",
         );
         let recs = recommendations(&[m], &|_| false, &[], &[], &[], &|_| false);
         assert!(matches!(
@@ -430,7 +434,7 @@ mod tests {
     fn stock_lcd_is_always_recommended_when_disabled() {
         let m = manifest(
             "halo_lcd",
-            "type: integration\npermissions: [network]\ntransports:\n  tcp: {}\nconfig:\n  fields:\n    - { key: host, label: Host, kind: host }\n    - { key: port, label: Port, kind: port }\n",
+            "type: integration\ntransports:\n  tcp: {}\nconfig:\n  fields:\n    - { key: host, label: Host, kind: host }\n    - { key: port, label: Port, kind: port }\n",
         );
         let recs = recommendations(&[m], &|_| false, &[], &[], &[], &|_| false);
         assert!(matches!(
@@ -443,7 +447,7 @@ mod tests {
     fn command_device_is_recommended_when_executable_resolves() {
         let m = manifest(
             "gpu_tool",
-            "permissions: [command]\ndevices:\n  - vendor: Acme\n    model: any\n    match:\n      command: nvidia-smi\ntransports:\n  command:\n    commands: [nvidia-smi]\n",
+            "devices:\n  - vendor: Acme\n    model: any\n    match:\n      command: nvidia-smi\ntransports:\n  command:\n    commands: [nvidia-smi]\n",
         );
         let recs = recommendations(&[m], &|_| false, &[], &[], &[], &|name| {
             name == "nvidia-smi"

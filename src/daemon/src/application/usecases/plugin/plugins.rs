@@ -3,7 +3,6 @@
 
 use crate::domain::events::ChangeSink as _;
 
-use std::path::Path;
 use std::sync::Arc;
 
 use anyhow::{bail, Context, Result};
@@ -13,15 +12,17 @@ use serde_json::json;
 use crate::application::ipc::ClientHandle;
 use crate::application::state::AppState;
 
-/// Disable a plugin immediately. Enabling is only allowed through
-/// [`confirm_enable`], which verifies the authority snapshot shown to the user.
 pub async fn set_enabled(id: String, enabled: bool, app: Arc<AppState>) -> Result<()> {
-    if enabled {
-        bail!("enabling a plugin requires ConfirmPluginEnable");
+    if enabled && !app.registry.supports_current_platform(&id) {
+        bail!("plugin '{id}' is not supported on this platform");
     }
     {
         let mut cfg = app.config.write().await;
         cfg.plugins.enabled.retain(|x| x != &id);
+        if enabled {
+            cfg.plugins.enabled.push(id.clone());
+        }
+        app.registry.replace_policy(&cfg.plugins);
     }
     app.request_config_save();
     let device_ids = {
@@ -170,11 +171,8 @@ pub async fn set_config(
     Ok(())
 }
 
-/// Purge every id-keyed piece of plugin state — secret, disabled flag, plaintext
-/// config, granted permissions, installed content hash, and integration
-/// disable — returning whether config changed. Shared by [`delete`] and
-/// `repos::remove_repo`, so a reinstall of identical content can't inherit an
-/// old grant or acknowledgement.
+/// Purge every id-keyed piece of plugin state (secrets, enable flags, config),
+/// returning whether config changed.
 pub(crate) async fn purge_plugin_state(id: &str, app: &Arc<AppState>) -> bool {
     let keys = app.registry.secure_config_keys_for(id);
     let store = Arc::clone(&app.secret_store);
@@ -196,36 +194,20 @@ pub(crate) async fn purge_plugin_state(id: &str, app: &Arc<AppState>) -> bool {
     cfg.plugins.enabled.retain(|x| x != id);
     let enabled_changed = cfg.plugins.enabled.len() != before;
     let config_changed = cfg.plugins.config.remove(id).is_some();
-    let authority_changed = cfg.plugins.accepted_authorities.remove(id).is_some();
-    let hash_changed = cfg.plugins.installed_hashes.remove(id).is_some();
     let integ_before = cfg.plugins.integrations_enabled.len();
     cfg.plugins.integrations_enabled.retain(|x| x != id);
     let integ_changed = cfg.plugins.integrations_enabled.len() != integ_before;
 
-    let changed =
-        enabled_changed || config_changed || authority_changed || hash_changed || integ_changed;
+    let changed = enabled_changed || config_changed || integ_changed;
     if changed {
         app.registry.replace_policy(&cfg.plugins);
     }
     changed
 }
 
-/// Re-read plugins while preserving the process-local development source, then
-/// re-apply the enabled and accepted-authority policy. Shared with `repos.rs`.
 pub(crate) async fn reload_registry(app: &Arc<AppState>) {
     let cfg = app.config.read().await;
-    #[cfg(feature = "dev-plugin-repo")]
-    let development_repo = app.development_plugin_repo.read().await.clone();
-    #[cfg(not(feature = "dev-plugin-repo"))]
-    let development_repo: Option<&std::path::Path> = None;
-    app.registry.load_all_with_priority_repo(
-        &crate::config::plugins_dir(),
-        #[cfg(feature = "dev-plugin-repo")]
-        development_repo.as_deref(),
-        #[cfg(not(feature = "dev-plugin-repo"))]
-        development_repo,
-        &crate::domain::plugin::repo_plugin_sources(&cfg.plugins.repos),
-    );
+    app.registry.load_all(&cfg.plugins.repos);
     app.registry.replace_policy(&cfg.plugins);
     drop(cfg);
     // Manifests just changed, so their derived requirements may have too.
@@ -266,146 +248,6 @@ pub(crate) async fn refresh_recommendations(app: &Arc<AppState>) {
         }
     };
     app.registry.refresh_recommendations(&hid, &usb, &gpu_smbus);
-}
-
-/// Apply a repo-driven registry change immediately.
-///
-/// Repository installs and updates are explicit user actions, so reconcile
-/// their affected devices before returning success.
-pub(crate) async fn apply_repo_plugins(app: Arc<AppState>, plugin_ids: Vec<String>) -> Result<()> {
-    // A repository update has changed files on disk. Rebuild the registry
-    // before reconciliation so workers use the newly accepted code rather
-    // than stale manifest/source snapshots.
-    reload_registry(&app).await;
-    // An explicit update is allowed to replace code, but not to silently widen
-    // a plugin's authority. Compare the new inert manifest against the exact
-    // snapshot accepted through the enable modal and disable only affected
-    // plugins. A package without an accepted snapshot is inert until the user
-    // explicitly enables it.
-    let expanded: Vec<String> = {
-        let mut cfg = app.config.write().await;
-        let mut expanded = Vec::new();
-        for id in &plugin_ids {
-            let Some(accepted) = cfg.plugins.accepted_authorities.get(id) else {
-                continue;
-            };
-            let Some(current) = app.registry.authority_for(id) else {
-                continue;
-            };
-            if !current.is_subset_of(accepted) {
-                if cfg.plugins.enabled.contains(id) {
-                    cfg.plugins.enabled.retain(|enabled| enabled != id);
-                }
-                expanded.push(id.clone());
-            }
-        }
-        if !expanded.is_empty() {
-            app.registry.replace_policy(&cfg.plugins);
-        }
-        expanded
-    };
-    if !expanded.is_empty() {
-        app.request_config_save();
-        log::warn!(
-            "plugin update expanded authority; disabled pending fresh consent: {}",
-            expanded.join(", ")
-        );
-    }
-    if plugin_ids.is_empty() {
-        app.record_change(crate::domain::events::Change::PluginTopology)
-            .await;
-    } else {
-        reconcile_plugins(&app, &plugin_ids).await;
-    }
-    Ok(())
-}
-
-/// Enable a plugin only when the caller confirmed the exact authority that is
-/// currently declared by its inert manifest.  The runtime still receives the
-/// permission projection, while the complete snapshot is retained for later
-/// repository-update authority comparisons.
-pub async fn confirm_enable(
-    id: String,
-    authority: halod_shared::types::PluginAuthority,
-    app: Arc<AppState>,
-) -> Result<()> {
-    confirm_enable_batch(
-        vec![halod_shared::commands::PluginEnableConfirmation { id, authority }],
-        app,
-    )
-    .await
-}
-
-/// Validate a set of consent snapshots against one registry generation, commit
-/// every valid entry together, then reconcile the successful plugins once.
-/// Invalid entries are collected rather than short-circuiting the batch.
-pub async fn confirm_enable_batch(
-    confirmations: Vec<halod_shared::commands::PluginEnableConfirmation>,
-    app: Arc<AppState>,
-) -> Result<()> {
-    refresh_requirements(&app).await?;
-    let mut approved = Vec::new();
-    let mut failures = Vec::new();
-    let mut seen = std::collections::HashSet::new();
-
-    for confirmation in confirmations {
-        let id = confirmation.id;
-        if !seen.insert(id.clone()) {
-            failures.push(format!(
-                "plugin '{id}' appears more than once in enable batch"
-            ));
-            continue;
-        }
-        let Some(current) = app.registry.authority_for(&id) else {
-            failures.push(format!("unknown plugin '{id}'"));
-            continue;
-        };
-        if confirmation.authority.normalized() != current {
-            failures.push(format!(
-                "plugin '{id}' authority changed; reopen the enable confirmation"
-            ));
-            continue;
-        }
-        if !app.registry.supports_current_platform(&id) {
-            failures.push(format!("plugin '{id}' is not supported on this platform"));
-            continue;
-        }
-        let missing = app.registry.missing_blocking_requirements(&id);
-        if !missing.is_empty() {
-            failures.push(format!(
-                "plugin '{id}' has {} unmet blocking requirement(s)",
-                missing.len()
-            ));
-            continue;
-        }
-        approved.push((id, current));
-    }
-
-    let approved_ids: Vec<String> = approved.iter().map(|(id, _)| id.clone()).collect();
-    if !approved.is_empty() {
-        {
-            let mut cfg = app.config.write().await;
-            for (id, authority) in approved {
-                if !cfg.plugins.enabled.contains(&id) {
-                    cfg.plugins.enabled.push(id.clone());
-                }
-                cfg.plugins.accepted_authorities.insert(id, authority);
-            }
-            app.registry.replace_policy(&cfg.plugins);
-        }
-        app.request_config_save();
-        reconcile_plugins(&app, &approved_ids).await;
-    }
-
-    if !failures.is_empty() {
-        bail!(
-            "failed to enable {} plugin(s): {}",
-            failures.len(),
-            failures.join("; ")
-        );
-    }
-
-    Ok(())
 }
 
 /// Close and unregister every currently-registered device owned by one of
@@ -527,80 +369,10 @@ async fn reconcile_plugin_set(app: &Arc<AppState>, plugins: &[String]) {
         .await;
 }
 
-/// Sanitize a file name or repo URL into a safe plugin id / directory name (lower-cased `[a-z0-9-]`, path-traversal-proof).
-pub(crate) fn sanitize_slug(filename: &str) -> String {
-    let stem = Path::new(filename)
-        .file_stem()
-        .and_then(|s| s.to_str())
-        .unwrap_or("");
-    let mut slug = String::new();
-    for c in stem.chars() {
-        if c.is_ascii_alphanumeric() {
-            slug.push(c.to_ascii_lowercase());
-        } else if !slug.ends_with('-') {
-            slug.push('-');
-        }
-    }
-    let slug = slug.trim_matches('-');
-    if slug.is_empty() {
-        "plugin".to_owned()
-    } else {
-        slug.to_owned()
-    }
-}
-
 #[cfg(test)]
 mod tests {
     use super::*;
     use std::sync::atomic::Ordering;
-
-    #[cfg(feature = "dev-plugin-repo")]
-    #[tokio::test]
-    async fn reload_registry_keeps_the_development_repository_as_the_priority_source() {
-        crate::test_support::with_tmp_config(|app| async move {
-            let development_repo = tempfile::tempdir().unwrap();
-            let package = development_repo.path().join("devplug");
-            std::fs::create_dir_all(&package).unwrap();
-            std::fs::write(
-                package.join("plugin.yaml"),
-                "id: devplug\nname: Development Plugin\npermissions: [hid]\ncapabilities: [lighting]\ndevices:\n  - vendor: Example\n    model: Device\n    type: led_strip\n    match:\n      hid: { vid: 0x1234, pid: 0x5678 }\n",
-            )
-            .unwrap();
-            std::fs::write(package.join("main.lua"), "return {}\n").unwrap();
-            *app.development_plugin_repo.write().await =
-                Some(development_repo.path().to_path_buf());
-
-            reload_registry(&app).await;
-
-            let plugin = app
-                .registry
-                .list(app.secret_store.as_ref())
-                .into_iter()
-                .find(|plugin| plugin.id == "devplug")
-                .expect("development package must remain loaded after a registry reload");
-            assert_eq!(
-                plugin.provenance,
-                halod_shared::types::PluginProvenance::LocalDevelopment
-            );
-            assert!(plugin.path.starts_with(development_repo.path().to_string_lossy().as_ref()));
-        })
-        .await;
-    }
-
-    #[test]
-    fn sanitize_slugs_a_file_name() {
-        assert_eq!(sanitize_slug("My Driver.lua"), "my-driver");
-        assert_eq!(sanitize_slug("wled_udp"), "wled-udp");
-        assert_eq!(sanitize_slug("a  b--c.lua"), "a-b-c");
-    }
-
-    #[test]
-    fn sanitize_strips_path_traversal_and_handles_empty() {
-        // A path separator can never survive into the written directory name.
-        assert!(!sanitize_slug("../../etc/passwd").contains('/'));
-        assert_eq!(sanitize_slug("///"), "plugin");
-        assert_eq!(sanitize_slug(""), "plugin");
-    }
 
     #[tokio::test]
     async fn set_enabled_reconciles_without_touching_unrelated_devices() {
@@ -765,7 +537,7 @@ mod tests {
 
     /// Every declaration lives in YAML; the Lua entry contains callbacks only.
     const CONFIG_TEST_PLUGIN_YAML: &str =
-        "id: cfgtest\npermissions: [network, hid, secure_storage]\ncapabilities: [lighting]\ndevices:\n  - vendor: x\n    model: y\n    type: led_strip\n    match:\n      hid: { vid: 1, pid: 2 }\nconfig:\n  fields:\n    - key: host\n      label: Host\n    - key: token\n      label: Token\n      secure: true\n";
+        "id: cfgtest\nversion: 1.0.0\napi: \"3.0\"\ncapabilities: [lighting]\ndevices:\n  - vendor: x\n    model: y\n    type: led_strip\n    match:\n      hid: { vid: 1, pid: 2 }\nconfig:\n  fields:\n    - key: host\n      label: Host\n    - key: token\n      label: Token\n      secure: true\n";
 
     fn write_config_test_plugin(root: &std::path::Path) {
         let dir = root.join("cfgtest");
@@ -778,35 +550,20 @@ mod tests {
 
     fn config_test_repo_record() -> crate::config::PluginRepoRecord {
         crate::config::PluginRepoRecord {
-            url: "test://cfgtest".to_owned(),
             slug: CONFIG_TEST_REPO_SLUG.to_owned(),
-            repository_id: None,
+            source: crate::config::PluginRepoSource::Url("https://example.org/catalog.yaml".into()),
             trusted_key: None,
-            source_kind: crate::config::PluginRepoSourceKind::Release,
-            release_tag: Some("test".to_owned()),
-            release_policy: crate::config::PluginReleasePolicy::Latest,
-            active_revision: Some("test".to_owned()),
-            active_source: crate::config::PluginRevisionSource::Managed,
-            previous_release_tag: None,
-            last_sync: None,
         }
     }
 
-    /// Loads `CONFIG_TEST_PLUGIN` into `app`'s plugin registry for the duration
-    /// of `f`, then restores the registry to just the built-ins.
     /// Requires `with_tmp_config`.
-    ///
-    /// The plugin is installed as an unsigned repo source rather than standalone
-    /// under `plugins_dir()`: production loads plugins only from configured
-    /// repos, and the registry reload that `set_config`/enable run internally
-    /// re-scans just those repos — a standalone plugin would silently vanish.
     async fn with_config_test_plugin<F, Fut>(app: &Arc<AppState>, f: F)
     where
         F: FnOnce() -> Fut,
         Fut: std::future::Future<Output = ()>,
     {
         let record = config_test_repo_record();
-        write_config_test_plugin(&crate::domain::plugin::repo::active_revision_dir(&record));
+        write_config_test_plugin(&crate::domain::plugin::catalog::repo_dir(&record.slug));
         app.config.write().await.plugins.repos.push(record);
         reload_registry(app).await;
         f().await;
@@ -820,99 +577,25 @@ mod tests {
     }
 
     #[tokio::test]
-    async fn enable_batch_commits_valid_plugins_when_another_entry_fails() {
+    async fn enabling_and_disabling_persist_without_consent() {
         crate::test_support::with_tmp_config(|app| async move {
             with_config_test_plugin(&app, || async {
-                let authority = app.registry.authority_for("cfgtest").unwrap();
-                let result = confirm_enable_batch(
-                    vec![
-                        halod_shared::commands::PluginEnableConfirmation {
-                            id: "missing".into(),
-                            authority: Default::default(),
-                        },
-                        halod_shared::commands::PluginEnableConfirmation {
-                            id: "cfgtest".into(),
-                            authority: authority.clone(),
-                        },
-                    ],
-                    app.clone(),
-                )
-                .await;
-
-                assert!(result.is_err(), "the failed entry is still reported");
-                let cfg = app.config.read().await;
-                assert!(cfg.plugins.enabled.contains(&"cfgtest".to_owned()));
-                assert_eq!(
-                    cfg.plugins.accepted_authorities.get("cfgtest"),
-                    Some(&authority)
-                );
-            })
-            .await;
-        })
-        .await;
-    }
-
-    #[tokio::test]
-    async fn repo_update_disables_plugin_when_authority_widens() {
-        crate::test_support::with_tmp_config(|app| async move {
-            with_config_test_plugin(&app, || async {
-                {
-                    let mut cfg = app.config.write().await;
-                    cfg.plugins.enabled.push("cfgtest".into());
-                    cfg.plugins
-                        .accepted_authorities
-                        .insert("cfgtest".into(), Default::default());
-                    app.registry.replace_policy(&cfg.plugins);
-                }
-
-                apply_repo_plugins(app.clone(), vec!["cfgtest".into()])
-                    .await
-                    .unwrap();
-
-                let cfg = app.config.read().await;
-                assert!(!cfg.plugins.enabled.contains(&"cfgtest".to_owned()));
-                assert_eq!(
-                    cfg.plugins.accepted_authorities.get("cfgtest"),
-                    Some(&halod_shared::types::PluginAuthority::default()),
-                    "the accepted snapshot must remain for the consent diff"
-                );
-            })
-            .await;
-        })
-        .await;
-    }
-
-    #[tokio::test]
-    async fn enable_batch_reports_duplicate_plugin_ids() {
-        crate::test_support::with_tmp_config(|app| async move {
-            with_config_test_plugin(&app, || async {
-                let authority = app.registry.authority_for("cfgtest").unwrap();
-                let result = confirm_enable_batch(
-                    vec![
-                        halod_shared::commands::PluginEnableConfirmation {
-                            id: "cfgtest".into(),
-                            authority: authority.clone(),
-                        },
-                        halod_shared::commands::PluginEnableConfirmation {
-                            id: "cfgtest".into(),
-                            authority,
-                        },
-                    ],
-                    app.clone(),
-                )
-                .await;
-
-                let error = result.expect_err("the duplicate entry must be reported");
-                assert!(error.to_string().contains("appears more than once"));
-                assert!(
+                let enabled = || async {
                     app.config
                         .read()
                         .await
                         .plugins
                         .enabled
-                        .contains(&"cfgtest".to_owned()),
-                    "the first valid entry is still committed"
-                );
+                        .contains(&"cfgtest".to_owned())
+                };
+                set_enabled("cfgtest".into(), true, app.clone())
+                    .await
+                    .unwrap();
+                assert!(enabled().await);
+                set_enabled("cfgtest".into(), false, app.clone())
+                    .await
+                    .unwrap();
+                assert!(!enabled().await);
             })
             .await;
         })
@@ -932,14 +615,13 @@ mod tests {
             };
             std::fs::write(
                 dir.join("winonly").join("plugin.yaml"),
-                format!("id: winonly\nplatforms: [{foreign}]\npermissions: [hid]\ncapabilities: [lighting]\ndevices:\n  - vendor: x\n    model: y\n    type: led_strip\n    match:\n      hid: {{ vid: 1, pid: 2 }}\n"),
+                format!("id: winonly\nversion: 1.0.0\napi: \"3.0\"\nplatforms: [{foreign}]\ncapabilities: [lighting]\ndevices:\n  - vendor: x\n    model: y\n    type: led_strip\n    match:\n      hid: {{ vid: 1, pid: 2 }}\n"),
             )
             .unwrap();
             std::fs::write(dir.join("winonly").join("main.lua"), CONFIG_TEST_PLUGIN).unwrap();
-            app.registry.load_all(&dir);
+            app.registry.load_dir(&dir);
 
-            let authority = app.registry.authority_for("winonly").unwrap();
-            let result = confirm_enable("winonly".into(), authority, app.clone()).await;
+            let result = set_enabled("winonly".into(), true, app.clone()).await;
 
             let error = result.expect_err("enable must be rejected on an unsupported platform");
             assert!(error.to_string().contains("not supported on this platform"));
@@ -953,7 +635,7 @@ mod tests {
                 "an unsupported plugin must never be persisted as enabled"
             );
 
-            app.registry.load_all(std::path::Path::new("/nonexistent"));
+            app.registry.load_dir(std::path::Path::new("/nonexistent"));
         })
         .await;
     }
@@ -979,7 +661,7 @@ mod tests {
         std::fs::create_dir_all(plugin_dir.join("assets")).unwrap();
         std::fs::write(
             plugin_dir.join("plugin.yaml"),
-            "id: assetplug\npermissions: [hid]\ncapabilities: [lighting]\ndevices:\n  - vendor: x\n    model: y\n    type: led_strip\n    match:\n      hid: { vid: 1, pid: 2 }\n\
+            "id: assetplug\nversion: 1.0.0\napi: \"3.0\"\ncapabilities: [lighting]\ndevices:\n  - vendor: x\n    model: y\n    type: led_strip\n    match:\n      hid: { vid: 1, pid: 2 }\n\
              logo: logo.png\n",
         )
         .unwrap();
@@ -993,7 +675,7 @@ mod tests {
             b.into_inner()
         };
         std::fs::write(plugin_dir.join("assets/logo.png"), &png).unwrap();
-        app.registry.load_all(dir.path());
+        app.registry.load_dir(dir.path());
 
         let (client, mut rx) = test_client();
         get_asset("assetplug".into(), "logo.png".into(), client, app.clone())
@@ -1010,7 +692,7 @@ mod tests {
             .unwrap();
         assert_eq!(decoded, png);
 
-        app.registry.load_all(std::path::Path::new("/nonexistent"));
+        app.registry.load_dir(std::path::Path::new("/nonexistent"));
     }
 
     #[tokio::test]
@@ -1095,7 +777,7 @@ mod tests {
             std::fs::create_dir_all(&pdir).unwrap();
             std::fs::write(
                 pdir.join("plugin.yaml"),
-                "id: numcfg\npermissions: [hid]\ncapabilities: [lighting]\ndevices:\n  - vendor: x\n    model: y\n    type: led_strip\n    match:\n      hid: { vid: 1, pid: 2 }\nconfig:\n  fields:\n    - { key: hz, label: Hz, kind: number, default: 50, min: 1, max: 100 }\n    - { key: enabled, label: Enabled, kind: boolean, default: true }\n    - { key: mode, label: Mode, kind: enum, default: auto, options: [auto, manual] }\n    - { key: host, label: Host, kind: host, default: localhost }\n    - { key: port, label: Port, kind: port, default: 8080 }\n    - { key: endpoint, label: Endpoint, kind: url, default: 'https://example.com' }\n    - { key: timeout, label: Timeout, kind: duration_ms, default: 1000, min: 10, max: 5000 }\n",
+                "id: numcfg\nversion: 1.0.0\napi: \"3.0\"\ncapabilities: [lighting]\ndevices:\n  - vendor: x\n    model: y\n    type: led_strip\n    match:\n      hid: { vid: 1, pid: 2 }\nconfig:\n  fields:\n    - { key: hz, label: Hz, kind: number, default: 50, min: 1, max: 100 }\n    - { key: enabled, label: Enabled, kind: boolean, default: true }\n    - { key: mode, label: Mode, kind: enum, default: auto, options: [auto, manual] }\n    - { key: host, label: Host, kind: host, default: localhost }\n    - { key: port, label: Port, kind: port, default: 8080 }\n    - { key: endpoint, label: Endpoint, kind: url, default: 'https://example.com' }\n    - { key: timeout, label: Timeout, kind: duration_ms, default: 1000, min: 10, max: 5000 }\n",
             )
             .unwrap();
             std::fs::write(
@@ -1103,7 +785,7 @@ mod tests {
                 "return {}",
             )
             .unwrap();
-            app.registry.load_all(&dir);
+            app.registry.load_dir(&dir);
 
             let resolved = app.registry.resolved_config_for(
                 app.secret_store.as_ref(),
@@ -1179,7 +861,7 @@ mod tests {
                 .await
                 .unwrap();
 
-            app.registry.load_all(std::path::Path::new("/nonexistent"));
+            app.registry.load_dir(std::path::Path::new("/nonexistent"));
         })
         .await;
     }

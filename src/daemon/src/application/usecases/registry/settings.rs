@@ -143,51 +143,6 @@ pub async fn set_ui_config(
     Ok(())
 }
 
-/// Allow or deny the daemon contacting GitHub for official plugins and
-/// automatic update checks. An allowed request also retries a missing official
-/// checkout, which lets first-run onboarding recover from an offline bootstrap.
-pub async fn set_plugin_download_consent(allowed: bool, app: Arc<AppState>) -> Result<()> {
-    use halod_shared::types::PluginDownloadConsent;
-    {
-        let mut cfg = app.config.write().await;
-        cfg.gui.plugin_downloads = if allowed {
-            PluginDownloadConsent::Allowed
-        } else {
-            PluginDownloadConsent::Denied
-        };
-    }
-    app.request_config_save();
-    app.record_change(crate::domain::events::Change::Gui).await;
-    if !allowed {
-        app.plugin_update_plan.lock().await.clear();
-        app.record_change(crate::domain::events::Change::PluginData)
-            .await;
-    } else {
-        crate::domain::registry::ensure_official_repo(&app).await;
-        crate::application::usecases::plugin::plugins::reload_registry(&app).await;
-        let official_plugins = app
-            .registry
-            .list(&*app.secret_store)
-            .into_iter()
-            .filter_map(|p| match p.source {
-                halod_shared::types::PluginSource::Repo { slug }
-                    if slug == crate::constants::OFFICIAL_PLUGIN_REPO_SLUG =>
-                {
-                    Some(p.id)
-                }
-                _ => None,
-            })
-            .collect();
-        crate::application::usecases::plugin::plugins::apply_repo_plugins(
-            app.clone(),
-            official_plugins,
-        )
-        .await?;
-        crate::domain::registry::start_update_check(app.clone()).await;
-    }
-    Ok(())
-}
-
 pub async fn mark_tour_seen(tour: String, app: Arc<AppState>) -> Result<()> {
     {
         let mut cfg = app.config.write().await;
@@ -291,41 +246,6 @@ mod tests {
         with_tmp_config(|app| async move {
             set_log_level("debug".into(), app.clone()).await.unwrap();
             assert_eq!(app.config.read().await.gui.log_level, "debug");
-        })
-        .await;
-    }
-
-    #[tokio::test]
-    async fn revoking_download_consent_clears_retained_update_state() {
-        with_tmp_config(|app| async move {
-            {
-                let mut plan = app.plugin_update_plan.lock().await;
-                plan.apply_repo_check(vec![halod_shared::types::RepoUpdateStatus {
-                    slug: "repo".to_owned(),
-                    installed_tag: "v1".to_owned(),
-                    available_tag: Some("v2".to_owned()),
-                    pinned: false,
-                }]);
-                plan.apply_package_check(
-                    vec![halod_shared::types::PluginUpdateStatus {
-                        plugin_id: "repo-plugin".to_owned(),
-                        slug: "repo".to_owned(),
-                        update_available: true,
-                        on_disk_changed: false,
-                        current_version: "1".to_owned(),
-                        available_version: "2".to_owned(),
-                    }],
-                    Vec::new(),
-                );
-            }
-
-            set_plugin_download_consent(false, app.clone())
-                .await
-                .unwrap();
-
-            let plan = app.plugin_update_plan.lock().await;
-            assert!(plan.packages().is_empty());
-            assert!(plan.repos().is_empty());
         })
         .await;
     }

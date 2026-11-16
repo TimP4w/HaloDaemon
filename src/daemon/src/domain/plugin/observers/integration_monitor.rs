@@ -615,7 +615,7 @@ mod tests {
         std::fs::write(
             dir.join("plugin.yaml"),
             format!(
-                "id: {id}\ntype: integration\npermissions: [network]\ntransports:\n  tcp:\n    host_key: host\n    port_key: port\nconfig:\n  fields:\n    - key: host\n      label: Host\n      kind: host\n    - key: port\n      label: Port\n      kind: port\n"
+                "id: {id}\nversion: 1.0.0\napi: \"3.0\"\ntype: integration\ntransports:\n  tcp:\n    host_key: host\n    port_key: port\nconfig:\n  fields:\n    - key: host\n      label: Host\n      kind: host\n    - key: port\n      label: Port\n      kind: port\n"
             ),
         )
         .unwrap();
@@ -626,9 +626,6 @@ mod tests {
         let mut policy = crate::config::PluginPolicy::default();
         policy.enabled.push(id.to_string());
         policy.integrations_enabled.push(id.to_string());
-        policy
-            .accepted_authorities
-            .insert(id.to_string(), app.registry.authority_for(id).unwrap());
         app.registry.replace_policy(&policy);
     }
 

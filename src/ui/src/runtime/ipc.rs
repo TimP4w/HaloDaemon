@@ -85,7 +85,6 @@ pub struct UiRx {
     /// Decoded plugin display assets, keyed by `plugin_asset_cache_key`.
     pub plugin_assets: Synced<HashMap<String, Vec<u8>>>,
     pub udev_rules: Synced<Option<halod_shared::types::UdevRulesStatus>>,
-    pub plugin_releases: Synced<HashMap<String, Vec<halod_shared::types::PluginReleaseInfo>>>,
     /// Host serial ports for the `serial_port` config-field dropdown; empty until
     /// a config screen requests one via `ListSerialPorts`.
     pub serial_ports: Synced<Vec<halod_shared::types::SerialPortInfo>>,
@@ -110,7 +109,6 @@ pub(crate) struct UiTx {
     running_apps: watch::Sender<Vec<RunningApp>>,
     plugin_assets: watch::Sender<HashMap<String, Vec<u8>>>,
     udev_rules: watch::Sender<Option<halod_shared::types::UdevRulesStatus>>,
-    plugin_releases: watch::Sender<HashMap<String, Vec<halod_shared::types::PluginReleaseInfo>>>,
     serial_ports: watch::Sender<Vec<halod_shared::types::SerialPortInfo>>,
     lcd_upload: watch::Sender<Option<LcdUploadProgress>>,
     lcd_template: watch::Sender<Option<(String, CustomTemplateDef)>>,
@@ -229,7 +227,6 @@ fn channels(hidden: Arc<AtomicBool>) -> (UiTx, UiRx, FrameSinks) {
     let (apps_s, apps_r) = watch::channel(Vec::new());
     let (assets_s, assets_r) = watch::channel(HashMap::new());
     let (udev_rules_s, udev_rules_r) = watch::channel(None);
-    let (plugin_releases_s, plugin_releases_r) = watch::channel(HashMap::new());
     let (serial_ports_s, serial_ports_r) = watch::channel(Vec::new());
     let (upload_s, upload_r) = watch::channel(None);
     let (template_s, template_r) = watch::channel(None);
@@ -253,7 +250,6 @@ fn channels(hidden: Arc<AtomicBool>) -> (UiTx, UiRx, FrameSinks) {
         running_apps: apps_s,
         plugin_assets: assets_s,
         udev_rules: udev_rules_s,
-        plugin_releases: plugin_releases_s,
         serial_ports: serial_ports_s,
         lcd_upload: upload_s,
         lcd_template: template_s,
@@ -273,7 +269,6 @@ fn channels(hidden: Arc<AtomicBool>) -> (UiTx, UiRx, FrameSinks) {
         running_apps: Synced::new(apps_r, "running_apps"),
         plugin_assets: Synced::new(assets_r, "plugin_assets"),
         udev_rules: Synced::new(udev_rules_r, "udev_rules"),
-        plugin_releases: Synced::new(plugin_releases_r, "plugin_releases"),
         serial_ports: Synced::new(serial_ports_r, "serial_ports"),
         lcd_upload: Synced::new(upload_r, "lcd_upload"),
         lcd_template: template_r,
@@ -695,10 +690,11 @@ fn handle_json(payload: &[u8], tx: &UiTx, repaint: &impl Fn()) -> Reaction {
             if value.get("handled").and_then(|v| v.as_bool()) == Some(true) {
                 return Reaction::default();
             }
-            let message = if value.get("code").and_then(|code| code.as_str())
-                == Some(halod_shared::types::ERROR_REPOSITORY_SIGNATURE_VERIFICATION_FAILED)
-            {
-                t!("plugins.repo_signature_verification_failed").to_string()
+            let catalog_error = value
+                .get("code")
+                .and_then(|code| serde_json::from_value(code.clone()).ok());
+            let message = if let Some(code) = catalog_error {
+                catalog_error_message(code)
             } else {
                 value
                     .get("message")
@@ -791,22 +787,6 @@ fn handle_json(payload: &[u8], tx: &UiTx, repaint: &impl Fn()) -> Reaction {
             }
             Reaction::default()
         }
-        Some("plugin_releases") => {
-            let url = value.get("url").and_then(|url| url.as_str());
-            let releases = value.get("releases").and_then(|releases| {
-                serde_json::from_value::<Vec<halod_shared::types::PluginReleaseInfo>>(
-                    releases.clone(),
-                )
-                .ok()
-            });
-            if let (Some(url), Some(releases)) = (url, releases) {
-                tx.plugin_releases.send_modify(|cache| {
-                    cache.insert(url.to_owned(), releases);
-                });
-                repaint();
-            }
-            Reaction::default()
-        }
         Some("lcd_template") => {
             let name = value
                 .get("name")
@@ -843,6 +823,20 @@ fn handle_json(payload: &[u8], tx: &UiTx, repaint: &impl Fn()) -> Reaction {
     }
 }
 
+fn catalog_error_message(code: halod_shared::types::CatalogErrorCode) -> String {
+    use halod_shared::types::CatalogErrorCode;
+    match code {
+        CatalogErrorCode::Malformed => t!("plugins.catalog_malformed"),
+        CatalogErrorCode::Unsigned => t!("plugins.catalog_unsigned"),
+        CatalogErrorCode::UntrustedKey => t!("plugins.catalog_untrusted_key"),
+        CatalogErrorCode::SignatureMismatch => t!("plugins.catalog_signature_mismatch"),
+        CatalogErrorCode::Stale => t!("plugins.catalog_stale"),
+        CatalogErrorCode::HashMismatch => t!("plugins.catalog_hash_mismatch"),
+        CatalogErrorCode::ApiIncompatible => t!("plugins.requires_newer_daemon"),
+    }
+    .into_owned()
+}
+
 #[cfg(test)]
 mod tests {
     use super::*;
@@ -859,7 +853,6 @@ mod tests {
             running_apps: watch::channel(Vec::new()).0,
             plugin_assets: watch::channel(HashMap::new()).0,
             udev_rules: watch::channel(None).0,
-            plugin_releases: watch::channel(HashMap::new()).0,
             serial_ports: watch::channel(Vec::new()).0,
             lcd_upload: upload_s,
             lcd_template: watch::channel(None).0,
@@ -1005,10 +998,10 @@ mod tests {
     }
 
     #[test]
-    fn signature_failure_uses_localized_message_instead_of_backend_text() {
+    fn catalog_errors_use_localized_messages_instead_of_backend_text() {
         let (tx, _rx) = test_tx();
         assert!(!handle_json(
-            br#"{"type":"error","code":"repository_signature_verification_failed","message":"release signature does not match release.yaml"}"#,
+            br#"{"type":"error","code":"signature_mismatch","message":"catalog signature does not match its contents"}"#,
             &tx,
             &|| {}
         ).relist_lcd_images);
@@ -1016,7 +1009,7 @@ mod tests {
         assert_eq!(
             notification.code,
             NotificationCode::Generic {
-                message: "Repository signature verification failed.".into()
+                message: t!("plugins.catalog_signature_mismatch").into_owned()
             }
         );
     }

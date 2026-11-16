@@ -1,8 +1,8 @@
 // SPDX-License-Identifier: GPL-3.0-or-later
 use anyhow::Result;
-use halod_shared::types::{AppRule, PluginAuthority, VisibilityState, DEFAULT_PROFILE_NAME};
+use halod_shared::types::{AppRule, VisibilityState, DEFAULT_PROFILE_NAME};
 pub use halod_shared::types::{
-    CanvasState, CoolingConfig, GuiConfig, LcdConfig, PlacedZone, PluginReleasePolicy, RgbConfig,
+    CanvasState, CoolingConfig, GuiConfig, LcdConfig, PlacedZone, RgbConfig,
 };
 use halod_shared::zone_transform::ZoneContentTransform;
 use serde::de::DeserializeOwned;
@@ -32,7 +32,7 @@ pub fn load() -> Result<Config> {
     }
     let devices: DevicesFile = load_file(&devices_config_path(), "devices.yaml")?;
     let app_rules: AppRulesFile = load_file(&app_rules_config_path(), "app_rules.yaml")?;
-    let plugins: PluginPolicy = load_file(&plugins_config_path(), "plugins.yaml")?;
+    let plugins: PluginPolicy = load_file(&plugins_config_path(), "plugin_state.yaml")?;
     let mut profiles = load_profiles()?;
     if profiles.is_empty() {
         profiles.insert(DEFAULT_PROFILE_NAME.to_string(), Profile::default());
@@ -241,7 +241,7 @@ fn app_rules_config_path() -> PathBuf {
 }
 
 fn plugins_config_path() -> PathBuf {
-    config_dir().join("plugins.yaml")
+    config_dir().join("plugin_state.yaml")
 }
 
 fn profiles_dir() -> PathBuf {
@@ -254,22 +254,10 @@ pub fn lcd_images_dir() -> PathBuf {
     config_dir().join(halod_shared::types::LCD_IMAGES_SUBDIR)
 }
 
-/// Directory holding standalone plugin packages (`plugin.yaml` plus entry
-/// source), read at startup.
+/// Installed plugins live at `plugins/<repo-slug>/<id>`, beside each remote
+/// repository's cached `catalog.yaml`.
 pub fn plugins_dir() -> PathBuf {
     config_dir().join("plugins")
-}
-
-/// Directory holding installed plugin release revisions, grouped by source.
-pub fn plugin_repos_dir() -> PathBuf {
-    config_dir().join("plugin_repos")
-}
-
-/// Immutable revisions materialized from the daemon's release-embedded plugin
-/// bundle. Kept outside managed release roots so a later download can use
-/// the normal mutable repository location unchanged.
-pub fn embedded_plugin_revisions_dir() -> PathBuf {
-    config_dir().join("embedded_plugin_revisions")
 }
 
 #[derive(Debug, Clone, Serialize, Deserialize)]
@@ -323,93 +311,38 @@ struct AppRulesFile {
 #[derive(Debug, Clone, Default, Serialize, Deserialize)]
 #[serde(deny_unknown_fields)]
 pub struct PluginPolicy {
-    /// Authority snapshots accepted through the enable modal.  They are kept
-    /// separately from the runtime permission projection so repository updates
-    /// can decide whether a changed manifest expands authority.
-    #[serde(default, skip_serializing_if = "HashMap::is_empty")]
-    pub accepted_authorities: HashMap<String, PluginAuthority>,
-    /// Plugin ids explicitly enabled through the authority confirmation flow.
-    /// An absent id is inert, which makes a fresh consent decision required.
     #[serde(default, skip_serializing_if = "Vec::is_empty")]
     pub enabled: Vec<String>,
-    /// Non-secure user-editable config values per plugin id (key -> value).
-    /// Fields declared `secure = true` never appear here — see the encrypted
-    /// secret store instead.
+    /// Non-secure values only; `secure` fields live in the secret store.
     #[serde(default, skip_serializing_if = "HashMap::is_empty")]
     pub config: HashMap<String, HashMap<String, String>>,
-    /// Integration ids explicitly enabled independently of package activation.
     #[serde(default, skip_serializing_if = "Vec::is_empty")]
     pub integrations_enabled: Vec<String>,
-    /// Integrations that completed their host-owned setup flow. This marker is
-    /// separate from retained config values so manifest defaults do not make a
-    /// never-configured integration appear ready.
+    /// Separate from config values so manifest defaults cannot make a
+    /// never-configured integration look ready.
     #[serde(default, skip_serializing_if = "Vec::is_empty")]
     pub integrations_configured: Vec<String>,
-    /// Stable discovery identity selected for each configured integration.
     #[serde(default, skip_serializing_if = "HashMap::is_empty")]
     pub integration_devices: HashMap<String, String>,
-    /// Content hash (hex SHA-256) of the installed plugin package, keyed by
-    /// plugin id. This identifies updates and modified checkouts; it is never
-    /// used as a consent gate.
-    #[serde(default, skip_serializing_if = "HashMap::is_empty")]
-    pub installed_hashes: HashMap<String, String>,
-    /// Registered release sources. See `PluginRepoRecord`.
     #[serde(default, skip_serializing_if = "Vec::is_empty")]
     pub repos: Vec<PluginRepoRecord>,
 }
 
-/// A registered immutable release source.
-#[derive(Debug, Clone, Serialize, Deserialize)]
+#[derive(Debug, Clone, PartialEq, Eq, Serialize, Deserialize)]
 #[serde(deny_unknown_fields)]
 pub struct PluginRepoRecord {
-    pub url: String,
-    /// Directory name under `plugin_repos_dir()`, derived from the URL at `add_repo` time
-    /// (fixed to `constants::OFFICIAL_PLUGIN_REPO_SLUG` for the seeded official repo).
     pub slug: String,
-    /// Stable identity declared by `release.yaml`. Pinning this prevents a
-    /// URL from silently becoming a different release pack.
-    #[serde(default)]
-    pub repository_id: Option<String>,
-    /// Publisher key pinned on first successful signed import. A later
-    /// revision must verify with this exact key (TOFU continuity).
+    pub source: PluginRepoSource,
+    /// Pinned on first signed fetch; later catalogs must verify with it.
     #[serde(default, skip_serializing_if = "Option::is_none")]
     pub trusted_key: Option<halod_plugin_signing::RepositorySigningKey>,
-    #[serde(default)]
-    pub source_kind: PluginRepoSourceKind,
-    /// GitHub release tag currently active.
-    #[serde(default, skip_serializing_if = "Option::is_none")]
-    pub release_tag: Option<String>,
-    #[serde(default)]
-    pub release_policy: PluginReleasePolicy,
-    /// Immutable revision directory currently selected for execution. `None`
-    /// means the source is registered but has not installed a revision yet.
-    #[serde(default)]
-    pub active_revision: Option<String>,
-    /// Storage backing the active revision.
-    #[serde(default)]
-    pub active_source: PluginRevisionSource,
-    /// Previously active release tag retained for rollback diagnostics.
-    #[serde(default)]
-    pub previous_release_tag: Option<String>,
-    /// Last successful release synchronization (RFC 3339).
-    #[serde(default)]
-    pub last_sync: Option<String>,
 }
 
-#[derive(Debug, Clone, Copy, Default, PartialEq, Eq, Serialize, Deserialize)]
+#[derive(Debug, Clone, PartialEq, Eq, Serialize, Deserialize)]
 #[serde(rename_all = "snake_case")]
-pub enum PluginRepoSourceKind {
-    #[default]
-    Release,
-    Archive,
-}
-
-#[derive(Debug, Clone, Copy, Default, PartialEq, Eq, Serialize, Deserialize)]
-#[serde(rename_all = "snake_case")]
-pub enum PluginRevisionSource {
-    Embedded,
-    #[default]
-    Managed,
+pub enum PluginRepoSource {
+    Url(String),
+    Local(PathBuf),
 }
 
 #[derive(Debug, Clone, Serialize, Deserialize)]
@@ -601,38 +534,21 @@ mod tests {
         cfg.rgb.canvas_fps = 45;
         cfg.lcd.enabled = false;
         cfg.plugins.enabled.push("wled_udp".into());
-        cfg.plugins.accepted_authorities.insert(
-            "wled_udp".into(),
-            PluginAuthority {
-                permissions: vec![halod_shared::types::Permission::Network],
-                transport_scopes: vec![],
-                data_reads: vec![],
-            },
-        );
         cfg.plugins.config.insert(
             "openrgb".into(),
             HashMap::from([("host".to_string(), "127.0.0.1".to_string())]),
         );
-        cfg.plugins
-            .installed_hashes
-            .insert("wled_udp".into(), "abc123".into());
+        cfg.plugins.repos.push(PluginRepoRecord {
+            slug: "local-dev".into(),
+            source: PluginRepoSource::Local("/src/plugins".into()),
+            trusted_key: None,
+        });
 
         save(&cfg).unwrap();
         let reloaded = load().unwrap();
 
         assert_eq!(reloaded.plugins.enabled, vec!["wled_udp".to_string()]);
-        assert_eq!(
-            reloaded
-                .plugins
-                .accepted_authorities
-                .get("wled_udp")
-                .map(|authority| &authority.permissions),
-            Some(&vec![halod_shared::types::Permission::Network])
-        );
-        assert_eq!(
-            reloaded.plugins.installed_hashes.get("wled_udp"),
-            Some(&"abc123".to_string())
-        );
+        assert_eq!(reloaded.plugins.repos, cfg.plugins.repos);
         assert_eq!(
             reloaded
                 .plugins
@@ -743,44 +659,31 @@ mod tests {
     fn plugin_policy_rejects_retired_fields() {
         let current: PluginPolicy = serde_yaml::from_str("enabled: [foo]\n").unwrap();
         assert_eq!(current.enabled, ["foo"]);
-        assert!(serde_yaml::from_str::<PluginPolicy>("disabled: [foo]\n").is_err());
-        assert!(serde_yaml::from_str::<PluginPolicy>("acknowledged: {}\n").is_err());
+        for retired in [
+            "disabled: [foo]\n",
+            "accepted_authorities: {}\n",
+            "installed_hashes: {}\n",
+        ] {
+            assert!(
+                serde_yaml::from_str::<PluginPolicy>(retired).is_err(),
+                "{retired}"
+            );
+        }
     }
 
     #[test]
-    fn plugin_repos_round_trip_through_save_and_load() {
+    fn a_legacy_plugins_yaml_is_ignored() {
         let dir = tempfile::tempdir().unwrap();
         let _guard = crate::test_support::HALOD_CONFIG_DIR_LOCK.lock();
         unsafe { std::env::set_var("HALOD_CONFIG_DIR", dir.path()) };
+        std::fs::write(
+            dir.path().join("plugins.yaml"),
+            "accepted_authorities: {}\nrepos: [{url: x, slug: y}]\n",
+        )
+        .unwrap();
 
-        let mut cfg = Config::default();
-        cfg.plugins.repos.push(PluginRepoRecord {
-            url: "https://github.com/example/foo".into(),
-            slug: "foo".into(),
-            repository_id: None,
-            trusted_key: None,
-            source_kind: PluginRepoSourceKind::Release,
-            release_tag: Some("v1.0.0".into()),
-            release_policy: PluginReleasePolicy::Latest,
-            active_revision: Some("v1.0.0".into()),
-            active_source: PluginRevisionSource::Managed,
-            previous_release_tag: None,
-            last_sync: None,
-        });
-        save(&cfg).unwrap();
-        let reloaded = load().unwrap();
-
-        assert_eq!(reloaded.plugins.repos.len(), 1);
-        assert_eq!(reloaded.plugins.repos[0].slug, "foo");
-        assert_eq!(
-            reloaded.plugins.repos[0].release_tag.as_deref(),
-            Some("v1.0.0")
-        );
-        assert_eq!(
-            reloaded.plugins.repos[0].source_kind,
-            PluginRepoSourceKind::Release
-        );
-        assert!(reloaded.plugins.repos[0].trusted_key.is_none());
+        let loaded = load().unwrap();
+        assert!(loaded.plugins.repos.is_empty());
 
         unsafe { std::env::remove_var("HALOD_CONFIG_DIR") };
     }

@@ -1,69 +1,60 @@
 // SPDX-License-Identifier: GPL-3.0-or-later
-//! Projects plugin registry, repository, and runtime status into retained state.
+use std::collections::HashMap;
 
-#[cfg(test)]
-use std::sync::Arc;
+use halod_plugin_signing::HOST_PLUGIN_API;
+use halod_shared::types::{
+    AvailablePlugin, PluginRepoInfo, PluginRepoLocation, PluginsState, RepoTrust, WireDevice,
+};
 
+use super::catalog::RepoCatalog;
 use crate::application::state::AppState;
-use crate::config::{Config, PluginRepoRecord, PluginRepoSourceKind};
-use halod_shared::types::{PluginRepoInfo, PluginsState, RepoSignatureStatus, WireDevice};
+use crate::config::{Config, PluginRepoRecord, PluginRepoSource};
 
-fn active_signature_status(record: &PluginRepoRecord) -> RepoSignatureStatus {
-    let trust = if record.slug == crate::constants::OFFICIAL_PLUGIN_REPO_SLUG {
-        super::repo::RepositoryTrust::Official
-    } else if let Some(key) = &record.trusted_key {
-        super::repo::RepositoryTrust::Pinned(key.clone())
-    } else {
-        return RepoSignatureStatus::Unsigned;
-    };
-    let result = if record.active_revision.is_some() {
-        super::repo::verify_repository_signature(&super::repo::active_revision_dir(record), &trust)
-    } else {
-        return RepoSignatureStatus::Invalid {
-            reason: "the repository has not been downloaded or has no active revision".to_owned(),
-        };
-    };
-    result
-        .map(|_| RepoSignatureStatus::Verified)
-        .unwrap_or_else(|error| RepoSignatureStatus::Invalid {
-            reason: format!("{error:#}"),
-        })
+fn repo_info(record: &PluginRepoRecord, catalog: Option<&RepoCatalog>) -> PluginRepoInfo {
+    let official = record.slug == crate::constants::OFFICIAL_PLUGIN_REPO_SLUG;
+    let signing_key = catalog
+        .and_then(|repo| repo.catalog.signing_key.as_ref())
+        .or(record.trusted_key.as_ref());
+    PluginRepoInfo {
+        slug: record.slug.clone(),
+        location: match &record.source {
+            PluginRepoSource::Url(url) => PluginRepoLocation::Url(url.clone()),
+            PluginRepoSource::Local(dir) => PluginRepoLocation::Local(dir.display().to_string()),
+        },
+        official,
+        trust: match (official, signing_key) {
+            (true, _) => RepoTrust::Official,
+            (false, Some(_)) => RepoTrust::Signed,
+            (false, None) => RepoTrust::Unsigned,
+        },
+        fingerprint: signing_key
+            .and_then(|key| halod_plugin_signing::catalog::signing_key_fingerprint(key).ok()),
+        last_sync: catalog.and_then(|repo| repo.last_sync.clone()),
+        commit: catalog.and_then(|repo| repo.catalog.commit.clone()),
+    }
 }
 
-async fn cached_signature_status(app: &AppState, record: &PluginRepoRecord) -> RepoSignatureStatus {
-    let Some(revision) = record
-        .active_revision
-        .clone()
-        .filter(|revision| !revision.is_empty())
-    else {
-        return active_signature_status(record);
-    };
-    let key = (record.slug.clone(), revision);
-    if let Some(status) = app.signature_status_cache.lock().await.get(&key) {
-        return status.clone();
-    }
-    let status = active_signature_status(record);
-    app.signature_status_cache
-        .lock()
-        .await
-        .insert(key, status.clone());
-    status
+fn available(catalogs: &HashMap<String, RepoCatalog>) -> Vec<AvailablePlugin> {
+    let mut available: Vec<AvailablePlugin> = catalogs
+        .iter()
+        .flat_map(|(slug, repo)| {
+            repo.catalog
+                .select(HOST_PLUGIN_API)
+                .into_values()
+                .map(move |entry| AvailablePlugin {
+                    repo: slug.clone(),
+                    id: entry.id.clone(),
+                    version: entry.version.to_string(),
+                    api: entry.api.to_string(),
+                    compatible: entry.api.is_compatible_with(HOST_PLUGIN_API),
+                })
+        })
+        .collect();
+    available.sort_by(|a, b| (&a.repo, &a.id).cmp(&(&b.repo, &b.id)));
+    available
 }
 
 pub async fn project(app: &AppState, cfg: &Config, devices: &[WireDevice]) -> PluginsState {
-    let observed_signatures = app.repo_signature_status.lock().await.clone();
-    let mut signatures: std::collections::HashMap<String, RepoSignatureStatus> =
-        std::collections::HashMap::new();
-    for record in &cfg.plugins.repos {
-        let status = match observed_signatures
-            .get(&record.slug)
-            .filter(|(tag, _)| Some(tag.as_str()) != record.release_tag.as_deref())
-        {
-            Some((_, status)) => status.clone(),
-            None => cached_signature_status(app, record).await,
-        };
-        signatures.insert(record.slug.clone(), status);
-    }
     let mut plugins = app.registry.list(app.secret_store.as_ref());
     for plugin in &mut plugins {
         if plugin.plugin_type == halod_shared::types::PluginKind::Integration
@@ -95,146 +86,94 @@ pub async fn project(app: &AppState, cfg: &Config, devices: &[WireDevice]) -> Pl
             )
             .collect();
     }
-    let (updates, repo_updates) = {
-        let plan = app.plugin_update_plan.lock().await;
-        (plan.packages(), plan.repos())
-    };
+    let catalogs = app.plugin_catalogs.lock().await;
     PluginsState {
         plugins,
         repos: cfg
             .plugins
             .repos
             .iter()
-            .map(|record| PluginRepoInfo {
-                url: record.url.clone(),
-                slug: record.slug.clone(),
-                repository_id: record.repository_id.clone(),
-                release_tag: record.release_tag.clone(),
-                release_policy: record.release_policy.clone(),
-                active_revision: record.active_revision.clone(),
-                previous_release_tag: record.previous_release_tag.clone(),
-                last_sync: record.last_sync.clone(),
-                official: record.slug == crate::constants::OFFICIAL_PLUGIN_REPO_SLUG,
-                location: match record.source_kind {
-                    PluginRepoSourceKind::Archive => {
-                        halod_shared::types::PluginRepoLocation::LocalArchive
-                    }
-                    PluginRepoSourceKind::Release => {
-                        halod_shared::types::PluginRepoLocation::RemoteRelease
-                    }
-                },
-                signature: signatures
-                    .get(&record.slug)
-                    .cloned()
-                    .unwrap_or(RepoSignatureStatus::Unsigned),
-                signing_key_fingerprint: record
-                    .trusted_key
-                    .as_ref()
-                    .and_then(|key| halod_plugin_signing::signing_key_fingerprint(key).ok()),
-            })
+            .map(|record| repo_info(record, catalogs.get(&record.slug)))
             .collect(),
+        available: available(&catalogs),
         skipped: app.registry.skipped(),
         recommendations: app.registry.recommendations(),
-        updates,
-        repo_updates,
     }
 }
 
 #[cfg(test)]
 mod tests {
     use super::*;
+    use halod_plugin_signing::{Catalog, CatalogPackage};
 
-    fn repo_record(slug: &str) -> PluginRepoRecord {
-        PluginRepoRecord {
-            url: format!("https://example.com/{slug}.git"),
-            slug: slug.to_owned(),
-            repository_id: None,
-            trusted_key: None,
-            source_kind: PluginRepoSourceKind::Release,
-            release_tag: None,
-            release_policy: crate::config::PluginReleasePolicy::Latest,
-            active_revision: None,
-            active_source: crate::config::PluginRevisionSource::Managed,
-            previous_release_tag: None,
+    fn entry(id: &str, version: &str, api: &str) -> CatalogPackage {
+        CatalogPackage {
+            id: id.into(),
+            version: version.parse().unwrap(),
+            api: api.parse().unwrap(),
+            path: format!("packages/{id}-{version}.tar.gz"),
+            sha256: "a".repeat(64),
+            size: 1,
+        }
+    }
+
+    fn repo(packages: Vec<CatalogPackage>) -> RepoCatalog {
+        RepoCatalog {
+            catalog: Catalog {
+                schema: 1,
+                name: "Test".into(),
+                commit: Some("abc".into()),
+                published: 1,
+                signing_key: None,
+                packages,
+            },
             last_sync: None,
         }
     }
 
     #[test]
-    fn third_party_repositories_are_unsigned() {
-        let record = repo_record("community");
+    fn available_lists_the_best_entry_per_repo_and_flags_incompatible_ones() {
+        let catalogs = HashMap::from([
+            (
+                "official".to_owned(),
+                repo(vec![
+                    entry("demo", "1.0.0", "3.0"),
+                    entry("demo", "2.0.0", "3.9"),
+                ]),
+            ),
+            (
+                "other".to_owned(),
+                repo(vec![entry("future", "1.0.0", "9.0")]),
+            ),
+        ]);
+        let listed = available(&catalogs);
+        assert_eq!(listed.len(), 2);
         assert_eq!(
-            active_signature_status(&record),
-            RepoSignatureStatus::Unsigned
+            (listed[0].version.as_str(), listed[0].compatible),
+            ("1.0.0", true)
+        );
+        assert_eq!(
+            (listed[1].id.as_str(), listed[1].compatible),
+            ("future", false)
         );
     }
 
     #[test]
-    fn unavailable_official_repository_is_invalid() {
-        let status =
-            active_signature_status(&repo_record(crate::constants::OFFICIAL_PLUGIN_REPO_SLUG));
-        assert!(matches!(status, RepoSignatureStatus::Invalid { .. }));
-    }
-
-    #[tokio::test]
-    async fn signature_status_is_served_from_the_cache_on_a_hit() {
-        let app = Arc::new(AppState::new(Config::default()));
-        let mut record = repo_record(crate::constants::OFFICIAL_PLUGIN_REPO_SLUG);
-        record.active_revision = Some("rev1".to_owned());
-        app.signature_status_cache.lock().await.insert(
-            (record.slug.clone(), "rev1".to_owned()),
-            RepoSignatureStatus::Verified,
-        );
-
+    fn repository_trust_follows_the_signing_key() {
+        let record = PluginRepoRecord {
+            slug: "community".into(),
+            source: PluginRepoSource::Url("https://x/catalog.yaml".into()),
+            trusted_key: None,
+        };
+        assert_eq!(repo_info(&record, None).trust, RepoTrust::Unsigned);
+        let official = PluginRepoRecord {
+            slug: crate::constants::OFFICIAL_PLUGIN_REPO_SLUG.into(),
+            ..record
+        };
+        let info = repo_info(&official, Some(&repo(vec![])));
         assert_eq!(
-            cached_signature_status(&app, &record).await,
-            RepoSignatureStatus::Verified
+            (info.trust, info.commit.as_deref()),
+            (RepoTrust::Official, Some("abc"))
         );
-    }
-
-    #[tokio::test]
-    async fn invalidation_drops_only_the_repositorys_cached_signatures() {
-        let app = Arc::new(AppState::new(Config::default()));
-        {
-            let mut cache = app.signature_status_cache.lock().await;
-            cache.insert(
-                ("repo-a".to_owned(), "rev".to_owned()),
-                RepoSignatureStatus::Verified,
-            );
-            cache.insert(
-                ("repo-b".to_owned(), "rev".to_owned()),
-                RepoSignatureStatus::Verified,
-            );
-        }
-
-        app.invalidate_signature_status("repo-a").await;
-
-        let cache = app.signature_status_cache.lock().await;
-        assert!(!cache.contains_key(&("repo-a".to_owned(), "rev".to_owned())));
-        assert!(cache.contains_key(&("repo-b".to_owned(), "rev".to_owned())));
-    }
-
-    #[tokio::test]
-    async fn rejected_remote_signature_is_projected() {
-        let app = Arc::new(AppState::new(Config::default()));
-        let mut record = repo_record(crate::constants::OFFICIAL_PLUGIN_REPO_SLUG);
-        record.release_tag = Some("active".to_owned());
-        let mut cfg = app.config.read().await.clone();
-        cfg.plugins.repos.push(record);
-        app.repo_signature_status.lock().await.insert(
-            crate::constants::OFFICIAL_PLUGIN_REPO_SLUG.to_owned(),
-            (
-                "remote".to_owned(),
-                RepoSignatureStatus::Invalid {
-                    reason: "release.sig is missing".to_owned(),
-                },
-            ),
-        );
-
-        let projected = project(&app, &cfg, &[]).await;
-        assert!(matches!(
-            &projected.repos[0].signature,
-            RepoSignatureStatus::Invalid { reason } if reason == "release.sig is missing"
-        ));
     }
 }

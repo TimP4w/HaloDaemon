@@ -3,9 +3,6 @@ mod application;
 mod config;
 mod constants;
 mod domain;
-mod embedded_plugins {
-    include!(concat!(env!("OUT_DIR"), "/embedded_plugin_bundle.rs"));
-}
 mod infrastructure;
 mod logger;
 #[cfg(test)]
@@ -29,9 +26,7 @@ use crate::util::task::TaskHandle;
 /// The daemon is always a plain user process now — Windows service registration
 /// and the elevated register-bus broker live in `halod-broker.exe`, and the GUI
 /// launches this daemon directly. `--headless` opts out of idle-shutdown (see
-/// [`crate::application::lifecycle`]); the development-only `--dev-plugin-repo <DIR>` flag
-/// loads a directly supplied working tree as an extra plugin source alongside
-/// the official, local, and configured repos, winning any id collisions.
+/// [`crate::application::lifecycle`]).
 ///
 /// `plugin-test <package-dir>` (behind the `plugin-test` cargo feature) is a
 /// separate mode entirely: it drives one plugin package's `test.lua` against
@@ -42,30 +37,27 @@ use crate::util::task::TaskHandle;
 enum ProcessRole {
     Server {
         headless: bool,
-        #[cfg(feature = "dev-plugin-repo")]
-        dev_plugin_repo: Option<std::path::PathBuf>,
     },
     #[cfg(feature = "plugin-test")]
     PluginTest {
         package: std::path::PathBuf,
     },
     UdevRules {
-        embedded: bool,
+        catalog: Option<String>,
     },
 }
 
-#[cfg(feature = "dev-plugin-repo")]
-const USAGE: &str = "usage: halod [--headless] [--dev-plugin-repo <DIR>] | halod udev-rules";
-#[cfg(not(feature = "dev-plugin-repo"))]
-const USAGE: &str = "usage: halod [--headless] | halod udev-rules";
+const USAGE: &str = "usage: halod [--headless] | halod udev-rules [--catalog <url>]";
 
 fn process_role(args: &[String]) -> std::result::Result<ProcessRole, String> {
     if args.first().map(String::as_str) == Some("udev-rules") {
-        let embedded = args.get(1).is_some_and(|arg| arg == "--embedded");
-        if args.len() != 1 + usize::from(embedded) {
-            return Err("usage: halod udev-rules [--embedded]".to_owned());
-        }
-        return Ok(ProcessRole::UdevRules { embedded });
+        return match &args[1..] {
+            [] => Ok(ProcessRole::UdevRules { catalog: None }),
+            [flag, url] if flag == "--catalog" => Ok(ProcessRole::UdevRules {
+                catalog: Some(url.clone()),
+            }),
+            _ => Err("usage: halod udev-rules [--catalog <url>]".to_owned()),
+        };
     }
     #[cfg(feature = "plugin-test")]
     if args.first().map(String::as_str) == Some("plugin-test") {
@@ -78,46 +70,11 @@ fn process_role(args: &[String]) -> std::result::Result<ProcessRole, String> {
         }
         return Ok(ProcessRole::PluginTest { package });
     }
-    let mut headless = false;
-    #[cfg(feature = "dev-plugin-repo")]
-    let mut dev_plugin_repo = None;
-    let mut i = 0;
-    while i < args.len() {
-        match args[i].as_str() {
-            "--headless" => {
-                if headless {
-                    return Err("--headless may only be provided once".to_owned());
-                }
-                headless = true;
-            }
-            #[cfg(feature = "dev-plugin-repo")]
-            "--dev-plugin-repo" => {
-                let Some(path) = args.get(i + 1) else {
-                    return Err("--dev-plugin-repo requires a directory".to_owned());
-                };
-                if path.starts_with('-')
-                    || dev_plugin_repo
-                        .replace(std::path::PathBuf::from(path))
-                        .is_some()
-                {
-                    return Err(
-                        "--dev-plugin-repo requires one directory and may only be provided once"
-                            .to_owned(),
-                    );
-                }
-                i += 1;
-            }
-            _ => {
-                return Err(format!("unknown argument '{}'", args[i]));
-            }
-        }
-        i += 1;
+    match args {
+        [] => Ok(ProcessRole::Server { headless: false }),
+        [flag] if flag == "--headless" => Ok(ProcessRole::Server { headless: true }),
+        _ => Err(format!("unknown arguments {args:?}")),
     }
-    Ok(ProcessRole::Server {
-        headless,
-        #[cfg(feature = "dev-plugin-repo")]
-        dev_plugin_repo,
-    })
 }
 
 fn main() -> Result<()> {
@@ -138,20 +95,14 @@ fn main() -> Result<()> {
         std::process::exit(exit_code);
     }
 
-    if let ProcessRole::UdevRules { embedded } = role {
-        let rules = if embedded {
-            let bytes = embedded_plugins::BUNDLE
-                .ok_or_else(|| anyhow::anyhow!("this build has no embedded plugin bundle"))?;
-            plugin::udev_rules_from_bundle(bytes)?
-        } else {
-            let cfg = config::load()?;
-            let registry = plugin::Registry::default();
-            registry.load_all_with_priority_repo(
-                &config::plugins_dir(),
-                None,
-                &plugin::repo_plugin_sources(&cfg.plugins.repos),
-            );
-            registry.udev_rules()
+    if let ProcessRole::UdevRules { catalog } = role {
+        let rules = match catalog {
+            Some(url) => plugin::udev_rules_from_catalog(&url)?,
+            None => {
+                let registry = plugin::Registry::default();
+                registry.load_all(&config::load()?.plugins.repos);
+                registry.udev_rules()
+            }
         };
         print!("{rules}");
         return Ok(());
@@ -163,24 +114,6 @@ fn main() -> Result<()> {
         #[cfg(feature = "plugin-test")]
         ProcessRole::PluginTest { .. } => unreachable!("handled above"),
     };
-    #[cfg(feature = "dev-plugin-repo")]
-    let dev_plugin_repo = match role {
-        ProcessRole::Server {
-            dev_plugin_repo, ..
-        } => dev_plugin_repo,
-        ProcessRole::UdevRules { .. } => unreachable!("handled above"),
-        #[cfg(feature = "plugin-test")]
-        ProcessRole::PluginTest { .. } => unreachable!("handled above"),
-    };
-    #[cfg(feature = "dev-plugin-repo")]
-    let dev_plugin_repo = dev_plugin_repo.map(|path| {
-        let canonical = std::fs::canonicalize(&path).unwrap_or_else(|e| {
-            eprintln!("invalid --dev-plugin-repo '{}': {e}", path.display());
-            std::process::exit(2);
-        });
-        canonical
-    });
-
     // Before the runtime starts (still single-threaded, no env-reader race).
     #[cfg(target_os = "linux")]
     {
@@ -208,22 +141,13 @@ fn main() -> Result<()> {
         .worker_threads(4)
         .enable_all()
         .build()?;
-    runtime.block_on(run_daemon(
-        headless,
-        #[cfg(feature = "dev-plugin-repo")]
-        dev_plugin_repo,
-        cfg,
-    ))
+    runtime.block_on(run_daemon(headless, cfg))
 }
 
 /// The actual device server — always a plain, unprivileged user process.
 /// On Windows, register-bus access is delegated to the elevated `halod-broker`
 /// on demand (see `drivers::transports::register_ops`); nothing here elevates.
-async fn run_daemon(
-    headless: bool,
-    #[cfg(feature = "dev-plugin-repo")] dev_plugin_repo: Option<std::path::PathBuf>,
-    cfg: crate::config::Config,
-) -> Result<()> {
+async fn run_daemon(headless: bool, cfg: crate::config::Config) -> Result<()> {
     let initial_level: log::LevelFilter =
         cfg.gui.log_level.parse().unwrap_or(log::LevelFilter::Info);
 
@@ -259,12 +183,7 @@ async fn run_daemon(
     infrastructure::audio::sink::cleanup_orphaned_sinks().await;
 
     log::info!("Discovering devices...");
-    crate::domain::registry::initialize_app_state(
-        app.clone(),
-        #[cfg(feature = "dev-plugin-repo")]
-        dev_plugin_repo,
-    )
-    .await;
+    crate::domain::registry::initialize_app_state(app.clone()).await;
     log::info!("Device discovery complete");
 
     // Prime the requirement cache so the first UI poll doesn't trigger a probe
@@ -551,66 +470,42 @@ mod tests {
     }
 
     #[test]
-    fn no_args_runs_a_plain_server() {
+    fn server_arguments_parse_and_reject_unknown_flags() {
         assert_eq!(
             process_role(&argv(&[])).unwrap(),
-            ProcessRole::Server {
-                headless: false,
-                #[cfg(feature = "dev-plugin-repo")]
-                dev_plugin_repo: None
-            }
+            ProcessRole::Server { headless: false }
         );
-    }
-
-    #[test]
-    fn headless_flag_marks_a_headless_server() {
         assert_eq!(
             process_role(&argv(&["--headless"])).unwrap(),
-            ProcessRole::Server {
-                headless: true,
-                #[cfg(feature = "dev-plugin-repo")]
-                dev_plugin_repo: None
-            }
+            ProcessRole::Server { headless: true }
         );
+        for args in [
+            vec!["--unknown"],
+            vec!["--headless", "--headless"],
+            vec!["--dev-plugin-repo", "C:/plugins"],
+        ] {
+            assert!(process_role(&argv(&args)).is_err(), "{args:?}");
+        }
     }
 
     #[test]
-    fn udev_rules_is_a_standalone_runtime_command() {
+    fn udev_rules_optionally_takes_a_catalog() {
         assert_eq!(
             process_role(&argv(&["udev-rules"])).unwrap(),
-            ProcessRole::UdevRules { embedded: false }
+            ProcessRole::UdevRules { catalog: None }
         );
         assert_eq!(
-            process_role(&argv(&["udev-rules", "--embedded"])).unwrap(),
-            ProcessRole::UdevRules { embedded: true }
-        );
-        assert!(process_role(&argv(&["udev-rules", "extra"])).is_err());
-    }
-
-    #[cfg(feature = "dev-plugin-repo")]
-    #[test]
-    fn development_plugin_repository_is_parsed() {
-        assert_eq!(
-            process_role(&argv(&["--dev-plugin-repo", "C:/plugins"])).unwrap(),
-            ProcessRole::Server {
-                headless: false,
-                dev_plugin_repo: Some("C:/plugins".into()),
+            process_role(&argv(&[
+                "udev-rules",
+                "--catalog",
+                "https://x/catalog.yaml"
+            ]))
+            .unwrap(),
+            ProcessRole::UdevRules {
+                catalog: Some("https://x/catalog.yaml".into())
             }
         );
-    }
-
-    #[test]
-    fn invalid_server_arguments_return_usage_errors() {
-        let mut cases = vec![vec!["--unknown"], vec!["--headless", "--headless"]];
-        #[cfg(feature = "dev-plugin-repo")]
-        cases.extend([
-            vec!["--dev-plugin-repo"],
-            vec!["--dev-plugin-repo", "--headless"],
-            vec!["--dev-plugin-repo", "one", "--dev-plugin-repo", "two"],
-        ]);
-        #[cfg(not(feature = "dev-plugin-repo"))]
-        cases.push(vec!["--dev-plugin-repo", "C:/plugins"]);
-        for args in cases {
+        for args in [vec!["udev-rules", "extra"], vec!["udev-rules", "--catalog"]] {
             assert!(process_role(&argv(&args)).is_err(), "{args:?}");
         }
     }

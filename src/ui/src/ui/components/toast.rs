@@ -33,24 +33,16 @@ const DETAILS_ROW_H: f32 = 38.0;
 
 /// Extra card height for the Details row (0 when the code has no detail).
 fn details_extra_height(note: &Notification) -> f32 {
-    if shows_details(&note.code) || restore_slug(&note.code).is_some() {
+    if shows_details(&note.code) {
         DETAILS_ROW_H
     } else {
         0.0
     }
 }
 
-fn restore_slug(code: &NotificationCode) -> Option<&str> {
-    match code {
-        NotificationCode::RepositoryIntegrityError { restore_slug, .. } => restore_slug.as_deref(),
-        _ => None,
-    }
-}
-
 #[derive(Debug, Clone)]
 pub enum ToastEvent {
     Details(Notification),
-    RestoreRepository(String),
 }
 
 /// Accent color for a toast's severity indicator and title.
@@ -179,12 +171,6 @@ impl Toasts {
                     if action.details {
                         event = Some(ToastEvent::Details(toast.note.clone()));
                     }
-                    if action.restore {
-                        if let Some(slug) = restore_slug(&toast.note.code) {
-                            event = Some(ToastEvent::RestoreRepository(slug.to_owned()));
-                            dismiss = Some(i);
-                        }
-                    }
                     bottom -= h + GAP;
                 }
             });
@@ -221,7 +207,6 @@ fn toast_height(ui: &egui::Ui, note: &Notification, w: f32) -> f32 {
 struct ToastAction {
     dismiss: bool,
     details: bool,
-    restore: bool,
 }
 
 /// Severity tile: a tinted square with the severity glyph, shared by toasts
@@ -319,14 +304,8 @@ fn toast_card(
         dismiss: resp.clicked(),
         ..Default::default()
     };
-    let label = if shows_details(&note.code) {
-        Some(t!("plugins.issue_details"))
-    } else if restore_slug(&note.code).is_some() {
-        Some(t!("plugins.integrity_restore"))
-    } else {
-        None
-    };
-    if let Some(label) = label {
+    if shows_details(&note.code) {
+        let label = t!("plugins.issue_details");
         let w = ui
             .painter()
             .layout_no_wrap(label.to_string(), theme::body_sm(), theme::TEXT)
@@ -345,11 +324,7 @@ fn toast_card(
             super::ButtonKind::Secondary,
         )
         .clicked();
-        if shows_details(&note.code) {
-            action.details = clicked;
-        } else {
-            action.restore = clicked;
-        }
+        action.details = clicked;
     }
     action
 }
@@ -401,20 +376,6 @@ mod tests {
         }
     }
 
-    fn integrity_error() -> Notification {
-        Notification {
-            code: NotificationCode::RepositoryIntegrityError {
-                repository: Some("official".into()),
-                package: "halo_lcd".into(),
-                expected: "a".into(),
-                actual: "b".into(),
-                restore_slug: Some("official".into()),
-            },
-            show_native: false,
-            timestamp_ms: 0,
-        }
-    }
-
     #[test]
     fn errors_are_sticky_others_time_out() {
         assert_eq!(toast_timeout(&note(NotificationSeverity::Error).code), None);
@@ -438,15 +399,6 @@ mod tests {
         assert!(!shows_details(&w.code));
         assert!(toast_timeout(&w.code).is_some());
         assert_eq!(details_extra_height(&w), 0.0);
-    }
-
-    #[test]
-    fn integrity_error_is_sticky_and_exposes_restore_action() {
-        let note = integrity_error();
-        assert_eq!(toast_timeout(&note.code), None);
-        assert!(!shows_details(&note.code));
-        assert_eq!(restore_slug(&note.code), Some("official"));
-        assert_eq!(details_extra_height(&note), DETAILS_ROW_H);
     }
 
     #[test]

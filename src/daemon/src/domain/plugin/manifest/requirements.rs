@@ -202,23 +202,26 @@ mod tests {
     fn write_plugin_dir(root: &Path, id: &str, yaml_extra: &str) -> PathBuf {
         let dir = root.join(id);
         std::fs::create_dir_all(&dir).unwrap();
-        std::fs::write(dir.join("plugin.yaml"), format!("id: {id}\n{yaml_extra}")).unwrap();
+        std::fs::write(
+            dir.join("plugin.yaml"),
+            format!("id: {id}\nversion: 1.0.0\napi: \"3.0\"\n{yaml_extra}"),
+        )
+        .unwrap();
         std::fs::write(dir.join("main.lua"), "return {}").unwrap();
         dir
     }
 
     #[test]
     fn command_transport_is_automatic_and_explicit_command_is_still_supported() {
-        let transport = manifest(
-            "type: integration\npermissions: [command]\ntransports:\n  command:\n    commands: [nvidia-smi]\n",
-        );
+        let transport =
+            manifest("type: integration\ntransports:\n  command:\n    commands: [nvidia-smi]\n");
         assert!(matches!(
             &derive_for(&transport, "linux")[0].requirement,
             PluginRequirement::Command { executable } if executable == "nvidia-smi"
         ));
 
         let integration = manifest(
-            "type: integration\npermissions: [network]\ntransports:\n  tcp: {}\nconfig:\n  fields:\n    - { key: host, label: Host, kind: host }\n    - { key: port, label: Port, kind: port }\nrequirements:\n  - { kind: command, name: openrgb }\n",
+            "type: integration\ntransports:\n  tcp: {}\nconfig:\n  fields:\n    - { key: host, label: Host, kind: host }\n    - { key: port, label: Port, kind: port }\nrequirements:\n  - { kind: command, name: openrgb }\n",
         );
         assert!(matches!(
             &derive_for(&integration, "linux")[0].requirement,
@@ -229,7 +232,7 @@ mod tests {
     #[test]
     fn explicit_kernel_module_is_retained() {
         let integration = manifest(
-            "type: integration\nplatforms: [linux]\npermissions: [network]\ntransports:\n  tcp: {}\nconfig:\n  fields:\n    - { key: host, label: Host, kind: host }\n    - { key: port, label: Port, kind: port }\nrequirements:\n  - { kind: kernel_module, name: v4l2loopback, platforms: [linux] }\n",
+            "type: integration\nplatforms: [linux]\ntransports:\n  tcp: {}\nconfig:\n  fields:\n    - { key: host, label: Host, kind: host }\n    - { key: port, label: Port, kind: port }\nrequirements:\n  - { kind: kernel_module, name: v4l2loopback, platforms: [linux] }\n",
         );
         assert!(matches!(
             &derive_for(&integration, "linux")[0].requirement,
@@ -240,7 +243,7 @@ mod tests {
     #[test]
     fn missing_transport_command_blocks_activation() {
         let manifest = manifest(
-            "type: integration\npermissions: [command]\ntransports:\n  command:\n    commands: [nvidia-smi, liquidctl]\n",
+            "type: integration\ntransports:\n  command:\n    commands: [nvidia-smi, liquidctl]\n",
         );
         let statuses = evaluate_with(&manifest, "linux", &|name| name == "nvidia-smi");
         let missing = blocking_missing(&statuses);
@@ -251,7 +254,7 @@ mod tests {
     #[test]
     fn hardware_requirements_are_inferred_from_transports() {
         let smbus = manifest(
-            "platforms: [linux, windows]\npermissions: [smbus]\ndevices:\n  - vendor: Test\n    model: Chip\n    match:\n      smbus: { bus: chipset, addresses: [0x58] }\n",
+            "platforms: [linux, windows]\ndevices:\n  - vendor: Test\n    model: Chip\n    match:\n      smbus: { bus: chipset, addresses: [0x58] }\n",
         );
         assert!(matches!(
             derive_for(&smbus, "linux")[0].requirement,
@@ -263,7 +266,7 @@ mod tests {
         ));
 
         let pawnio = manifest(
-            "platforms: [windows]\npermissions: [amd_smn]\ndevices:\n  - vendor: AMD\n    model: CPU\n    match:\n      amd_smn: { any: true }\ntransports:\n  amd_smn: {}\n",
+            "platforms: [windows]\ndevices:\n  - vendor: AMD\n    model: CPU\n    match:\n      amd_smn: { any: true }\ntransports:\n  amd_smn: {}\n",
         );
         assert!(matches!(
             derive_for(&pawnio, "windows")[0].requirement,
@@ -274,7 +277,7 @@ mod tests {
     #[test]
     fn hwmon_read_and_fan_control_are_inferred() {
         let manifest = manifest(
-            "type: integration\nplatforms: [linux]\npermissions: [hwmon]\ncapabilities: [sensors, cooling]\ntransports:\n  hwmon: {}\n",
+            "type: integration\nplatforms: [linux]\ncapabilities: [sensors, cooling]\ntransports:\n  hwmon: {}\n",
         );
         let requirements = derive_for(&manifest, "linux");
         assert_eq!(requirements.len(), 2);
@@ -286,7 +289,7 @@ mod tests {
     #[test]
     fn unsupported_platform_has_no_requirements() {
         let manifest = manifest(
-            "type: integration\nplatforms: [windows]\npermissions: [command]\ntransports:\n  command:\n    commands: [nvidia-smi]\n",
+            "type: integration\nplatforms: [windows]\ntransports:\n  command:\n    commands: [nvidia-smi]\n",
         );
         assert!(derive_for(&manifest, "linux").is_empty());
     }

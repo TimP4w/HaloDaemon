@@ -326,7 +326,6 @@ impl WaylandApp {
         let painter =
             egui_glow::Painter::new(Arc::clone(&gl), "", None, true).expect("create glow painter");
         let egui_winit = self.new_egui_state(event_loop, &win.window, painter.max_texture_side());
-        self.app.replay_integrity_native_on_reopen();
         win.window.request_redraw();
         self.painter = Some(painter);
         self.egui_winit = Some(egui_winit);

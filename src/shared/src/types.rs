@@ -472,16 +472,6 @@ impl Default for LcdConfig {
     }
 }
 
-/// `Unset` remains readable for configs written by older versions.
-#[derive(Debug, Clone, Copy, PartialEq, Eq, Serialize, Deserialize, Default)]
-#[serde(rename_all = "snake_case")]
-pub enum PluginDownloadConsent {
-    Unset,
-    #[default]
-    Allowed,
-    Denied,
-}
-
 pub const ONBOARDING_TOUR_KEY: &str = "onboarding";
 
 pub const MAX_HOME_WIDGETS: usize = 12;
@@ -599,7 +589,6 @@ pub struct GuiConfig {
     /// Persistence keys (e.g. "page:home") of completed or skipped tutorials.
     pub seen_tours: BTreeSet<String>,
     pub log_level: String,
-    pub plugin_downloads: PluginDownloadConsent,
     /// In display order.
     pub home_widgets: Vec<HomeWidget>,
     /// In display order; separate from `home_widgets` so each page keeps its own sensors.
@@ -616,7 +605,6 @@ impl Default for GuiConfig {
             low_battery_notifications: true,
             seen_tours: BTreeSet::new(),
             log_level: "info".to_string(),
-            plugin_downloads: PluginDownloadConsent::Allowed,
             home_widgets: Vec::new(),
             cooling_widgets: Vec::new(),
         }
@@ -630,10 +618,6 @@ pub enum NotificationSeverity {
     Warning,
     Error,
 }
-
-/// The GUI translates this code instead of displaying backend text.
-pub const ERROR_REPOSITORY_SIGNATURE_VERIFICATION_FAILED: &str =
-    "repository_signature_verification_failed";
 
 /// The GUI owns all human-readable copy; `severity()` is derived from the variant, not sent.
 #[derive(Debug, Clone, Serialize, Deserialize, PartialEq, Eq)]
@@ -673,10 +657,6 @@ pub enum NotificationCode {
     FanStalled {
         fan: String,
     },
-    /// Dirty-update metadata, not a consent decision.
-    PluginContentChanged {
-        plugin: String,
-    },
     /// Background-path Lua failure, deduplicated daemon-side so it alerts once, not every frame.
     PluginRuntimeError {
         plugin: String,
@@ -690,14 +670,6 @@ pub enum NotificationCode {
     /// `plugin` is the display name and never includes device paths or serials.
     PluginRecommended {
         plugin: String,
-    },
-    /// Sticky; signed repositories may expose a restore action through `restore_slug`.
-    RepositoryIntegrityError {
-        repository: Option<String>,
-        package: String,
-        expected: String,
-        actual: String,
-        restore_slug: Option<String>,
     },
     /// The GUI translates only the title and shows `message` verbatim.
     Generic {
@@ -713,12 +685,10 @@ impl NotificationCode {
             | ChainLinkRestoreFailed { .. }
             | DeviceInitFailed { .. }
             | DeviceWriteFailed { .. }
-            | RepositoryIntegrityError { .. }
             | Generic { .. } => NotificationSeverity::Error,
             KeyRemapUnavailable { .. }
             | DeviceReconnectFailed { .. }
             | FanStalled { .. }
-            | PluginContentChanged { .. }
             | PluginRuntimeError { .. }
             | PluginConnectFailed { .. } => NotificationSeverity::Warning,
             ProfileSwitched { .. } | LowBattery { .. } | PluginRecommended { .. } => {
@@ -821,17 +791,16 @@ pub struct PluginsState {
     pub plugins: Vec<PluginInfo>,
     #[serde(default)]
     pub repos: Vec<PluginRepoInfo>,
+    /// The best entry per id and remote repo: the newest compatible version,
+    /// else the newest one, flagged incompatible.
+    #[serde(default)]
+    pub available: Vec<AvailablePlugin>,
     /// Manifests too malformed to load, shown as a "skipped" notice.
     #[serde(default)]
     pub skipped: Vec<SkippedPlugin>,
     /// Computed once at startup.
     #[serde(default)]
     pub recommendations: Vec<PluginRecommendation>,
-    /// Retained on this topic so reconnecting clients need no ad-hoc broadcast.
-    #[serde(default)]
-    pub updates: Vec<PluginUpdateStatus>,
-    #[serde(default)]
-    pub repo_updates: Vec<RepoUpdateStatus>,
 }
 
 #[derive(Debug, Clone, PartialEq, Eq, Serialize, Deserialize)]
@@ -840,91 +809,60 @@ pub struct SkippedPlugin {
     pub reason: String,
 }
 
-#[derive(Debug, Clone, Serialize, Deserialize)]
-pub struct PluginRepoInfo {
-    pub url: String,
-    pub slug: String,
-    #[serde(default)]
-    pub repository_id: Option<String>,
-    #[serde(default)]
-    pub release_tag: Option<String>,
-    #[serde(default)]
-    pub release_policy: PluginReleasePolicy,
-    #[serde(default)]
-    pub active_revision: Option<String>,
-    #[serde(default)]
-    pub previous_release_tag: Option<String>,
-    /// RFC 3339.
-    #[serde(default)]
-    pub last_sync: Option<String>,
-    /// The GUI hides the remove control for the seeded official repo.
-    #[serde(default)]
-    pub official: bool,
-    #[serde(default)]
-    pub location: PluginRepoLocation,
-    #[serde(default)]
-    pub signature: RepoSignatureStatus,
-    #[serde(default, skip_serializing_if = "Option::is_none")]
-    pub signing_key_fingerprint: Option<String>,
-}
-
-#[derive(Debug, Clone, Default, PartialEq, Eq, Serialize, Deserialize)]
-#[serde(rename_all = "snake_case", tag = "mode", content = "tag")]
-pub enum PluginReleasePolicy {
-    #[default]
-    Latest,
-    Pinned(String),
-}
-
 #[derive(Debug, Clone, PartialEq, Eq, Serialize, Deserialize)]
-pub struct PluginReleaseInfo {
-    pub tag: String,
-    #[serde(default)]
-    pub prerelease: bool,
-    #[serde(default)]
-    pub published_at: Option<String>,
+#[serde(tag = "kind", content = "value", rename_all = "snake_case")]
+pub enum PluginRepoLocation {
+    Url(String),
+    Local(String),
 }
 
 #[derive(Debug, Clone, Copy, Default, PartialEq, Eq, Serialize, Deserialize)]
 #[serde(rename_all = "snake_case")]
-pub enum PluginRepoLocation {
-    #[default]
-    RemoteRelease,
-    LocalArchive,
-}
-
-#[derive(Debug, Clone, Default, PartialEq, Eq, Serialize, Deserialize)]
-#[serde(tag = "status", rename_all = "snake_case")]
-pub enum RepoSignatureStatus {
-    Verified,
+pub enum RepoTrust {
+    Official,
+    Signed,
     #[default]
     Unsigned,
-    Invalid {
-        reason: String,
-    },
 }
 
-#[derive(Debug, Clone, Serialize, Deserialize)]
-pub struct RepoUpdateStatus {
+#[derive(Debug, Clone, PartialEq, Eq, Serialize, Deserialize)]
+pub struct PluginRepoInfo {
     pub slug: String,
-    pub installed_tag: String,
+    pub location: PluginRepoLocation,
+    /// The GUI hides the remove control for the seeded official repo.
     #[serde(default)]
-    pub available_tag: Option<String>,
+    pub official: bool,
     #[serde(default)]
-    pub pinned: bool,
+    pub trust: RepoTrust,
+    #[serde(default, skip_serializing_if = "Option::is_none")]
+    pub fingerprint: Option<String>,
+    /// RFC 3339.
+    #[serde(default)]
+    pub last_sync: Option<String>,
+    #[serde(default)]
+    pub commit: Option<String>,
 }
 
-/// A repository can be behind while a given package's content is unchanged.
-#[derive(Debug, Clone, Serialize, Deserialize)]
-pub struct PluginUpdateStatus {
-    pub plugin_id: String,
-    pub slug: String,
-    pub update_available: bool,
-    /// A local edit (or tampering), not an upstream change.
-    #[serde(default)]
-    pub on_disk_changed: bool,
-    pub current_version: String,
-    pub available_version: String,
+/// Sent as an IPC error `code` so the GUI can localize repository failures.
+#[derive(Debug, Clone, Copy, PartialEq, Eq, Serialize, Deserialize)]
+#[serde(rename_all = "snake_case")]
+pub enum CatalogErrorCode {
+    Malformed,
+    Unsigned,
+    UntrustedKey,
+    SignatureMismatch,
+    Stale,
+    HashMismatch,
+    ApiIncompatible,
+}
+
+#[derive(Debug, Clone, PartialEq, Eq, Serialize, Deserialize)]
+pub struct AvailablePlugin {
+    pub repo: String,
+    pub id: String,
+    pub version: String,
+    pub api: String,
+    pub compatible: bool,
 }
 
 /// The boundary between "trusted to talk to its matched device" and "trusted to reach outside it".
@@ -941,8 +879,6 @@ pub enum Permission {
     Command,
     Serial,
     Network,
-    /// Currently clock reads via `os.time`/`os.clock`.
-    Os,
     /// Non-secure config values need no permission.
     SecureStorage,
     /// A raw bus grants access to every device on it, hence a separate grant.
@@ -950,59 +886,26 @@ pub enum Permission {
     AudioRouting,
 }
 
-/// Separate from [`PluginSource`]: what Halo could verify, not where the bytes live.
 #[derive(Debug, Clone, Copy, Default, PartialEq, Eq, Serialize, Deserialize)]
 #[serde(rename_all = "snake_case")]
 pub enum PluginProvenance {
-    VerifiedOfficial,
-    UnsignedRepository,
-    /// `--dev-plugin-repo`.
-    LocalDevelopment,
+    Official,
+    Signed,
     #[default]
-    LocalUnsigned,
-    /// Visible for repair but never executable.
-    InvalidSignature,
+    Unsigned,
+    Local,
 }
 
-/// Transport scopes are sorted before persistence so equality and subset checks are stable.
+/// What a plugin's manifest declares it uses; display-only.
 #[derive(Debug, Clone, Default, PartialEq, Eq, Serialize, Deserialize)]
-pub struct PluginAuthority {
+pub struct PluginAccess {
     #[serde(default)]
     pub permissions: Vec<Permission>,
     #[serde(default)]
-    pub transport_scopes: Vec<String>,
+    pub commands: Vec<String>,
     /// Exact keys, except for the host-managed `host.sensors.*` scope.
     #[serde(default)]
     pub data_reads: Vec<String>,
-}
-
-impl PluginAuthority {
-    pub fn normalized(mut self) -> Self {
-        self.permissions.sort_unstable();
-        self.permissions.dedup();
-        self.transport_scopes.sort();
-        self.transport_scopes.dedup();
-        self.data_reads.sort();
-        self.data_reads.dedup();
-        self
-    }
-
-    pub fn is_subset_of(&self, accepted: &Self) -> bool {
-        let requested = self.clone().normalized();
-        let accepted = accepted.clone().normalized();
-        requested
-            .permissions
-            .iter()
-            .all(|permission| accepted.permissions.binary_search(permission).is_ok())
-            && requested
-                .transport_scopes
-                .iter()
-                .all(|scope| accepted.transport_scopes.binary_search(scope).is_ok())
-            && requested
-                .data_reads
-                .iter()
-                .all(|scope| accepted.data_reads.binary_search(scope).is_ok())
-    }
 }
 
 #[derive(Debug, Clone, PartialEq, Eq, Serialize, Deserialize)]
@@ -1032,16 +935,6 @@ pub struct PluginEffectAsset {
     pub thumbnail: String,
 }
 
-#[derive(Debug, Clone, Default, PartialEq, Eq, Serialize, Deserialize)]
-#[serde(tag = "kind", rename_all = "snake_case")]
-pub enum PluginSource {
-    #[default]
-    Local,
-    Repo {
-        slug: String,
-    },
-}
-
 #[derive(Debug, Clone, PartialEq, Eq, Serialize, Deserialize)]
 #[serde(rename_all = "snake_case")]
 pub enum PluginIssueKind {
@@ -1058,17 +951,7 @@ pub enum PluginIssueKind {
 #[derive(Debug, Clone, PartialEq, Eq, Serialize, Deserialize)]
 #[serde(tag = "type", rename_all = "snake_case")]
 pub enum PluginIssueContext {
-    RepositoryHashMismatch {
-        package: String,
-        expected: String,
-        actual: String,
-    },
-    RepositoryManifestMismatch {
-        package: String,
-        field: String,
-        expected: String,
-        actual: String,
-    },
+    ApiIncompatible { required: String, supported: String },
 }
 
 /// Persisted so it survives a transient toast the user may have missed.
@@ -1330,22 +1213,19 @@ pub struct PluginInfo {
     pub logo: Option<String>,
     #[serde(default)]
     pub effect_thumbnails: Vec<PluginEffectAsset>,
+    /// Slug of the repository the plugin was loaded from.
     #[serde(default)]
-    pub source: PluginSource,
+    pub repo: String,
     #[serde(default)]
     pub provenance: PluginProvenance,
     #[serde(default)]
-    pub declared_permissions: Vec<Permission>,
-    #[serde(default)]
-    pub authority: PluginAuthority,
+    pub access: PluginAccess,
     #[serde(default)]
     pub provides: Vec<String>,
     #[serde(default)]
     pub consumes: Vec<String>,
     #[serde(default)]
     pub data_records: Vec<PluginDataRecordStatus>,
-    #[serde(default)]
-    pub accepted_authority: Option<PluginAuthority>,
     #[serde(default)]
     pub config_fields: Vec<PluginConfigField>,
     /// Secure fields never appear here; see `secret_set`.
@@ -1365,9 +1245,6 @@ pub struct PluginInfo {
     pub integration_state: IntegrationLifecycleState,
     #[serde(default, skip_serializing_if = "Option::is_none")]
     pub integration_setup: Option<IntegrationSetupStatus>,
-    /// Content hashes are update/dirty metadata, never a consent gate.
-    #[serde(default = "default_true")]
-    pub consented: bool,
     /// An enabled plugin is inactive while a blocking host requirement is missing.
     #[serde(default)]
     pub active: bool,
@@ -3060,29 +2937,6 @@ mod default_tests {
         assert!(
             !c.suppress_dependency_warning,
             "default_suppress_dependency_warning"
-        );
-    }
-
-    #[test]
-    fn gui_config_defaults_plugin_downloads_to_allowed_when_omitted() {
-        let c: GuiConfig = serde_json::from_str(r#"{"language":"en","log_level":"info"}"#).unwrap();
-        assert_eq!(c.plugin_downloads, PluginDownloadConsent::Allowed);
-    }
-
-    #[test]
-    fn plugin_download_consent_round_trips() {
-        for v in [
-            PluginDownloadConsent::Unset,
-            PluginDownloadConsent::Allowed,
-            PluginDownloadConsent::Denied,
-        ] {
-            let json = serde_json::to_string(&v).unwrap();
-            let back: PluginDownloadConsent = serde_json::from_str(&json).unwrap();
-            assert_eq!(v, back);
-        }
-        assert_eq!(
-            serde_json::to_string(&PluginDownloadConsent::Allowed).unwrap(),
-            "\"allowed\""
         );
     }
 

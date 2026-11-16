@@ -11,6 +11,7 @@
 //! registry snapshot, and `make_device` is consulted before built-in
 //! host descriptors, so a plugin shadows a built-in device for the same hardware.
 
+pub mod catalog;
 pub(crate) mod engine;
 pub(crate) mod manifest;
 pub mod observers;
@@ -18,7 +19,6 @@ pub mod observers;
 pub mod plugin_test;
 pub mod projection;
 pub(crate) mod recommend;
-pub mod release_source;
 pub mod repo;
 
 pub use engine::device::LuaDevice;
@@ -35,10 +35,6 @@ pub use manifest::{DeviceSpec, EffectKind, PluginManifest, ProbeMode};
 
 use engine::{command_resolve, device, transport, worker};
 use manifest::{requirements, udev};
-
-/// Lua host/plugin ABI implemented by this daemon. Release validation,
-/// release tooling, and [`manifest::contract::PLUGIN_API_CONTRACT`] share this value.
-pub const PLUGIN_API: u32 = halod_plugin_signing::PLUGIN_API;
 
 use halod_shared::types::{
     Animation, EffectParamValue, HealthState, HealthStatus, Permission, PluginInfo, PluginIssue,
@@ -133,10 +129,8 @@ pub struct PluginPresetEntry {
     pub plugin_dir: std::path::PathBuf,
 }
 
-/// The validated inputs a device spawn needs, produced by
-/// [`Registry::activation_status`] only after the consent gate passes.
-/// [`Registry::build_device`] accepts one of these, so it is unreachable without
-/// consent.
+/// [`Registry::build_device`] only accepts this, so it is unreachable for a
+/// plugin that [`Registry::activation_status`] did not clear.
 struct ReadyPlugin {
     granted: Vec<Permission>,
     config: ResolvedConfig,
@@ -170,8 +164,6 @@ enum ActivationState {
     /// A blocking host requirement is unmet (e.g. a declared command is not on
     /// PATH). The plugin stays enabled but cannot execute until it is satisfied.
     MissingRequirements(Vec<halod_shared::types::PluginRequirementStatus>),
-    /// Declared permissions have not been granted.
-    AwaitingConsent,
     /// Cleared to spawn, carrying its resolved grants + config.
     Ready(ReadyPlugin),
 }
@@ -196,18 +188,7 @@ struct PluginState {
     /// `PluginKind::Integration` plugins.
     integrations_disabled: HashSet<String>,
     integrations_configured: HashSet<String>,
-    /// Permissions the user granted per plugin (see [`granted_for`]). Every
-    /// plugin — built-in or not — must be granted its permissions through
-    /// consent; nothing is auto-granted.
-    granted: HashMap<String, Vec<Permission>>,
-    /// Last complete authority snapshot accepted through the enable flow.
-    accepted_authorities: HashMap<String, halod_shared::types::PluginAuthority>,
-    /// Loader-established provenance.  This cannot be inferred from a package
-    /// path for an explicit development repository because it intentionally
-    /// lives outside the managed repository directory.
-    provenance: HashMap<String, halod_shared::types::PluginProvenance>,
-    /// Installed package hashes are update metadata, not an execution gate.
-    installed_hashes: HashMap<String, String>,
+    origins: HashMap<String, Origin>,
     /// Non-secure config values the user set per plugin. Secure values never
     /// live here — see the secret store.
     config_values: HashMap<String, HashMap<String, String>>,
@@ -235,7 +216,6 @@ const RUNTIME_ERROR_GRACE: std::time::Duration = std::time::Duration::from_secs(
 /// shared-globals lock).
 #[derive(Default)]
 pub struct Registry {
-    /// The read-mostly plugin snapshot (manifests/effects/consent/config).
     plugins: RwLock<Arc<PluginState>>,
     /// Health episodes keyed by a plugin id or by `plugin_id::device_id`.
     /// Keeping device failures separate makes recovery and one-shot
@@ -273,7 +253,6 @@ impl Registry {
         manifest.plugin_type == PluginKind::Integration
             && manifest.supports_current_platform()
             && !state.disabled.contains(&manifest.plugin_id)
-            && consent_satisfied_in(state, manifest)
             && self.blocking_requirements_met(manifest)
             && (!require_active_lifecycle
                 || (!state.integrations_disabled.contains(&manifest.plugin_id)
@@ -316,79 +295,66 @@ impl Registry {
     }
 }
 
-/// Assemble release rules from the exact signed repository bundle embedded in
-/// the daemon binary, without reading or modifying the user's plugin config.
-pub fn udev_rules_from_bundle(bytes: &[u8]) -> anyhow::Result<String> {
-    struct Cleanup(std::path::PathBuf);
-    impl Drop for Cleanup {
-        fn drop(&mut self) {
-            let _ = std::fs::remove_dir_all(&self.0);
-        }
-    }
-
-    let root = std::env::temp_dir().join(format!("halod-udev-{}", uuid::Uuid::new_v4()));
-    let cleanup = Cleanup(root.clone());
-    halod_plugin_signing::extract_bundle(bytes, &root)?;
-    let registry = Registry::default();
-    registry.load_all_with_priority_repo(&root.join("__local__"), Some(&root), &[]);
-    let rules = registry.udev_rules();
-    drop(cleanup);
-    Ok(rules)
+#[derive(Clone)]
+struct Origin {
+    repo: String,
+    provenance: halod_shared::types::PluginProvenance,
 }
 
-fn consent_satisfied_in(state: &PluginState, manifest: &PluginManifest) -> bool {
-    let requested = authority_for_manifest(manifest);
-    if requested.permissions.is_empty()
-        && requested.transport_scopes.is_empty()
-        && requested.data_reads.is_empty()
+/// Rules for the catalog's packages compatible with this build, without
+/// touching the user's config or installed plugins.
+pub fn udev_rules_from_catalog(url: &str) -> anyhow::Result<String> {
+    use halod_plugin_signing::catalog::MAX_CATALOG_BYTES;
+    use halod_plugin_signing::fetch::{https_get, https_url, package_url};
+    use halod_plugin_signing::package::{extract_archive, MAX_ARCHIVE_BYTES};
+
+    let bytes = https_get(&https_url(url)?, MAX_CATALOG_BYTES)?;
+    let trust = (url == crate::constants::OFFICIAL_PLUGIN_CATALOG_URL)
+        .then_some(crate::constants::OFFICIAL_PLUGIN_REPO_PUBLIC_KEYS);
+    let catalog = halod_plugin_signing::open_catalog(&bytes, trust)?;
+    let root = tempfile::tempdir()?;
+    for entry in catalog
+        .select(halod_plugin_signing::HOST_PLUGIN_API)
+        .into_values()
     {
-        return true;
+        if !entry
+            .api
+            .is_compatible_with(halod_plugin_signing::HOST_PLUGIN_API)
+        {
+            continue;
+        }
+        let archive = https_get(&package_url(url, &entry.path)?, MAX_ARCHIVE_BYTES)?;
+        entry.verify(&archive)?;
+        extract_archive(&archive, &root.path().join(&entry.id))?;
     }
-    state
-        .accepted_authorities
-        .get(&manifest.plugin_id)
-        .is_some_and(|accepted| requested.is_subset_of(accepted))
+    let registry = Registry::default();
+    registry.load_all(&[crate::config::PluginRepoRecord {
+        slug: "catalog".into(),
+        source: crate::config::PluginRepoSource::Local(root.path().to_path_buf()),
+        trusted_key: None,
+    }]);
+    Ok(registry.udev_rules())
 }
 
-/// Convert the statically declared transport surface into stable scope labels
-/// suitable for consent comparison and UI display. Device transport names are
-/// included even when their configuration is implicit (for example HID), while
-/// configured endpoints contribute their own names. Future scoped transports
-/// can extend this function without changing persisted authority semantics.
-fn authority_for_manifest(manifest: &PluginManifest) -> halod_shared::types::PluginAuthority {
-    let mut scopes: Vec<String> = manifest
-        .devices
+fn access_for_manifest(manifest: &PluginManifest) -> halod_shared::types::PluginAccess {
+    let mut data_reads: Vec<String> = manifest
+        .consumes
         .iter()
-        .map(|device| device.transport.kind().to_owned())
+        .filter(|key| !key.starts_with(&format!("{}.", manifest.plugin_id)))
+        .cloned()
         .collect();
-    if manifest.transports.hid.is_some() {
-        scopes.push("hid".to_owned());
+    data_reads.sort();
+    data_reads.dedup();
+    halod_shared::types::PluginAccess {
+        permissions: manifest.permissions(),
+        commands: manifest
+            .transports
+            .command
+            .as_ref()
+            .map(|command| command.commands.clone())
+            .unwrap_or_default(),
+        data_reads,
     }
-    if manifest.transports.tcp.is_some() {
-        scopes.push("tcp".to_owned());
-    }
-    if manifest.transports.usb.is_some() {
-        scopes.push("usb".to_owned());
-    }
-    if let Some(command) = &manifest.transports.command {
-        scopes.extend(
-            command
-                .commands
-                .iter()
-                .map(|name| format!("command:{name}")),
-        );
-    }
-    halod_shared::types::PluginAuthority {
-        permissions: manifest.permissions.clone(),
-        transport_scopes: scopes,
-        data_reads: manifest
-            .consumes
-            .iter()
-            .filter(|key| !key.starts_with(&format!("{}.", manifest.plugin_id)))
-            .cloned()
-            .collect(),
-    }
-    .normalized()
 }
 
 fn effect_entries_for(manifest: &PluginManifest) -> Vec<PluginEffectEntry> {
@@ -438,25 +404,20 @@ fn preset_entries_for(manifest: &PluginManifest) -> Vec<PluginPresetEntry> {
 }
 
 impl Registry {
-    /// Whether the plugin owning an effect remains within its accepted authority.
-    /// Installed content hashes intentionally do not gate code.
-    fn effect_consent_ok(state: &PluginState, plugin_id: &str) -> bool {
-        state
-            .manifests
-            .iter()
-            .find(|m| m.plugin_id == plugin_id)
-            .is_some_and(|m| !state.disabled.contains(plugin_id) && consent_satisfied_in(state, m))
+    fn effect_enabled(state: &PluginState, plugin_id: &str) -> bool {
+        state.manifests.iter().any(|m| m.plugin_id == plugin_id)
+            && !state.disabled.contains(plugin_id)
     }
 
-    /// Every enabled, consent-satisfied plugin's declared descriptors of one effect
-    /// kind, for the RGB engine's dynamic catalog.
+    /// Every enabled plugin's declared descriptors of one effect kind, for the
+    /// RGB engine's dynamic catalog.
     fn effect_descriptors(&self, kind: EffectKind) -> Vec<Animation> {
         let state = self.snapshot();
         state
             .effects
             .iter()
             .filter(|e| e.kind == kind && !state.disabled.contains(&e.plugin_id))
-            .filter(|e| Self::effect_consent_ok(&state, &e.plugin_id))
+            .filter(|e| Self::effect_enabled(&state, &e.plugin_id))
             .map(|e| e.descriptor.clone())
             .collect()
     }
@@ -476,9 +437,7 @@ impl Registry {
             .manifests
             .iter()
             .find(|manifest| manifest.plugin_id == plugin_id)
-            .is_some_and(|manifest| {
-                !state.disabled.contains(plugin_id) && consent_satisfied_in(state, manifest)
-            })
+            .is_some_and(|_| !state.disabled.contains(plugin_id))
     }
 
     pub fn widget_descriptors(&self) -> Vec<halod_shared::types::LcdWidgetDescriptor> {
@@ -557,7 +516,6 @@ impl Registry {
             entry.script_source,
             entry.module_sources,
             widget_ids,
-            granted,
             config,
             data,
         ))
@@ -575,7 +533,7 @@ impl Registry {
     }
 
     /// Look up a registered effect entry by its namespaced catalog id. `None` if
-    /// unknown, disabled, or its plugin's consent is no longer satisfied.
+    /// unknown or disabled.
     pub fn effect_entry(&self, catalog_id: &str) -> Option<PluginEffectEntry> {
         let state = self.snapshot();
         state
@@ -584,7 +542,7 @@ impl Registry {
             .find(|e| {
                 e.catalog_id == catalog_id
                     && !state.disabled.contains(&e.plugin_id)
-                    && Self::effect_consent_ok(&state, &e.plugin_id)
+                    && Self::effect_enabled(&state, &e.plugin_id)
             })
             .cloned()
     }
@@ -646,7 +604,6 @@ impl Registry {
             entry.module_sources,
             effect_id,
             params.clone(),
-            granted,
             config,
             data,
         ))
@@ -672,13 +629,6 @@ impl Registry {
                 .map(|manifest| manifest.plugin_id.clone())
                 .collect();
             s.integrations_configured = policy.integrations_configured.iter().cloned().collect();
-            s.granted = policy
-                .accepted_authorities
-                .iter()
-                .map(|(id, authority)| (id.clone(), authority.permissions.clone()))
-                .collect();
-            s.accepted_authorities = policy.accepted_authorities.clone();
-            s.installed_hashes = policy.installed_hashes.clone();
             s.config_values = policy.config.clone();
         });
         let now_disabled = self.snapshot().disabled.clone();
@@ -788,19 +738,6 @@ impl Registry {
         self.snapshot().integrations_disabled.contains(plugin_id)
     }
 
-    /// Current authority from inert manifest data. This must stay independent
-    /// of Lua so the user can inspect exactly what will run before enabling it.
-    pub(crate) fn authority_for(
-        &self,
-        plugin_id: &str,
-    ) -> Option<halod_shared::types::PluginAuthority> {
-        self.snapshot()
-            .manifests
-            .iter()
-            .find(|m| m.plugin_id == plugin_id)
-            .map(authority_for_manifest)
-    }
-
     /// Whether `plugin_id`'s manifest may execute on the current host. Unknown
     /// plugins report `false`.
     pub(crate) fn supports_current_platform(&self, plugin_id: &str) -> bool {
@@ -811,23 +748,59 @@ impl Registry {
             .is_some_and(|m| m.supports_current_platform())
     }
 
-    /// Effective permissions granted to `plugin_id`'s Lua sandbox: persisted user
-    /// grants intersected with the current manifest declaration. This is the
-    /// authoritative capability boundary even if persisted config was edited or an
-    /// internal caller supplied an undeclared permission.
     pub(crate) fn granted_for(&self, plugin_id: &str) -> Vec<Permission> {
-        let state = self.snapshot();
-        let Some(manifest) = state.manifests.iter().find(|m| m.plugin_id == plugin_id) else {
-            return Vec::new();
-        };
-        state
-            .granted
+        self.snapshot()
+            .manifests
+            .iter()
+            .find(|m| m.plugin_id == plugin_id)
+            .map(PluginManifest::permissions)
+            .unwrap_or_default()
+    }
+
+    pub(crate) fn origin(&self, plugin_id: &str) -> Option<String> {
+        self.snapshot()
+            .origins
             .get(plugin_id)
-            .into_iter()
-            .flatten()
-            .copied()
-            .filter(|permission| manifest.permissions.contains(permission))
+            .map(|origin| origin.repo.clone())
+    }
+
+    pub(crate) fn plugins_from_repo(&self, slug: &str) -> Vec<String> {
+        self.snapshot()
+            .origins
+            .iter()
+            .filter(|(_, origin)| origin.repo == slug)
+            .map(|(id, _)| id.clone())
             .collect()
+    }
+
+    /// `(repo, id, version)` of every loaded plugin.
+    pub(crate) fn installed(&self) -> Vec<(String, String, semver::Version)> {
+        let state = self.snapshot();
+        state
+            .manifests
+            .iter()
+            .filter_map(|m| {
+                let origin = state.origins.get(&m.plugin_id)?;
+                Some((origin.repo.clone(), m.plugin_id.clone(), m.version.clone()))
+            })
+            .collect()
+    }
+
+    /// Why the package at `dir` did not load, if it failed.
+    pub(crate) fn load_problem(&self, dir: &Path) -> Option<String> {
+        let path = dir.display().to_string();
+        self.invalid_manifests
+            .read()
+            .iter()
+            .find(|(m, _)| m.plugin_dir == dir)
+            .map(|(_, issue)| issue.detail.clone())
+            .or_else(|| {
+                self.skipped
+                    .read()
+                    .iter()
+                    .find(|skipped| skipped.path == path)
+                    .map(|skipped| skipped.reason.clone())
+            })
     }
 
     /// A plugin's resolved non-secure config: every declared field defaults to its
@@ -1322,41 +1295,17 @@ impl Registry {
         Ok(())
     }
 
-    /// True when the plugin's complete requested authority remains within the
-    /// accepted snapshot. Being consent-satisfied is
-    /// necessary but not sufficient to activate — see [`Registry::activation_status`],
-    /// which also accounts for the disabled set.
-    fn consent_satisfied(&self, manifest: &PluginManifest) -> bool {
-        consent_satisfied_in(&self.snapshot(), manifest)
-    }
-
-    /// The single gate for "may this plugin activate, and with what?": disabled,
-    /// awaiting consent (with the reason), or [`Ready`](ActivationState::Ready) with
-    /// the resolved grants + config a spawn needs. Every device spawn resolves
-    /// through here and [`build_device`](Registry::build_device) accepts only a
-    /// [`ReadyPlugin`], so a device can't be built without passing the consent gate
-    /// (the ARCH-N1 class of bug becomes unrepresentable rather than checked by
-    /// convention).
     fn activation_status(
         &self,
         secrets: &dyn crate::infrastructure::secrets::SecretStore,
         manifest: &PluginManifest,
     ) -> ActivationState {
-        if !manifest.supports_current_platform() {
-            // Catalog-visible but inert: it must neither request consent nor
-            // shadow an otherwise applicable built-in host device.
-            ActivationState::Disabled
-        } else if self.is_disabled(&manifest.plugin_id) {
+        if !manifest.supports_current_platform() || self.is_disabled(&manifest.plugin_id) {
             ActivationState::Disabled
         } else {
-            // Requirements are evaluated before consent: a plugin that cannot run
-            // shows its missing requirement instead of prompting for consent it
-            // could not use. Requirement probing is inert host access, never Lua.
             let missing = requirements::blocking_missing(&self.requirement_statuses(manifest));
             if !missing.is_empty() {
                 ActivationState::MissingRequirements(missing)
-            } else if !self.consent_satisfied(manifest) {
-                ActivationState::AwaitingConsent
             } else {
                 let granted = self.granted_for(&manifest.plugin_id);
                 let config = self.resolved_config_for(secrets, &manifest.plugin_id, &granted);
@@ -1393,7 +1342,7 @@ impl Registry {
     /// Manifest eligible for an explicit pairing action. Unlike
     /// [`integration_manifest`], this intentionally ignores the integration's
     /// on/off switch: pairing credentials must be obtainable before the user
-    /// enables the integration. Generic plugin disable, platform, consent, and
+    /// enables the integration. Generic plugin disable, platform and
     /// requirement gates remain in force.
     pub(crate) fn setup_integration_manifest(&self, plugin_id: &str) -> Option<PluginManifest> {
         let state = self.snapshot();
@@ -1416,27 +1365,6 @@ impl Registry {
             .is_some_and(|manifest| {
                 manifest.setup.is_none() || state.integrations_configured.contains(plugin_id)
             })
-    }
-}
-
-/// Where `plugin_dir` came from: `Repo { slug }` under `plugin_repos_dir()`, else `Local`.
-fn plugin_source_for(plugin_dir: &Path) -> halod_shared::types::PluginSource {
-    let embedded_official = crate::config::embedded_plugin_revisions_dir()
-        .join(crate::constants::OFFICIAL_PLUGIN_REPO_SLUG);
-    if plugin_dir.starts_with(embedded_official) {
-        return halod_shared::types::PluginSource::Repo {
-            slug: crate::constants::OFFICIAL_PLUGIN_REPO_SLUG.to_owned(),
-        };
-    }
-    let repos_dir = crate::config::plugin_repos_dir();
-    match plugin_dir.strip_prefix(&repos_dir).ok().and_then(|rel| {
-        rel.components().next().and_then(|c| match c {
-            std::path::Component::Normal(slug) => Some(slug.to_string_lossy().into_owned()),
-            _ => None,
-        })
-    }) {
-        Some(slug) => halod_shared::types::PluginSource::Repo { slug },
-        None => halod_shared::types::PluginSource::Local,
     }
 }
 
@@ -1465,7 +1393,6 @@ impl Registry {
             }
             let mut info = self.build_plugin_info(m, &state, secrets);
             info.enabled = false;
-            info.consented = false;
             info.integration_enabled = false;
             info.active = false;
             info.activation_blocker = None;
@@ -1477,23 +1404,6 @@ impl Registry {
             infos.push(info);
         }
         infos
-    }
-
-    /// Blocking host requirements currently unmet for `plugin_id` (empty when
-    /// satisfied or the plugin is unknown). Freshly evaluated — the daemon-
-    /// authoritative check the enable flow force-refreshes so a stale GUI cannot
-    /// bypass the gate.
-    pub fn missing_blocking_requirements(
-        &self,
-        plugin_id: &str,
-    ) -> Vec<halod_shared::types::PluginRequirementStatus> {
-        let state = self.snapshot();
-        state
-            .manifests
-            .iter()
-            .find(|m| m.plugin_id == plugin_id)
-            .map(|m| requirements::blocking_missing(&requirements::evaluate(m)))
-            .unwrap_or_default()
     }
 
     /// Cached requirement statuses for `m`, evaluating and caching on first use.
@@ -1584,7 +1494,6 @@ impl Registry {
                 (f.key.clone(), is_set)
             })
             .collect();
-        let consented = self.consent_satisfied(m);
         let health = self.health_for(&m.plugin_id);
         // Requirement status drives the effective activation and the "Enabled,
         // but inactive" blocker. A disabled/unsupported plugin has no blocker —
@@ -1603,7 +1512,6 @@ impl Registry {
             halod_shared::types::IntegrationLifecycleState::Configured
         };
         let active = intent
-            && consented
             && blocking.is_empty()
             && (m.plugin_type != PluginKind::Integration || integration_enabled);
         let activation_blocker = (intent && !blocking.is_empty()).then_some(
@@ -1622,7 +1530,7 @@ impl Registry {
             platforms: m.platforms.clone(),
             platform_supported: m.supports_current_platform(),
             effect_names: m.effects.iter().map(|e| e.name.clone()).collect(),
-            enabled: m.supports_current_platform() && !self.is_disabled(&m.plugin_id) && consented,
+            enabled: m.supports_current_platform() && !self.is_disabled(&m.plugin_id),
             author: m.author().to_owned(),
             version: m.version().to_owned(),
             license: m.license().to_owned(),
@@ -1647,18 +1555,20 @@ impl Registry {
                     thumbnail: e.thumbnail.clone(),
                 })
                 .collect(),
-            source: plugin_source_for(&m.plugin_dir),
-            provenance: state
-                .provenance
+            repo: state
+                .origins
                 .get(&m.plugin_id)
-                .copied()
-                .unwrap_or(halod_shared::types::PluginProvenance::LocalUnsigned),
-            declared_permissions: m.permissions.clone(),
-            authority: authority_for_manifest(m),
+                .map(|origin| origin.repo.clone())
+                .unwrap_or_default(),
+            provenance: state
+                .origins
+                .get(&m.plugin_id)
+                .map(|origin| origin.provenance)
+                .unwrap_or_default(),
+            access: access_for_manifest(m),
             provides: m.provides.iter().map(|item| item.key.clone()).collect(),
             consumes: m.consumes.clone(),
             data_records: vec![],
-            accepted_authority: state.accepted_authorities.get(&m.plugin_id).cloned(),
             config_fields: m.config_fields().iter().map(Into::into).collect(),
             config_values: config_values_for(state, m),
             secret_set,
@@ -1667,7 +1577,6 @@ impl Registry {
             integration_requires_setup: m.setup.is_some(),
             integration_state,
             integration_setup: self.integration_setup_status(&m.plugin_id),
-            consented,
             active,
             requirements,
             activation_blocker,
@@ -1894,12 +1803,13 @@ fn validate_logo(dir: &Path, manifest: &mut PluginManifest, warnings: &mut Vec<P
 #[derive(Default)]
 struct LoadScan {
     manifests: Vec<PluginManifest>,
+    origins: HashMap<String, Origin>,
     warnings: Vec<PluginLoadWarning>,
     invalid: Vec<(PluginManifest, String, Option<PluginIssueContext>)>,
     skipped: Vec<SkippedPlugin>,
 }
 
-fn try_load_plugin_dir(dir: &Path, scan: &mut LoadScan) {
+fn try_load_plugin_dir(dir: &Path, origin: &Origin, scan: &mut LoadScan) {
     if !dir.join("plugin.yaml").is_file() {
         return;
     }
@@ -1919,6 +1829,20 @@ fn try_load_plugin_dir(dir: &Path, scan: &mut LoadScan) {
         let reason = format!("{e:#}");
         log::warn!("Plugin {} is invalid: {reason}", dir.display());
         scan.invalid.push((manifest, reason, None));
+        return;
+    }
+    let host = halod_plugin_signing::HOST_PLUGIN_API;
+    if !manifest.api.is_compatible_with(host) {
+        let reason = format!(
+            "requires plugin API {}, this HaloDaemon supports {host}",
+            manifest.api
+        );
+        log::warn!("Plugin {} is incompatible: {reason}", dir.display());
+        let context = PluginIssueContext::ApiIncompatible {
+            required: manifest.api.to_string(),
+            supported: host.to_string(),
+        };
+        scan.invalid.push((manifest, reason, Some(context)));
         return;
     }
     if scan
@@ -1945,261 +1869,78 @@ fn try_load_plugin_dir(dir: &Path, scan: &mut LoadScan) {
         m.plugin_id,
         dir.display()
     );
+    scan.origins.insert(m.plugin_id.clone(), origin.clone());
     scan.manifests.push(m);
 }
 
-fn record_invalid_plugin_dir(
-    dir: &Path,
-    package_id: String,
-    package_version: String,
-    reason: &str,
-    context: Option<&PluginIssueContext>,
-    scan: &mut LoadScan,
-) {
-    match manifest::build_manifest_from_dir(dir) {
-        Ok(manifest) => scan
-            .invalid
-            .push((manifest, reason.to_owned(), context.cloned())),
-        Err(error) => scan.invalid.push((
-            PluginManifest {
-                plugin_id: package_id.clone(),
-                source_path: dir.join("main.lua"),
-                script_source: String::new(),
-                module_sources: Default::default(),
-                plugin_dir: dir.to_path_buf(),
-                devices: vec![],
-                identity: manifest::Identity {
-                    name: Some(package_id.clone()),
-                    id: Some(package_id),
-                    version: Some(package_version),
-                    ..Default::default()
-                },
-                logo: None,
-                effect_thumbnails: vec![],
-                plugin_type: PluginKind::Device,
-                experimental: false,
-                dynamic_children: false,
-                poll_interval_ms: 1_000,
-                effects: vec![],
-                widgets: vec![],
-                translations: Default::default(),
-                presets: vec![],
-                transports: Default::default(),
-                requirements: vec![],
-                permissions: vec![],
-                provides: vec![],
-                consumes: vec![],
-                platforms: vec![],
-                capabilities: vec![],
-                config: None,
-                setup: None,
-            },
-            format!("{reason}; package manifest also failed to parse: {error:#}"),
-            context.cloned(),
-        )),
-    }
-}
-
-/// Scan every immediate subdirectory of `root` that contains a `plugin.yaml`.
-fn scan_plugin_subdirs(root: &Path, scan: &mut LoadScan) {
-    match std::fs::read_dir(root) {
-        Ok(entries) => {
-            for entry in entries.flatten() {
-                let path = entry.path();
-                if path.is_dir() {
-                    try_load_plugin_dir(&path, scan);
-                }
-            }
-        }
-        Err(e) if e.kind() == std::io::ErrorKind::NotFound => {
-            log::debug!("No plugins directory at {}", root.display());
-        }
-        Err(e) => log::warn!("Cannot read plugins directory {}: {e}", root.display()),
-    }
-}
-
-/// Load a git-repo plugin source: a single plugin at `repo_dir`, packages as
-/// immediate sibling subdirectories of `repo_dir`, and/or nested under a
-/// `plugins/` subdirectory — a repo may use any combination of the three.
-fn scan_repo(repo_dir: &Path, scan: &mut LoadScan) {
-    match repo::read_repository_manifest(repo_dir) {
-        Ok(repository) => {
-            for package in repository.packages {
-                try_load_plugin_dir(&repo_dir.join(package.path), scan);
-            }
+fn scan_packages(root: &Path, origin: &Origin, scan: &mut LoadScan) {
+    let entries = match std::fs::read_dir(root) {
+        Ok(entries) => entries,
+        Err(e) if e.kind() == std::io::ErrorKind::NotFound => return,
+        Err(e) => {
+            log::warn!("Cannot read plugins directory {}: {e}", root.display());
             return;
         }
-        Err(error) if repo_dir.join("release.yaml").is_file() => {
-            record_invalid_repository(repo_dir, &error, scan);
-            return;
-        }
-        Err(_) => {}
-    }
-    try_load_plugin_dir(repo_dir, scan);
-    scan_plugin_subdirs(repo_dir, scan);
-    scan_plugin_subdirs(&repo_dir.join("plugins"), scan);
-}
-
-fn record_invalid_repository(repo_dir: &Path, error: &anyhow::Error, scan: &mut LoadScan) {
-    log::warn!(
-        "Ignoring invalid plugin repository {}: {error:#}",
-        repo_dir.display()
-    );
-    if let Ok(repository) = repo::read_repository_index(repo_dir) {
-        let reason = format!("repository failed integrity validation: {error:#}");
-        let context = error
-            .downcast_ref::<halod_plugin_signing::PackageHashMismatch>()
-            .map(|mismatch| PluginIssueContext::RepositoryHashMismatch {
-                package: mismatch.package.clone(),
-                expected: mismatch.expected.clone(),
-                actual: mismatch.actual.clone(),
-            })
-            .or_else(|| {
-                error
-                    .downcast_ref::<halod_plugin_signing::PackageManifestMismatch>()
-                    .map(|mismatch| PluginIssueContext::RepositoryManifestMismatch {
-                        package: mismatch.package.clone(),
-                        field: mismatch.field.clone(),
-                        expected: mismatch.expected.clone(),
-                        actual: mismatch.actual.clone(),
-                    })
-            });
-        for package in repository.packages {
-            record_invalid_plugin_dir(
-                &repo_dir.join(package.path),
-                package.id,
-                package.version,
-                &reason,
-                context.as_ref(),
-                scan,
-            );
-        }
+    };
+    let mut dirs: Vec<_> = entries
+        .flatten()
+        .filter(|entry| !entry.file_name().to_string_lossy().starts_with('.'))
+        .map(|entry| entry.path())
+        .filter(|path| path.is_dir())
+        .collect();
+    dirs.sort();
+    for dir in dirs {
+        try_load_plugin_dir(&dir, origin, scan);
     }
 }
 
-#[derive(Clone)]
-pub struct RepoPluginSource {
-    slug: String,
-    dir: std::path::PathBuf,
-    trust: repo::RepositoryTrust,
-}
-
-fn scan_repo_source(source: &RepoPluginSource, scan: &mut LoadScan) {
-    if !matches!(source.trust, repo::RepositoryTrust::Unsigned) {
-        if let Err(error) = repo::verify_repository_signature(&source.dir, &source.trust) {
-            record_invalid_repository(&source.dir, &error, scan);
-            return;
+fn origin_for(record: &crate::config::PluginRepoRecord) -> Origin {
+    use halod_shared::types::PluginProvenance;
+    let provenance = match &record.source {
+        crate::config::PluginRepoSource::Local(_) => PluginProvenance::Local,
+        _ if record.slug == crate::constants::OFFICIAL_PLUGIN_REPO_SLUG => {
+            PluginProvenance::Official
         }
+        _ if record.trusted_key.is_some() => PluginProvenance::Signed,
+        _ => PluginProvenance::Unsigned,
+    };
+    Origin {
+        repo: record.slug.clone(),
+        provenance,
     }
-    scan_repo(&source.dir, scan);
-}
-
-/// Scan a repo without integrity verification — for the local development repo
-/// (`--dev-plugin-repo`), whose working tree is edited in place and whose hashes
-/// intentionally won't match the generated `release.yaml`.
-fn scan_repo_trusted(repo_dir: &Path, scan: &mut LoadScan) {
-    if let Ok(repository) = repo::read_repository_index(repo_dir) {
-        for package in repository.packages {
-            try_load_plugin_dir(&repo_dir.join(package.path), scan);
-        }
-        return;
-    }
-    try_load_plugin_dir(repo_dir, scan);
-    scan_plugin_subdirs(repo_dir, scan);
-    scan_plugin_subdirs(&repo_dir.join("plugins"), scan);
-}
-
-/// Plugin ids discoverable under a repo's clone directory, for purging a removed repo's state.
-pub fn repo_plugin_ids(repo_dir: &Path) -> Vec<String> {
-    let mut scan = LoadScan::default();
-    scan_repo(repo_dir, &mut scan);
-    scan.manifests.into_iter().map(|m| m.plugin_id).collect()
-}
-
-/// Every configured repo's checked-out clone directory, for [`Registry::load_all_with_repos`].
-pub fn repo_plugin_sources(repos: &[crate::config::PluginRepoRecord]) -> Vec<RepoPluginSource> {
-    repos
-        .iter()
-        .map(|record| RepoPluginSource {
-            slug: record.slug.clone(),
-            dir: repo::active_revision_dir(record),
-            trust: if record.slug == crate::constants::OFFICIAL_PLUGIN_REPO_SLUG {
-                repo::RepositoryTrust::Official
-            } else if let Some(key) = &record.trusted_key {
-                repo::RepositoryTrust::Pinned(key.clone())
-            } else {
-                repo::RepositoryTrust::Unsigned
-            },
-        })
-        .collect()
 }
 
 impl Registry {
-    /// [`Registry::load_all_with_repos`] with no configured repos.
     #[cfg(test)]
-    pub fn load_all(&self, dir: &Path) {
-        self.load_all_with_repos(dir, &[]);
+    pub fn load_dir(&self, dir: &Path) {
+        self.load_all(&[crate::config::PluginRepoRecord {
+            slug: "local-test".into(),
+            source: crate::config::PluginRepoSource::Local(dir.to_path_buf()),
+            trusted_key: None,
+        }]);
     }
 
-    /// (Re)load the local and git-repo (`repo_dirs`) plugins, replacing prior
-    /// contents. Load order is security-ranked: the official repo first, then
-    /// local `plugins/`, then other repos in config order — so an id is owned by
-    /// whichever source provides it first and no later source can shadow it (see
-    /// [`try_load_plugin_dir`]'s collision handling).
-    #[cfg(test)]
-    pub fn load_all_with_repos(&self, dir: &Path, repo_dirs: &[std::path::PathBuf]) {
-        let sources: Vec<_> = repo_dirs
-            .iter()
-            .map(|dir| RepoPluginSource {
-                slug: dir
-                    .file_name()
-                    .and_then(|name| name.to_str())
-                    .unwrap_or_default()
-                    .to_owned(),
-                dir: dir.clone(),
-                trust: repo::RepositoryTrust::Unsigned,
-            })
-            .collect();
-        self.load_all_inner(dir, None, &sources, true);
-    }
-
-    /// Load an optional directly supplied development repository ahead of the
-    /// normal local and configured sources, so it wins id collisions while those
-    /// sources still load. It is intentionally not required to live under Halo's
-    /// managed repository directory.
-    pub fn load_all_with_priority_repo(
-        &self,
-        dir: &Path,
-        priority_repo: Option<&Path>,
-        repo_sources: &[RepoPluginSource],
-    ) {
-        self.load_all_inner(dir, priority_repo, repo_sources, false);
-    }
-
-    fn load_all_inner(
-        &self,
-        dir: &Path,
-        priority_repo: Option<&Path>,
-        repo_sources: &[RepoPluginSource],
-        allow_standalone: bool,
-    ) {
+    /// Local folders load first and win id collisions, so a checkout shadows
+    /// an installed copy; installed packages follow, official first.
+    pub fn load_all(&self, repos: &[crate::config::PluginRepoRecord]) {
+        use crate::config::PluginRepoSource;
         let mut scan = LoadScan::default();
-        let is_official =
-            |source: &&RepoPluginSource| source.slug == crate::constants::OFFICIAL_PLUGIN_REPO_SLUG;
-        // The development repo is additive, not a replacement: scanning it first
-        // lets it win id collisions while the official, local, and configured
-        // repos still load behind it.
-        if let Some(repo_dir) = priority_repo {
-            scan_repo_trusted(repo_dir, &mut scan);
+        for record in repos {
+            if let PluginRepoSource::Local(dir) = &record.source {
+                scan_packages(dir, &origin_for(record), &mut scan);
+            }
         }
-        for source in repo_sources.iter().filter(is_official) {
-            scan_repo_source(source, &mut scan);
-        }
-        if allow_standalone {
-            scan_plugin_subdirs(dir, &mut scan);
-        }
-        for source in repo_sources.iter().filter(|source| !is_official(source)) {
-            scan_repo_source(source, &mut scan);
+        let mut remote: Vec<_> = repos
+            .iter()
+            .filter(|record| matches!(record.source, PluginRepoSource::Url(_)))
+            .collect();
+        remote.sort_by_key(|record| record.slug != crate::constants::OFFICIAL_PLUGIN_REPO_SLUG);
+        for record in remote {
+            scan_packages(
+                &crate::config::plugins_dir().join(&record.slug),
+                &origin_for(record),
+                &mut scan,
+            );
         }
         let effects: Vec<PluginEffectEntry> =
             scan.manifests.iter().flat_map(effect_entries_for).collect();
@@ -2207,31 +1948,6 @@ impl Registry {
             scan.manifests.iter().flat_map(widget_entries_for).collect();
         let presets: Vec<PluginPresetEntry> =
             scan.manifests.iter().flat_map(preset_entries_for).collect();
-        let provenance = scan
-            .manifests
-            .iter()
-            .map(|manifest| {
-                let provenance =
-                    if priority_repo.is_some_and(|root| manifest.plugin_dir.starts_with(root)) {
-                        halod_shared::types::PluginProvenance::LocalDevelopment
-                    } else {
-                        match plugin_source_for(&manifest.plugin_dir) {
-                            halod_shared::types::PluginSource::Repo { ref slug }
-                                if slug == crate::constants::OFFICIAL_PLUGIN_REPO_SLUG =>
-                            {
-                                halod_shared::types::PluginProvenance::VerifiedOfficial
-                            }
-                            halod_shared::types::PluginSource::Repo { .. } => {
-                                halod_shared::types::PluginProvenance::UnsignedRepository
-                            }
-                            halod_shared::types::PluginSource::Local => {
-                                halod_shared::types::PluginProvenance::LocalUnsigned
-                            }
-                        }
-                    };
-                (manifest.plugin_id.clone(), provenance)
-            })
-            .collect();
         // Re-derive load-warning issues from scratch so a warning the user has
         // since fixed doesn't linger; only surface warnings for plugins that
         // actually loaded (the GUI lists nothing else).
@@ -2275,7 +1991,7 @@ impl Registry {
             s.effects = effects;
             s.widgets = widgets;
             s.presets = presets;
-            s.provenance = provenance;
+            s.origins = scan.origins;
         });
         self.transport_open_failures.write().clear();
         self.content_revision
@@ -2508,9 +2224,8 @@ impl Registry {
             let Some(spec) = manifest.device_for(handle) else {
                 continue;
             };
-            // Only a `Ready` plugin (enabled + consent-satisfied + requirements
-            // met) shadows a native driver; a disabled/ungranted/blocked one
-            // falls through to the native path.
+            // Only a `Ready` plugin shadows a native driver; a disabled or
+            // blocked one falls through to the native path.
             match self.activation_status(app.secret_store.as_ref(), manifest) {
                 ActivationState::Ready(ready) => {
                     return self.build_device(app, manifest, spec, handle, ready, known);
@@ -2522,7 +2237,7 @@ impl Registry {
                         missing.len()
                     );
                 }
-                ActivationState::Disabled | ActivationState::AwaitingConsent => {}
+                ActivationState::Disabled => {}
             }
         }
         None
@@ -2533,11 +2248,7 @@ impl Registry {
         state
             .manifests
             .iter()
-            .filter(|m| {
-                m.supports_current_platform()
-                    && !state.disabled.contains(&m.plugin_id)
-                    && self.consent_satisfied(m)
-            })
+            .filter(|m| m.supports_current_platform() && !state.disabled.contains(&m.plugin_id))
             .any(|m| m.device_for(handle).is_some())
     }
 
@@ -2561,11 +2272,7 @@ impl Registry {
         state
             .manifests
             .iter()
-            .filter(|m| {
-                m.supports_current_platform()
-                    && !state.disabled.contains(&m.plugin_id)
-                    && consent_satisfied_in(&state, m)
-            })
+            .filter(|m| m.supports_current_platform() && !state.disabled.contains(&m.plugin_id))
             .flat_map(|m| m.devices.clone())
             .collect()
     }

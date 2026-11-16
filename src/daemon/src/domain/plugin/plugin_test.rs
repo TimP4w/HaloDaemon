@@ -692,7 +692,6 @@ fn validate_lcd_widgets(runtime: &tokio::runtime::Handle, manifest: &PluginManif
         manifest.script_source.clone(),
         manifest.module_sources.clone(),
         ids,
-        manifest.permissions.clone(),
         HashMap::new(),
         super::engine::data_api::DataRuntime::new(
             Arc::new(crate::application::bus::data_bus::DataBus::default()),
@@ -988,7 +987,7 @@ fn open_integration(
             transport: transport_kind.into(),
             ..Default::default()
         },
-        manifest.permissions.clone(),
+        manifest.permissions(),
         resolved_config,
         handle.clone(),
         Arc::new(Mutex::new(Vec::new())),
@@ -1443,7 +1442,7 @@ fn open_device(
                 handle: handle.clone(),
                 // The harness grants every declared permission (so gated transports
                 // open), uses no config, and has no `AppState` to notify.
-                granted: manifest.permissions.clone(),
+                granted: manifest.permissions(),
                 config: std::collections::HashMap::new(),
                 data: super::engine::data_api::DataRuntime::new(
                     data_bus,
@@ -2245,7 +2244,7 @@ mod tests {
         std::fs::create_dir_all(dir).unwrap();
         std::fs::write(
             dir.join("plugin.yaml"),
-            "id: fixture\npermissions: [hid]\ndevices:\n  - vendor: x\n    model: y\n    match:\n      hid: { vid: 1, pid: 2 }\ntransports:\n  hid: { report_size: 64, timeout_ms: 1000 }\n",
+            "id: fixture\nversion: 1.0.0\napi: \"3.0\"\ndevices:\n  - vendor: x\n    model: y\n    match:\n      hid: { vid: 1, pid: 2 }\ntransports:\n  hid: { report_size: 64, timeout_ms: 1000 }\n",
         )
         .unwrap();
         std::fs::write(
@@ -2284,7 +2283,7 @@ mod tests {
         std::fs::create_dir_all(&dir).unwrap();
         std::fs::write(
             dir.join("plugin.yaml"),
-            "id: fixture\npermissions: [hid]\nprovides:\n  - { key: fixture.current, stale_after_ms: 60000, min_notify_interval_ms: 250 }\nconsumes: [host.sensors.*]\ndevices:\n  - vendor: x\n    model: y\n    match: { hid: { vid: 1, pid: 2 } }\ntransports:\n  hid: {}\n",
+            "id: fixture\nversion: 1.0.0\napi: \"3.0\"\nprovides:\n  - { key: fixture.current, stale_after_ms: 60000, min_notify_interval_ms: 250 }\nconsumes: [host.sensors.*]\ndevices:\n  - vendor: x\n    model: y\n    match: { hid: { vid: 1, pid: 2 } }\ntransports:\n  hid: {}\n",
         )
         .unwrap();
         std::fs::write(
@@ -2348,7 +2347,7 @@ mod tests {
         std::fs::create_dir_all(&dir).unwrap();
         std::fs::write(
             dir.join("plugin.yaml"),
-            "id: fixture\npermissions: [hid]\ndevices:\n  - vendor: x\n    model: y\n    match:\n      hid: { vid: 1, pid: 2 }\ntransports:\n  hid: { report_size: 64, timeout_ms: 1000 }\n",
+            "id: fixture\nversion: 1.0.0\napi: \"3.0\"\ndevices:\n  - vendor: x\n    model: y\n    match:\n      hid: { vid: 1, pid: 2 }\ntransports:\n  hid: { report_size: 64, timeout_ms: 1000 }\n",
         )
         .unwrap();
         std::fs::write(dir.join("main.lua"), "return {}").unwrap();
@@ -2368,20 +2367,20 @@ mod tests {
         std::fs::create_dir_all(&dir).unwrap();
         std::fs::write(
             dir.join("plugin.yaml"),
-            "id: command_fixture\ntype: integration\npermissions: [command]\ntransports:\n  command:\n    commands: [nvidia-smi]\n",
+            "id: command_fixture\nversion: 1.0.0\napi: \"3.0\"\ntype: integration\ntransports:\n  command:\n    commands: [nvidia-smi]\n",
         )
         .unwrap();
         std::fs::write(
             dir.join("main.lua"),
             r#"return {
-                enumerate_controllers = function(_dev)
-                    local result = command.run("nvidia-smi", { "arg" })
+                enumerate_controllers = function(dev)
+                    local result = dev.transport:run("nvidia-smi", { "arg" })
                     return {{
                         index = result.exit_code,
                         id = tostring(result.success),
                         key = result.stdout,
                         name = result.stderr,
-                        location = tostring(result.timed_out),
+                        serial = tostring(result.timed_out),
                     }}
                 end,
             }"#,
@@ -2399,7 +2398,7 @@ mod tests {
                 h:assert_eq(result.index, 23, "exit code is structured")
                 h:assert_eq(result.key, "partial", "stdout is structured")
                 h:assert_eq(result.name, "failure detail", "stderr is structured")
-                h:assert_eq(result.location, "true", "timeout is structured")
+                h:assert_eq(result.serial, "true", "timeout is structured")
             end"#,
         )
         .unwrap();

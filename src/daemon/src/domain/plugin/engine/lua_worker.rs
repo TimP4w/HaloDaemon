@@ -28,13 +28,11 @@ pub(super) trait VmCtx {
 }
 
 pub(super) fn bootstrap_worker_vm(
-    granted: &[halod_shared::types::Permission],
     config: &crate::domain::plugin::ResolvedConfig,
     modules: &std::collections::BTreeMap<String, String>,
     data: super::data_api::DataRuntime,
 ) -> Result<(Lua, Rc<Cell<u64>>)> {
     let (lua, budget) = super::sandbox::bootstrap_vm(
-        granted,
         config,
         super::PLUGIN_VM_MEMORY_BYTES,
         super::PLUGIN_INSTRUCTION_BUDGET,

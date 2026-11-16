@@ -249,22 +249,6 @@ fn fresh_integration_runtime_clears_stale_device_errors() {
 }
 
 #[test]
-fn missing_command_requirement_is_daemon_authoritative() {
-    let manifest = command_manifest(&["liquidctl"]);
-    let registry = super::Registry::default();
-    registry.update(|s| s.manifests = vec![manifest.clone()]);
-
-    // The force-refreshed gate the enable flow consults reports the unmet
-    // requirement, so a stale GUI cannot enable past it.
-    let missing = registry.missing_blocking_requirements(&manifest.plugin_id);
-    assert_eq!(missing.len(), 1);
-    assert!(!missing[0].satisfied);
-
-    // An unknown plugin has no requirements rather than erroring.
-    assert!(registry.missing_blocking_requirements("nope").is_empty());
-}
-
-#[test]
 fn refresh_requirements_caches_evaluated_statuses() {
     let manifest = command_manifest(&["liquidctl"]);
     let registry = super::Registry::default();
@@ -277,22 +261,14 @@ fn refresh_requirements_caches_evaluated_statuses() {
 }
 
 #[test]
-fn consented_integration_with_missing_command_is_gated_out() {
+fn integration_with_missing_command_is_gated_out() {
     let manifest = command_manifest(&["liquidctl"]);
     let registry = super::Registry::default();
-    let authority = super::authority_for_manifest(&manifest);
-    registry.update(|s| {
-        s.manifests = vec![manifest.clone()];
-        s.accepted_authorities
-            .insert(manifest.plugin_id.clone(), authority);
-    });
+    registry.update(|s| s.manifests = vec![manifest.clone()]);
 
-    // Consent is satisfied, so exclusion is purely the requirement gate — a
-    // blocked integration must not be handed to the integration scanner/monitor.
-    assert!(registry.consent_satisfied(&manifest));
     assert!(
         registry.integration_manifests().is_empty(),
-        "an enabled, consented integration whose command is missing must be inactive"
+        "an enabled integration whose command is missing must be inactive"
     );
     assert!(registry.integration_manifest(&manifest.plugin_id).is_none());
 }
@@ -319,11 +295,8 @@ fn disabled_integration_is_not_reported_active() {
         platforms: vec![],
     });
     let registry = super::Registry::default();
-    let authority = super::authority_for_manifest(&manifest);
     registry.update(|s| {
         s.manifests = vec![manifest.clone()];
-        s.accepted_authorities
-            .insert(manifest.plugin_id.clone(), authority);
         s.integrations_disabled.insert(manifest.plugin_id.clone());
     });
     let info = registry.list(&NoSecrets).pop().unwrap();
@@ -340,7 +313,7 @@ fn command_manifest(commands: &[&str]) -> super::PluginManifest {
     std::fs::write(
         dir.join("plugin.yaml"),
         format!(
-            "id: command_scope_test\ntype: integration\npermissions: [command]\ntransports:\n  command:\n    commands: [{commands}]\n"
+            "id: command_scope_test\nversion: 1.0.0\napi: \"3.0\"\ntype: integration\ntransports:\n  command:\n    commands: [{commands}]\n"
         ),
     )
     .unwrap();
@@ -348,267 +321,77 @@ fn command_manifest(commands: &[&str]) -> super::PluginManifest {
     super::parse_manifest_from_dir(&dir).unwrap()
 }
 
-#[test]
-fn consent_rejects_transport_scope_widening_under_old_acceptance() {
-    let manifest = command_manifest(&["nvidia-smi", "liquidctl"]);
-    let mut state = super::PluginState::default();
-    state.granted.insert(
-        manifest.plugin_id.clone(),
-        vec![halod_shared::types::Permission::Command],
-    );
-    state.accepted_authorities.insert(
-        manifest.plugin_id.clone(),
-        halod_shared::types::PluginAuthority {
-            permissions: vec![halod_shared::types::Permission::Command],
-            transport_scopes: vec!["command:nvidia-smi".to_owned()],
-            data_reads: vec![],
-        },
-    );
-
-    assert!(!super::consent_satisfied_in(&state, &manifest));
+fn write_plugin(root: &std::path::Path, id: &str, api: &str) {
+    let package = root.join(id);
+    std::fs::create_dir_all(&package).unwrap();
+    std::fs::write(
+        package.join("plugin.yaml"),
+        format!("id: {id}\nversion: 1.0.0\napi: \"{api}\"\ntype: integration\ntransports:\n  command:\n    commands: [nvidia-smi]\n"),
+    )
+    .unwrap();
+    std::fs::write(package.join("main.lua"), "return {}\n").unwrap();
 }
 
 #[test]
-fn consent_rejects_new_cross_plugin_data_read() {
-    let accepted = halod_shared::types::PluginAuthority::default();
-    let requested = halod_shared::types::PluginAuthority {
-        data_reads: vec!["telemetry.current".into()],
-        ..Default::default()
+fn a_local_repo_shadows_an_installed_plugin() {
+    use crate::config::{PluginRepoRecord, PluginRepoSource};
+    use halod_shared::types::PluginProvenance;
+    let _config = crate::test_support::tmp_config_dir();
+    let installed = crate::config::plugins_dir().join("community");
+    write_plugin(&installed, "demo", "3.0");
+    write_plugin(&installed, "other", "3.0");
+    std::fs::create_dir_all(installed.join(".demo.staging-1")).unwrap();
+    let local = tempfile::tempdir().unwrap();
+    write_plugin(local.path(), "demo", "3.0");
+
+    let registry = super::Registry::default();
+    registry.load_all(&[
+        PluginRepoRecord {
+            slug: "community".into(),
+            source: PluginRepoSource::Url("https://example.org/catalog.yaml".into()),
+            trusted_key: None,
+        },
+        PluginRepoRecord {
+            slug: "local-dev".into(),
+            source: PluginRepoSource::Local(local.path().to_path_buf()),
+            trusted_key: None,
+        },
+    ]);
+
+    let plugins = registry.list(&crate::infrastructure::secrets::FileKeyStore::new());
+    let origin = |id: &str| {
+        let plugin = plugins.iter().find(|p| p.id == id).unwrap();
+        (plugin.repo.clone(), plugin.provenance)
     };
-    assert!(!requested.is_subset_of(&accepted));
-    assert!(requested.is_subset_of(&requested));
-}
-
-#[test]
-fn consent_accepts_authority_within_the_accepted_snapshot() {
-    let manifest = command_manifest(&["nvidia-smi"]);
-    let mut state = super::PluginState::default();
-    state.accepted_authorities.insert(
-        manifest.plugin_id.clone(),
-        halod_shared::types::PluginAuthority {
-            permissions: vec![halod_shared::types::Permission::Command],
-            transport_scopes: vec![
-                "command:nvidia-smi".to_owned(),
-                "command:liquidctl".to_owned(),
-            ],
-            data_reads: vec![],
-        },
-    );
-
-    assert!(super::consent_satisfied_in(&state, &manifest));
-}
-
-#[test]
-fn indexed_repository_with_a_bad_digest_does_not_fall_back_to_loose_scanning() {
-    let root = tempfile::tempdir().unwrap();
-    let package = root.path().join("plugins").join("demo");
-    std::fs::create_dir_all(&package).unwrap();
-    std::fs::write(
-        package.join("plugin.yaml"),
-        "id: demo\nversion: 1.0.0\ntype: integration\npermissions: [command]\ntransports:\n  command:\n    commands: [nvidia-smi]\n",
-    )
-    .unwrap();
-    std::fs::write(package.join("main.lua"), "return {}\n").unwrap();
-    std::fs::write(
-        root.path().join("release.yaml"),
-        format!(
-            "schema: 1\nid: test-release\nname: Test release\nversion: 1.0.0\npackages:\n  - id: demo\n    path: plugins/demo\n    version: 1.0.0\n    sha256: {}\n",
-            "0".repeat(64)
-        ),
-    )
-    .unwrap();
-
-    let mut scan = super::LoadScan::default();
-    super::scan_repo(root.path(), &mut scan);
-
-    assert!(scan.manifests.is_empty());
-    assert_eq!(scan.invalid.len(), 1);
-    assert_eq!(scan.invalid[0].0.plugin_id, "demo");
-    assert!(scan.invalid[0].1.contains("integrity validation"));
-    assert!(matches!(
-        scan.invalid[0].2,
-        Some(halod_shared::types::PluginIssueContext::RepositoryHashMismatch {
-            ref package,
-            ..
-        }) if package == "demo"
-    ));
-}
-
-#[test]
-fn indexed_repository_with_a_version_mismatch_is_recoverable_integrity_failure() {
-    let root = tempfile::tempdir().unwrap();
-    let package = root.path().join("plugins").join("monitor_pkg");
-    std::fs::create_dir_all(&package).unwrap();
-    std::fs::write(
-        package.join("plugin.yaml"),
-        "id: monitor_pkg\nversion: 1.0.0\ntype: device\n",
-    )
-    .unwrap();
-    std::fs::write(package.join("main.lua"), "return {}\n").unwrap();
-    let digest = halod_plugin_signing::package_hash(&package).unwrap();
-    std::fs::write(
-        root.path().join("release.yaml"),
-        format!(
-            "schema: 1\nid: test-release\nname: Test release\nversion: 1.0.0\npackages:\n  - id: monitor_pkg\n    path: plugins/monitor_pkg\n    version: 2.0.0\n    sha256: {digest}\n"
-        ),
-    )
-    .unwrap();
-
-    let mut scan = super::LoadScan::default();
-    super::scan_repo(root.path(), &mut scan);
-
-    assert!(scan.manifests.is_empty());
-    assert_eq!(scan.invalid.len(), 1);
-    assert!(matches!(
-        scan.invalid[0].2,
-        Some(
-            halod_shared::types::PluginIssueContext::RepositoryManifestMismatch {
-                ref package,
-                ref field,
-                ref expected,
-                ref actual,
-            }
-        ) if package == "monitor_pkg"
-            && field == "version"
-            && expected == "2.0.0"
-            && actual == "1.0.0"
-    ));
-}
-
-#[test]
-fn indexed_repository_with_a_bad_digest_is_listed_as_failed() {
-    let root = tempfile::tempdir().unwrap();
-    let package = root.path().join("plugins").join("demo");
-    std::fs::create_dir_all(&package).unwrap();
-    std::fs::write(
-        package.join("plugin.yaml"),
-        "id: demo\nversion: 1.0.0\ntype: integration\npermissions: [command]\ntransports:\n  command:\n    commands: [nvidia-smi]\n",
-    )
-    .unwrap();
-    std::fs::write(package.join("main.lua"), "return {}\n").unwrap();
-    std::fs::write(
-        root.path().join("release.yaml"),
-        format!(
-            "schema: 1\nid: test-release\nname: Test release\nversion: 1.0.0\npackages:\n  - id: demo\n    path: plugins/demo\n    version: 1.0.0\n    sha256: {}\n",
-            "0".repeat(64)
-        ),
-    )
-    .unwrap();
-
-    let registry = super::Registry::default();
-    registry.load_all_with_repos(&root.path().join("local"), &[root.path().to_path_buf()]);
-
-    let plugins = registry.list(&crate::infrastructure::secrets::FileKeyStore::new());
-    assert_eq!(plugins.len(), 1);
-    assert_eq!(plugins[0].id, "demo");
-    assert!(!plugins[0].active);
-    assert!(matches!(
-        plugins[0].health.issue.as_ref(),
-        Some(halod_shared::types::PluginIssue {
-            kind: halod_shared::types::PluginIssueKind::LoadFailed,
-            context: Some(
-                halod_shared::types::PluginIssueContext::RepositoryHashMismatch { package, .. }
-            ),
-            ..
-        }) if package == "demo"
-    ));
-}
-
-#[tokio::test]
-async fn embedded_official_packages_keep_their_repository_source() {
-    crate::test_support::with_tmp_config(|_| async move {
-        let package = crate::config::embedded_plugin_revisions_dir()
-            .join(crate::constants::OFFICIAL_PLUGIN_REPO_SLUG)
-            .join("revisions")
-            .join("abc")
-            .join("plugins")
-            .join("halo_lcd");
-
-        assert_eq!(
-            super::plugin_source_for(&package),
-            halod_shared::types::PluginSource::Repo {
-                slug: crate::constants::OFFICIAL_PLUGIN_REPO_SLUG.to_owned(),
-            }
-        );
-    })
-    .await;
-}
-
-#[test]
-fn trusted_repo_scan_loads_packages_despite_a_bad_digest() {
-    // The dev repo (`--dev-plugin-repo`) is edited in place, so its hashes won't
-    // match the generated index. A trusted scan must load anyway.
-    let root = tempfile::tempdir().unwrap();
-    let package = root.path().join("plugins").join("demo");
-    std::fs::create_dir_all(&package).unwrap();
-    std::fs::write(
-        package.join("plugin.yaml"),
-        "id: demo\nversion: 1.0.0\ntype: integration\npermissions: [command]\ntransports:\n  command:\n    commands: [nvidia-smi]\n",
-    )
-    .unwrap();
-    std::fs::write(package.join("main.lua"), "return {}\n").unwrap();
-    std::fs::write(
-        root.path().join("release.yaml"),
-        format!(
-            "schema: 1\nid: test-release\nname: Test release\nversion: 1.0.0\npackages:\n  - id: demo\n    path: plugins/demo\n    version: 1.0.0\n    sha256: {}\n",
-            "0".repeat(64)
-        ),
-    )
-    .unwrap();
-
-    let mut scan = super::LoadScan::default();
-    super::scan_repo_trusted(root.path(), &mut scan);
-
-    assert_eq!(scan.manifests.len(), 1);
-    assert_eq!(scan.manifests[0].plugin_id, "demo");
-    assert!(scan.invalid.is_empty());
-}
-
-/// Write a standalone (index-less) plugin dir at `root/plugins/<id>`.
-fn write_standalone_plugin(root: &std::path::Path, id: &str) {
-    let package = root.join("plugins").join(id);
-    std::fs::create_dir_all(&package).unwrap();
-    std::fs::write(
-        package.join("plugin.yaml"),
-        format!("id: {id}\nversion: 1.0.0\ntype: integration\npermissions: [command]\ntransports:\n  command:\n    commands: [nvidia-smi]\n"),
-    )
-    .unwrap();
-    std::fs::write(package.join("main.lua"), "return {}\n").unwrap();
-}
-
-#[test]
-fn dev_repo_is_additive_and_wins_id_collisions() {
-    // The development repo loads alongside the configured repos: a colliding id
-    // is served from the dev tree while every non-colliding plugin still loads.
-    let dev = tempfile::tempdir().unwrap();
-    write_standalone_plugin(dev.path(), "demo");
-
-    let other_repo = tempfile::tempdir().unwrap();
-    write_standalone_plugin(other_repo.path(), "demo");
-    write_standalone_plugin(other_repo.path(), "other");
-
-    let registry = super::Registry::default();
-    registry.load_all_with_priority_repo(
-        std::path::Path::new("/nonexistent"),
-        Some(dev.path()),
-        &[super::RepoPluginSource {
-            slug: "extra".to_owned(),
-            dir: other_repo.path().to_path_buf(),
-            trust: super::repo::RepositoryTrust::Unsigned,
-        }],
-    );
-
-    let plugins = registry.list(&crate::infrastructure::secrets::FileKeyStore::new());
-    let mut ids: Vec<&str> = plugins.iter().map(|p| p.id.as_str()).collect();
-    ids.sort_unstable();
-    assert_eq!(ids, ["demo", "other"]);
-
-    let demo = plugins.iter().find(|p| p.id == "demo").unwrap();
+    assert_eq!(plugins.len(), 2);
     assert_eq!(
-        demo.provenance,
-        halod_shared::types::PluginProvenance::LocalDevelopment,
-        "the dev tree must win the collision over the configured repo"
+        origin("demo"),
+        ("local-dev".into(), PluginProvenance::Local)
     );
+    assert_eq!(
+        origin("other"),
+        ("community".into(), PluginProvenance::Unsigned)
+    );
+}
+
+#[test]
+fn an_incompatible_api_is_listed_but_not_loaded() {
+    let root = tempfile::tempdir().unwrap();
+    write_plugin(root.path(), "future", "9.0");
+    let registry = super::Registry::default();
+    registry.load_dir(root.path());
+
+    assert!(registry.origin("future").is_none());
+    let issue = registry
+        .list(&crate::infrastructure::secrets::FileKeyStore::new())
+        .pop()
+        .and_then(|info| info.health.issue)
+        .unwrap();
+    assert!(matches!(
+        issue.context,
+        Some(halod_shared::types::PluginIssueContext::ApiIncompatible { ref required, .. })
+            if required == "9.0"
+    ));
 }
 
 #[tokio::test]

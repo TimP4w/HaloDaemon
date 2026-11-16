@@ -57,10 +57,6 @@ pub fn notification_text(code: &NotificationCode) -> (String, String) {
             t!("notify.fan_stalled.title", fan = fan).to_string(),
             t!("notify.fan_stalled.message").to_string(),
         ),
-        PluginContentChanged { plugin } => (
-            t!("notify.plugin_content_changed.title").to_string(),
-            t!("notify.plugin_content_changed.message", plugin = plugin).to_string(),
-        ),
         PluginRuntimeError { plugin, detail: _ } => (
             t!("notify.plugin_runtime_error.title", plugin = plugin).to_string(),
             t!("notify.plugin_runtime_error.message").to_string(),
@@ -72,21 +68,6 @@ pub fn notification_text(code: &NotificationCode) -> (String, String) {
         PluginRecommended { plugin } => (
             t!("notify.plugin_recommended.title").to_string(),
             t!("notify.plugin_recommended.message", plugin = plugin).to_string(),
-        ),
-        RepositoryIntegrityError {
-            repository,
-            package,
-            expected: _,
-            actual: _,
-            restore_slug: _,
-        } => (
-            t!("notify.repository_integrity.title").to_string(),
-            t!(
-                "notify.repository_integrity.message",
-                repository = repository.as_deref().unwrap_or("unknown"),
-                package = package
-            )
-            .to_string(),
         ),
         Generic { message } => (t!("notify.error_title").to_string(), message.clone()),
     }
@@ -125,9 +106,6 @@ mod tests {
                 detail: "boom".into(),
             },
             FanStalled { fan: "cpu".into() },
-            PluginContentChanged {
-                plugin: "wled_udp".into(),
-            },
             PluginRuntimeError {
                 plugin: "wled_udp".into(),
                 detail: "boom".into(),
@@ -138,13 +116,6 @@ mod tests {
             },
             PluginRecommended {
                 plugin: "NZXT Kraken".into(),
-            },
-            RepositoryIntegrityError {
-                repository: Some("official".into()),
-                package: "halo_lcd".into(),
-                expected: "expected".into(),
-                actual: "actual".into(),
-                restore_slug: Some("official".into()),
             },
             Generic {
                 message: "boom".into(),

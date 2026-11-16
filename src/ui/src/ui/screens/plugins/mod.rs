@@ -1,18 +1,13 @@
 // SPDX-License-Identifier: GPL-3.0-or-later
-//! Plugins page — a master–detail view of canonical plugin packages. The left
-//! column lists every plugin with an enable toggle; the right column shows the
-//! manifest catalog, authority, and provenance. Every package is supplied by
-//! a registered remote, local Git, or archive repository.
 
 use std::collections::{HashMap, HashSet};
 
 use crate::domain::topic_store::TopicStore;
 use egui::{Align2, Pos2, Rect, Sense, Stroke, Vec2};
 use halod_shared::types::{
-    PluginDownloadConsent, PluginInfo, PluginIssue, PluginIssueKind, PluginProvenance,
+    AvailablePlugin, PluginInfo, PluginIssue, PluginIssueKind, PluginProvenance,
     PluginRecommendation, PluginRepoInfo, PluginRepoLocation, PluginRequirement,
-    PluginRequirementStatus, PluginSource, PluginUpdateStatus, RepoSignatureStatus,
-    RepoUpdateStatus, RequirementImpact,
+    PluginRequirementStatus, PluginsState, RepoTrust, RequirementImpact,
 };
 
 use crate::domain::models::plugin_issues::plugin_issue_detail;
@@ -23,15 +18,11 @@ use crate::ui::icons;
 use crate::ui::theme;
 use halod_shared::commands::DaemonCommand;
 
-mod authority;
+mod access;
 mod repo;
 mod udev;
 
-use authority::*;
-pub(crate) use authority::{
-    authority_review_cards, plugin_needs_permission, plugin_requires_regrant,
-};
-use repo::*;
+use access::*;
 use udev::*;
 
 pub(crate) fn plugin_name(plugin: &PluginInfo) -> &str {
@@ -42,28 +33,18 @@ fn plugin_description(plugin: &PluginInfo) -> &str {
     plugin.localized_description(&rust_i18n::locale())
 }
 
-/// In-progress state of the "Add repository" modal.
 #[derive(Default)]
 struct AddRepoState {
     url: String,
 }
 
-/// Failsafe: drop the "checking for updates" spinner after this long even if
-/// the check never lands (e.g. an unreachable remote).
+/// Failsafe for a refresh that never lands (e.g. an unreachable remote).
 const REPO_CHECK_TIMEOUT: f64 = 25.0;
 
-/// A repo whose update check is in flight — the spinner shows until its
-/// `last_sync` advances past `prev_sync` (the check landed) or it times out.
 struct RepoCheck {
     slug: String,
     prev_sync: Option<String>,
     started: f64,
-}
-
-/// A malformed repo package selected for a scoped remote restore.
-#[derive(Clone)]
-struct PendingRepoRepair {
-    slug: String,
 }
 
 /// What the detail column shows: a plugin, a repo, or nothing (empty state).
@@ -75,52 +56,28 @@ enum Selection {
     None,
 }
 
-/// Local UI state for the Plugins screen (selection + open dialogs).
 #[derive(Default)]
 pub struct PluginsUi {
-    /// What the detail column shows.
     selection: Selection,
-    /// The add-repository modal, when open.
     add_repo: Option<AddRepoState>,
-    /// Repo slug pending a remove confirmation, when the dialog is open.
     pending_repo_delete: Option<String>,
-    /// Repository pending a whole-repository recovery confirmation.
-    pending_repo_repair: Option<PendingRepoRepair>,
-    /// The repo whose "check for updates" is currently in flight, if any.
+    pending_uninstall: Option<String>,
     checking_repo: Option<RepoCheck>,
-    /// Id pending a permission consent decision, when the dialog is open.
-    pending_consent: Option<String>,
     /// Plugin ids whose enable/disable is applying → target state; the toggle is
     /// locked at the target until the daemon confirms.
     in_flight: HashMap<String, bool>,
-    /// Asset cache keys already requested, so a pending fetch isn't re-sent.
     requested_assets: HashSet<String>,
-    requested_releases: HashSet<String>,
-    /// Decoded asset bytes turned into textures, keyed like `requested_assets`.
     asset_textures: HashMap<String, egui::TextureHandle>,
-    /// Plugin ids whose single-plugin update is in flight → egui time it began.
-    /// The button shows a spinner until the plugin drops its "update available"
-    /// flag (the daemon re-broadcasts once the checkout lands) or it times out.
-    updating: HashMap<String, f64>,
-    /// "Update all" in flight → egui time it began, cleared the same way.
+    /// Plugin ids whose install or update is in flight → egui start time.
+    installing: HashMap<String, f64>,
     updating_all: Option<f64>,
-    /// Repositories whose whole-repo update is in flight → egui start time.
-    /// Entries are reconciled centrally so progress ends even when another
-    /// detail pane is selected. "Update all" inserts every affected repo.
-    updating_repos: HashMap<String, f64>,
-    /// The open plugin-issue Details modal (title + detail), when the user
-    /// clicked Details on a plugin's issue banner.
     issue_modal: Option<(String, String)>,
-    /// Exact udev lines missing for the selected plugin.
     udev_rule_details: Option<Vec<String>>,
     #[cfg(target_os = "linux")]
     next_udev_status_check: f64,
     udev_command_copied: bool,
     udev_info_open: bool,
-    /// egui time a udev "Recheck rules" began, driving the button's spinner; the
-    /// spinner runs for [`UDEV_RECHECK_SPINNER`] to acknowledge the request.
     udev_rechecking: Option<f64>,
-    /// Index into [`PluginFilter::ALL`] for the list's type filter.
     filter: usize,
     search: String,
     integration: crate::ui::screens::plugin_integration::IntegrationPanel,
@@ -162,8 +119,7 @@ impl PluginFilter {
 /// action visible feedback while the fresh status is fetched.
 const UDEV_RECHECK_SPINNER: f64 = 1.0;
 
-/// Failsafe: drop an update spinner after this long even if the daemon never
-/// re-broadcasts (e.g. an unreachable remote mid-update).
+/// Failsafe for an install that never lands (e.g. an unreachable remote).
 const UPDATE_TIMEOUT: f64 = 90.0;
 
 /// Per-frame inputs of the Plugins page that live outside the topic store.
@@ -171,26 +127,13 @@ pub struct PluginsCtx<'a> {
     pub state: &'a TopicStore,
     pub cmd: &'a CommandTx,
     pub assets: &'a HashMap<String, Vec<u8>>,
-    pub releases: &'a HashMap<String, Vec<halod_shared::types::PluginReleaseInfo>>,
     pub udev: Option<&'a halod_shared::types::UdevRulesStatus>,
     pub serial_ports: &'a [halod_shared::types::SerialPortInfo],
 }
 
-impl PluginsCtx<'_> {
-    fn repo_updates(&self) -> &[RepoUpdateStatus] {
-        &self.state.plugins.repo_updates
-    }
-
-    fn plugin_updates(&self) -> &[PluginUpdateStatus] {
-        &self.state.plugins.updates
-    }
-}
-
 impl PluginsUi {
-    /// Stop optimistic update progress as soon as the daemon reports that the
-    /// command failed. The same notification is rendered by the root toast
-    /// layer, so the user sees the reason instead of a spinner lasting until
-    /// the failsafe timeout.
+    /// A failed command arrives as a notification; stop the spinners then
+    /// rather than at the failsafe timeout.
     pub fn observe_notifications(&mut self, notifications: &[halod_shared::types::Notification]) {
         if notifications.iter().any(|notification| {
             matches!(
@@ -198,9 +141,8 @@ impl PluginsUi {
                 halod_shared::types::NotificationCode::Generic { .. }
             )
         }) {
-            self.updating.clear();
+            self.installing.clear();
             self.updating_all = None;
-            self.updating_repos.clear();
         }
     }
 
@@ -238,8 +180,7 @@ impl PluginsUi {
 
         self.add_repo_modal(ui.ctx(), cx.cmd);
         self.repo_delete_modal(ui.ctx(), cx.cmd);
-        self.repo_repair_modal(ui.ctx(), cx.cmd);
-        self.consent_modal(ui.ctx(), cx.state, cx.cmd);
+        self.uninstall_modal(ui.ctx(), cx.cmd);
         widgets::issue_modal_slot(ui.ctx(), "plugin_issue_page", &mut self.issue_modal);
         if self.udev_rule_details.is_some()
             && udev_rule_details_modal(
@@ -312,10 +253,44 @@ impl PluginsUi {
     }
 
     fn toggle(&mut self, cmd: &CommandTx, p: &PluginInfo) {
-        let out = request_toggle(cmd, p, self.pending_consent.take());
-        self.pending_consent = out.pending_consent;
-        if let Some(target) = out.dispatched {
-            apply_and_lock(&mut self.in_flight, &p.id, target);
+        let target = !p.enabled;
+        ipc::send(
+            cmd,
+            DaemonCommand::SetPluginEnabled {
+                id: p.id.clone(),
+                enabled: target,
+            },
+        );
+        self.in_flight.insert(p.id.clone(), target);
+    }
+
+    fn install(&mut self, now: f64, cmd: &CommandTx, repo: &str, id: &str) {
+        self.installing.insert(id.to_owned(), now);
+        ipc::send(
+            cmd,
+            DaemonCommand::InstallPlugin {
+                repo: repo.to_owned(),
+                id: id.to_owned(),
+            },
+        );
+    }
+
+    fn uninstall_modal(&mut self, ctx: &egui::Context, cmd: &CommandTx) {
+        if self.pending_uninstall.is_none() {
+            return;
+        }
+        if let Some(id) = widgets::confirm_delete_dialog(
+            ctx,
+            "uninstall_plugin",
+            &t!("plugins.uninstall_title"),
+            &t!(
+                "plugins.uninstall_body",
+                name = self.pending_uninstall.as_deref().unwrap_or_default()
+            ),
+            &t!("plugins.uninstall"),
+            &mut self.pending_uninstall,
+        ) {
+            ipc::send(cmd, DaemonCommand::UninstallPlugin { id });
         }
     }
 
@@ -329,23 +304,13 @@ impl PluginsUi {
             ),
         );
         let now = ui.input(|i| i.time);
-        clear_finished_updates(
-            &mut self.updating,
+        clear_finished_installs(
+            &mut self.installing,
             &mut self.updating_all,
-            cx.plugin_updates(),
+            &cx.state.plugins,
             now,
         );
-        clear_finished_repo_updates(
-            &mut self.updating_repos,
-            cx.repo_updates(),
-            cx.plugin_updates(),
-            now,
-        );
-        if self.updating_all.is_some()
-            || !self.updating.is_empty()
-            || !self.updating_repos.is_empty()
-        {
-            // Keep the timeout advancing and the spinner animating.
+        if self.updating_all.is_some() || !self.installing.is_empty() {
             ui.ctx().request_repaint();
         }
 
@@ -357,7 +322,7 @@ impl PluginsUi {
                 .iter()
                 .filter(|p| p.platform_supported);
             let total = shown.clone().count();
-            let enabled = shown.filter(|p| plugin_enabled_with_consent(p)).count();
+            let enabled = shown.filter(|p| p.enabled).count();
             let title = widgets::page_title(
                 ui,
                 &t!("plugins.title"),
@@ -407,16 +372,6 @@ impl PluginsUi {
 
     fn banners(&mut self, ui: &mut egui::Ui, cx: &PluginsCtx) {
         let now = ui.input(|i| i.time);
-        if let Some(problem) = repository_integrity_problem(cx.state) {
-            if repository_integrity_banner(ui, &problem) {
-                if problem.repairable {
-                    self.pending_repo_repair = Some(PendingRepoRepair { slug: problem.slug });
-                } else {
-                    self.pending_repo_delete = Some(problem.slug);
-                }
-            }
-            ui.add_space(theme::SPACE_5);
-        }
         if let Some(status) = cx.udev.filter(|status| udev_rules_need_action(status)) {
             match udev_rules_banner(ui, status, self.udev_command_copied) {
                 UdevBannerAction::Install => {
@@ -428,13 +383,10 @@ impl PluginsUi {
             }
             ui.add_space(theme::SPACE_5);
         }
-        let due = updates_due_count(cx.repo_updates(), cx.plugin_updates());
+        let due = updates_due_count(&cx.state.plugins);
         if due > 0 {
             if update_all_banner(ui, due, self.updating_all.is_some()) {
                 self.updating_all = Some(now);
-                for slug in update_all_seed_slugs(cx.repo_updates(), cx.plugin_updates()) {
-                    self.updating_repos.insert(slug, now);
-                }
                 ipc::send(cx.cmd, DaemonCommand::UpdateAllPlugins);
             }
             ui.add_space(theme::SPACE_5);
@@ -468,21 +420,13 @@ impl PluginsUi {
         ui.spacing_mut().item_spacing.y = 3.0;
         for p in visible {
             let selected = self.selection == Selection::Plugin(p.id.clone());
-            // An on-disk change only flags the row while the
-            // plugin is held disabled; re-enabling accepts it.
-            let needs_action = plugin_requires_regrant(p)
+            let update_available = update_for(p, &cx.state.plugins.available).is_some();
+            let needs_action = update_available
                 || cx.udev.is_some_and(|status| {
                     status.supported
                         && !status.current
                         && status.plugins_requiring_update.iter().any(|id| id == &p.id)
-                })
-                || cx.plugin_updates().iter().any(|s| {
-                    s.plugin_id == p.id && (s.update_available || (s.on_disk_changed && !p.enabled))
                 });
-            let update_available = cx
-                .plugin_updates()
-                .iter()
-                .any(|s| s.plugin_id == p.id && s.update_available);
             let logo = self.logo(p);
             match list_row(
                 ui,
@@ -547,7 +491,8 @@ impl PluginsUi {
     ) {
         let logo = self.logo(p);
         let locked_target = self.locked_target(p);
-        let update = cx.plugin_updates().iter().find(|s| s.plugin_id == p.id);
+        let update = update_for(p, &cx.state.plugins.available);
+        let now = ui.input(|i| i.time);
         let mut toggle_clicked = false;
         let setup_open = p.integration_setup.is_some();
         egui::Sides::new().show(
@@ -581,7 +526,7 @@ impl PluginsUi {
                 });
             },
             |ui| {
-                let on = locked_target.unwrap_or_else(|| plugin_enabled_with_consent(p));
+                let on = locked_target.unwrap_or(p.enabled);
                 let label = if setup_open {
                     t!("integrations.cancel_setup")
                 } else if on {
@@ -622,37 +567,18 @@ impl PluginsUi {
                     self.issue_modal = issue_modal(issue);
                 }
             }
-            // A failed plugin cannot expose its normal controls, but an upstream
-            // update may be the only way to make it compatible again. Keep that
-            // recovery action available even when the checked-out files also count
-            // as modified on disk.
-            if let Some(update) = update.filter(|u| {
-                u.update_available && p.provenance != PluginProvenance::LocalDevelopment
-            }) {
+            if let Some(update) = update {
                 ui.add_space(theme::SPACE_7);
-                let in_flight = self.updating.contains_key(&update.plugin_id);
                 if update_banner(
                     ui,
-                    &update.current_version,
-                    &update.available_version,
-                    in_flight,
+                    &p.version,
+                    &update.version,
+                    self.installing.contains_key(&p.id),
                 ) {
-                    self.updating
-                        .insert(update.plugin_id.clone(), ui.input(|i| i.time));
-                    ipc::send(
-                        cx.cmd,
-                        DaemonCommand::UpdatePluginRepo {
-                            slug: update.slug.clone(),
-                        },
-                    );
+                    self.install(now, cx.cmd, &update.repo, &p.id);
                 }
             }
             return;
-        }
-
-        if plugin_requires_regrant(p) {
-            ui.add_space(theme::SPACE_9);
-            regrant_warning_banner(ui, p);
         }
 
         if matches!(
@@ -682,20 +608,16 @@ impl PluginsUi {
             }
         }
 
-        // A local on-disk edit is surfaced ahead of an upstream update: it's the
-        // surprising, security-relevant state (the daemon has disabled the plugin).
-        // Only while the plugin is held inactive: once re-enabled, the risk is
-        // accepted and the banner is gone.
-        if update.is_some_and(|u| u.on_disk_changed) && !plugin_enabled_with_consent(p) {
+        if let Some(update) = update {
             ui.add_space(theme::SPACE_9);
-            modified_on_disk_banner(ui);
-        } else if let Some(update) = update
-            .filter(|u| u.update_available && p.provenance != PluginProvenance::LocalDevelopment)
-        {
-            // A plugin is updated by pulling its whole repository, never one
-            // plugin at a time.
-            ui.add_space(theme::SPACE_9);
-            update_info_banner(ui, &update.current_version, &update.available_version);
+            if update_banner(
+                ui,
+                &p.version,
+                &update.version,
+                self.installing.contains_key(&p.id),
+            ) {
+                self.install(now, cx.cmd, &update.repo, &p.id);
+            }
         }
 
         if !plugin_description(p).is_empty() {
@@ -724,94 +646,19 @@ impl PluginsUi {
             self.integration
                 .show(ui, cx.state, p, cx.cmd, cx.serial_ports, page);
         }
-        permissions_section(ui, p, cx.cmd);
-    }
-
-    // ── Dialogs ─────────────────────────────────────────────────────────────
-
-    /// Grant-permission prompt: shown when the user turns on a plugin that
-    /// declares permissions (or right after importing one). Lists each
-    /// permission with what it lets the plugin do; "Grant & Enable" accepts and
-    /// activates, "Cancel" leaves the plugin installed but off.
-    fn consent_modal(&mut self, ctx: &egui::Context, state: &TopicStore, cmd: &CommandTx) {
-        let Some(id) = self.pending_consent.clone() else {
-            return;
-        };
-        let Some(p) = state.plugins.plugins.iter().find(|p| p.id == id) else {
-            self.pending_consent = None;
-            return;
-        };
-
-        let mut grant = false;
-        let mut cancel = false;
-        let dismissed = widgets::dialog(
-            ctx,
-            "plugin_consent",
-            &t!("plugins.consent_title"),
-            460.0,
-            |ui| {
-                ui.label(
-                    egui::RichText::new(t!("plugins.consent_body", name = plugin_name(p)))
-                        .font(theme::body_md())
-                        .color(theme::TEXT_DIM),
-                );
-                match consent_reason(p) {
-                    ConsentReason::AuthorityExpanded => {
-                        ui.add_space(theme::SPACE_4);
-                        ui.label(
-                            egui::RichText::new(t!("plugins.consent_permission_added"))
-                                .font(theme::body_sm())
-                                .color(theme::STAT_AMBER),
-                        );
-                    }
-                    ConsentReason::New => {}
-                }
-                ui.add_space(theme::SPACE_6);
-                authority_review_cards(ui, p);
-                ui.add_space(theme::SPACE_1);
-                ui.label(
-                    egui::RichText::new(t!("plugins.consent_warning"))
-                        .font(theme::body_sm())
-                        .color(theme::TEXT_MUT),
-                );
-            },
-            |ui| {
-                if widgets::button(
-                    ui,
-                    &t!("plugins.consent_grant_enable"),
-                    ButtonKind::Primary,
-                    Vec2::new(170.0, 34.0),
-                )
-                .clicked()
-                {
-                    grant = true;
-                }
-                if widgets::button(
-                    ui,
-                    &t!("plugins.consent_cancel"),
-                    ButtonKind::Secondary,
-                    Vec2::new(100.0, 34.0),
-                )
-                .clicked()
-                {
-                    cancel = true;
-                }
-            },
-        );
-
-        if grant {
-            crate::runtime::ipc::send(
-                cmd,
-                halod_shared::commands::DaemonCommand::ConfirmPluginEnable {
-                    id: id.clone(),
-                    authority: p.authority.clone(),
-                },
-            );
-            // Granting enables the plugin — apply and lock like a direct enable.
-            apply_and_lock(&mut self.in_flight, &id, true);
-            self.pending_consent = None;
-        } else if cancel || dismissed {
-            self.pending_consent = None;
+        uses_section(ui, p);
+        if p.provenance != PluginProvenance::Local {
+            ui.add_space(theme::SPACE_9);
+            if widgets::button(
+                ui,
+                &t!("plugins.uninstall"),
+                ButtonKind::Danger,
+                Vec2::new(130.0, 32.0),
+            )
+            .clicked()
+            {
+                self.pending_uninstall = Some(p.id.clone());
+            }
         }
     }
 }
@@ -834,21 +681,50 @@ fn resolve_selection(
     }
 }
 
-fn clear_finished_updates(
-    updating: &mut HashMap<String, f64>,
+pub(super) fn is_newer(candidate: &str, current: &str) -> bool {
+    match (
+        semver::Version::parse(candidate),
+        semver::Version::parse(current),
+    ) {
+        (Ok(candidate), Ok(current)) => candidate > current,
+        _ => false,
+    }
+}
+
+/// A newer, compatible version of `p` in the catalog of the repo it came from.
+pub(crate) fn update_for<'a>(
+    p: &PluginInfo,
+    available: &'a [AvailablePlugin],
+) -> Option<&'a AvailablePlugin> {
+    available.iter().find(|a| {
+        a.repo == p.repo && a.id == p.id && a.compatible && is_newer(&a.version, &p.version)
+    })
+}
+
+pub(super) fn updates_due_count(state: &PluginsState) -> usize {
+    state
+        .plugins
+        .iter()
+        .filter(|p| update_for(p, &state.available).is_some())
+        .count()
+}
+
+/// An install is done once the plugin is present with no update left due.
+fn clear_finished_installs(
+    installing: &mut HashMap<String, f64>,
     updating_all: &mut Option<f64>,
-    plugin_updates: &[PluginUpdateStatus],
+    state: &PluginsState,
     now: f64,
 ) {
-    let still_due = |id: &str| {
-        plugin_updates
+    let done = |id: &str| {
+        state
+            .plugins
             .iter()
-            .any(|s| s.plugin_id == id && (s.update_available || s.on_disk_changed))
+            .any(|p| p.id == id && update_for(p, &state.available).is_none())
     };
-    updating.retain(|id, started| still_due(id) && now - *started < UPDATE_TIMEOUT);
+    installing.retain(|id, started| !done(id) && now - *started < UPDATE_TIMEOUT);
     if let Some(started) = *updating_all {
-        let any_due = plugin_updates.iter().any(|s| s.update_available);
-        if !any_due || now - started > UPDATE_TIMEOUT {
+        if updates_due_count(state) == 0 || now - started > UPDATE_TIMEOUT {
             *updating_all = None;
         }
     }
@@ -907,37 +783,6 @@ enum RowAction {
     Toggle,
 }
 
-/// Toasts for plugins the daemon quarantined: derived from state (the daemon's
-/// own toast fires before the GUI connects), once each until re-enabled.
-pub(crate) fn quarantine_toasts(
-    plugins: &[PluginInfo],
-    plugin_updates: &[PluginUpdateStatus],
-    toasted: &mut HashSet<String>,
-    timestamp_ms: u64,
-) -> Vec<halod_shared::types::Notification> {
-    use halod_shared::types::{Notification, NotificationCode};
-
-    let is_quarantined = |p: &PluginInfo| {
-        !p.enabled
-            && plugin_updates
-                .iter()
-                .any(|u| u.plugin_id == p.id && u.on_disk_changed)
-    };
-    toasted.retain(|id| plugins.iter().any(|p| &p.id == id && is_quarantined(p)));
-
-    plugins
-        .iter()
-        .filter(|p| is_quarantined(p) && toasted.insert(p.id.clone()))
-        .map(|p| Notification {
-            code: NotificationCode::PluginContentChanged {
-                plugin: plugin_name(p).to_owned(),
-            },
-            show_native: true,
-            timestamp_ms,
-        })
-        .collect()
-}
-
 /// Persistence key marking the first-run onboarding as seen. Reuses the
 /// `seen_tours` set (via `MarkTourSeen`), so recommendations need no extra config.
 pub(crate) const ONBOARDING_KEY: &str = halod_shared::types::ONBOARDING_TOUR_KEY;
@@ -977,7 +822,7 @@ pub(crate) fn onboarding_pending(seen: &std::collections::BTreeSet<String>) -> b
 /// Toasts for newly available recommendations: one per stable match identity
 /// not already surfaced (persisted `seen`) and not yet shown this session
 /// (`toasted`). Each toast is paired with its persistence key so the caller can
-/// `MarkTourSeen` it. Mirrors [`quarantine_toasts`].
+/// `MarkTourSeen` it.
 pub(crate) fn recommendation_toasts(
     recommendations: &[PluginRecommendation],
     seen: &std::collections::BTreeSet<String>,
@@ -1006,75 +851,11 @@ pub(crate) fn recommendation_toasts(
         .collect()
 }
 
-/// True when the user's enable intent is consent-satisfied. Runtime `active`
-/// additionally depends on host requirements and is reported by the daemon.
-fn plugin_enabled_with_consent(p: &PluginInfo) -> bool {
-    p.enabled && p.consented
-}
-
-/// What a toggle click should do, given the plugin's current state.
-#[derive(Debug, PartialEq, Eq)]
-enum ToggleDecision {
-    /// Active → turn it off.
-    Disable,
-    /// Every disabled-to-enabled transition opens the authority review modal.
-    NeedsConsent,
-}
-
-/// Every enable is an explicit, current authority confirmation. This applies
-/// to permission-free plugins too: transports and supported-device scope are
-/// still meaningful authority for the user to review.
-fn toggle_decision(p: &PluginInfo) -> ToggleDecision {
-    if plugin_enabled_with_consent(p) {
-        ToggleDecision::Disable
-    } else {
-        ToggleDecision::NeedsConsent
-    }
-}
-
-/// Outcome of an enable/disable toggle click.
-struct ToggleOutcome {
-    /// The `pending_consent` to keep (this plugin's id when a grant modal opens).
-    pending_consent: Option<String>,
-    /// `Some(target)` when a `SetPluginEnabled` was dispatched.
-    dispatched: Option<bool>,
-}
-
-/// Apply a toggle click through the consent gate. Enabling/disabling dispatches
-/// immediately; a plugin needing permission opens the grant modal instead (by
-/// returning its id as the new `pending_consent`).
-fn request_toggle(cmd: &CommandTx, p: &PluginInfo, pending: Option<String>) -> ToggleOutcome {
-    match toggle_decision(p) {
-        ToggleDecision::Disable => {
-            crate::runtime::ipc::send(
-                cmd,
-                halod_shared::commands::DaemonCommand::SetPluginEnabled {
-                    id: p.id.clone(),
-                    enabled: false,
-                },
-            );
-            ToggleOutcome {
-                pending_consent: pending,
-                dispatched: Some(false),
-            }
-        }
-        ToggleDecision::NeedsConsent => ToggleOutcome {
-            pending_consent: Some(p.id.clone()),
-            dispatched: None,
-        },
-    }
-}
-
-/// Apply a just-dispatched toggle immediately and lock it at `target`.
-fn apply_and_lock(in_flight: &mut HashMap<String, bool>, id: &str, target: bool) {
-    in_flight.insert(id.to_owned(), target);
-}
-
 /// A toggle has landed once the plugin is at the target and the re-probe scan
 /// has finished — so the toggle stays locked for the whole
 /// (multi-second) device scan, not just until the config flag flips.
 fn plugin_toggle_landed(p: &PluginInfo, target: bool, discovering: bool) -> bool {
-    plugin_enabled_with_consent(p) == target && !discovering
+    p.enabled == target && !discovering
 }
 
 /// Drop landed (or vanished) in-flight toggles, unlocking them. Pure/testable.
@@ -1099,7 +880,7 @@ enum PluginStatus {
     Degraded,
     /// Enabled by the user but held inactive by a missing blocking requirement.
     Inactive,
-    /// Off — disabled, unconsented, or unsupported.
+    /// Off — disabled or unsupported.
     Disabled,
 }
 
@@ -1145,10 +926,6 @@ fn status_visual(status: PluginStatus) -> (egui::Color32, String, egui::Color32)
             theme::TEXT_MUT,
         ),
     }
-}
-
-fn status_dot(p: &PluginInfo) -> egui::Color32 {
-    status_visual(plugin_status(p)).0
 }
 
 /// One line of user-facing remediation for an unmet requirement. Structured
@@ -1266,7 +1043,7 @@ fn list_row(
         crate::domain::tour::AnchorId::PluginsToggle,
         toggle_rect,
     );
-    let toggle_on = locked_target.unwrap_or_else(|| plugin_enabled_with_consent(p));
+    let toggle_on = locked_target.unwrap_or(p.enabled);
     if widgets::toggle_at(
         ui,
         toggle_rect,
@@ -1368,11 +1145,10 @@ fn plugin_type_label(kind: halod_shared::types::PluginKind) -> std::borrow::Cow<
 
 fn provenance_label(provenance: PluginProvenance) -> std::borrow::Cow<'static, str> {
     match provenance {
-        PluginProvenance::VerifiedOfficial => t!("plugins.provenance_official"),
-        PluginProvenance::UnsignedRepository => t!("plugins.provenance_repository"),
-        PluginProvenance::LocalDevelopment => t!("plugins.provenance_development"),
-        PluginProvenance::LocalUnsigned => t!("plugins.provenance_local"),
-        PluginProvenance::InvalidSignature => t!("plugins.provenance_invalid"),
+        PluginProvenance::Official => t!("plugins.provenance_official"),
+        PluginProvenance::Signed => t!("plugins.provenance_signed"),
+        PluginProvenance::Unsigned => t!("plugins.provenance_repository"),
+        PluginProvenance::Local => t!("plugins.provenance_local"),
     }
 }
 
@@ -1425,34 +1201,6 @@ fn update_all_banner(ui: &mut egui::Ui, count: usize, updating: bool) -> bool {
         .show(ui)
 }
 
-/// Amber "Update available vX → vY / Update" banner in a plugin's detail. Never
-/// automatic.
-/// Banner shown when a plugin's on-disk content differs from its checked-out
-/// baseline — a local edit or tampering. The daemon has disabled the plugin for
-/// safety; this explains why and how to recover. Purely informational: the user
-/// re-enables it with the normal toggle, which accepts the current content.
-fn modified_on_disk_banner(ui: &mut egui::Ui) {
-    let title = t!("plugins.modified_on_disk");
-    let sub = t!("plugins.modified_on_disk_sub");
-    widgets::Banner::warn(title.as_ref())
-        .subtitle(sub.as_ref())
-        .show(ui);
-}
-
-/// Prominent recovery hint for a plugin disabled after its previously approved
-/// content or permission set changed. The row dot gets the user here; this
-/// banner makes the required action explicit before the normal detail content.
-fn regrant_warning_banner(ui: &mut egui::Ui, p: &PluginInfo) {
-    let detail = match consent_reason(p) {
-        ConsentReason::AuthorityExpanded => t!("plugins.consent_permission_added"),
-        ConsentReason::New => t!("plugins.consent_modified"),
-    };
-    let title = t!("plugins.regrant_required");
-    widgets::Banner::warn(title.as_ref())
-        .subtitle(detail.as_ref())
-        .show(ui);
-}
-
 /// The i18n label key for a plugin issue banner, by kind.
 fn issue_label_key(kind: &PluginIssueKind) -> &'static str {
     match kind {
@@ -1490,38 +1238,12 @@ fn issue_banner(ui: &mut egui::Ui, issue: &PluginIssue) -> bool {
         .show(ui)
 }
 
-/// Informational "Update available vX → vY" banner in a plugin's detail, with
-/// no action: a plugin is updated by pulling its whole repository, so the button
-/// lives on the repo detail instead.
-fn update_info_banner(ui: &mut egui::Ui, current: &str, available: &str) {
-    let title = t!("plugins.update_available");
-    widgets::Banner::warn(title.as_ref())
-        .title_color(theme::TEXT)
-        .title_font(theme::body_md())
-        .show_with(ui, |ui| {
-            if !current.is_empty() || !available.is_empty() {
-                ui.add_space(theme::SPACE_1);
-                ui.label(
-                    egui::RichText::new(format!("{current} → {available}"))
-                        .font(theme::value_sm())
-                        .color(theme::STAT_AMBER),
-                );
-            }
-            ui.add_space(theme::SPACE_1);
-            ui.label(
-                egui::RichText::new(t!("plugins.update_via_repo"))
-                    .font(theme::body_sm())
-                    .color(theme::TEXT_MUT),
-            );
-        });
-}
-
 fn update_banner(ui: &mut egui::Ui, current: &str, available: &str, updating: bool) -> bool {
     let title = t!("plugins.update_available");
     let label = if updating {
         t!("plugins.updating")
     } else {
-        t!("plugins.repos_update")
+        t!("plugins.update")
     };
     widgets::Banner::warn(title.as_ref())
         .title_color(theme::TEXT)
@@ -1563,15 +1285,26 @@ mod tests {
         }
     }
 
-    pub(super) fn status(id: &str, update_available: bool) -> PluginUpdateStatus {
-        PluginUpdateStatus {
-            plugin_id: id.to_owned(),
-            slug: "repo".to_owned(),
-            update_available,
-            on_disk_changed: false,
-            current_version: "1.0.0".to_owned(),
-            available_version: "1.1.0".to_owned(),
+    pub(super) fn available(
+        repo: &str,
+        id: &str,
+        version: &str,
+        compatible: bool,
+    ) -> AvailablePlugin {
+        AvailablePlugin {
+            repo: repo.into(),
+            id: id.into(),
+            version: version.into(),
+            api: "3.0".into(),
+            compatible,
         }
+    }
+
+    fn installed(id: &str, version: &str) -> PluginInfo {
+        let mut p = info(id, true);
+        p.repo = "official".into();
+        p.version = version.into();
+        p
     }
 
     #[test]
@@ -1582,64 +1315,66 @@ mod tests {
     }
 
     #[test]
-    fn clear_finished_updates_retires_a_plugin_that_finished_updating() {
-        let mut updating = HashMap::from([("a".to_owned(), 0.0)]);
-        let mut updating_all = None;
-        // Still reporting an available update: the spinner stays.
-        clear_finished_updates(&mut updating, &mut updating_all, &[status("a", true)], 1.0);
-        assert!(updating.contains_key("a"));
-        // Update landed (flag cleared): the spinner is retired.
-        clear_finished_updates(&mut updating, &mut updating_all, &[status("a", false)], 2.0);
-        assert!(updating.is_empty());
-    }
-
-    #[test]
-    fn clear_finished_updates_drops_a_stuck_spinner_after_the_timeout() {
-        let mut updating = HashMap::from([("a".to_owned(), 0.0)]);
-        let mut updating_all = None;
-        // Still "due" but past the failsafe deadline — drop it anyway.
-        clear_finished_updates(
-            &mut updating,
-            &mut updating_all,
-            &[status("a", true)],
-            UPDATE_TIMEOUT + 1.0,
+    fn updates_are_newer_compatible_versions_from_the_same_repo() {
+        let p = installed("kraken", "1.0.0");
+        let catalog = [
+            available("other", "kraken", "9.0.0", true),
+            available("official", "kraken", "2.0.0", false),
+        ];
+        assert!(update_for(&p, &catalog).is_none());
+        let catalog = [available("official", "kraken", "1.0.1", true)];
+        assert_eq!(
+            update_for(&p, &catalog).map(|a| a.version.as_str()),
+            Some("1.0.1")
         );
-        assert!(updating.is_empty());
+        assert!(update_for(&installed("kraken", "1.0.1"), &catalog).is_none());
+        assert!(!is_newer("1.0.0", "not-semver"));
     }
 
     #[test]
-    fn clear_finished_updates_clears_update_all_once_nothing_is_due() {
-        let mut updating = HashMap::new();
-        let mut updating_all = Some(0.0);
-        // One plugin still due: keep the "update all" spinner.
-        clear_finished_updates(&mut updating, &mut updating_all, &[status("a", true)], 1.0);
-        assert_eq!(updating_all, Some(0.0));
-        // Nothing due anymore: clear it.
-        clear_finished_updates(&mut updating, &mut updating_all, &[status("a", false)], 2.0);
-        assert_eq!(updating_all, None);
-    }
-
-    #[test]
-    fn command_error_notification_stops_update_progress_immediately() {
-        let mut screen = PluginsUi {
-            updating: HashMap::from([("plugin-a".to_owned(), 1.0)]),
-            updating_all: Some(1.0),
-            updating_repos: HashMap::from([("repo-a".to_owned(), 1.0)]),
+    fn installs_finish_when_the_version_lands_or_time_runs_out() {
+        let mut state = PluginsState {
+            plugins: vec![installed("kraken", "1.0.0")],
+            available: vec![available("official", "kraken", "1.1.0", true)],
             ..Default::default()
         };
-        let notification = halod_shared::types::Notification {
+        let mut installing = HashMap::from([("kraken".to_owned(), 0.0), ("new".to_owned(), 0.0)]);
+        let mut updating_all = Some(0.0);
+
+        clear_finished_installs(&mut installing, &mut updating_all, &state, 1.0);
+        assert_eq!(installing.len(), 2);
+        assert!(updating_all.is_some());
+
+        state.plugins[0].version = "1.1.0".into();
+        clear_finished_installs(&mut installing, &mut updating_all, &state, 2.0);
+        assert_eq!(installing.keys().collect::<Vec<_>>(), ["new"]);
+        assert!(updating_all.is_none());
+
+        clear_finished_installs(
+            &mut installing,
+            &mut updating_all,
+            &state,
+            UPDATE_TIMEOUT + 1.0,
+        );
+        assert!(installing.is_empty());
+    }
+
+    #[test]
+    fn command_error_notification_stops_install_progress_immediately() {
+        let mut screen = PluginsUi {
+            installing: HashMap::from([("plugin-a".to_owned(), 1.0)]),
+            updating_all: Some(1.0),
+            ..Default::default()
+        };
+        screen.observe_notifications(&[halod_shared::types::Notification {
             code: halod_shared::types::NotificationCode::Generic {
-                message: "repository update would roll back".to_owned(),
+                message: "install failed".to_owned(),
             },
             show_native: false,
             timestamp_ms: 0,
-        };
-
-        screen.observe_notifications(&[notification]);
-
-        assert!(screen.updating.is_empty());
+        }]);
+        assert!(screen.installing.is_empty());
         assert!(screen.updating_all.is_none());
-        assert!(screen.updating_repos.is_empty());
     }
 
     pub(super) fn info(id: &str, enabled: bool) -> PluginInfo {
@@ -1663,14 +1398,12 @@ mod tests {
             devices: vec![],
             logo: None,
             effect_thumbnails: vec![],
-            source: Default::default(),
+            repo: String::new(),
             provenance: Default::default(),
-            declared_permissions: vec![],
-            authority: Default::default(),
+            access: Default::default(),
             provides: vec![],
             consumes: vec![],
             data_records: vec![],
-            accepted_authority: None,
             config_fields: vec![],
             config_values: Default::default(),
             secret_set: Default::default(),
@@ -1679,7 +1412,6 @@ mod tests {
             integration_requires_setup: false,
             integration_state: halod_shared::types::IntegrationLifecycleState::Configured,
             integration_setup: None,
-            consented: true,
             active: enabled,
             requirements: vec![],
             activation_blocker: None,
@@ -1762,36 +1494,6 @@ mod tests {
         assert!(onboarding_pending(&BTreeSet::new()));
         let seen: BTreeSet<String> = [ONBOARDING_KEY.to_string()].into_iter().collect();
         assert!(!onboarding_pending(&seen));
-    }
-
-    #[test]
-    fn quarantine_toasts_fire_once_then_rearm_after_reenable() {
-        let quarantined = |id: &str| PluginUpdateStatus {
-            on_disk_changed: true,
-            ..status(id, false)
-        };
-        let mut disabled = info("edited", true);
-        disabled.enabled = false;
-        let ok = info("ok", true);
-        let updates = vec![quarantined("edited"), status("ok", false)];
-        let mut toasted = HashSet::new();
-
-        let first = quarantine_toasts(&[disabled.clone(), ok.clone()], &updates, &mut toasted, 0);
-        assert_eq!(first.len(), 1);
-        assert!(
-            quarantine_toasts(&[disabled.clone(), ok.clone()], &updates, &mut toasted, 0)
-                .is_empty()
-        );
-
-        // Re-enabled → forgotten, and a later re-quarantine alerts again.
-        let mut reenabled = disabled.clone();
-        reenabled.enabled = true;
-        assert!(quarantine_toasts(&[reenabled, ok.clone()], &updates, &mut toasted, 0).is_empty());
-        assert!(toasted.is_empty());
-        assert_eq!(
-            quarantine_toasts(&[disabled, ok], &updates, &mut toasted, 0).len(),
-            1
-        );
     }
 
     #[test]
@@ -1878,20 +1580,15 @@ mod tests {
         assert!(assets_to_request(&p, &HashMap::new(), &HashSet::new()).is_empty());
     }
 
-    pub(super) fn repo(slug: &str, release_tag: &str) -> PluginRepoInfo {
+    pub(super) fn repo(slug: &str) -> PluginRepoInfo {
         PluginRepoInfo {
-            url: format!("https://example.com/{slug}.git"),
             slug: slug.to_owned(),
-            repository_id: None,
-            release_tag: Some(release_tag.to_owned()),
-            release_policy: Default::default(),
-            active_revision: None,
-            previous_release_tag: None,
-            last_sync: None,
+            location: PluginRepoLocation::Url(format!("https://example.com/{slug}/catalog.yaml")),
             official: false,
-            location: Default::default(),
-            signature: RepoSignatureStatus::Unsigned,
-            signing_key_fingerprint: None,
+            trust: RepoTrust::Unsigned,
+            fingerprint: None,
+            last_sync: None,
+            commit: None,
         }
     }
 
@@ -1940,7 +1637,7 @@ mod tests {
     #[test]
     fn selection_keeps_a_valid_repo_selection() {
         let plugins = vec![info("a", true)];
-        let repos = vec![repo("foo", "aaaaaaaa")];
+        let repos = vec![repo("foo")];
         assert_eq!(
             resolve_selection(Selection::Repo("foo".into()), &plugins, &repos),
             Selection::Repo("foo".into())
@@ -1958,8 +1655,9 @@ mod tests {
 
     #[test]
     fn status_dot_reflects_enabled() {
-        assert_eq!(status_dot(&info("a", true)), theme::ONLINE);
-        assert_eq!(status_dot(&info("a", false)), theme::TEXT_FAINT2);
+        let dot = |p: &PluginInfo| status_visual(plugin_status(p)).0;
+        assert_eq!(dot(&info("a", true)), theme::ONLINE);
+        assert_eq!(dot(&info("a", false)), theme::TEXT_FAINT2);
     }
 
     #[test]
@@ -1990,7 +1688,7 @@ mod tests {
             requirements: vec![missing.clone()],
         });
         assert_eq!(plugin_status(&blocked), PluginStatus::Inactive);
-        assert_eq!(status_dot(&blocked), theme::OFFLINE);
+        assert_eq!(status_visual(plugin_status(&blocked)).0, theme::OFFLINE);
         assert!(blocked.enabled, "a blocked plugin's toggle stays on");
         assert!(requirement_line(&missing).contains("liquidctl"));
 
@@ -2006,46 +1704,6 @@ mod tests {
             feature: Some("audio_routing".into()),
         }];
         assert_eq!(plugin_status(&degraded), PluginStatus::Degraded);
-    }
-
-    #[test]
-    fn toggle_decision_routes_through_the_consent_gate() {
-        use halod_shared::types::Permission;
-        // Permission-free, off → authority review.
-        let mut p = info("a", false);
-        assert_eq!(toggle_decision(&p), ToggleDecision::NeedsConsent);
-
-        // Permission-free, on → disable.
-        p.enabled = true;
-        assert_eq!(toggle_decision(&p), ToggleDecision::Disable);
-
-        // Declares a permission, not yet consented, off → must consent first.
-        let mut q = info("b", false);
-        q.declared_permissions = vec![Permission::Network];
-        q.consented = false;
-        assert_eq!(toggle_decision(&q), ToggleDecision::NeedsConsent);
-
-        // Even "enabled" but unconsented is not active → still needs consent.
-        q.enabled = true;
-        assert_eq!(toggle_decision(&q), ToggleDecision::NeedsConsent);
-
-        // Granted (consented) + enabled → active → disable.
-        q.consented = true;
-        assert_eq!(toggle_decision(&q), ToggleDecision::Disable);
-    }
-
-    #[test]
-    fn enabled_with_consent_requires_both_flags() {
-        let mut p = info("a", true);
-        assert!(plugin_enabled_with_consent(&p));
-        p.consented = false;
-        assert!(
-            !plugin_enabled_with_consent(&p),
-            "unconsented is inert even if enabled"
-        );
-        p.consented = true;
-        p.enabled = false;
-        assert!(!plugin_enabled_with_consent(&p), "disabled is not active");
     }
 
     #[test]

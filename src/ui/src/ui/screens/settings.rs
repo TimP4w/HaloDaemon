@@ -9,7 +9,7 @@ use crate::ui::components as widgets;
 use egui::{Align2, Color32, Pos2, Stroke, Vec2};
 use halod_shared::commands::{DaemonCommand, EngineKind};
 use halod_shared::debug_info::{DebugInfo, DependencyStatus};
-use halod_shared::types::{DiscoveryPhase, GuiConfig, PluginDownloadConsent};
+use halod_shared::types::{DiscoveryPhase, GuiConfig};
 
 use crate::runtime::ipc::{self, CommandTx};
 use crate::ui::screens::depcheck::{fix_text, impact_text, title_text};
@@ -216,11 +216,10 @@ fn page_body(
     st: &mut SettingsUi,
     show_hidden: &mut bool,
 ) {
-    let [close_to_tray, low_battery, downloads, window_controls, startup_check] =
-        app_toggles(&state.gui);
+    let [close_to_tray, low_battery, window_controls, startup_check] = app_toggles(&state.gui);
     let app = group(ui, st, Section::Application, |ui, st| {
         start_on_boot_row(ui, &mut st.start_on_boot);
-        for (title, sub, on, command) in [close_to_tray, low_battery, downloads, window_controls] {
+        for (title, sub, on, command) in [close_to_tray, low_battery, window_controls] {
             if widgets::list_row(ui, &title, &sub, |ui| widgets::toggle(ui, on) != on) {
                 ipc::send(cmd, command);
             }
@@ -470,7 +469,7 @@ type ToggleRow = (Cow<'static, str>, Cow<'static, str>, bool, DaemonCommand);
 
 /// `(title, subtitle, on, command that flips it)` for the Application toggles.
 /// `SetUiConfig` replaces the whole UI config, so each carries the full snapshot.
-fn app_toggles(gui: &GuiConfig) -> [ToggleRow; 5] {
+fn app_toggles(gui: &GuiConfig) -> [ToggleRow; 4] {
     let flip = |i: usize| {
         let mut f = [
             gui.close_to_tray,
@@ -486,7 +485,6 @@ fn app_toggles(gui: &GuiConfig) -> [ToggleRow; 5] {
             low_battery_notifications: f[3],
         }
     };
-    let downloads = gui.plugin_downloads == PluginDownloadConsent::Allowed;
     [
         (
             t!("settings.close_to_tray_title"),
@@ -499,14 +497,6 @@ fn app_toggles(gui: &GuiConfig) -> [ToggleRow; 5] {
             t!("settings.low_battery_notifications_sub"),
             gui.low_battery_notifications,
             flip(3),
-        ),
-        (
-            t!("settings.plugin_downloads_title"),
-            t!("settings.plugin_downloads_sub"),
-            downloads,
-            DaemonCommand::SetPluginDownloadConsent {
-                allowed: !downloads,
-            },
         ),
         (
             t!("settings.window_controls_title"),
@@ -1383,13 +1373,6 @@ gui:
                     g.hide_window_controls = hide_window_controls;
                     g.low_battery_notifications = low_battery_notifications;
                 }
-                DaemonCommand::SetPluginDownloadConsent { allowed } => {
-                    g.plugin_downloads = if allowed {
-                        PluginDownloadConsent::Allowed
-                    } else {
-                        PluginDownloadConsent::Denied
-                    };
-                }
                 other => panic!("unexpected command {other:?}"),
             }
         }
@@ -1398,7 +1381,6 @@ gui:
             let mut g = GuiConfig::default();
             g.close_to_tray ^= true;
             g.hide_window_controls ^= true;
-            g.plugin_downloads = PluginDownloadConsent::Denied;
             g
         }] {
             for (i, (_, _, _, command)) in app_toggles(&base).into_iter().enumerate() {

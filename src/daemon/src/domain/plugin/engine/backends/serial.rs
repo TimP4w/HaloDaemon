@@ -74,7 +74,7 @@ mod tests {
         std::fs::create_dir(&dir).unwrap();
         std::fs::write(
             dir.join("plugin.yaml"),
-            "id: serialtest\ntype: integration\npermissions: [serial]\ntransports:\n  serial:\n    port_key: serial_port\n    baud: 115200\nconfig:\n  fields:\n    - { key: serial_port, label: Port, kind: serial_port }\n",
+            "id: serialtest\nversion: 1.0.0\napi: \"3.0\"\ntype: integration\ntransports:\n  serial:\n    port_key: serial_port\n    baud: 115200\nconfig:\n  fields:\n    - { key: serial_port, label: Port, kind: serial_port }\n",
         )
         .unwrap();
         std::fs::write(dir.join("main.lua"), "return {}").unwrap();

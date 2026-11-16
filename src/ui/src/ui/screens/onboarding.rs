@@ -1,7 +1,4 @@
 // SPDX-License-Identifier: GPL-3.0-or-later
-//! First-run onboarding wizard driven by live daemon state. It owns first-run
-//! download consent, dependency health, plugin recommendations, initial
-//! selection, and authority review so those concerns never race separate modals.
 
 use std::collections::HashMap;
 
@@ -9,9 +6,7 @@ use crate::domain::topic_store::TopicStore;
 use egui::{RichText, Stroke, Vec2};
 use halod_shared::commands::DaemonCommand;
 use halod_shared::debug_info::DebugInfo;
-use halod_shared::types::{
-    PluginDownloadConsent, PluginInfo, PluginKind, PluginRecommendation, PluginSource,
-};
+use halod_shared::types::{AvailablePlugin, PluginRecommendation, PluginsState};
 
 use crate::runtime::ipc::{self, CommandTx};
 use crate::ui::components::{self as widgets, ButtonKind};
@@ -35,12 +30,9 @@ const SCAN_SECS: f64 = 2.2;
 pub struct OnboardingUi {
     step: u8,
     scan_started: Option<f64>,
-    official_retry_started: Option<f64>,
-    /// Plugin id → selected for authority review within onboarding.
+    refresh_started: Option<f64>,
+    /// Plugin id → selected for installation.
     selected: HashMap<String, bool>,
-    /// Optimistic value while the daemon persists download consent. This keeps
-    /// a previous installation's config from winning the next wizard click.
-    plugin_downloads: Option<bool>,
     start_on_boot: Option<bool>,
 }
 
@@ -63,26 +55,19 @@ pub enum Outcome {
     Finished,
 }
 
-fn plugins_on(st: &OnboardingUi, state: &TopicStore) -> bool {
-    st.plugin_downloads
-        .unwrap_or(state.gui.plugin_downloads == PluginDownloadConsent::Allowed)
-}
-
 fn is_selected(st: &OnboardingUi, id: &str) -> bool {
     st.selected.get(id).copied().unwrap_or(false)
 }
 
-fn plugin_candidates(plugins: &[PluginInfo]) -> Vec<&PluginInfo> {
+/// Official plugins that can be installed on this build and aren't yet.
+fn plugin_candidates(plugins: &PluginsState) -> Vec<&AvailablePlugin> {
     plugins
+        .available
         .iter()
-        .filter(|plugin| {
-            plugin.platform_supported
-                && plugin.plugin_type != PluginKind::Integration
-                && matches!(
-                    &plugin.source,
-                    PluginSource::Repo { slug }
-                        if slug == OFFICIAL_REPO_SLUG
-                )
+        .filter(|entry| {
+            entry.repo == OFFICIAL_REPO_SLUG
+                && entry.compatible
+                && !plugins.plugins.iter().any(|p| p.id == entry.id)
         })
         .collect()
 }
@@ -90,27 +75,19 @@ fn plugin_candidates(plugins: &[PluginInfo]) -> Vec<&PluginInfo> {
 fn seed_plugin_selection(
     st: &mut OnboardingUi,
     recommendations: &[PluginRecommendation],
-    plugins: &[PluginInfo],
+    plugins: &PluginsState,
 ) {
-    for plugin in plugin_candidates(plugins) {
-        if recommendations
-            .iter()
-            .any(|recommendation| recommendation.plugin_id == plugin.id)
-        {
-            // Only materialize recommended defaults. An absent entry already
-            // means "off"; storing false before the asynchronous recommendation
-            // snapshot arrives would make that temporary state indistinguishable
-            // from a user explicitly switching the plugin off.
-            st.selected.entry(plugin.id.clone()).or_insert(true);
+    for entry in plugin_candidates(plugins) {
+        if recommendations.iter().any(|r| r.plugin_id == entry.id) {
+            // Absent already means off; inserting false now would make the
+            // pending recommendation snapshot look like an explicit opt-out.
+            st.selected.entry(entry.id.clone()).or_insert(true);
         }
     }
 }
 
-fn active_count(st: &OnboardingUi, plugins: &[PluginInfo]) -> usize {
-    plugin_candidates(plugins)
-        .into_iter()
-        .filter(|plugin| is_selected(st, &plugin.id))
-        .count()
+fn active_count(st: &OnboardingUi, plugins: &PluginsState) -> usize {
+    install_targets(st, plugins).len()
 }
 
 /// The primary button label for a step (pure, tested).
@@ -121,7 +98,7 @@ fn primary_label(step: u8, active: usize) -> String {
         PREFS => t!("onboarding.p_scan").to_string(),
         PLUGINS => {
             if active > 0 {
-                t!("onboarding.p_grant_enable", n = active).to_string()
+                t!("onboarding.p_install", n = active).to_string()
             } else {
                 t!("onboarding.p_finish").to_string()
             }
@@ -142,12 +119,11 @@ fn active_dot(step: u8) -> usize {
     }
 }
 
-/// Selected official plugins that are currently disabled.
-fn enable_targets(st: &OnboardingUi, plugins: &[PluginInfo]) -> Vec<String> {
+fn install_targets(st: &OnboardingUi, plugins: &PluginsState) -> Vec<String> {
     plugin_candidates(plugins)
         .into_iter()
-        .filter(|plugin| is_selected(st, &plugin.id) && !plugin.enabled)
-        .map(|plugin| plugin.id.clone())
+        .filter(|entry| is_selected(st, &entry.id))
+        .map(|entry| entry.id.clone())
         .collect()
 }
 
@@ -160,7 +136,7 @@ pub fn show(
     time: f64,
 ) -> Outcome {
     let recs = &state.plugins.recommendations;
-    seed_plugin_selection(st, recs, &state.plugins.plugins);
+    seed_plugin_selection(st, recs, &state.plugins);
 
     // Drive the scan timer.
     if st.step == SCANNING {
@@ -245,7 +221,7 @@ pub fn show(
                             footer(
                                 ui,
                                 st,
-                                active_count(st, &state.plugins.plugins),
+                                active_count(st, &state.plugins),
                                 &mut outcome,
                                 state,
                                 cmd,
@@ -423,7 +399,6 @@ fn step_health(ui: &mut egui::Ui, debug: Option<&DebugInfo>) {
 }
 
 fn step_prefs(ui: &mut egui::Ui, st: &mut OnboardingUi, state: &TopicStore, cmd: &CommandTx) {
-    let on = plugins_on(st, state);
     inset_list(ui, |ui| {
         crate::ui::screens::settings::start_on_boot_row(ui, &mut st.start_on_boot);
         widgets::list_row(
@@ -433,20 +408,6 @@ fn step_prefs(ui: &mut egui::Ui, st: &mut OnboardingUi, state: &TopicStore, cmd:
             |ui| {
                 if widgets::toggle(ui, state.gui.close_to_tray) != state.gui.close_to_tray {
                     send_ui_config(cmd, state, !state.gui.close_to_tray);
-                }
-            },
-        );
-        widgets::list_row(
-            ui,
-            &t!("settings.plugin_downloads_title"),
-            &t!("settings.plugin_downloads_sub"),
-            |ui| {
-                if widgets::toggle(ui, on) != on {
-                    st.plugin_downloads = Some(!on);
-                    ipc::send(
-                        cmd,
-                        DaemonCommand::SetPluginDownloadConsent { allowed: !on },
-                    );
                 }
             },
         );
@@ -468,32 +429,6 @@ fn step_scanning(ui: &mut egui::Ui) {
     ui.add_space(theme::SPACE_10);
 }
 
-/// One plugin row: a checkbox row and — once checked — the system access it
-/// wants, so choosing a plugin and consenting to it are one decision.
-fn plugin_toggle_row(ui: &mut egui::Ui, plugin: &PluginInfo, on: bool, note: &str) -> bool {
-    let locale = rust_i18n::locale();
-    let clicked = widgets::check_row(
-        ui,
-        plugin.localized_name(&locale),
-        Some(plugin.localized_description(&locale)),
-        (!note.is_empty()).then_some((note, theme::TEXT_SOFT)),
-        on,
-    )
-    .clicked();
-    if on && !plugin.enabled {
-        if plugin.declared_permissions.is_empty() {
-            ui.label(
-                RichText::new(t!("onboarding.permissions_none"))
-                    .font(theme::body_sm())
-                    .color(theme::TEXT_MUT),
-            );
-        } else {
-            crate::ui::screens::plugins::authority_review_cards(ui, plugin);
-        }
-    }
-    clicked
-}
-
 fn step_plugins(
     ui: &mut egui::Ui,
     st: &mut OnboardingUi,
@@ -501,98 +436,86 @@ fn step_plugins(
     cmd: &CommandTx,
     time: f64,
 ) {
-    let candidates = plugin_candidates(&state.plugins.plugins);
-    let official_unavailable = state.plugins.repos.iter().any(|repo| {
-        repo.slug == OFFICIAL_REPO_SLUG && repo.active_revision.as_deref().is_none_or(str::is_empty)
-    });
-    if !candidates.is_empty() {
-        st.official_retry_started = None;
-    }
-    {
-        {
-            if candidates.is_empty() && official_unavailable && plugins_on(st, state) {
-                let retrying = st
-                    .official_retry_started
-                    .is_some_and(|started| time - started < 8.0);
-                widgets::card_with_surface(
-                    ui,
-                    egui::Margin::same(18),
-                    theme::CARD_BG,
-                    theme::BORDER,
-                    |ui| {
-                        ui.label(
-                            RichText::new(if retrying {
-                                t!("onboarding.plugins_retrying")
-                            } else {
-                                t!("onboarding.plugins_error")
-                            })
-                            .font(theme::body_md())
-                            .color(if retrying {
-                                theme::TEXT_MUT
-                            } else {
-                                theme::OFFLINE
-                            }),
-                        );
-                        ui.add_space(theme::SPACE_7);
-                        if retrying {
-                            widgets::progress_bar(ui, ui.available_width(), 8.0, None);
-                        } else if widgets::button(
-                            ui,
-                            &t!("onboarding.plugins_retry"),
-                            ButtonKind::Primary,
-                            Vec2::new(92.0, 34.0),
-                        )
-                        .clicked()
-                        {
-                            st.official_retry_started = Some(time);
-                            ipc::send(
-                                cmd,
-                                DaemonCommand::SetPluginDownloadConsent { allowed: true },
-                            );
-                        }
-                    },
-                );
-            } else if candidates.is_empty() && plugins_on(st, state) {
+    let candidates = plugin_candidates(&state.plugins);
+    let catalog_loaded = state
+        .plugins
+        .available
+        .iter()
+        .any(|entry| entry.repo == OFFICIAL_REPO_SLUG);
+    if catalog_loaded {
+        st.refresh_started = None;
+    } else {
+        let refreshing = st
+            .refresh_started
+            .is_some_and(|started| time - started < 8.0)
+            || state.discovery.checking_updates;
+        widgets::card_with_surface(
+            ui,
+            egui::Margin::same(18),
+            theme::CARD_BG,
+            theme::BORDER,
+            |ui| {
                 ui.label(
-                    RichText::new(t!("onboarding.plugins_loading"))
-                        .font(theme::body_md())
-                        .color(theme::TEXT_FAINT),
+                    RichText::new(if refreshing {
+                        t!("onboarding.plugins_loading")
+                    } else {
+                        t!("onboarding.plugins_error")
+                    })
+                    .font(theme::body_md())
+                    .color(if refreshing {
+                        theme::TEXT_MUT
+                    } else {
+                        theme::OFFLINE
+                    }),
                 );
                 ui.add_space(theme::SPACE_7);
-                widgets::progress_bar(ui, ui.available_width(), 4.0, None);
-            }
-            if !candidates.is_empty() {
-                let recommended = t!("onboarding.recommended");
-                egui::ScrollArea::vertical()
-                    .max_height(LIST_MAX_H)
-                    .show(ui, |ui| {
-                        ui.spacing_mut().item_spacing.y = theme::SPACE_4;
-                        for plugin in candidates {
-                            let on = is_selected(st, &plugin.id);
-                            let note = if state
-                                .plugins
-                                .recommendations
-                                .iter()
-                                .any(|r| r.plugin_id == plugin.id)
-                            {
-                                recommended.as_ref()
-                            } else {
-                                ""
-                            };
-                            if plugin_toggle_row(ui, plugin, on, note) {
-                                st.selected.insert(plugin.id.clone(), !on);
-                            }
-                        }
-                    });
-                ui.add_space(theme::SPACE_3);
-                ui.label(
-                    RichText::new(t!("plugins.consent_warning"))
-                        .font(theme::body_sm())
-                        .color(theme::TEXT_MUT),
-                );
-            }
-        }
+                if refreshing {
+                    widgets::progress_bar(ui, ui.available_width(), 8.0, None);
+                } else if widgets::button(
+                    ui,
+                    &t!("onboarding.plugins_retry"),
+                    ButtonKind::Primary,
+                    Vec2::new(92.0, 34.0),
+                )
+                .clicked()
+                {
+                    st.refresh_started = Some(time);
+                    ipc::send(cmd, DaemonCommand::RefreshPluginRepos);
+                }
+            },
+        );
+        return;
     }
+    let recommended = t!("onboarding.recommended");
+    egui::ScrollArea::vertical()
+        .max_height(LIST_MAX_H)
+        .show(ui, |ui| {
+            ui.spacing_mut().item_spacing.y = theme::SPACE_4;
+            for entry in candidates {
+                let on = is_selected(st, &entry.id);
+                let note = if state
+                    .plugins
+                    .recommendations
+                    .iter()
+                    .any(|r| r.plugin_id == entry.id)
+                {
+                    recommended.as_ref()
+                } else {
+                    ""
+                };
+                if widgets::check_row(
+                    ui,
+                    &entry.id,
+                    Some(&entry.version),
+                    (!note.is_empty()).then_some((note, theme::TEXT_SOFT)),
+                    on,
+                )
+                .clicked()
+                {
+                    st.selected.insert(entry.id.clone(), !on);
+                }
+            }
+        });
 }
 
 fn step_done(ui: &mut egui::Ui, st: &OnboardingUi, state: &TopicStore) {
@@ -602,7 +525,7 @@ fn step_done(ui: &mut egui::Ui, st: &OnboardingUi, state: &TopicStore) {
         .filter(|d| crate::domain::models::device::listable(d))
         .count();
     let plugins = state.plugins.plugins.iter().filter(|p| p.enabled).count()
-        + enable_targets(st, &state.plugins.plugins).len();
+        + install_targets(st, &state.plugins).len();
     let sensors = crate::domain::models::sensors::sensors(state).len();
     let tiles = [
         (devices, t!("onboarding.done_devices")),
@@ -713,39 +636,18 @@ fn advance_primary(
         WELCOME => st.step = HEALTH,
         HEALTH => st.step = PREFS,
         PREFS => {
-            if st.plugin_downloads.is_none()
-                && state.gui.plugin_downloads == PluginDownloadConsent::Unset
-            {
-                st.plugin_downloads = Some(false);
-                ipc::send(
-                    cmd,
-                    DaemonCommand::SetPluginDownloadConsent { allowed: false },
-                );
-            }
-            // Official plugins are bundled, so their recommendation and
-            // authority-review steps remain useful even when future plugin
-            // downloads are disabled.
             st.step = SCANNING;
             st.scan_started = None;
         }
         PLUGINS => {
-            let plugins: Vec<halod_shared::commands::PluginEnableConfirmation> =
-                enable_targets(st, &state.plugins.plugins)
-                    .into_iter()
-                    .filter_map(|id| {
-                        state
-                            .plugins
-                            .plugins
-                            .iter()
-                            .find(|plugin| plugin.id == id)
-                            .map(|plugin| halod_shared::commands::PluginEnableConfirmation {
-                                id,
-                                authority: plugin.authority.clone(),
-                            })
-                    })
-                    .collect();
-            if !plugins.is_empty() {
-                ipc::send(cmd, DaemonCommand::ConfirmPluginEnableBatch { plugins });
+            for id in install_targets(st, &state.plugins) {
+                ipc::send(
+                    cmd,
+                    DaemonCommand::InstallPlugin {
+                        repo: OFFICIAL_REPO_SLUG.to_owned(),
+                        id,
+                    },
+                );
             }
             st.step = DONE;
         }
@@ -789,36 +691,6 @@ mod tests {
     }
 
     #[test]
-    fn disabled_downloads_still_continue_to_bundled_plugin_scan() {
-        let (cmd, mut rx) = tokio::sync::mpsc::unbounded_channel();
-        let mut state = TopicStore::default();
-        state.gui.plugin_downloads = PluginDownloadConsent::Denied;
-        let mut st = OnboardingUi {
-            step: PREFS,
-            ..Default::default()
-        };
-        let mut outcome = Outcome::Pending;
-
-        advance_primary(&mut st, &state, &cmd, &mut outcome);
-
-        assert_eq!(st.step, SCANNING);
-        assert_eq!(outcome, Outcome::Pending);
-        assert!(rx.try_recv().is_err());
-    }
-
-    #[test]
-    fn onboarding_choice_overrides_stale_persisted_download_consent() {
-        let mut state = TopicStore::default();
-        state.gui.plugin_downloads = PluginDownloadConsent::Allowed;
-        let st = OnboardingUi {
-            plugin_downloads: Some(false),
-            ..Default::default()
-        };
-
-        assert!(!plugins_on(&st, &state));
-    }
-
-    #[test]
     fn active_dot_tracks_each_onboarding_page() {
         assert_eq!(active_dot(WELCOME), 0);
         assert_eq!(active_dot(HEALTH), 1);
@@ -829,55 +701,64 @@ mod tests {
         assert_eq!(step_labels().len(), 5);
     }
 
-    #[test]
-    fn recommendations_seed_plugin_selection_on() {
-        let mut st = OnboardingUi::default();
-        let recs = [rec("a"), rec("b")];
-        let plugins = [plugin("a", false), plugin("b", false), plugin("c", false)];
-        seed_plugin_selection(&mut st, &recs, &plugins);
-        assert_eq!(active_count(&st, &plugins), 2);
-        st.selected.insert("a".into(), false);
-        assert_eq!(active_count(&st, &plugins), 1);
+    fn catalog(ids: &[&str]) -> PluginsState {
+        PluginsState {
+            available: ids
+                .iter()
+                .map(|id| AvailablePlugin {
+                    repo: OFFICIAL_REPO_SLUG.into(),
+                    id: (*id).into(),
+                    version: "1.0.0".into(),
+                    api: "3.0".into(),
+                    compatible: true,
+                })
+                .collect(),
+            ..Default::default()
+        }
     }
 
     #[test]
-    fn recommendations_arriving_after_plugins_still_preselect_defaults() {
+    fn candidates_are_compatible_official_plugins_not_yet_installed() {
+        let mut plugins = catalog(&["a", "b", "c"]);
+        plugins.available[1].compatible = false;
+        plugins.available.push(AvailablePlugin {
+            repo: "other".into(),
+            ..plugins.available[0].clone()
+        });
+        plugins.plugins = vec![serde_json::from_value(
+            serde_json::json!({ "id": "c", "name": "c", "path": "", "enabled": true }),
+        )
+        .unwrap()];
+        let ids: Vec<&str> = plugin_candidates(&plugins)
+            .iter()
+            .map(|e| e.id.as_str())
+            .collect();
+        assert_eq!(ids, ["a"]);
+    }
+
+    #[test]
+    fn recommendations_preselect_without_overriding_an_opt_out() {
         let mut st = OnboardingUi::default();
-        let plugins = [plugin("a", false), plugin("b", false)];
+        let plugins = catalog(&["a", "b"]);
 
         seed_plugin_selection(&mut st, &[], &plugins);
         assert!(st.selected.is_empty(), "loading is not a user choice");
 
         seed_plugin_selection(&mut st, &[rec("a")], &plugins);
-        assert!(is_selected(&st, "a"));
-        assert!(!is_selected(&st, "b"));
+        assert_eq!(active_count(&st, &plugins), 1);
 
         st.selected.insert("a".into(), false);
         seed_plugin_selection(&mut st, &[rec("a")], &plugins);
-        assert!(!is_selected(&st, "a"), "an explicit opt-out stays off");
+        assert_eq!(active_count(&st, &plugins), 0);
     }
 
     #[test]
-    fn enable_targets_only_selected_disabled_plugins_with_authority() {
-        let mut st = OnboardingUi::default();
-        st.selected.insert("b".into(), false); // deselected
-        let recs = [rec("a"), rec("b"), rec("c")];
-        let plugins = vec![
-            plugin("a", false),
-            plugin("b", false),
-            plugin("c", true), // already enabled → excluded
-        ];
-        seed_plugin_selection(&mut st, &recs, &plugins);
-        let targets = enable_targets(&st, &plugins);
-        assert_eq!(targets.len(), 1);
-        assert_eq!(targets[0], "a");
-    }
-
-    #[test]
-    fn plugin_selection_grants_authority_before_completion() {
+    fn finishing_the_plugin_step_installs_the_selection() {
         let (cmd, mut rx) = tokio::sync::mpsc::unbounded_channel();
-        let mut state = TopicStore::default();
-        state.plugins.plugins = vec![plugin("a", false)];
+        let state = TopicStore {
+            plugins: catalog(&["a", "b"]),
+            ..Default::default()
+        };
         let mut st = OnboardingUi {
             step: PLUGINS,
             selected: HashMap::from([("a".into(), true)]),
@@ -887,26 +768,13 @@ mod tests {
 
         advance_primary(&mut st, &state, &cmd, &mut outcome);
         assert_eq!(st.step, DONE);
-        assert_eq!(outcome, Outcome::Pending);
         assert!(matches!(
             rx.try_recv(),
-            Ok(DaemonCommand::ConfirmPluginEnableBatch { plugins })
-                if plugins.len() == 1 && plugins[0].id == "a"
+            Ok(DaemonCommand::InstallPlugin { repo, id }) if repo == OFFICIAL_REPO_SLUG && id == "a"
         ));
+        assert!(rx.try_recv().is_err());
 
         advance_primary(&mut st, &state, &cmd, &mut outcome);
         assert_eq!(outcome, Outcome::Finished);
-    }
-
-    fn plugin(id: &str, enabled: bool) -> PluginInfo {
-        let mut p: PluginInfo = serde_json::from_value(serde_json::json!({
-            "id": id, "name": id, "path": "", "enabled": enabled
-        }))
-        .unwrap();
-        p.authority = halod_shared::types::PluginAuthority::default();
-        p.source = PluginSource::Repo {
-            slug: OFFICIAL_REPO_SLUG.into(),
-        };
-        p
     }
 }

@@ -47,8 +47,6 @@ settings:
   close_to_tray_sub: "Nascondi la finestra invece di uscire quando la chiudi"
   low_battery_notifications_title: Notifiche batteria scarica
   low_battery_notifications_sub: "Avvisa sotto il 20%, poi di nuovo sotto il 10% e il 5%"
-  plugin_downloads_title: "Plugin ufficiali e aggiornamenti"
-  plugin_downloads_sub: "Scarica i plugin ufficiali da GitHub e controlla gli aggiornamenti all’avvio"
   window_controls_title: Controlli finestra
   window_controls_sub: "Mostra riduci, ingrandisci e chiudi. Disattiva con i gestori di finestre a tiling."
   startup_healthcheck_title: "Controlla all’avvio"

@@ -221,7 +221,11 @@ mod tests {
     fn plugin(root: &std::path::Path, id: &str, manifest: &str) -> PluginManifest {
         let dir = root.join(id);
         std::fs::create_dir(&dir).unwrap();
-        std::fs::write(dir.join("plugin.yaml"), format!("id: {id}\n{manifest}")).unwrap();
+        std::fs::write(
+            dir.join("plugin.yaml"),
+            format!("id: {id}\nversion: 1.0.0\napi: \"3.0\"\n{manifest}"),
+        )
+        .unwrap();
         std::fs::write(dir.join("main.lua"), "return {}").unwrap();
         parse_manifest_from_dir(&dir).unwrap()
     }
@@ -232,7 +236,7 @@ mod tests {
         let manifest = plugin(
             temp.path(),
             "cooler",
-            "name: Cooler\npermissions: [hid, usb]\ndevices:\n  - vendor: Acme\n    model: One\n    match: { hid: { vid: 0x1234, pids: [0x0002, 0x0001] } }\ntransports:\n  hid: {}\n  usb:\n    devices:\n      - { id: primary, control: {} }\n      - { id: screen, vid: 0xabcd, pid: 0x0102, control: {} }\n",
+            "name: Cooler\ndevices:\n  - vendor: Acme\n    model: One\n    match: { hid: { vid: 0x1234, pids: [0x0002, 0x0001] } }\ntransports:\n  hid: {}\n  usb:\n    devices:\n      - { id: primary, control: {} }\n      - { id: screen, vid: 0xabcd, pid: 0x0102, control: {} }\n",
         );
 
         let output = assemble(&[manifest]);
@@ -251,7 +255,7 @@ mod tests {
         let manifest = plugin(
             temp.path(),
             "usb_family",
-            "permissions: [usb]\ndevices:\n  - vendor: Acme\n    model: Family\n    match: { usb: { vid: 0x1234, pids: [0xAAAA, 0xBBBB] } }\n",
+            "devices:\n  - vendor: Acme\n    model: Family\n    match: { usb: { vid: 0x1234, pids: [0xAAAA, 0xBBBB] } }\n",
         );
 
         let output = assemble(&[manifest]);
@@ -268,17 +272,17 @@ mod tests {
         let linux = plugin(
             temp.path(),
             "linux_device",
-            "permissions: [hid]\ndevices:\n  - vendor: Acme\n    model: One\n    match: { hid: { vid: 1, pid: 2 } }\ntransports: { hid: {} }\n",
+            "devices:\n  - vendor: Acme\n    model: One\n    match: { hid: { vid: 1, pid: 2 } }\ntransports: { hid: {} }\n",
         );
         let also_linux = plugin(
             temp.path(),
             "also_linux_device",
-            "permissions: [hid]\ndevices:\n  - vendor: Acme\n    model: Two\n    match: { hid: { vid: 1, pid: 2 } }\ntransports: { hid: {} }\n",
+            "devices:\n  - vendor: Acme\n    model: Two\n    match: { hid: { vid: 1, pid: 2 } }\ntransports: { hid: {} }\n",
         );
         let windows = plugin(
             temp.path(),
             "windows_device",
-            "platforms: [windows]\npermissions: [hid]\ndevices:\n  - vendor: Acme\n    model: Win\n    match: { hid: { vid: 3, pid: 4 } }\ntransports: { hid: {} }\n",
+            "platforms: [windows]\ndevices:\n  - vendor: Acme\n    model: Win\n    match: { hid: { vid: 3, pid: 4 } }\ntransports: { hid: {} }\n",
         );
 
         let output = assemble(&[windows, also_linux, linux]);
@@ -301,7 +305,7 @@ mod tests {
         let manifest = plugin(
             temp.path(),
             "smbus_rgb",
-            "permissions: [smbus]\ndevices:\n  - vendor: Acme\n    model: DRAM\n    match:\n      smbus: { bus: chipset, addresses: [0x70] }\n  - vendor: Acme\n    model: GPU\n    match:\n      smbus:\n        bus: gpu\n        addresses: [0x67]\n        pci_match:\n          - { vendor: 0x10de, sub_vendor: 0x1043 }\n          - { vendor: 0x1002, sub_vendor: 0x1043 }\n          - { vendor: 0x10de, sub_vendor: 0x19da }\n",
+            "devices:\n  - vendor: Acme\n    model: DRAM\n    match:\n      smbus: { bus: chipset, addresses: [0x70] }\n  - vendor: Acme\n    model: GPU\n    match:\n      smbus:\n        bus: gpu\n        addresses: [0x67]\n        pci_match:\n          - { vendor: 0x10de, sub_vendor: 0x1043 }\n          - { vendor: 0x1002, sub_vendor: 0x1043 }\n          - { vendor: 0x10de, sub_vendor: 0x19da }\n",
         );
 
         let output = assemble(&[manifest]);
@@ -347,12 +351,12 @@ mod tests {
         let first = plugin(
             temp.path(),
             "first",
-            "permissions: [hid]\ndevices:\n  - vendor: Acme\n    model: One\n    match: { hid: { vid: 1, pid: 2 } }\ntransports: { hid: {} }\n",
+            "devices:\n  - vendor: Acme\n    model: One\n    match: { hid: { vid: 1, pid: 2 } }\ntransports: { hid: {} }\n",
         );
         let second = plugin(
             temp.path(),
             "second",
-            "permissions: [hid]\ndevices:\n  - vendor: Acme\n    model: Two\n    match: { hid: { vid: 3, pid: 4 } }\ntransports: { hid: {} }\n",
+            "devices:\n  - vendor: Acme\n    model: Two\n    match: { hid: { vid: 3, pid: 4 } }\ntransports: { hid: {} }\n",
         );
         let installed_path = temp.path().join("installed.rules");
         std::fs::write(&installed_path, assemble(std::slice::from_ref(&first))).unwrap();

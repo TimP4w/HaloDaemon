@@ -13,38 +13,14 @@ plugins:
   empty_hint: Add a plugin repository to extend HaloDaemon with new devices.
   # Plugin repositories
   repos_title: Repositories
-  repos_check_updates: Check for updates
-  repos_checking: Checking for updates…
-  repos_updates_disabled: Update checks are off. Turn on plugin downloads in Settings to check for updates.
-  repos_url_hint: Git URL (https://...)
+  repos_url_hint: Catalog URL (https://…/catalog.yaml)
   repos_add: Add
   repos_add_title: Add repository
-  repos_add_sub: Connect HaloDaemon to a remote Git repository to browse, install, and update its plugins.
-  repos_import_archive: Tar archive
+  repos_add_sub: Paste a plugin catalog URL, or add a local folder of plugin packages for development.
   repos_empty: No plugin repositories registered.
-  repos_update: Update
-  repos_update_repo: Update repo
-  repos_move_pin: "Update to %{tag}"
-  repo_pinned: Pinned
-  repo_pinned_hint: This repository stays on the selected release. New releases are reported but never installed automatically.
-  repo_pinned_update_title: "Release %{tag} is available"
-  repo_pinned_update_body: "This repository is pinned to %{pinned}. Updating moves the pin to %{tag}."
-  repos_repair: Force pull
-  repos_repair_title: Repair repository?
-  repos_repair_body: This restores the repository's active revision from its verified source. Any local changes within that repository will be lost.
-  repos_resolve: Resolve issue
-  repos_remove_reimport: Remove and re-import
-  integrity_ok: Repository contents match its package index.
-  integrity_failed: Repository content verification failed. Its affected plugins were disabled.
-  integrity_banner_title: Repository integrity check failed
-  integrity_banner_signed: "Files in '%{repository}' changed on disk or no longer match their expected SHA-256. Restore the repository from its verified source."
-  integrity_banner_unsigned: "Files in unsigned repository '%{repository}' changed on disk or no longer match their expected SHA-256. HaloDaemon cannot safely restore an unauthenticated source; remove the repository and re-import it."
-  integrity_restore: Restore from repository
   repos_remove: Remove repository
   repos_remove_title: Remove repository?
   repos_remove_body: This removes %{name} and uninstalls every plugin provided by the repository.
-  repo_source: Source
-  repo_source_local_archive: Local archive
   repo_signing_fingerprint: "Publisher key: %{fingerprint}"
   repo_last_sync: Last sync
   repo_never_synced: never
@@ -55,19 +31,13 @@ plugins:
   repo_drivers: Drivers
   repo_drivers_count: "%{count} installed"
   repo_drivers_from: Drivers from this repository
-  repo_no_drivers: No drivers installed from this repository yet.
-  repo_signature_verified: Signature verified with the publisher key pinned when this repository was first imported.
-  repo_signature_unsigned: Unsigned repository. Package hashes are checked, but the publisher is not authenticated.
-  repo_signature_verification_failed: Repository signature verification failed.
+  repo_no_drivers: This repository provides no plugins yet.
   # Per-plugin updates
   updates_available: "%{count} plugin update available"
   updates_available_plural: "%{count} plugin updates available"
   update_all: Update all
   updating: Updating…
   update_available: Update available
-  update_via_repo: Update from this plugin's repository.
-  modified_on_disk: Disabled because it was modified on disk
-  modified_on_disk_sub: This plugin's files changed since they were installed, so it was disabled for safety. Re-enable it to accept the change.
   udev_missing: Linux device access is not installed
   udev_missing_sub: "No HaloDaemon udev file was found. Generate and install the %{count} device rules to enable access."
   udev_outdated: Linux device access needs updating
@@ -98,8 +68,6 @@ plugins:
   issue_runtime_error: Runtime error
   issue_load_warning: Loaded with a warning
   issue_load_failed: Failed to load
-  repository_hash_mismatch: "Plugin package '%{package}' failed integrity validation. Expected SHA-256 %{expected}, but found %{actual}."
-  repository_manifest_mismatch: "Plugin package '%{package}' failed integrity validation. Its %{field} should be %{expected}, but plugin.yaml declares %{actual}."
   issue_details: Details
   issue_modal_title: "Plugin issue: %{plugin}"
   issue_copy: Copy
@@ -133,15 +101,8 @@ plugins:
   req_hwmon_pwm_permission: "Fan control requires write access to the PWM files in /sys/class/hwmon."
   provenance_official: Verified official
   provenance_repository: Unsigned repository
-  provenance_development: Development source
   provenance_local: Local package
-  provenance_invalid: Invalid signature
   # Permissions
-  regrant_required: Permission review required
-  permissions_enable_hint: Enabling this plugin will request the permissions above.
-  revoke: Revoke and disable
-  access_granted: System access you granted
-  access_requested: System access this plugin requests
   permission_hid: HID device access
   permission_usb: USB device access
   permission_hwmon: Hardware monitoring
@@ -150,7 +111,6 @@ plugins:
   permission_command: Run approved commands
   permission_serial: Serial / COM port access
   permission_network: Network
-  permission_os: OS
   permission_secure_storage: Secure storage
   permission_smbus: SMBus
   permission_audio_routing: Audio routing
@@ -163,7 +123,6 @@ plugins:
   permission_command_desc: Lets the plugin run only the executable names declared in its manifest, without a shell.
   permission_serial_desc: Lets the plugin open only the serial/COM port scoped by its declared serial transport.
   permission_network_desc: Opens network connections, such as to a local SDK or server. A malicious script could send data from this computer.
-  permission_os_desc: Reads the system clock (os.time / os.clock). This is low risk and does not grant access to files or processes.
   permission_secure_storage_desc: Reads this plugin's own saved secret values (e.g. an API token) in clear text while it runs.
   permission_smbus_desc: Scans, reads, and writes SMBus/I2C devices. This reaches every device on the bus, not just this plugin's own hardware, so a bad write can destabilize other devices.
   permission_audio_routing_desc: Creates and routes host audio sinks. A malicious script could spawn audio modules or capture/redirect audio on this machine.
@@ -171,13 +130,28 @@ plugins:
   # Config fields
   secret_set_hint: (a secret is stored)
   # Permission consent dialog (shown when enabling a plugin that declares permissions)
-  consent_title: Grant permissions
-  consent_body: "%{name} needs the following to run."
-  consent_warning: Permissions are granted together. You can revoke them at any time, which will disable the plugin.
-  consent_modified: This plugin's script changed after you last approved it. Review the permissions again and grant approval to continue using it.
-  consent_permission_added: An update to this plugin added a new permission that must be granted before it can run again. Review what it now requires below.
-  consent_grant_enable: Grant & enable
-  consent_cancel: Cancel
   # Add dialog
   cancel: Cancel
   # Delete confirmation
+  install: "Install"
+  update: "Update"
+  uninstall: "Uninstall"
+  uninstall_title: "Uninstall plugin"
+  uninstall_body: "Uninstall %{name}? Its settings and stored secrets are deleted too."
+  uses: "Uses"
+  uses_commands: "Runs programs"
+  not_installed_version: "Not installed · %{version}"
+  requires_newer_daemon: "Requires a newer HaloDaemon"
+  api_incompatible: "This plugin needs plugin API %{required}, but this HaloDaemon supports %{supported}. Update HaloDaemon to use it."
+  provenance_signed: "Signed repository"
+  repo_commit: "Commit"
+  repo_local: "Local folder"
+  repo_signature_official: "Official, signed"
+  repos_refresh: "Refresh"
+  repos_add_folder: "Add folder"
+  catalog_malformed: "The repository catalog is invalid."
+  catalog_unsigned: "The repository catalog is not signed, but this repository requires a signature."
+  catalog_untrusted_key: "The repository catalog is signed with an untrusted key. Remove and re-add the repository to accept a new key."
+  catalog_signature_mismatch: "The repository catalog signature does not match its contents."
+  catalog_stale: "The repository catalog is older than the one already downloaded."
+  catalog_hash_mismatch: "A downloaded plugin does not match the repository catalog."

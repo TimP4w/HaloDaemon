@@ -12,7 +12,6 @@ use std::collections::HashMap;
 pub enum Icon {
     Lock,
     Check,
-    IntegrityShield,
 }
 
 impl Icon {
@@ -20,7 +19,6 @@ impl Icon {
         match self {
             Icon::Lock => include_bytes!("../../assets/icons/lock.svg"),
             Icon::Check => include_bytes!("../../assets/icons/check.svg"),
-            Icon::IntegrityShield => include_bytes!("../../assets/icons/integrity_shield.svg"),
         }
     }
 
@@ -28,7 +26,6 @@ impl Icon {
         match self {
             Icon::Lock => "lock",
             Icon::Check => "check",
-            Icon::IntegrityShield => "integrity_shield",
         }
     }
 }
@@ -206,7 +203,7 @@ mod tests {
     /// wrong include path at build time rather than as a blank sidebar glyph.
     #[test]
     fn every_nav_icon_rasterizes() {
-        for icon in [Icon::Lock, Icon::Check, Icon::IntegrityShield] {
+        for icon in [Icon::Lock, Icon::Check] {
             let img = crate::svg::color_image(icon.svg(), ICON_PX)
                 .unwrap_or_else(|| panic!("{} failed to rasterize", icon.key()));
             assert_eq!(img.width().max(img.height()), ICON_PX as usize);

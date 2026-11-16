@@ -33,8 +33,6 @@ notify:
     title: "Ventola bloccata: %{fan}"
     message: "La ventola sembra esserere bloccata, il sensore indica che non gira. Controlla i cavi della ventola o sostituiscila."
   plugin_content_changed:
-    title: Plugin modificato su disco
-    message: "I file di %{plugin} sono cambiati su disco, quindi è stato disabilitato per sicurezza. Apri la schermata Plugin per rivederlo e riabilitarlo."
   plugin_runtime_error:
     title: "Si è verificato un errore nel plugin %{plugin}"
     message: "Apri Dettagli per l'errore completo."
@@ -46,8 +44,6 @@ notify:
     title: Plugin consigliato disponibile
     message: "%{plugin} è consigliato per questo sistema. Apri Plugin per attivarlo."
   repository_integrity:
-    title: Errore di integrità del repository
-    message: "Qualcosa non va. Il pacchetto %{package} del repository %{repository} non ha superato la convalida e non è stato caricato."
 
 tray:
   open: Apri HaloDaemon
@@ -91,14 +87,12 @@ onboarding:
   plugins_loading: Il download dei plugin ufficiali è ancora in corso. Potrai attivarli in seguito dalla scheda Plugin.
   plugins_error: Impossibile scaricare i plugin ufficiali. Controlla la connessione a Internet e riprova.
   plugins_retry: Riprova
-  plugins_retrying: Nuovo tentativo di download dei plugin ufficiali…
-  permissions_none: Non richiede accesso aggiuntivo al sistema.
   done_title: Tutto pronto
   back: Indietro
   please_wait: Ricerca in corso…
   p_get_started: Inizia
   p_scan: Trova plugin
-  p_grant_enable: "Concedi l’accesso e attiva %{n}"
+  p_install: "Installa %{n}"
   p_finish: Completa
   p_enter: Apri halod
   p_continue: Continua

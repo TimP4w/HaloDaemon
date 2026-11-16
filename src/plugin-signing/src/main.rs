@@ -1,14 +1,24 @@
 // SPDX-License-Identifier: GPL-3.0-or-later
-
-use std::path::PathBuf;
+use std::path::{Path, PathBuf};
+use std::time::{SystemTime, UNIX_EPOCH};
 
 use anyhow::{anyhow, bail, Context, Result};
 use base64::{engine::general_purpose::STANDARD as B64, Engine as _};
-use ed25519_dalek::{Signer, SigningKey};
-use halod_plugin_signing as signing;
+use ed25519_dalek::SigningKey;
+use halod_plugin_signing::catalog::{
+    build_catalog, open_catalog, sign_catalog, verify_published, BuildInput, CATALOG_FILE,
+    MAX_CATALOG_BYTES,
+};
+use halod_plugin_signing::fetch::{https_get, https_url, package_url};
+use halod_plugin_signing::package::MAX_ARCHIVE_BYTES;
 use zeroize::Zeroizing;
 
 const DEFAULT_KEY_ENV: &str = "HALOD_PLUGIN_SIGNING_KEY_B64";
+const USAGE: &str = "usage:
+  halod-plugin-signing catalog <repo> --out <dir> --name <name> (--previous <url> [--trusted-key <id=base64>]... | --bootstrap)
+  halod-plugin-signing sign <dir> --key-id <id> [--key-env <name>]
+  halod-plugin-signing verify <dir> --trusted-key <id=base64>...
+  halod-plugin-signing keygen [key-id]";
 
 fn main() {
     if let Err(error) = run(std::env::args().skip(1).collect()) {
@@ -18,151 +28,91 @@ fn main() {
 }
 
 fn run(args: Vec<String>) -> Result<()> {
+    let rest = args.get(1..).unwrap_or_default();
     match args.first().map(String::as_str) {
-        Some("validate") => {
-            let repo = one_repo_arg(&args[1..])?;
-            let manifest = signing::read_repository_index(&repo)?;
-            signing::validate_repository(&repo, &manifest)?;
-            println!("validated {} packages", manifest.packages.len());
-            Ok(())
-        }
-        Some("index") => index(&args[1..]),
-        Some("bundle") => bundle(&args[1..]),
-        Some("sign") => sign(&args[1..]),
-        Some("verify") => verify(&args[1..]),
-        Some("verify-assets") => verify_assets(&args[1..]),
-        Some("keygen") => keygen(args.get(1).map(String::as_str)),
-        _ => bail!(
-            "usage:\n  halod-plugin-signing validate <release-dir>\n  halod-plugin-signing index <release-dir> [--version <semver>] [--id <id> --name <name>] [--check]\n  halod-plugin-signing bundle <release-dir> --output <bundle>\n  halod-plugin-signing sign <release-dir> --key-id <id> [--key-env <name>]\n  halod-plugin-signing verify <release-dir> --trusted-key <id=base64>...\n  halod-plugin-signing verify-assets <asset-dir> --trusted-key <id=base64>...\n  halod-plugin-signing keygen [key-id]"
-        ),
+        Some("catalog") => catalog(rest),
+        Some("sign") => sign(rest),
+        Some("verify") => verify(rest),
+        Some("keygen") => keygen(rest.first().map(String::as_str)),
+        _ => bail!("{USAGE}"),
     }
 }
 
-fn bundle(args: &[String]) -> Result<()> {
-    let repo = repo_arg(args)?;
-    let output = option(args, "--output")?
-        .map(PathBuf::from)
-        .ok_or_else(|| anyhow!("missing --output"))?;
-    let metadata = signing::write_bundle(&repo, &output)?;
-    println!(
-        "wrote {} for {} at {}",
-        output.display(),
-        metadata.repository_id,
-        metadata.release
-    );
-    Ok(())
-}
-
-fn index(args: &[String]) -> Result<()> {
-    let repo = repo_arg(args)?;
-    let version = option(args, "--version")?;
-    let id = option(args, "--id")?;
-    let name = option(args, "--name")?;
-    let check = args.iter().any(|arg| arg == "--check");
-    if let Some(arg) = args.iter().skip(1).find(|arg| {
-        arg.starts_with("--") && !["--version", "--id", "--name", "--check"].contains(&arg.as_str())
-    }) {
-        bail!("unknown index argument '{arg}'");
-    }
-    if check && version.is_some() {
-        bail!("--check and --version are mutually exclusive");
-    }
-    if id.is_some() != name.is_some() {
-        bail!("--id and --name must be provided together");
-    }
-    let changed = signing::rewrite_index(&repo, version, check, id.zip(name))?;
-    println!(
-        "{}",
-        if changed {
-            "wrote release.yaml"
-        } else {
-            "release.yaml is current"
+fn catalog(args: &[String]) -> Result<()> {
+    let repo = positional(args)?;
+    let out = PathBuf::from(required(args, "--out")?);
+    let name = required(args, "--name")?;
+    let bootstrap = args.iter().any(|arg| arg == "--bootstrap");
+    let previous_url = option(args, "--previous")?;
+    let previous = match (previous_url, bootstrap) {
+        (Some(url), false) => {
+            let bytes = https_get(&https_url(url)?, MAX_CATALOG_BYTES)
+                .context("fetching the previous catalog (use --bootstrap for a first publish)")?;
+            let keys = trusted_keys(args)?;
+            let keys = borrow(&keys);
+            Some(open_catalog(
+                &bytes,
+                (!keys.is_empty()).then_some(keys.as_slice()),
+            )?)
         }
+        (None, true) => None,
+        _ => bail!("pass exactly one of --previous <url> or --bootstrap"),
+    };
+    let published = SystemTime::now().duration_since(UNIX_EPOCH)?.as_secs();
+    let catalog = build_catalog(
+        BuildInput {
+            repo_dir: &repo,
+            out_dir: &out,
+            name,
+            commit: std::env::var("GITHUB_SHA").ok(),
+            published,
+            previous: previous.as_ref(),
+        },
+        |package| {
+            let url = previous_url.context("no previous catalog")?;
+            https_get(&package_url(url, &package.path)?, MAX_ARCHIVE_BYTES)
+        },
+    )?;
+    println!(
+        "wrote {} with {} packages",
+        out.join(CATALOG_FILE).display(),
+        catalog.packages.len()
     );
     Ok(())
 }
 
 fn sign(args: &[String]) -> Result<()> {
-    let repo = repo_arg(args)?;
-    let key_id = option(args, "--key-id")?.ok_or_else(|| anyhow!("missing --key-id"))?;
+    let dir = positional(args)?;
+    let key_id = required(args, "--key-id")?;
     let key_env = option(args, "--key-env")?.unwrap_or(DEFAULT_KEY_ENV);
     let encoded = Zeroizing::new(
         std::env::var(key_env).with_context(|| format!("reading signing key from {key_env}"))?,
     );
-    let decoded = Zeroizing::new(B64.decode(encoded.trim()).context("decoding signing key")?);
-    let seed = Zeroizing::new(
-        decoded
-            .as_slice()
-            .try_into()
-            .map_err(|_| anyhow!("signing key seed is not 32 bytes"))?,
-    );
-    let signing_key = SigningKey::from_bytes(&seed);
-    let mut manifest = signing::read_repository_index(&repo)?;
-    manifest.signing_key = Some(signing::RepositorySigningKey {
-        id: key_id.to_owned(),
-        algorithm: signing::SIGNATURE_ALGORITHM.to_owned(),
-        public_key: B64.encode(signing_key.verifying_key().to_bytes()),
-    });
-    let payload = signing::canonical_index_bytes(&manifest)?;
-    signing::atomic_write(&repo.join("release.yaml"), &payload)?;
-    let signature = signing_key.sign(&payload).to_bytes();
-    signing::atomic_write(
-        &repo.join("release.sig"),
-        &signing::signature_bytes(key_id, &signature),
-    )?;
-    println!("wrote {}", repo.join("release.sig").display());
+    let seed = Zeroizing::new(B64.decode(encoded.trim()).context("decoding signing key")?);
+    let seed: [u8; 32] = seed
+        .as_slice()
+        .try_into()
+        .map_err(|_| anyhow!("signing key seed is not 32 bytes"))?;
+    let key = SigningKey::from_bytes(&seed);
+    let path = dir.join(CATALOG_FILE);
+    let mut catalog = open_catalog(&std::fs::read(&path)?, None)?;
+    std::fs::write(&path, sign_catalog(&mut catalog, key_id, &key))?;
+    println!("signed {}", path.display());
     Ok(())
 }
 
 fn verify(args: &[String]) -> Result<()> {
-    let repo = repo_arg(args)?;
-    let keys = trusted_keys(&args[1..])?;
-    let manifest = signing::read_repository_index(&repo)?;
-    signing::validate_repository(&repo, &manifest)?;
-    let payload = std::fs::read(repo.join("release.yaml"))?;
-    let signature = std::fs::read(repo.join("release.sig"))?;
-    let borrowed = borrow_keys(&keys);
-    signing::verify_signature(&payload, &signature, &borrowed)?;
-    println!("release signature and all package hashes are valid");
-    Ok(())
-}
-
-fn verify_assets(args: &[String]) -> Result<()> {
-    let repo = repo_arg(args)?;
-    let keys = trusted_keys(&args[1..])?;
-    let borrowed = borrow_keys(&keys);
-    signing::verify_release_assets(&repo, &borrowed)?;
-    println!("release signature and archive are valid");
-    Ok(())
-}
-
-fn trusted_keys(args: &[String]) -> Result<Vec<(String, String)>> {
-    let mut keys = Vec::new();
-    let mut i = 0;
-    while i < args.len() {
-        if args[i] != "--trusted-key" {
-            bail!("unknown verification argument '{}'", args[i]);
-        }
-        i += 1;
-        let value = args
-            .get(i)
-            .ok_or_else(|| anyhow!("--trusted-key requires id=base64"))?;
-        let (id, key) = value
-            .split_once('=')
-            .ok_or_else(|| anyhow!("trusted key must be id=base64"))?;
-        keys.push((id.to_owned(), key.to_owned()));
-        i += 1;
-    }
+    let dir = positional(args)?;
+    let keys = trusted_keys(args)?;
     if keys.is_empty() {
         bail!("at least one --trusted-key is required");
     }
-    Ok(keys)
-}
-
-fn borrow_keys(keys: &[(String, String)]) -> Vec<(&str, &str)> {
-    keys.iter()
-        .map(|(id, key)| (id.as_str(), key.as_str()))
-        .collect()
+    let catalog = verify_published(&dir, &borrow(&keys))?;
+    println!(
+        "catalog signature and {} package archives are valid",
+        catalog.packages.len()
+    );
+    Ok(())
 }
 
 fn keygen(key_id: Option<&str>) -> Result<()> {
@@ -178,17 +128,38 @@ fn keygen(key_id: Option<&str>) -> Result<()> {
     Ok(())
 }
 
-fn repo_arg(args: &[String]) -> Result<PathBuf> {
-    args.first()
-        .map(PathBuf::from)
-        .ok_or_else(|| anyhow!("missing <repo>"))
+fn trusted_keys(args: &[String]) -> Result<Vec<(String, String)>> {
+    let mut keys = Vec::new();
+    let mut iter = args.iter();
+    while let Some(arg) = iter.next() {
+        if arg == "--trusted-key" {
+            let value = iter
+                .next()
+                .ok_or_else(|| anyhow!("--trusted-key requires id=base64"))?;
+            let (id, key) = value
+                .split_once('=')
+                .ok_or_else(|| anyhow!("trusted key must be id=base64"))?;
+            keys.push((id.to_owned(), key.to_owned()));
+        }
+    }
+    Ok(keys)
 }
 
-fn one_repo_arg(args: &[String]) -> Result<PathBuf> {
-    match args {
-        [repo] => Ok(repo.into()),
-        _ => bail!("expected exactly one <repo> argument"),
+fn borrow(keys: &[(String, String)]) -> Vec<(&str, &str)> {
+    keys.iter()
+        .map(|(id, key)| (id.as_str(), key.as_str()))
+        .collect()
+}
+
+fn positional(args: &[String]) -> Result<PathBuf> {
+    match args.first() {
+        Some(arg) if !arg.starts_with("--") => Ok(Path::new(arg).to_path_buf()),
+        _ => bail!("{USAGE}"),
     }
+}
+
+fn required<'a>(args: &'a [String], name: &str) -> Result<&'a str> {
+    option(args, name)?.ok_or_else(|| anyhow!("missing {name}"))
 }
 
 fn option<'a>(args: &'a [String], name: &str) -> Result<Option<&'a str>> {
@@ -196,7 +167,6 @@ fn option<'a>(args: &'a [String], name: &str) -> Result<Option<&'a str>> {
         return Ok(None);
     };
     args.get(index + 1)
-        .map(String::as_str)
-        .map(Some)
+        .map(|value| Some(value.as_str()))
         .ok_or_else(|| anyhow!("{name} requires a value"))
 }

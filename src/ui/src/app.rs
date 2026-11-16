@@ -18,9 +18,6 @@ pub struct App {
     pub(crate) frame_sinks: FrameSinks,
     pub(crate) cmd: CommandTx,
     pub(crate) entered: bool,
-    /// Plugin ids already toasted as quarantined (disabled for an on-disk
-    /// change), so each is alerted once until it leaves that state.
-    pub(crate) quarantine_toasted: std::collections::HashSet<String>,
     /// Recommendation keys already toasted this session, so a "new plugin you
     /// may activate" alert fires once per hardware match (persisted dedup lives
     /// in `seen_tours`; this bridges the daemon roundtrip within a session).
@@ -51,8 +48,6 @@ pub struct App {
     /// Open notification Details modal. Outlives the toast that spawned it.
     /// A notification Details modal's translated title and full error text.
     pub(crate) issue_details_modal: Option<(String, String)>,
-    /// Repository-integrity episodes already notified during this GUI session.
-    pub(crate) integrity_alert_notified: std::collections::HashSet<String>,
     /// Set by the tray "Quit" so a close request bypasses "close to tray" and
     /// actually exits instead of hiding the window.
     pub(crate) force_quit: Arc<AtomicBool>,
@@ -107,7 +102,6 @@ impl App {
             frame_sinks,
             cmd,
             entered: false,
-            quarantine_toasted: std::collections::HashSet::new(),
             recommendation_toasted: std::collections::HashSet::new(),
             onboarding_completed: false,
             onboarding_ui: ui::screens::onboarding::OnboardingUi::default(),
@@ -129,7 +123,6 @@ impl App {
             tray,
             toasts: ui::components::toast::Toasts::default(),
             issue_details_modal: None,
-            integrity_alert_notified: std::collections::HashSet::new(),
             force_quit,
             hidden,
             hide_state,

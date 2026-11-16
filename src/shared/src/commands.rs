@@ -9,7 +9,7 @@ use std::collections::HashMap;
 
 use crate::types::{
     ButtonMapping, ChannelKind, EffectDef, EffectParamValue, IntegrationSetupMode, LightingState,
-    MacroStep, PluginAuthority, SamplingMode, VisibilityState, ZoneTopology,
+    MacroStep, PluginRepoLocation, SamplingMode, VisibilityState, ZoneTopology,
 };
 use crate::zone_transform::ZoneContentTransform;
 use serde::{Deserialize, Serialize};
@@ -33,13 +33,6 @@ pub enum OverrideTarget {
         state_key: String,
     },
     Canvas,
-}
-
-/// One authority snapshot in a batch plugin-enable confirmation.
-#[derive(Debug, Clone, Serialize, Deserialize)]
-pub struct PluginEnableConfirmation {
-    pub id: String,
-    pub authority: PluginAuthority,
 }
 
 /// Typed LCD screen rotation values. Only 90° multiples are physically supported.
@@ -153,24 +146,6 @@ pub enum DaemonCommand {
         id: String,
         enabled: bool,
     },
-    /// Import a complete local repository from a Git directory or a
-    /// `.tar`/`.tar.gz` archive. Standalone plugin packages are not accepted.
-    ImportPluginRepository {
-        source_path: String,
-    },
-    /// Confirm the exact manifest-derived authority currently displayed in the
-    /// enable modal, then enable the plugin. The daemon rejects stale snapshots
-    /// so an update cannot race a user's confirmation.
-    ConfirmPluginEnable {
-        id: String,
-        authority: PluginAuthority,
-    },
-    /// Confirm and enable several plugins as one operation. Every authority is
-    /// validated independently; valid plugins are enabled together even when
-    /// another entry fails validation.
-    ConfirmPluginEnableBatch {
-        plugins: Vec<PluginEnableConfirmation>,
-    },
     /// Replace a plugin's user-editable config values (see `ConfigFieldDef`).
     /// A `secure` field's key is included only when the user typed a new
     /// value; an absent secure key leaves the previously stored secret
@@ -180,34 +155,24 @@ pub enum DaemonCommand {
         id: String,
         values: HashMap<String, String>,
     },
-    /// Register an immutable GitHub plugin release source.
     AddPluginRepo {
-        url: String,
+        source: PluginRepoLocation,
     },
-    /// Unregister a plugin release source, purging every plugin id it contributed.
+    /// Unregister a repository and uninstall every plugin it provided.
     RemovePluginRepo {
         slug: String,
     },
-    /// List immutable plugin releases for a GitHub source.
-    ListPluginReleases {
-        url: String,
+    /// Fetch every remote catalog; never installs anything.
+    RefreshPluginRepos,
+    /// Install or update one plugin from a repository's catalog.
+    InstallPlugin {
+        repo: String,
+        id: String,
     },
-    /// Check every registered source for a newer selected release.
-    CheckPluginRepoUpdates,
-    /// Install the selected release for a plugin source.
-    UpdatePluginRepo {
-        slug: String,
+    UninstallPlugin {
+        id: String,
     },
-    /// Atomically install a specific release and pin the source to its tag.
-    InstallPluginRelease {
-        slug: String,
-        tag: String,
-    },
-    /// Follow the newest non-prerelease again after a source was pinned.
-    FollowLatestPluginRelease {
-        slug: String,
-    },
-    /// Update every plugin currently flagged with an update available, across every repo.
+    /// Update every installed plugin whose catalog has a newer compatible version.
     UpdateAllPlugins,
     /// Enable or disable a single integration, independent of the generic
     /// plugin toggle (which only governs whether its Lua may run at all —
@@ -271,12 +236,6 @@ pub enum DaemonCommand {
         suppress_dependency_warning: bool,
         hide_window_controls: bool,
         low_battery_notifications: bool,
-    },
-    /// Allow or deny the daemon contacting GitHub for official plugins and
-    /// automatic update checks. An allowed request also retries a missing
-    /// official-repo checkout and starts an update check.
-    SetPluginDownloadConsent {
-        allowed: bool,
     },
     MarkTourSeen {
         tour: String,
@@ -730,12 +689,6 @@ mod tests {
                 json!({"type": "set_plugin_enabled", "id": "nzxt_kraken", "enabled": false}),
             ),
             (
-                DaemonCommand::ImportPluginRepository {
-                    source_path: "/r.tar.gz".into(),
-                },
-                json!({"type": "import_plugin_repository", "source_path": "/r.tar.gz"}),
-            ),
-            (
                 DaemonCommand::GetPluginAsset {
                     plugin_id: "my_driver".into(),
                     name: "logo.png".into(),
@@ -744,21 +697,26 @@ mod tests {
             ),
             (
                 DaemonCommand::AddPluginRepo {
-                    url: "https://github.com/example/foo".into(),
+                    source: PluginRepoLocation::Url(
+                        "https://example.github.io/p/catalog.yaml".into(),
+                    ),
                 },
-                json!({"type": "add_plugin_repo", "url": "https://github.com/example/foo"}),
+                json!({"type": "add_plugin_repo", "source": {"kind": "url", "value": "https://example.github.io/p/catalog.yaml"}}),
+            ),
+            (
+                DaemonCommand::InstallPlugin {
+                    repo: "official".into(),
+                    id: "nzxt_kraken".into(),
+                },
+                json!({"type": "install_plugin", "repo": "official", "id": "nzxt_kraken"}),
             ),
             (
                 DaemonCommand::RemovePluginRepo { slug: "foo".into() },
                 json!({"type": "remove_plugin_repo", "slug": "foo"}),
             ),
             (
-                DaemonCommand::CheckPluginRepoUpdates,
-                json!({"type": "check_plugin_repo_updates"}),
-            ),
-            (
-                DaemonCommand::UpdatePluginRepo { slug: "foo".into() },
-                json!({"type": "update_plugin_repo", "slug": "foo"}),
+                DaemonCommand::RefreshPluginRepos,
+                json!({"type": "refresh_plugin_repos"}),
             ),
             (
                 DaemonCommand::UpdateAllPlugins,

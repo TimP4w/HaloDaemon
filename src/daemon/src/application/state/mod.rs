@@ -1,6 +1,4 @@
 // SPDX-License-Identifier: GPL-3.0-or-later
-#[cfg(feature = "dev-plugin-repo")]
-use std::path::PathBuf;
 use std::sync::Arc;
 use tokio::sync::{watch, Mutex, RwLock};
 
@@ -66,26 +64,14 @@ pub struct AppState {
     /// Elects one drain loop. Callers may merge work while another drain runs,
     /// then wait on this gate until their request has been consumed.
     pub rediscovery_runner: Mutex<()>,
-    /// Latest plugin/repository update availability, retained in the plugins
-    /// bus record.
-    pub plugin_update_plan: Mutex<crate::application::usecases::plugin::repos::UpdatePlan>,
-    /// Latest signature result observed for a fetched repository commit, keyed
-    /// by slug. The SHA distinguishes a rejected remote tip from the active revision.
-    pub repo_signature_status: Mutex<
-        std::collections::HashMap<String, (String, halod_shared::types::RepoSignatureStatus)>,
-    >,
-    pub signature_status_cache: Mutex<
-        std::collections::HashMap<(String, String), halod_shared::types::RepoSignatureStatus>,
-    >,
+    /// Last verified catalog per remote repository slug.
+    pub plugin_catalogs:
+        Mutex<std::collections::HashMap<String, crate::domain::plugin::catalog::RepoCatalog>>,
+    pub repo_refresh_retry: Arc<crate::util::backoff::RetryQueue>,
     /// The device-plugin registry (loaded manifests, consent/config, notice
     /// dedup, load warnings).
     pub registry: crate::domain::plugin::Registry,
     pub data_bus: Arc<crate::application::bus::data_bus::DataBus>,
-    #[cfg(feature = "dev-plugin-repo")]
-    /// Process-local development repository selected with `--dev-plugin-repo`.
-    /// Registry rebuilds must retain this priority source rather than falling
-    /// back to the managed official checkout.
-    pub development_plugin_repo: RwLock<Option<PathBuf>>,
     /// Backing store for plugin-declared secret config values.
     pub secret_store: Arc<dyn crate::infrastructure::secrets::SecretStore>,
     /// Pending state-restore retries, keyed by device id. A device that is
@@ -115,23 +101,13 @@ impl AppState {
             discovery_scope: RwLock::new(DiscoveryScope::Clean),
             pending_rediscovery: Mutex::new(PendingRediscovery::Clean),
             rediscovery_runner: Mutex::new(()),
-            plugin_update_plan: Mutex::default(),
-            repo_signature_status: Mutex::new(std::collections::HashMap::new()),
-            signature_status_cache: Mutex::new(std::collections::HashMap::new()),
+            plugin_catalogs: Mutex::default(),
+            repo_refresh_retry: Arc::default(),
             registry: crate::domain::plugin::Registry::default(),
             data_bus: Arc::new(crate::application::bus::data_bus::DataBus::default()),
-            #[cfg(feature = "dev-plugin-repo")]
-            development_plugin_repo: RwLock::new(None),
             secret_store: Arc::new(crate::infrastructure::secrets::FileKeyStore::new()),
             restore_retry: Arc::default(),
         }
-    }
-
-    pub async fn invalidate_signature_status(&self, slug: &str) {
-        self.signature_status_cache
-            .lock()
-            .await
-            .retain(|(cached, _), _| cached != slug);
     }
 
     /// The serialization lock for one device id, created on first use. Held for

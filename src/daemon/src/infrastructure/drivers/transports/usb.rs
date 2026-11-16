@@ -204,6 +204,9 @@ impl UsbEndpointTransport {
             .control
             .as_ref()
             .ok_or_else(|| anyhow!("USB control transfers are not declared for this device"))?;
+        if !policy.permits(request_type, request) {
+            bail!("USB control request 0x{request_type:02x}/0x{request:02x} is not declared");
+        }
         let length = bytes.len().max(read_length);
         if length > policy.max_transfer_size {
             bail!(

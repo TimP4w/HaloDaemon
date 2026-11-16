@@ -734,13 +734,13 @@ mod tests {
         std::fs::create_dir_all(&plugin_dir).unwrap();
         std::fs::write(
             plugin_dir.join("plugin.yaml"),
-            "id: inttest\ntype: integration\npermissions: [network, secure_storage]\ntransports:\n  tcp:\n    host_key: host\n    port_key: port\n    timeout_ms: 50\nconfig:\n  fields:\n    - key: host\n      label: Host\n      kind: host\n      default: 127.0.0.1\n    - key: port\n      label: Port\n      kind: port\n      default: '12345'\n    - key: token\n      label: Token\n      secure: true\n",
+            "id: inttest\nversion: 1.0.0\napi: \"3.0\"\ntype: integration\ntransports:\n  tcp:\n    host_key: host\n    port_key: port\n    timeout_ms: 50\nconfig:\n  fields:\n    - key: host\n      label: Host\n      kind: host\n      default: 127.0.0.1\n    - key: port\n      label: Port\n      kind: port\n      default: '12345'\n    - key: token\n      label: Token\n      secure: true\n",
         )
         .unwrap();
         std::fs::write(plugin_dir.join("main.lua"), INTEGRATION_CONFIG_TEST_PLUGIN).unwrap();
-        app.registry.load_all(dir.path());
+        app.registry.load_dir(dir.path());
         f().await;
-        app.registry.load_all(std::path::Path::new("/nonexistent"));
+        app.registry.load_dir(std::path::Path::new("/nonexistent"));
     }
 
     #[tokio::test(flavor = "multi_thread", worker_threads = 1)]
@@ -935,7 +935,7 @@ mod tests {
             std::fs::create_dir_all(&plugin_dir).unwrap();
             std::fs::write(
                 plugin_dir.join("plugin.yaml"),
-                "id: empty_pair\ntype: integration\npermissions: [network, secure_storage]\ntranslations:\n  it:\n    setup.auth.title: Associa\n    setup.auth.instructions.0: Premi il pulsante\ntransports:\n  http:\n    origins: [https://api.example.com]\n    methods: [POST]\nsetup:\n  modes: [manual]\n  auth:\n    kind: button\n    title: Pair\n    instructions: [Press the button]\nconfig:\n  fields:\n    - { key: host, label: Host, default: api.example.com }\n    - { key: token, label: Token, secure: true }\n",
+                "id: empty_pair\nversion: 1.0.0\napi: \"3.0\"\ntype: integration\ntranslations:\n  it:\n    setup.auth.title: Associa\n    setup.auth.instructions.0: Premi il pulsante\ntransports:\n  http:\n    origins: [https://api.example.com]\n    methods: [POST]\nsetup:\n  modes: [manual]\n  auth:\n    kind: button\n    title: Pair\n    instructions: [Press the button]\nconfig:\n  fields:\n    - { key: host, label: Host, default: api.example.com }\n    - { key: token, label: Token, secure: true }\n",
             )
             .unwrap();
             std::fs::write(
@@ -943,22 +943,10 @@ mod tests {
                 "return {\n  pair = function(_) return { ok = true, values = { token = '' } } end,\n  validate = function(_) return { ok = true } end,\n}",
             )
             .unwrap();
-            app.registry.load_all(dir.path());
+            app.registry.load_dir(dir.path());
 
-            let authority = app
-                .registry
-                .list(app.secret_store.as_ref())
-                .into_iter()
-                .find(|plugin| plugin.id == "empty_pair")
-                .unwrap()
-                .authority;
             {
-                // Keep the temporary registry loaded; the production enable
-                // helper reconciles from configured repository paths.
                 let mut cfg = app.config.write().await;
-                cfg.plugins
-                    .accepted_authorities
-                    .insert("empty_pair".into(), authority.normalized());
                 cfg.plugins.enabled.push("empty_pair".into());
                 cfg.gui.language = "it".into();
                 app.registry.replace_policy(&cfg.plugins);
@@ -1008,7 +996,7 @@ mod tests {
             std::fs::create_dir_all(&plugin_dir).unwrap();
             std::fs::write(
                 plugin_dir.join("plugin.yaml"),
-                "id: resettable\ntype: integration\npermissions: [network, secure_storage]\ntransports:\n  http:\n    origins: [https://api.example.com]\nsetup:\n  modes: [manual]\n  auth: { kind: none }\nconfig:\n  fields:\n    - { key: host, label: Host, kind: host, default: controller.local }\n    - { key: token, label: Token, secure: true }\n",
+                "id: resettable\nversion: 1.0.0\napi: \"3.0\"\ntype: integration\ntransports:\n  http:\n    origins: [https://api.example.com]\nsetup:\n  modes: [manual]\n  auth: { kind: none }\nconfig:\n  fields:\n    - { key: host, label: Host, kind: host, default: controller.local }\n    - { key: token, label: Token, secure: true }\n",
             )
             .unwrap();
             std::fs::write(
@@ -1016,20 +1004,10 @@ mod tests {
                 "return { validate = function(_) return { ok = true } end }",
             )
             .unwrap();
-            app.registry.load_all(dir.path());
+            app.registry.load_dir(dir.path());
 
-            let authority = app
-                .registry
-                .list(app.secret_store.as_ref())
-                .into_iter()
-                .find(|plugin| plugin.id == "resettable")
-                .unwrap()
-                .authority;
             {
                 let mut cfg = app.config.write().await;
-                cfg.plugins
-                    .accepted_authorities
-                    .insert("resettable".into(), authority);
                 cfg.plugins.enabled.push("resettable".into());
                 app.registry.replace_policy(&cfg.plugins);
             }

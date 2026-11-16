@@ -28,13 +28,13 @@ use halod_shared::types::{
 };
 
 use super::bytebuf::ByteBuf;
-use super::ffi::{lua_err, to_lua_err};
+use super::ffi::lua_err;
 use super::manifest::{
     check_lcd_dims, check_led_count, check_zone_count, validate_accessories, validate_component,
     validate_short_text, AccessoryManifest, ActionDef, BooleanDef, ChoiceDef, RangeDef,
 };
 use super::sandbox;
-use super::transport::{command_result_table, AddrScope, CommandExecutor, PluginIo, RegisterBus};
+use super::transport::{AddrScope, PluginIo, RegisterBus};
 use super::transport_api::TransportApi;
 use crate::infrastructure::drivers::transports::smbus::SmBusDevice;
 
@@ -1402,14 +1402,12 @@ fn validate_runtime_controls(controls: &InitControls) -> Result<()> {
     Ok(())
 }
 
-/// Build the live `halod.http` runtime for a manifest that declares a scoped
-/// http transport and holds the network grant. Returns `None` (with a log) when
-/// the transport is absent, ungranted, or its policy fails to build, so a plugin
-/// simply lacks `halod.http` rather than failing to spawn.
 pub(crate) fn network_granted(granted: &[Permission]) -> bool {
     granted.contains(&Permission::Network)
 }
 
+/// `None` (with a log) when the transport is absent, ungranted, or its policy
+/// fails to build, so a plugin simply lacks `halod.http` rather than failing to spawn.
 pub(crate) fn http_runtime_for(
     manifest: &crate::domain::plugin::manifest::PluginManifest,
     granted: &[Permission],
@@ -1517,8 +1515,7 @@ fn build_ctx(
 ) -> Result<WorkerCtx> {
     debug_assert!(!super::contract::active().tables.is_empty());
     let controller_index = dev_match.index;
-    let (lua, budget) =
-        super::lua_worker::bootstrap_worker_vm(granted, config, module_sources, data)?;
+    let (lua, budget) = super::lua_worker::bootstrap_worker_vm(config, module_sources, data)?;
     if let Some(http) = http {
         super::http_api::register(&lua, http).map_err(|e| lua_err("http API", e))?;
     }
@@ -1534,19 +1531,12 @@ fn build_ctx(
     // The `dev` argument every callback receives: exposes the transport and the
     // matched-spec identity (`dev.match`).
     let dev = lua.create_table().map_err(|e| lua_err("dev table", e))?;
-    let command = match &transport {
-        PluginIo::Command(command) => Some(command.clone()),
-        _ => None,
-    };
     let api = TransportApi::new(transport.clone(), handle.clone());
     let api_ud = lua
         .create_userdata(api)
         .map_err(|e| lua_err("transport userdata", e))?;
     dev.set("transport", api_ud)
         .map_err(|e| lua_err("dev.transport", e))?;
-    if let Some(command) = command {
-        install_command_api(&lua, command)?;
-    }
     dev.set("match", build_match_table(&lua, &dev_match)?)
         .map_err(|e| lua_err("dev.match", e))?;
 
@@ -1575,23 +1565,6 @@ fn build_ctx(
         controller_index,
         budget,
     })
-}
-
-fn install_command_api(lua: &Lua, command: CommandExecutor) -> Result<()> {
-    let api = lua
-        .create_table()
-        .map_err(|e| lua_err("command table", e))?;
-    let run = lua
-        .create_function(move |lua, (executable, args): (String, Vec<String>)| {
-            let result = command.run(&executable, &args).map_err(to_lua_err)?;
-            command_result_table(lua, &result)
-        })
-        .map_err(|e| lua_err("command.run", e))?;
-    api.set("run", run).map_err(|e| lua_err("command.run", e))?;
-    lua.globals()
-        .set("command", api)
-        .map_err(|e| lua_err("command", e))?;
-    Ok(())
 }
 
 /// Run a plugin's `pre_scan(dev)` callback against a freshly opened SMBus bus,
@@ -1656,7 +1629,6 @@ fn run_pre_scan_inner(
     // `pre_scan` is one-time bus preparation before a device is even matched,
     // not general plugin logic — it gets no `halod.config` (an empty map).
     let (lua, _budget) = sandbox::bootstrap_vm(
-        granted,
         &HashMap::new(),
         PLUGIN_VM_MEMORY_BYTES,
         PLUGIN_INSTRUCTION_BUDGET,
@@ -2085,7 +2057,6 @@ mod tests {
     #[test]
     fn pre_scan_sleep_past_the_call_deadline_errors() {
         let (lua, _budget) = sandbox::bootstrap_vm(
-            &[],
             &HashMap::new(),
             PLUGIN_VM_MEMORY_BYTES,
             PLUGIN_INSTRUCTION_BUDGET,
@@ -2095,14 +2066,6 @@ mod tests {
         std::thread::sleep(std::time::Duration::from_millis(1));
         let err = lua.load("halod.sleep_ms(1000)").exec().unwrap_err();
         assert!(err.to_string().contains("deadline"), "{err}");
-    }
-
-    #[test]
-    fn network_granted_matches_the_permission() {
-        assert!(network_granted(&[Permission::Network]));
-        assert!(network_granted(&[Permission::Hid, Permission::Network]));
-        assert!(!network_granted(&[]));
-        assert!(!network_granted(&[Permission::Hid]));
     }
 
     #[tokio::test]
@@ -2246,19 +2209,11 @@ mod tests {
     }
 
     #[tokio::test]
-    async fn permission_gated_global_is_absent_until_granted() {
+    async fn the_clock_needs_no_grant() {
         let src = r#"return {
             apply = function(dev, state) assert(os.time() > 0) end,
         }"#;
-
-        // Without Permission::Os the `os` table is stripped, so the callback errors.
-        assert!(spawn(src, vec![]).rgb_apply(static_state()).await.is_err());
-
-        // Granting it re-injects the read-only clock, so the same callback succeeds.
-        spawn(src, vec![Permission::Os])
-            .rgb_apply(static_state())
-            .await
-            .unwrap();
+        spawn(src, vec![]).rgb_apply(static_state()).await.unwrap();
     }
 
     #[tokio::test]
@@ -2269,7 +2224,7 @@ mod tests {
         assert!(
             err.to_string().contains(&format!(
                 "plugin API {} has no apply()",
-                crate::domain::plugin::PLUGIN_API
+                halod_plugin_signing::HOST_PLUGIN_API
             )),
             "unexpected error: {err}"
         );

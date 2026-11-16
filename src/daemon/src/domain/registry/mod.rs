@@ -36,234 +36,72 @@ pub async fn seed_known_devices(app: Arc<AppState>) {
     }
 }
 
-/// Initialize devices using an optional development checkout in place of the
-/// managed official repository. The override is process-local and never
-/// persists in config.
-pub async fn initialize_app_state(
-    app: Arc<AppState>,
-    #[cfg(feature = "dev-plugin-repo")] dev_plugin_repo: Option<std::path::PathBuf>,
-) {
-    #[cfg(feature = "dev-plugin-repo")]
-    if let Some(dir) = &dev_plugin_repo {
-        log::warn!("Using development plugin repository at {}", dir.display());
-    }
+pub async fn initialize_app_state(app: Arc<AppState>) {
     ensure_official_repo(&app).await;
-    #[cfg(not(feature = "dev-plugin-repo"))]
-    let dev_plugin_repo: Option<std::path::PathBuf> = None;
-    #[cfg(feature = "dev-plugin-repo")]
-    {
-        *app.development_plugin_repo.write().await = dev_plugin_repo.clone();
-    }
-    let mut discovered_hashes = Vec::new();
+    let repos = app.config.read().await.plugins.repos.clone();
+    let cached = tokio::task::spawn_blocking(move || {
+        if let Err(error) =
+            crate::domain::plugin::catalog::remove_leftovers(&crate::config::plugins_dir())
+        {
+            log::warn!("removing interrupted plugin installs: {error:#}");
+        }
+        repos
+            .iter()
+            .filter(|record| matches!(record.source, crate::config::PluginRepoSource::Url(_)))
+            .filter_map(|record| {
+                let trust = crate::domain::plugin::repo::RepositoryTrust::for_record(record);
+                let catalog = crate::domain::plugin::catalog::cached(&record.slug, &trust)?;
+                Some((
+                    record.slug.clone(),
+                    crate::domain::plugin::catalog::RepoCatalog {
+                        catalog,
+                        last_sync: None,
+                    },
+                ))
+            })
+            .collect::<Vec<_>>()
+    })
+    .await
+    .unwrap_or_default();
+    app.plugin_catalogs.lock().await.extend(cached);
     {
         let cfg = app.config.read().await;
-        let repo_sources = crate::domain::plugin::repo_plugin_sources(&cfg.plugins.repos);
-        let official_dir = cfg
-            .plugins
-            .repos
-            .iter()
-            .find(|repo| repo.slug == crate::constants::OFFICIAL_PLUGIN_REPO_SLUG)
-            .map(crate::domain::plugin::repo::active_revision_dir)
-            .unwrap_or_else(|| {
-                crate::config::plugin_repos_dir().join(crate::constants::OFFICIAL_PLUGIN_REPO_SLUG)
-            });
-        if official_dir.is_dir() {
-            match crate::domain::plugin::repo::verify_official_repository(&official_dir) {
-                Ok(manifest) => discovered_hashes.extend(
-                    manifest
-                        .packages
-                        .into_iter()
-                        .map(|package| (package.id, package.sha256)),
-                ),
-                Err(e) => {
-                    log::warn!("official plugin repository failed validation: {e:#}");
-                }
-            }
-        }
-        app.registry.load_all_with_priority_repo(
-            &crate::config::plugins_dir(),
-            dev_plugin_repo.as_deref(),
-            &repo_sources,
-        );
+        app.registry.load_all(&cfg.plugins.repos);
         app.registry.replace_policy(&cfg.plugins);
     }
-    if !discovered_hashes.is_empty() {
-        let mut cfg = app.config.write().await;
-        for (id, hash) in discovered_hashes {
-            cfg.plugins.installed_hashes.entry(id).or_insert(hash);
-        }
-        app.registry.replace_policy(&cfg.plugins);
-        app.request_config_save();
-    }
-    // Surface packages whose active revision differs from its installed digest.
-    // This is dirty-update metadata, not a consent or activation gate, and it
-    // runs without network access. The dev repo is not a config record, so it is
-    // never a subject here.
-    crate::application::usecases::plugin::repos::quarantine_changed_plugins(app.clone()).await;
-    start_update_check(app.clone()).await;
+    crate::application::usecases::plugin::repos::refresh_in_background(app.clone());
     observers::discovery::discover_devices(app.clone()).await;
     seed_known_devices(app.clone()).await;
     crate::application::usecases::registry::chain::restore_saved_chains(app.clone()).await;
     crate::application::usecases::profiles::lifecycle::load_active_profile(app.clone()).await;
 }
 
-/// Seed the non-removable official plugin repo record if absent and unpack the
-/// embedded bundle. Official plugins still go through the normal
-/// consent/permission flow — only the repo *record* is protected from removal
-/// (see `usecases::repos::remove_repo`). Purely local: the network download of
-/// the latest release runs later, in [`start_update_check`]'s background job.
+/// Seed the non-removable official repository record, pointing it at the
+/// current official catalog URL.
 pub(crate) async fn ensure_official_repo(app: &Arc<AppState>) {
-    ensure_official_repo_from(app, crate::constants::OFFICIAL_PLUGIN_REPO_URL).await;
-}
+    use crate::config::{PluginRepoRecord, PluginRepoSource};
+    use crate::constants::{OFFICIAL_PLUGIN_CATALOG_URL, OFFICIAL_PLUGIN_REPO_SLUG};
 
-/// [`ensure_official_repo`] parameterized on the URL to clone, so tests can
-/// exercise the offline/clone-failure path against a local, non-network URL
-/// instead of the real `constants::OFFICIAL_PLUGIN_REPO_URL`.
-async fn ensure_official_repo_from(app: &Arc<AppState>, url: &str) {
-    use crate::config::PluginRepoRecord;
-
-    {
-        let mut cfg = app.config.write().await;
-        if !cfg
-            .plugins
-            .repos
-            .iter()
-            .any(|r| r.slug == crate::constants::OFFICIAL_PLUGIN_REPO_SLUG)
-        {
-            cfg.plugins.repos.push(PluginRepoRecord {
-                url: url.to_owned(),
-                slug: crate::constants::OFFICIAL_PLUGIN_REPO_SLUG.to_owned(),
-                repository_id: None,
-                trusted_key: None,
-                source_kind: crate::config::PluginRepoSourceKind::Release,
-                release_tag: None,
-                release_policy: crate::config::PluginReleasePolicy::Latest,
-                active_revision: None,
-                active_source: crate::config::PluginRevisionSource::Managed,
-                previous_release_tag: None,
-                last_sync: None,
-            });
-            app.request_config_save();
-        }
-        if let Some(record) = cfg
-            .plugins
-            .repos
-            .iter_mut()
-            .find(|record| record.slug == crate::constants::OFFICIAL_PLUGIN_REPO_SLUG)
-        {
-            record.url = url.to_owned();
-            record.source_kind = crate::config::PluginRepoSourceKind::Release;
-        }
-    }
-
-    install_embedded_official_bundle(app).await;
-}
-
-/// Download the latest official release when no managed revision is active yet.
-/// Runs off the boot path; a failure (offline first launch, GitHub down) leaves
-/// the daemon on the embedded bundle and is reported to the user.
-async fn download_official_release(app: &Arc<AppState>) {
-    let has_active_revision = app
-        .config
-        .read()
-        .await
+    let source = PluginRepoSource::Url(OFFICIAL_PLUGIN_CATALOG_URL.to_owned());
+    let mut cfg = app.config.write().await;
+    match cfg
         .plugins
         .repos
-        .iter()
-        .find(|repo| repo.slug == crate::constants::OFFICIAL_PLUGIN_REPO_SLUG)
-        .filter(|repo| repo.active_source == crate::config::PluginRevisionSource::Managed)
-        .and_then(|repo| repo.active_revision.as_deref())
-        .is_some_and(|revision| !revision.is_empty());
-    if has_active_revision {
-        return;
-    }
-    if let Err(error) = crate::application::usecases::plugin::repos::follow_latest_release(
-        crate::constants::OFFICIAL_PLUGIN_REPO_SLUG.to_owned(),
-        app.clone(),
-    )
-    .await
+        .iter_mut()
+        .find(|record| record.slug == OFFICIAL_PLUGIN_REPO_SLUG)
     {
-        crate::application::notifications::send(
-            app,
-            halod_shared::types::NotificationCode::Generic {
-                message: format!(
-                    "Official plugin download failed (continuing with the bundled plugins): {error:#}"
-                ),
+        Some(record) if record.source == source => return,
+        Some(record) => record.source = source,
+        None => cfg.plugins.repos.insert(
+            0,
+            PluginRepoRecord {
+                slug: OFFICIAL_PLUGIN_REPO_SLUG.to_owned(),
+                source,
+                trusted_key: None,
             },
-        )
-        .await;
+        ),
     }
-}
-
-/// Materialize the release-supplied signed plugin archive before the optional
-/// network checkout. It intentionally lives outside the managed Git root so a
-/// first online update can still clone into that root normally.
-async fn install_embedded_official_bundle(app: &Arc<AppState>) {
-    let Some(bytes) = crate::embedded_plugins::BUNDLE else {
-        return;
-    };
-    let root = crate::config::embedded_plugin_revisions_dir()
-        .join(crate::constants::OFFICIAL_PLUGIN_REPO_SLUG);
-    let staging = root.join(format!(".staging-{}", uuid::Uuid::new_v4()));
-    let result = tokio::task::spawn_blocking(move || -> anyhow::Result<(String, String)> {
-        let metadata = halod_plugin_signing::extract_bundle(bytes, &staging)?;
-        let revision = root.join(&metadata.release);
-        if revision.is_dir() {
-            std::fs::remove_dir_all(&staging)?;
-        } else {
-            crate::domain::plugin::repo::verify_official_repository(&staging)?;
-            std::fs::create_dir_all(&root)?;
-            std::fs::rename(&staging, &revision)?;
-        }
-        Ok((metadata.release, metadata.repository_id))
-    })
-    .await;
-    match result {
-        Ok(Ok((commit, repository_id))) => {
-            let mut cfg = app.config.write().await;
-            if let Some(record) = cfg
-                .plugins
-                .repos
-                .iter_mut()
-                .find(|r| r.slug == crate::constants::OFFICIAL_PLUGIN_REPO_SLUG)
-            {
-                if record.active_revision.is_none()
-                    || record.active_source == crate::config::PluginRevisionSource::Embedded
-                {
-                    record.release_tag = Some(commit.clone());
-                    record.active_revision = Some(commit);
-                    record.active_source = crate::config::PluginRevisionSource::Embedded;
-                    record.repository_id = Some(repository_id);
-                    app.request_config_save();
-                }
-            }
-        }
-        Ok(Err(error)) => {
-            log::warn!("embedded official plugin bundle failed validation: {error:#}")
-        }
-        Err(error) => log::warn!("embedded official plugin bundle task panicked: {error}"),
-    }
-}
-
-/// Kick off the background network job — first-run official release download
-/// followed by the plugin-update check (repo- and per-plugin) — flagging the
-/// discovery status so the radar can show a "checking for updates" step.
-/// A no-op unless the user has allowed GitHub access; spawned so no network
-/// stall can delay boot or hold the process past a shutdown request.
-pub(crate) async fn start_update_check(app: Arc<AppState>) {
-    if app.config.read().await.gui.plugin_downloads
-        != halod_shared::types::PluginDownloadConsent::Allowed
-    {
-        return;
-    }
-    app.discovery.lock().await.checking_updates = true;
-    crate::application::usecases::registry::runtime::topology_changed(&app).await;
-    tokio::spawn(async move {
-        download_official_release(&app).await;
-        crate::application::usecases::plugin::repos::check_updates_broadcast(app.clone()).await;
-        app.discovery.lock().await.checking_updates = false;
-        crate::application::usecases::registry::runtime::topology_changed(&app).await;
-    });
+    app.request_config_save();
 }
 
 #[cfg(test)]
@@ -334,86 +172,27 @@ mod official_repo_tests {
     use crate::constants::OFFICIAL_PLUGIN_REPO_SLUG as OFFICIAL_SLUG;
 
     #[tokio::test]
-    async fn seeds_the_record_even_when_the_download_url_is_unreachable() {
+    async fn seeding_is_idempotent_and_repairs_the_url() {
         crate::test_support::with_tmp_config(|app| async move {
-            app.config.write().await.gui.plugin_downloads =
-                halod_shared::types::PluginDownloadConsent::Allowed;
-            // A local nonexistent path fails fast (no network hang) while still
-            // exercising the exact failure path a bad/offline URL hits.
-            ensure_official_repo_from(&app, "/nonexistent/not-a-git-repo").await;
-            download_official_release(&app).await;
+            ensure_official_repo(&app).await;
+            app.config.write().await.plugins.repos[0].source =
+                crate::config::PluginRepoSource::Url("https://stale.example/catalog.yaml".into());
+            ensure_official_repo(&app).await;
 
             let cfg = app.config.read().await;
-            let record = cfg
-                .plugins
-                .repos
-                .iter()
-                .find(|r| r.slug == OFFICIAL_SLUG)
-                .expect("official repo record must be seeded even if the download fails");
-            assert!(
-                record.release_tag.is_none(),
-                "a failed download must not fabricate a release tag"
-            );
-        })
-        .await;
-    }
-
-    #[tokio::test]
-    async fn a_failed_download_notifies_the_user() {
-        crate::test_support::with_tmp_config(|app| async move {
-            ensure_official_repo_from(&app, "/nonexistent/not-a-git-repo").await;
-            download_official_release(&app).await;
-
-            let replay = app.data_bus.replay_events(None);
-            let halod_shared::bus::BusEventPayload::Notification(notification) = &replay
-                .events
-                .last()
-                .expect("the failure is reported to the user")
-                .payload;
-            assert!(matches!(
-                &notification.code,
-                halod_shared::types::NotificationCode::Generic { .. }
-            ));
-        })
-        .await;
-    }
-
-    #[tokio::test]
-    async fn seeds_the_record_but_downloads_nothing_without_consent() {
-        crate::test_support::with_tmp_config(|app| async move {
-            // Default consent is `Unset`: the record is seeded but nothing is
-            // downloaded, so the repo directory must never appear.
-            ensure_official_repo_from(&app, "/nonexistent/not-a-git-repo").await;
-            start_update_check(app.clone()).await;
-
-            let cfg = app.config.read().await;
-            assert!(
-                cfg.plugins.repos.iter().any(|r| r.slug == OFFICIAL_SLUG),
-                "the official record is seeded regardless of consent"
-            );
-            let clone_dir = crate::config::plugin_repos_dir().join(OFFICIAL_SLUG);
-            assert!(
-                !clone_dir.exists(),
-                "no download may happen before the user consents"
-            );
-        })
-        .await;
-    }
-
-    #[tokio::test]
-    async fn is_idempotent_and_does_not_duplicate_the_record() {
-        crate::test_support::with_tmp_config(|app| async move {
-            ensure_official_repo_from(&app, "/nonexistent/not-a-git-repo").await;
-            ensure_official_repo_from(&app, "/nonexistent/not-a-git-repo").await;
-
-            let cfg = app.config.read().await;
-            let count = cfg
+            let official: Vec<_> = cfg
                 .plugins
                 .repos
                 .iter()
                 .filter(|r| r.slug == OFFICIAL_SLUG)
-                .count();
-            assert_eq!(count, 1, "re-running must not duplicate the seeded record");
+                .collect();
+            assert_eq!(official.len(), 1);
+            assert_eq!(
+                official[0].source,
+                crate::config::PluginRepoSource::Url(
+                    crate::constants::OFFICIAL_PLUGIN_CATALOG_URL.into()
+                )
+            );
         })
         .await;
     }

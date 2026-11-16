@@ -3,9 +3,7 @@
 
 use crate::domain::topic_store::TopicStore;
 use egui::{Align2, Color32, Pos2, Rect, Sense, Vec2};
-use halod_shared::types::{
-    FanCurveStatus, PluginIssueKind, PluginUpdateStatus, RepoUpdateStatus, UdevRulesStatus,
-};
+use halod_shared::types::{FanCurveStatus, PluginIssueKind, UdevRulesStatus};
 
 use crate::domain::models::device as model;
 use crate::domain::models::udev::udev_rules_need_action;
@@ -20,42 +18,15 @@ const NAV: [Page; 5] = [
     Page::Settings,
 ];
 
-/// Count of plugins needing user attention: an error, an available update, or
-/// a plugin disabled by the security gate after its content changed or it
-/// requested a new permission. Ordinary first-time consent is intentionally
-/// not surfaced here because enabling the plugin presents that flow in context.
-pub fn plugins_needing_action(state: &TopicStore, plugin_updates: &[PluginUpdateStatus]) -> usize {
+/// Plugins with an issue or an available update.
+pub fn plugins_needing_action(state: &TopicStore) -> usize {
     state
         .plugins
         .plugins
         .iter()
         .filter(|p| {
-            let update_available = plugin_updates.iter().any(|u| {
-                u.plugin_id == p.id
-                    && (u.update_available
-                        // The daemon may report the content change separately
-                        // from the plugin snapshot while quarantine is active.
-                        || (u.on_disk_changed && !p.enabled))
-            });
             p.health.issue.is_some()
-                || crate::ui::screens::plugins::plugin_requires_regrant(p)
-                || update_available
-        })
-        .count()
-}
-
-fn repos_needing_action(
-    updates: &[RepoUpdateStatus],
-    plugin_updates: &[PluginUpdateStatus],
-) -> usize {
-    updates
-        .iter()
-        .filter(|status| {
-            !status.pinned
-                && status.available_tag.is_some()
-                && !plugin_updates
-                    .iter()
-                    .any(|plugin| plugin.slug == status.slug && plugin.update_available)
+                || crate::ui::screens::plugins::update_for(p, &state.plugins.available).is_some()
         })
         .count()
 }
@@ -132,9 +103,7 @@ pub fn nav_tabs(
     page: &mut Page,
     udev_status: Option<&UdevRulesStatus>,
 ) -> f32 {
-    let plugin_updates = &state.plugins.updates;
-    let plugin_actions = plugins_needing_action(state, plugin_updates)
-        + repos_needing_action(&state.plugins.repo_updates, plugin_updates)
+    let plugin_actions = plugins_needing_action(state)
         + usize::from(udev_status.is_some_and(udev_rules_need_action));
     let plugin_errors = plugins_have_errors(state);
     let cooling_actions = cooling_needing_action(state);
@@ -257,7 +226,7 @@ mod tests {
     use super::*;
     use halod_shared::types::PluginInfo;
 
-    fn plugin(id: &str, consented: bool) -> PluginInfo {
+    fn plugin(id: &str, enabled: bool) -> PluginInfo {
         PluginInfo {
             id: id.into(),
             name: id.into(),
@@ -269,7 +238,7 @@ mod tests {
             platforms: vec![],
             platform_supported: true,
             effect_names: vec![],
-            enabled: true,
+            enabled,
             author: String::new(),
             version: String::new(),
             description: String::new(),
@@ -278,14 +247,12 @@ mod tests {
             devices: vec![],
             logo: None,
             effect_thumbnails: vec![],
-            source: Default::default(),
+            repo: "official".into(),
             provenance: Default::default(),
-            declared_permissions: vec![],
-            authority: Default::default(),
+            access: Default::default(),
             provides: vec![],
             consumes: vec![],
             data_records: vec![],
-            accepted_authority: None,
             config_fields: vec![],
             config_values: Default::default(),
             secret_set: Default::default(),
@@ -294,29 +261,10 @@ mod tests {
             integration_requires_setup: false,
             integration_state: halod_shared::types::IntegrationLifecycleState::Configured,
             integration_setup: None,
-            consented,
-            active: consented,
+            active: enabled,
             requirements: vec![],
             activation_blocker: None,
             health: Default::default(),
-        }
-    }
-
-    fn update(id: &str, available: bool) -> PluginUpdateStatus {
-        PluginUpdateStatus {
-            plugin_id: id.into(),
-            slug: "official".into(),
-            update_available: available,
-            on_disk_changed: false,
-            current_version: String::new(),
-            available_version: String::new(),
-        }
-    }
-
-    fn on_disk_change(id: &str) -> PluginUpdateStatus {
-        PluginUpdateStatus {
-            on_disk_changed: true,
-            ..update(id, false)
         }
     }
 
@@ -339,72 +287,33 @@ mod tests {
     }
 
     #[test]
-    fn plugins_needing_action_counts_updates_and_security_blocks_only() {
+    fn plugins_needing_action_counts_issues_and_updates() {
         let mut state = TopicStore::default();
-        state.plugins.plugins = vec![
-            plugin("ok", true),           // fine — not counted
-            plugin("unconsented", false), // first-time consent is contextual
-            {
-                let mut changed = plugin("changed", true);
-                changed.enabled = false;
-                changed
-            },
-            plugin("has_update", true),
-        ];
-        let updates = vec![
-            update("has_update", true),
-            on_disk_change("changed"),
-            update("ok", false),
-        ];
-        assert_eq!(plugins_needing_action(&state, &updates), 2);
+        let mut failing = plugin("failing", true);
+        failing.health.issue = Some(halod_shared::types::PluginIssue {
+            kind: PluginIssueKind::RuntimeError,
+            detail: "boom".into(),
+            context: None,
+            timestamp_ms: 0,
+        });
+        let mut outdated = plugin("outdated", false);
+        outdated.version = "1.0.0".into();
+        state.plugins.plugins = vec![plugin("ok", true), failing, outdated];
+        state.plugins.available = vec![halod_shared::types::AvailablePlugin {
+            repo: "official".into(),
+            id: "outdated".into(),
+            version: "1.1.0".into(),
+            api: "3.0".into(),
+            compatible: true,
+        }];
+        assert_eq!(plugins_needing_action(&state), 2);
     }
 
     #[test]
     fn plugins_needing_action_is_zero_when_all_clear() {
         let mut state = TopicStore::default();
         state.plugins.plugins = vec![plugin("a", true), plugin("b", true)];
-        assert_eq!(plugins_needing_action(&state, &[]), 0);
-    }
-
-    #[test]
-    fn repository_hint_excludes_pinned_updates() {
-        let repo_status = |pinned| RepoUpdateStatus {
-            slug: "official".into(),
-            installed_tag: "v1".into(),
-            available_tag: Some("v2".into()),
-            pinned,
-        };
-        assert_eq!(repos_needing_action(&[repo_status(false)], &[]), 1);
-        assert_eq!(repos_needing_action(&[repo_status(true)], &[]), 0);
-        assert_eq!(
-            repos_needing_action(&[repo_status(false)], &[update("plugin", true)]),
-            0
-        );
-    }
-
-    #[test]
-    fn plugins_needing_action_counts_new_permission_only_after_prior_approval() {
-        let mut p = plugin("permission", true);
-        p.enabled = false;
-        p.accepted_authority = Some(halod_shared::types::PluginAuthority {
-            permissions: vec![halod_shared::types::Permission::Os],
-            transport_scopes: vec![],
-            data_reads: vec![],
-        });
-        p.declared_permissions = vec![
-            halod_shared::types::Permission::Os,
-            halod_shared::types::Permission::Network,
-        ];
-        p.authority.permissions = p.declared_permissions.clone();
-        let mut state = TopicStore::default();
-        state.plugins.plugins = vec![p];
-        assert_eq!(plugins_needing_action(&state, &[]), 1);
-
-        let mut first_run = plugin("first-run", false);
-        first_run.enabled = false;
-        first_run.declared_permissions = vec![halod_shared::types::Permission::Network];
-        state.plugins.plugins = vec![first_run];
-        assert_eq!(plugins_needing_action(&state, &[]), 0);
+        assert_eq!(plugins_needing_action(&state), 0);
     }
 
     #[test]
@@ -419,7 +328,7 @@ mod tests {
         });
         let mut state = TopicStore::default();
         state.plugins.plugins = vec![with_issue, plugin("ok", true)];
-        assert_eq!(plugins_needing_action(&state, &[]), 1);
+        assert_eq!(plugins_needing_action(&state), 1);
         assert!(plugins_have_errors(&state));
     }
 
@@ -449,7 +358,7 @@ mod tests {
             path: "/a/broken".into(),
             reason: "bad yaml".into(),
         }];
-        assert_eq!(plugins_needing_action(&state, &[]), 0);
+        assert_eq!(plugins_needing_action(&state), 0);
     }
 
     #[test]
@@ -485,29 +394,5 @@ mod tests {
         };
         state.devices.push(disabled);
         assert_eq!(cooling_needing_action(&state), 1);
-    }
-
-    #[test]
-    fn on_disk_change_counts_only_while_the_plugin_is_disabled() {
-        // Quarantined (disabled) → needs action.
-        let mut disabled = plugin("edited", true);
-        disabled.enabled = false;
-        let mut state = TopicStore::default();
-        state.plugins.plugins = vec![disabled];
-        assert_eq!(
-            plugins_needing_action(&state, &[on_disk_change("edited")]),
-            1
-        );
-
-        // Re-enabled (risk accepted) → no longer counted, even if a stale
-        // on-disk-change status lingers until the next check.
-        let mut enabled = plugin("edited", true);
-        enabled.enabled = true;
-        let mut state = TopicStore::default();
-        state.plugins.plugins = vec![enabled];
-        assert_eq!(
-            plugins_needing_action(&state, &[on_disk_change("edited")]),
-            0
-        );
     }
 }

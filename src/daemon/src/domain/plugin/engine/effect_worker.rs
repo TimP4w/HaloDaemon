@@ -15,7 +15,7 @@ use mlua::{Function, Lua, LuaSerdeExt, Table};
 use serde::{Deserialize, Serialize};
 use tokio::sync::oneshot;
 
-use halod_shared::types::{EffectParamValue, Permission};
+use halod_shared::types::EffectParamValue;
 
 use super::bytebuf::ByteBuf;
 use super::ffi::lua_err;
@@ -162,7 +162,6 @@ impl PluginEffectHandle {
         module_sources: std::collections::BTreeMap<String, String>,
         effect_id: String,
         params: HashMap<String, EffectParamValue>,
-        granted: Vec<Permission>,
         config: crate::domain::plugin::ResolvedConfig,
     ) -> Self {
         Self::spawn_with_data(
@@ -170,7 +169,6 @@ impl PluginEffectHandle {
             module_sources,
             effect_id,
             params,
-            granted,
             config,
             Default::default(),
         )
@@ -181,7 +179,6 @@ impl PluginEffectHandle {
         module_sources: std::collections::BTreeMap<String, String>,
         effect_id: String,
         params: HashMap<String, EffectParamValue>,
-        granted: Vec<Permission>,
         config: crate::domain::plugin::ResolvedConfig,
         data: super::data_api::DataRuntime,
     ) -> Self {
@@ -197,7 +194,6 @@ impl PluginEffectHandle {
                     &module_sources,
                     &effect_id,
                     &params,
-                    &granted,
                     &config,
                     data.clone(),
                 )
@@ -555,12 +551,11 @@ fn build_ctx(
     module_sources: &std::collections::BTreeMap<String, String>,
     effect_id: &str,
     params: &HashMap<String, EffectParamValue>,
-    granted: &[Permission],
     config: &crate::domain::plugin::ResolvedConfig,
     data: super::data_api::DataRuntime,
 ) -> Result<EffectCtx> {
     let (lua, budget) =
-        super::lua_worker::bootstrap_worker_vm(granted, config, module_sources, data.clone())?;
+        super::lua_worker::bootstrap_worker_vm(config, module_sources, data.clone())?;
     register_effect_helpers(&lua).map_err(|e| lua_err("effect helpers", e))?;
 
     let manifest: Table = lua
@@ -730,7 +725,6 @@ mod tests {
             Default::default(),
             "plasma".to_string(),
             params(),
-            vec![],
             HashMap::new(),
         );
         let bytes = handle.render_pixmap(frame(0.0, 1)).await.unwrap();
@@ -757,7 +751,6 @@ mod tests {
             Default::default(),
             "comet".to_string(),
             params(),
-            vec![],
             HashMap::new(),
         );
         let colors = handle
@@ -782,7 +775,6 @@ mod tests {
             Default::default(),
             "over".to_string(),
             params(),
-            vec![],
             HashMap::new(),
         );
         let colors = handle
@@ -802,7 +794,6 @@ mod tests {
             Default::default(),
             "nope".to_string(),
             params(),
-            vec![],
             HashMap::new(),
         );
         assert!(handle.render_pixmap(frame(0.0, 1)).await.is_err());
@@ -822,7 +813,6 @@ mod tests {
             Default::default(),
             "boom".to_string(),
             params(),
-            vec![],
             HashMap::new(),
         );
         assert!(handle.render_pixmap(frame(0.0, 1)).await.is_err());
@@ -840,7 +830,6 @@ mod tests {
             Default::default(),
             "spin".to_string(),
             params(),
-            vec![],
             HashMap::new(),
         );
         let result = handle.render_pixmap(frame(0.0, 1)).await;
@@ -886,7 +875,6 @@ mod tests {
             [("speed".to_string(), EffectParamValue::Float(0.8))]
                 .into_iter()
                 .collect(),
-            vec![],
             HashMap::new(),
         );
         let bytes = pixmap.render_pixmap(frame(1.5, 1)).await.unwrap();
@@ -901,7 +889,6 @@ mod tests {
             Default::default(),
             "comet".to_string(),
             params(),
-            vec![],
             HashMap::new(),
         );
         let colors = direct
@@ -930,7 +917,6 @@ mod tests {
             Default::default(),
             "comet".to_string(),
             fwd_params,
-            vec![],
             HashMap::new(),
         );
         let forward_colors = forward
@@ -949,7 +935,6 @@ mod tests {
             Default::default(),
             "comet".to_string(),
             back_params,
-            vec![],
             HashMap::new(),
         );
         let backward_colors = backward
@@ -999,7 +984,6 @@ mod tests {
             [("mode".to_owned(), EffectParamValue::Str("test".to_owned()))]
                 .into_iter()
                 .collect(),
-            vec![],
             HashMap::new(),
         );
         let mut first_frame = frame(1.25, 10);
@@ -1036,7 +1020,6 @@ mod tests {
             Default::default(),
             "stateful".to_owned(),
             params(),
-            vec![],
             HashMap::new(),
         );
         let first = handle
@@ -1066,7 +1049,6 @@ mod tests {
             Default::default(),
             "legacy".to_owned(),
             params(),
-            vec![],
             HashMap::new(),
         );
         assert!(handle.render_pixmap(frame(0.0, 1)).await.is_err());

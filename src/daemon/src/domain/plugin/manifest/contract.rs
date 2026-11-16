@@ -1,11 +1,11 @@
 // SPDX-License-Identifier: GPL-3.0-or-later
-//! Machine-readable Lua ABI catalog for [`super::PLUGIN_API`].
+//! Machine-readable Lua ABI catalog for [`halod_plugin_signing::HOST_PLUGIN_API`].
 //!
 //! This is the source of truth for callback spelling and the Lua table shapes
 //! crossing the host/plugin boundary. A shape names the Rust wire type where
 //! one exists; its serde definition is authoritative for individual fields.
 
-use crate::domain::plugin::PLUGIN_API;
+use halod_plugin_signing::{PluginApi, HOST_PLUGIN_API};
 
 #[derive(Debug, Clone, Copy, PartialEq, Eq)]
 pub enum CallbackUse {
@@ -37,7 +37,7 @@ pub struct TableContract {
 
 #[derive(Debug, Clone, Copy, PartialEq, Eq)]
 pub struct PluginApiContract {
-    pub version: u32,
+    pub version: PluginApi,
     pub callbacks: &'static [CallbackContract],
     pub tables: &'static [TableContract],
 }
@@ -245,7 +245,7 @@ pub const TABLES_V1: &[TableContract] = &[
 ];
 
 pub const PLUGIN_API_CONTRACT: PluginApiContract = PluginApiContract {
-    version: PLUGIN_API,
+    version: HOST_PLUGIN_API,
     callbacks: CALLBACKS_V1,
     tables: TABLES_V1,
 };
@@ -267,8 +267,7 @@ mod tests {
     use super::*;
 
     #[test]
-    fn active_catalog_is_versioned_and_has_unique_names() {
-        assert_eq!(PLUGIN_API_CONTRACT.version, PLUGIN_API);
+    fn callback_names_are_unique_and_described() {
         let mut names = HashSet::new();
         for callback in PLUGIN_API_CONTRACT.callbacks {
             assert!(names.insert(callback.name), "duplicate {}", callback.name);

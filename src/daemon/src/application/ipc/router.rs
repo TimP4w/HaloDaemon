@@ -191,6 +191,22 @@ fn reply_error(client: &ClientHandle, cmd: &str, req_id: Option<&str>, e: anyhow
     reply_error_with_handled(client, cmd, req_id, e, false);
 }
 
+fn catalog_error_code(
+    error: &halod_plugin_signing::CatalogError,
+) -> halod_shared::types::CatalogErrorCode {
+    use halod_plugin_signing::CatalogError as E;
+    use halod_shared::types::CatalogErrorCode as C;
+    match error {
+        E::Malformed(_) => C::Malformed,
+        E::Unsigned => C::Unsigned,
+        E::UnknownKey(_) => C::UntrustedKey,
+        E::SignatureMismatch => C::SignatureMismatch,
+        E::Stale { .. } => C::Stale,
+        E::HashMismatch { .. } => C::HashMismatch,
+        E::ApiIncompatible { .. } => C::ApiIncompatible,
+    }
+}
+
 fn reply_error_with_handled(
     client: &ClientHandle,
     cmd: &str,
@@ -200,8 +216,8 @@ fn reply_error_with_handled(
 ) {
     log::warn!("command '{cmd}' failed: {e:#}");
     let mut reply = json!({"type": "error", "message": e.to_string()});
-    if e.is::<halod_plugin_signing::RepositorySignatureMismatch>() {
-        reply["code"] = halod_shared::types::ERROR_REPOSITORY_SIGNATURE_VERIFICATION_FAILED.into();
+    if let Some(error) = e.downcast_ref::<halod_plugin_signing::CatalogError>() {
+        reply["code"] = serde_json::to_value(catalog_error_code(error)).unwrap_or_default();
     }
     if handled
         || e.downcast_ref::<crate::domain::plugin::SurfacedPluginError>()
@@ -428,38 +444,23 @@ async fn dispatch(
         DaemonCommand::SetPluginEnabled { id, enabled } => {
             crate::application::usecases::plugin::plugins::set_enabled(id, enabled, app).await
         }
-        DaemonCommand::ImportPluginRepository { source_path } => {
-            crate::application::usecases::plugin::repos::import_local_repo(source_path, app).await
-        }
-        DaemonCommand::ConfirmPluginEnable { id, authority } => {
-            crate::application::usecases::plugin::plugins::confirm_enable(id, authority, app).await
-        }
-        DaemonCommand::ConfirmPluginEnableBatch { plugins } => {
-            crate::application::usecases::plugin::plugins::confirm_enable_batch(plugins, app).await
-        }
         DaemonCommand::SetPluginConfig { id, values } => {
             crate::application::usecases::plugin::plugins::set_config(id, values, app).await
         }
-        DaemonCommand::AddPluginRepo { url } => {
-            crate::application::usecases::plugin::repos::add_repo(url, app).await
+        DaemonCommand::AddPluginRepo { source } => {
+            crate::application::usecases::plugin::repos::add_repo(source, app).await
         }
         DaemonCommand::RemovePluginRepo { slug } => {
             crate::application::usecases::plugin::repos::remove_repo(slug, app).await
         }
-        DaemonCommand::ListPluginReleases { url } => {
-            crate::application::usecases::plugin::repos::list_releases(url, client).await
+        DaemonCommand::RefreshPluginRepos => {
+            crate::application::usecases::plugin::repos::refresh_repos(app).await
         }
-        DaemonCommand::CheckPluginRepoUpdates => {
-            crate::application::usecases::plugin::repos::check_repo_updates(app, client).await
+        DaemonCommand::InstallPlugin { repo, id } => {
+            crate::application::usecases::plugin::repos::install_plugin(repo, id, app).await
         }
-        DaemonCommand::UpdatePluginRepo { slug } => {
-            crate::application::usecases::plugin::repos::update_repo(slug, app).await
-        }
-        DaemonCommand::InstallPluginRelease { slug, tag } => {
-            crate::application::usecases::plugin::repos::install_release(slug, tag, true, app).await
-        }
-        DaemonCommand::FollowLatestPluginRelease { slug } => {
-            crate::application::usecases::plugin::repos::follow_latest_release(slug, app).await
+        DaemonCommand::UninstallPlugin { id } => {
+            crate::application::usecases::plugin::repos::uninstall_plugin(id, app).await
         }
         DaemonCommand::UpdateAllPlugins => {
             crate::application::usecases::plugin::repos::update_all_plugins(app).await
@@ -530,12 +531,6 @@ async fn dispatch(
                 hide_window_controls,
                 low_battery_notifications,
                 app,
-            )
-            .await
-        }
-        DaemonCommand::SetPluginDownloadConsent { allowed } => {
-            crate::application::usecases::registry::settings::set_plugin_download_consent(
-                allowed, app,
             )
             .await
         }
@@ -1045,19 +1040,12 @@ mod tests {
             &client,
             "add_plugin_repo",
             None,
-            halod_plugin_signing::RepositorySignatureMismatch.into(),
+            halod_plugin_signing::CatalogError::SignatureMismatch.into(),
         );
 
         let frame = rx.recv().await.unwrap();
         let reply: Value = serde_json::from_slice(&frame[5..]).unwrap();
-        assert_eq!(
-            reply["code"],
-            halod_shared::types::ERROR_REPOSITORY_SIGNATURE_VERIFICATION_FAILED
-        );
-        assert_eq!(
-            reply["message"],
-            "release signature does not match release.yaml"
-        );
+        assert_eq!(reply["code"], "signature_mismatch");
     }
 
     #[tokio::test]

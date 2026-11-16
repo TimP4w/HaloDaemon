@@ -47,8 +47,6 @@ settings:
   close_to_tray_sub: "Hide the window instead of quitting when you close it"
   low_battery_notifications_title: Low battery notifications
   low_battery_notifications_sub: "Notify below 20%, then again below 10% and 5%"
-  plugin_downloads_title: "Official plugins and updates"
-  plugin_downloads_sub: "Download official plugins from GitHub and check for updates on startup"
   window_controls_title: Window controls
   window_controls_sub: "Show minimize, maximize and close. Turn off on tiling window managers."
   startup_healthcheck_title: "Check on startup"

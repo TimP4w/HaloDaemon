@@ -20,7 +20,7 @@ use crate::ui::components::{self as widgets, ButtonKind};
 use crate::ui::screens::plugin_config::{
     config_fields_editor, config_section, config_values_to_send, seed_config_edit_if_needed,
 };
-use crate::ui::screens::plugins::{plugin_name, plugin_needs_permission};
+use crate::ui::screens::plugins::plugin_name;
 use crate::ui::theme;
 
 #[derive(Default)]
@@ -99,7 +99,7 @@ enum PanelView {
 /// An unconfigured integration is always paused too, so setup must win over
 /// the paused/resume state: resuming is refused until setup has run.
 fn panel_view(p: &PluginInfo) -> PanelView {
-    if !p.enabled || plugin_needs_permission(p) {
+    if !p.enabled {
         PanelView::Hidden
     } else if p.integration_setup.is_some() {
         PanelView::Setup
@@ -1161,14 +1161,12 @@ mod tests {
             devices: vec![],
             logo: None,
             effect_thumbnails: vec![],
-            source: Default::default(),
+            repo: String::new(),
             provenance: Default::default(),
-            declared_permissions: vec![],
-            authority: Default::default(),
+            access: Default::default(),
             provides: vec![],
             consumes: vec![],
             data_records: vec![],
-            accepted_authority: None,
             config_fields: vec![],
             config_values: Default::default(),
             secret_set: Default::default(),
@@ -1181,7 +1179,6 @@ mod tests {
                 IntegrationLifecycleState::Disabled
             },
             integration_setup: None,
-            consented: true,
             active: enabled,
             requirements: vec![],
             activation_blocker: None,
@@ -1376,15 +1373,11 @@ mod tests {
     }
 
     #[test]
-    fn the_panel_is_hidden_until_the_plugin_is_enabled_with_consent() {
+    fn the_panel_is_hidden_until_the_plugin_is_enabled() {
         assert_eq!(
             panel_view(&plugin("openrgb", false, true)),
             PanelView::Hidden
         );
-        let mut unconsented = plugin("openrgb", true, true);
-        unconsented.consented = false;
-        unconsented.declared_permissions = vec![halod_shared::types::Permission::Network];
-        assert_eq!(panel_view(&unconsented), PanelView::Hidden);
     }
 
     #[test]

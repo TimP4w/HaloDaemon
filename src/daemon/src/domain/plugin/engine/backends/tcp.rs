@@ -101,7 +101,7 @@ mod tests {
         std::fs::write(
             dir.join("plugin.yaml"),
             format!(
-                "id: tcptest\npermissions: [hid, network]\ntransports:\n  tcp:\n    host_key: host\n    port_key: port\n    timeout_ms: 200\n    allow_private: {allow_private}\nconfig:\n  fields:\n    - key: host\n      label: Host\n      kind: host\n    - key: port\n      label: Port\n      kind: port\ndevices:\n  - vendor: Test\n    model: TCP\n    match:\n      hid: {{ vid: 1, pid: 2 }}\n"
+                "id: tcptest\nversion: 1.0.0\napi: \"3.0\"\ntransports:\n  tcp:\n    host_key: host\n    port_key: port\n    timeout_ms: 200\n    allow_private: {allow_private}\nconfig:\n  fields:\n    - key: host\n      label: Host\n      kind: host\n    - key: port\n      label: Port\n      kind: port\ndevices:\n  - vendor: Test\n    model: TCP\n    match:\n      hid: {{ vid: 1, pid: 2 }}\n"
             ),
         )
         .unwrap();

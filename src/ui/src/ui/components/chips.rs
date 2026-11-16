@@ -87,53 +87,6 @@ pub fn chip(ui: &mut egui::Ui, label: &str) {
     tag(ui, label, TagTone::Neutral);
 }
 
-/// A static chip tinted with an accent color (e.g. assigned-zone chips on the
-/// canvas instance rack). Returns a clickable response so callers can attach
-/// context menus.
-#[must_use]
-pub fn chip_colored(ui: &mut egui::Ui, label: &str, color: Color32) -> Response {
-    chip_impl(
-        ui,
-        label,
-        color,
-        color.gamma_multiply(0.14),
-        color.gamma_multiply(0.3),
-    )
-}
-
-fn chip_impl(
-    ui: &mut egui::Ui,
-    label: &str,
-    text: Color32,
-    fill: Color32,
-    border: Color32,
-) -> Response {
-    let galley = ui
-        .painter()
-        .layout_no_wrap(label.to_string(), theme::caption(), text);
-    let size = galley.size() + Vec2::new(18.0, 10.0);
-    let (rect, resp) = ui.allocate_exact_size(size, Sense::click());
-    ui.painter().rect_filled(rect, theme::RADIUS_SM, fill);
-    ui.painter().rect_stroke(
-        rect,
-        theme::RADIUS_SM,
-        Stroke::new(1.0, border),
-        egui::StrokeKind::Middle,
-    );
-    ui.painter().galley(
-        Pos2::new(
-            rect.center().x - galley.size().x / 2.0,
-            rect.center().y - galley.size().y / 2.0,
-        ),
-        galley,
-        text,
-    );
-    if resp.hovered() {
-        ui.ctx().set_cursor_icon(egui::CursorIcon::PointingHand);
-    }
-    resp
-}
-
 // ---------------------------------------------------------------------------
 // Context menu helpers — shared by home.rs device cards, canvas zone chips,
 // and sensor cards so every right-click menu in the app looks and feels the

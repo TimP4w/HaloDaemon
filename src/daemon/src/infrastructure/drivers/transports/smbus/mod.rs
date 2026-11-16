@@ -468,7 +468,6 @@ mod tests {
         SmBusSyncOps,
     };
     use crate::infrastructure::drivers::Metered;
-    use halod_shared::types::Permission;
     use parking_lot::Mutex;
     use std::sync::atomic::{AtomicUsize, Ordering};
     use std::sync::Arc;
@@ -558,7 +557,7 @@ mod tests {
             &Default::default(),
             bus,
             vec![0x50],
-            &[Permission::Os],
+            &[],
             tokio::runtime::Handle::current(),
         )
         .unwrap_err();

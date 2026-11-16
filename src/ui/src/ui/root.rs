@@ -23,34 +23,6 @@ impl App {
         self.tray.sync(ctx, self.ui.state.get());
     }
 
-    /// Re-deliver an active integrity alert when a tray-resident Linux window
-    /// is opened again. The sticky in-app toast survives close-to-tray, so its
-    /// native counterpart must not be limited to the toast's original ingest.
-    #[cfg(target_os = "linux")]
-    pub(crate) fn replay_integrity_native_on_reopen(&self) {
-        let Some(alert) = crate::domain::models::plugin_issues::repository_integrity_alert(
-            self.ui.state.get(),
-            &std::collections::HashSet::new(),
-        ) else {
-            return;
-        };
-        if !self.integrity_alert_notified.contains(&alert.key) {
-            return;
-        }
-        let notification = halod_shared::types::Notification {
-            code: halod_shared::types::NotificationCode::RepositoryIntegrityError {
-                repository: alert.repository,
-                package: alert.package,
-                expected: alert.expected,
-                actual: alert.actual,
-                restore_slug: alert.restore_slug,
-            },
-            show_native: true,
-            timestamp_ms: 0,
-        };
-        show_native_notifications(std::slice::from_ref(&notification));
-    }
-
     // Single render path shared by eframe (Windows/macOS) and winit+glow (Linux).
     pub(crate) fn draw(&mut self, ui: &mut egui::Ui) {
         let ctx = ui.ctx().clone();
@@ -84,7 +56,6 @@ impl App {
         self.ui.udev_rules.poll();
         self.ui.lcd_images.poll();
         self.ui.plugin_assets.poll();
-        self.ui.plugin_releases.poll();
         self.ui.serial_ports.poll();
         self.ui.lcd_editor_render.poll();
         self.ui.canvas_frame.poll();
@@ -163,39 +134,13 @@ impl App {
             incoming.retain(|notification| {
                 !matches!(
                     notification.code,
-                    halod_shared::types::NotificationCode::PluginContentChanged { .. }
-                        | halod_shared::types::NotificationCode::PluginRecommended { .. }
+                    halod_shared::types::NotificationCode::PluginRecommended { .. }
                 )
             });
         }
         self.plugins_ui.observe_notifications(&incoming);
         crate::ui::screens::profile::observe_notifications(&mut self.profile_ui, &incoming);
         self.toasts.ingest(incoming, time);
-
-        // Repository validation failures are part of the state snapshot rather
-        // than a transient daemon event, so synthesize a notification once per
-        // distinct mismatch episode. This also catches startup failures that
-        // happened before the GUI connected.
-        if let Some(alert) = crate::domain::models::plugin_issues::repository_integrity_alert(
-            &state,
-            &self.integrity_alert_notified,
-        ) {
-            self.integrity_alert_notified.insert(alert.key);
-            let code = halod_shared::types::NotificationCode::RepositoryIntegrityError {
-                repository: alert.repository,
-                package: alert.package,
-                expected: alert.expected,
-                actual: alert.actual,
-                restore_slug: alert.restore_slug,
-            };
-            let notification = halod_shared::types::Notification {
-                code,
-                show_native: true,
-                timestamp_ms: (time * 1000.0) as u64,
-            };
-            show_native_notifications(std::slice::from_ref(&notification));
-            self.toasts.ingest([notification], time);
-        }
 
         if self.page == Page::Lighting {
             if let Some(frame) = canvas_frame {
@@ -248,18 +193,6 @@ impl App {
             }
             ctx.request_repaint();
             return;
-        }
-
-        // After the radar gate (which returns before toasts.show) so it renders.
-        if !onboarding_active {
-            let quarantine = crate::ui::screens::plugins::quarantine_toasts(
-                &state.plugins.plugins,
-                &state.plugins.updates,
-                &mut self.quarantine_toasted,
-                (time * 1000.0) as u64,
-            );
-            show_native_notifications(&quarantine);
-            self.toasts.ingest(quarantine, time);
         }
 
         // Prevent desktop bleed-through under transparent panels.
@@ -456,7 +389,6 @@ impl App {
                             state: &state,
                             cmd: &self.cmd,
                             assets: &plugin_assets,
-                            releases: self.ui.plugin_releases.get(),
                             udev: udev_rules,
                             serial_ports: self.ui.serial_ports.get(),
                         };
@@ -584,12 +516,6 @@ impl App {
                             crate::domain::models::notifications::notification_text(&note.code);
                         self.issue_details_modal = Some((title, detail.to_owned()));
                     }
-                }
-                crate::ui::components::toast::ToastEvent::RestoreRepository(slug) => {
-                    crate::runtime::ipc::send(
-                        &self.cmd,
-                        halod_shared::commands::DaemonCommand::UpdatePluginRepo { slug },
-                    );
                 }
             }
         }
