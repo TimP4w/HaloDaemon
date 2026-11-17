@@ -1,4 +1,7 @@
 // SPDX-License-Identifier: GPL-3.0-or-later
+use crate::application::run_loop::{fps_tick_ms, EngineConfig};
+use crate::config::RgbConfig;
+use halod_shared::bus::{topic, BusValue};
 use std::{
     collections::{HashMap, HashSet},
     sync::{Arc, LazyLock},
@@ -350,7 +353,7 @@ impl RgbEngine {
 
     pub async fn start(
         self: Arc<Self>,
-        cfg_rx: crate::application::run_loop::EngineConfigReceiver,
+        cfg_rx: crate::application::run_loop::EngineConfigReceiver<RgbConfig>,
     ) -> tokio::task::JoinHandle<()> {
         tokio::spawn(async move {
             let engine_start = Instant::now();
@@ -362,14 +365,14 @@ impl RgbEngine {
             log::info!("Starting RGB engine");
             loop {
                 let cfg = cfg_rx.current();
-                if !cfg.enabled {
+                if !cfg.enabled() {
                     log::info!("[RGB] Engine disabled, waiting for re-enable");
                     if !cfg_rx.changed().await {
                         break;
                     }
                     continue;
                 }
-                let mut interval_ms = idle_interval_ms(idle_since, Instant::now(), cfg.tick_ms);
+                let mut interval_ms = idle_interval_ms(idle_since, Instant::now(), cfg.tick_ms());
                 let mut interval = tokio::time::interval(Duration::from_millis(interval_ms));
                 interval.set_missed_tick_behavior(tokio::time::MissedTickBehavior::Skip);
                 loop {
@@ -387,7 +390,7 @@ impl RgbEngine {
                                 idle_since = Some(now);
                             }
 
-                            let want_ms = idle_interval_ms(idle_since, now, cfg.tick_ms);
+                            let want_ms = idle_interval_ms(idle_since, now, cfg.tick_ms());
                             if want_ms != interval_ms {
                                 interval_ms = want_ms;
                                 interval = tokio::time::interval(Duration::from_millis(interval_ms));
@@ -1046,6 +1049,25 @@ impl RgbEngine {
             led_colors,
         });
         let _ = self.frame_tx.send(frame);
+    }
+}
+
+impl EngineConfig for RgbConfig {
+    const TOPIC: &'static str = topic::LIGHTING;
+
+    fn enabled(&self) -> bool {
+        self.canvas_enabled
+    }
+
+    fn tick_ms(&self) -> u64 {
+        fps_tick_ms(self.canvas_fps)
+    }
+
+    fn from_bus(value: &BusValue) -> Option<Self> {
+        match value {
+            BusValue::Lighting(state) => Some(state.config.clone()),
+            _ => None,
+        }
     }
 }
 
@@ -2090,10 +2112,8 @@ mod tests {
         let dev = MockRgbDevice::new("dev0", "ring", 4, false);
         let app = app_with(vec![dev.clone()]);
         let engine = RgbEngine::new(Arc::clone(&app)).await;
-        let cfg = crate::application::run_loop::EngineConfigReceiver::new(
-            Arc::clone(&app.data_bus),
-            crate::application::run_loop::EngineConfigTopic::Lighting,
-        );
+        let cfg =
+            crate::application::run_loop::EngineConfigReceiver::new(Arc::clone(&app.data_bus));
         let handle = Arc::clone(&engine).start(cfg).await;
 
         tokio::task::yield_now().await;

@@ -5,6 +5,9 @@
 //! the cooling engine's status cache for retained bus topic production. Any condition
 //! preventing safe closed-loop control drives the fan to the failsafe duty.
 
+use crate::application::run_loop::EngineConfig;
+use crate::config::CoolingConfig;
+use halod_shared::bus::{topic, BusValue};
 use std::collections::HashMap;
 use std::sync::Arc;
 
@@ -347,17 +350,16 @@ impl FanCurveEngine {
 
     pub fn start(
         self: Arc<Self>,
-        cfg_rx: crate::application::run_loop::EngineConfigReceiver,
+        cfg_rx: crate::application::run_loop::EngineConfigReceiver<CoolingConfig>,
     ) -> tokio::task::JoinHandle<()> {
         tokio::spawn(async move {
             crate::application::run_loop::engine_run_loop_idle(
                 "FanCurve",
                 cfg_rx,
                 tokio::time::MissedTickBehavior::Skip,
-                |_cfg| {
+                |cfg: CoolingConfig| {
                     let this = Arc::clone(&self);
-                    let duty = _cfg.failsafe_duty.unwrap_or(100);
-                    async move { this.tick(duty).await }
+                    async move { this.tick(cfg.fan_failsafe_duty).await }
                 },
                 std::future::pending::<()>,
                 || std::future::ready(true),
@@ -783,6 +785,25 @@ fn interpolate(points: &[(f32, f32)], temp: f32) -> f32 {
         "interpolate requires ascending temperatures, got {points:?}"
     );
     halod_shared::curve::duty_at_tuples(points, temp)
+}
+
+impl EngineConfig for CoolingConfig {
+    const TOPIC: &'static str = topic::COOLING;
+
+    fn enabled(&self) -> bool {
+        self.fan_curve_enabled
+    }
+
+    fn tick_ms(&self) -> u64 {
+        self.fan_curve_tick_ms
+    }
+
+    fn from_bus(value: &BusValue) -> Option<Self> {
+        match value {
+            BusValue::Cooling(state) => Some(state.config.clone()),
+            _ => None,
+        }
+    }
 }
 
 #[cfg(test)]

@@ -12,7 +12,7 @@ mod util;
 use anyhow::Result;
 use std::sync::Arc;
 
-use crate::application::run_loop::{EngineConfigReceiver, EngineConfigTopic};
+use crate::application::run_loop::EngineConfigReceiver;
 use crate::application::state;
 use crate::application::{ipc, lifecycle, task_supervisor};
 use crate::domain::{cooling, device, input, lcd, lighting, plugin, profiles};
@@ -349,7 +349,7 @@ async fn run_daemon(headless: bool, cfg: crate::config::Config) -> Result<()> {
         "FanCurve engine exited unexpectedly; fan control will no longer respond to sensors.",
         move || {
             let engine = Arc::clone(&fan_engine);
-            let cfg = EngineConfigReceiver::new(fan_bus.clone(), EngineConfigTopic::Cooling);
+            let cfg = EngineConfigReceiver::new(fan_bus.clone());
             Box::pin(async move { TaskHandle(engine.start(cfg)) })
         },
         || {},
@@ -361,7 +361,7 @@ async fn run_daemon(headless: bool, cfg: crate::config::Config) -> Result<()> {
         "RGB engine exited unexpectedly; RGB animations will stop.",
         move || {
             let engine = Arc::clone(&lighting_engine);
-            let cfg = EngineConfigReceiver::new(rgb_bus.clone(), EngineConfigTopic::Lighting);
+            let cfg = EngineConfigReceiver::new(rgb_bus.clone());
             Box::pin(async move { TaskHandle(engine.start(cfg).await) })
         },
         || {},
@@ -373,7 +373,7 @@ async fn run_daemon(headless: bool, cfg: crate::config::Config) -> Result<()> {
         "LCD engine exited unexpectedly; device LCDs will stop updating.",
         move || {
             let engine = Arc::clone(&lcd_engine);
-            let cfg = EngineConfigReceiver::new(lcd_bus.clone(), EngineConfigTopic::Lcd);
+            let cfg = EngineConfigReceiver::new(lcd_bus.clone());
             Box::pin(async move { TaskHandle(engine.start(cfg).await) })
         },
         || {},

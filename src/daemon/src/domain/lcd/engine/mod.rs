@@ -3,6 +3,9 @@ pub(crate) mod custom;
 mod templates;
 pub mod video;
 
+use crate::application::run_loop::{fps_tick_ms, EngineConfig};
+use crate::config::LcdConfig;
+use halod_shared::bus::{topic, BusValue};
 use std::{collections::HashMap, sync::Arc, time::Instant};
 
 use halod_shared::types::{EffectParamValue, LcdEngineFrame, WireLcdEngineState};
@@ -261,7 +264,7 @@ impl LcdEngine {
 
     pub async fn start(
         self: Arc<Self>,
-        cfg_rx: crate::application::run_loop::EngineConfigReceiver,
+        cfg_rx: crate::application::run_loop::EngineConfigReceiver<LcdConfig>,
     ) -> tokio::task::JoinHandle<()> {
         tokio::spawn(async move {
             let start = Instant::now();
@@ -496,6 +499,25 @@ impl LcdEngine {
     }
 }
 
+impl EngineConfig for LcdConfig {
+    const TOPIC: &'static str = topic::LCD;
+
+    fn enabled(&self) -> bool {
+        self.enabled
+    }
+
+    fn tick_ms(&self) -> u64 {
+        fps_tick_ms(self.fps)
+    }
+
+    fn from_bus(value: &BusValue) -> Option<Self> {
+        match value {
+            BusValue::Lcd(state) => Some(state.config.clone()),
+            _ => None,
+        }
+    }
+}
+
 #[cfg(test)]
 mod tests {
     use super::*;
@@ -697,10 +719,7 @@ mod tests {
 
         let mut frames = engine.subscribe();
         crate::application::usecases::registry::runtime::bootstrap(&app).await;
-        let cfg_rx = crate::application::run_loop::EngineConfigReceiver::new(
-            app.data_bus.clone(),
-            crate::application::run_loop::EngineConfigTopic::Lcd,
-        );
+        let cfg_rx = crate::application::run_loop::EngineConfigReceiver::new(app.data_bus.clone());
         let handle = Arc::clone(&engine).start(cfg_rx).await;
         // Let the engine park idle before the profile load.
         tokio::time::sleep(std::time::Duration::from_millis(50)).await;

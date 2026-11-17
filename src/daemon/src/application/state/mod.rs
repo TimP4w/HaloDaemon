@@ -13,7 +13,7 @@ mod persistence;
 mod workers;
 
 #[cfg(test)]
-use crate::application::run_loop::EngineRunConfig;
+use crate::application::run_loop::EngineConfig;
 pub use crate::domain::cooling::CoolingEngineState;
 pub use crate::domain::input::{ButtonEvent, InputState};
 pub use crate::domain::lcd::LcdEngineState;
@@ -360,8 +360,8 @@ mod tests {
             fps: 0,
             ..Default::default()
         };
-        assert_eq!(EngineRunConfig::canvas(&rgb_floor).tick_ms, 1000);
-        assert_eq!(EngineRunConfig::lcd(&lcd_floor).tick_ms, 1000);
+        assert_eq!(rgb_floor.tick_ms(), 1000);
+        assert_eq!(lcd_floor.tick_ms(), 1000);
 
         // Above the ceiling: clamps to 240 fps → 4 ms tick.
         let rgb_ceiling = RgbConfig {
@@ -372,8 +372,8 @@ mod tests {
             fps: 10_000,
             ..Default::default()
         };
-        assert_eq!(EngineRunConfig::canvas(&rgb_ceiling).tick_ms, 1000 / 240);
-        assert_eq!(EngineRunConfig::lcd(&lcd_ceiling).tick_ms, 1000 / 240);
+        assert_eq!(rgb_ceiling.tick_ms(), 1000 / 240);
+        assert_eq!(lcd_ceiling.tick_ms(), 1000 / 240);
     }
 
     #[tokio::test]
