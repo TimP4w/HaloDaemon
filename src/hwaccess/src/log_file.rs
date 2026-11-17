@@ -2,7 +2,8 @@
 use std::fs::{File, OpenOptions};
 use std::io::Write;
 use std::path::{Path, PathBuf};
-use std::sync::{Mutex, PoisonError};
+
+use parking_lot::Mutex;
 
 pub const MAX_LOG_BYTES: u64 = 5 * 1024 * 1024;
 const MAX_ROTATED: u32 = 3;
@@ -27,7 +28,7 @@ impl RotatingLog {
     }
 
     pub fn write_line(&self, line: &str) {
-        let mut guard = self.state.lock().unwrap_or_else(PoisonError::into_inner);
+        let mut guard = self.state.lock();
         let Some(state) = guard.as_mut() else {
             return;
         };
@@ -43,7 +44,7 @@ impl RotatingLog {
     }
 
     pub fn flush(&self) {
-        let mut guard = self.state.lock().unwrap_or_else(PoisonError::into_inner);
+        let mut guard = self.state.lock();
         if let Some(state) = guard.as_mut() {
             let _ = state.file.flush();
         }
@@ -80,23 +81,33 @@ fn open_log(path: &Path) -> Option<LogState> {
 #[cfg(test)]
 mod tests {
     use super::*;
-    use std::sync::atomic::{AtomicU64, Ordering};
 
-    fn temp_dir() -> PathBuf {
-        static N: AtomicU64 = AtomicU64::new(0);
-        let dir = std::env::temp_dir().join(format!(
-            "halod-log-test-{}-{}",
-            std::process::id(),
-            N.fetch_add(1, Ordering::Relaxed)
-        ));
-        std::fs::create_dir_all(&dir).unwrap();
-        dir
+    #[test]
+    fn rotated_path_appends_index() {
+        let base = Path::new("dir/halod.log");
+        assert!(rotated_path(base, 1).ends_with("halod.log.1"));
+        assert!(rotated_path(base, 3).ends_with("halod.log.3"));
+    }
+
+    #[test]
+    fn rotates_exactly_when_the_cap_is_reached() {
+        let dir = tempfile::tempdir().unwrap();
+        let base = dir.path().join("halod.log");
+        std::fs::write(&base, vec![b'x'; (MAX_LOG_BYTES - 7) as usize]).unwrap();
+        let log = RotatingLog::open(base.clone());
+
+        log.write_line("hello\n");
+        assert!(!rotated_path(&base, 1).exists());
+        assert_eq!(base.metadata().unwrap().len(), MAX_LOG_BYTES - 1);
+
+        log.write_line("x");
+        assert!(rotated_path(&base, 1).exists());
     }
 
     #[test]
     fn shift_rotations_ages_files_out_and_drops_the_oldest() {
-        let dir = temp_dir();
-        let base = dir.join("halod.log");
+        let dir = tempfile::tempdir().unwrap();
+        let base = dir.path().join("halod.log");
         for (index, body) in [(0, "live"), (1, "one"), (2, "two"), (3, "three")] {
             let path = if index == 0 {
                 base.clone()
@@ -122,13 +133,12 @@ mod tests {
             "two"
         );
         assert!(!rotated_path(&base, 4).exists());
-        std::fs::remove_dir_all(&dir).unwrap();
     }
 
     #[test]
     fn crossing_the_cap_rotates_to_a_fresh_file() {
-        let dir = temp_dir();
-        let base = dir.join("halod.log");
+        let dir = tempfile::tempdir().unwrap();
+        let base = dir.path().join("halod.log");
         std::fs::write(&base, vec![b'x'; (MAX_LOG_BYTES - 4) as usize]).unwrap();
         let log = RotatingLog::open(base.clone());
 
@@ -136,6 +146,5 @@ mod tests {
 
         assert!(rotated_path(&base, 1).exists());
         assert!(base.metadata().unwrap().len() < MAX_LOG_BYTES);
-        std::fs::remove_dir_all(&dir).unwrap();
     }
 }
