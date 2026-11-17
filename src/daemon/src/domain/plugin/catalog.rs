@@ -76,8 +76,19 @@ pub fn remove_leftovers(root: &Path) -> Result<()> {
     };
     for slug in slugs.flatten().filter(|entry| entry.path().is_dir()) {
         for entry in std::fs::read_dir(slug.path())?.flatten() {
-            if entry.file_name().to_string_lossy().starts_with('.') {
+            let name = entry.file_name().to_string_lossy().into_owned();
+            if name.starts_with('.') {
                 let path = entry.path();
+                let interrupted_swap = name
+                    .strip_prefix('.')
+                    .and_then(|rest| rest.strip_suffix(".old"))
+                    .map(|id| slug.path().join(id))
+                    .filter(|target| !target.exists());
+                if let Some(target) = interrupted_swap {
+                    std::fs::rename(&path, &target)
+                        .with_context(|| format!("restoring {}", target.display()))?;
+                    continue;
+                }
                 std::fs::remove_dir_all(&path)
                     .or_else(|_| std::fs::remove_file(&path))
                     .with_context(|| format!("removing {}", path.display()))?;
@@ -108,5 +119,23 @@ mod tests {
             .collect();
         names.sort();
         assert_eq!(names, ["catalog.yaml", "demo"]);
+    }
+
+    #[test]
+    fn a_backup_without_its_install_is_restored_not_removed() {
+        let root = tempfile::tempdir().unwrap();
+        let repo = root.path().join("official");
+        std::fs::create_dir_all(repo.join(".demo.old")).unwrap();
+        std::fs::write(repo.join(".demo.old").join("plugin.yaml"), "old").unwrap();
+        std::fs::create_dir_all(repo.join(".demo.staging-1")).unwrap();
+
+        remove_leftovers(root.path()).unwrap();
+
+        assert_eq!(
+            std::fs::read_to_string(repo.join("demo").join("plugin.yaml")).unwrap(),
+            "old"
+        );
+        assert!(!repo.join(".demo.old").exists());
+        assert!(!repo.join(".demo.staging-1").exists());
     }
 }
