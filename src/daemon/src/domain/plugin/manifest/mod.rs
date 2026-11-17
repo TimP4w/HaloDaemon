@@ -18,9 +18,9 @@ use std::collections::{HashMap, HashSet};
 use std::path::{Path, PathBuf};
 
 use super::engine::transport::{descriptor_for, known_kinds};
+use crate::domain::device::lighting_segment::ring_led_positions;
 use crate::domain::registry::observers::discovery::DiscoveryHandle;
 use crate::infrastructure::drivers::transports::smbus::{PciMatch, SmbusBusKind};
-use crate::infrastructure::drivers::vendors::generic::devices::common::ring_led_positions;
 
 fn default_report_size() -> usize {
     64

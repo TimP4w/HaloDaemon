@@ -9,10 +9,8 @@ use halod_shared::types::{
 
 use super::super::manifest::topology_from;
 use super::super::worker::{InitKeyboard, InitKeyboardVariant, InitLightingChannel};
+use crate::domain::device::lighting_segment::{linear_lighting_channel, ring_led_positions};
 use crate::domain::device::KeyboardLayoutSlot;
-use crate::infrastructure::drivers::vendors::generic::devices::common::{
-    linear_lighting_channel, ring_led_positions,
-};
 
 /// Keyboard geometry and the runtime lighting descriptors `initialize`
 /// reported: one for the ANSI layout and, when the keyboard has one, one for ISO.

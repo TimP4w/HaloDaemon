@@ -12,8 +12,8 @@ use super::{
 use anyhow::Result;
 use async_trait::async_trait;
 use halod_shared::types::{
-    DeviceType, LedPosition, LightingChannel, LightingDescriptor, LightingState, RgbColor,
-    ZoneTopology,
+    DeviceType, LedPosition, LightingChannel, LightingDescriptor, LightingDivision, LightingState,
+    RgbColor, ZoneTopology,
 };
 use halod_shared::zone_transform::transform_colors;
 
@@ -31,6 +31,30 @@ pub fn transformed_zone_frame(
         })
         .collect::<Vec<_>>();
     transform_colors(&colors, zone, &slot.transform_for(&zone.id))
+}
+
+/// Build a linear RGB zone with `led_count` evenly-spaced LEDs.
+pub fn linear_lighting_channel(id: &str, name: &str, led_count: usize) -> LightingChannel {
+    let leds = (0..led_count)
+        .map(|i| LedPosition {
+            id: i as u32,
+            x: if led_count > 1 {
+                i as f32 / (led_count - 1) as f32
+            } else {
+                0.5
+            },
+            y: 0.5,
+        })
+        .collect();
+    LightingChannel {
+        id: id.to_string(),
+        name: name.to_string(),
+        topology: ZoneTopology::Linear,
+        leds,
+        color_order: Default::default(),
+        division: LightingDivision::Indivisible,
+        visibility: Default::default(),
+    }
 }
 
 pub fn ring_led_positions(topology: &ZoneTopology, count: u32) -> Vec<LedPosition> {
@@ -298,6 +322,28 @@ impl LightingCapability for LightingSegmentDevice {
 #[cfg(test)]
 mod tests {
     use super::*;
+
+    #[test]
+    fn linear_rgb_zone_single_led_centered() {
+        let zone = linear_lighting_channel("leds", "LEDs", 1);
+        assert_eq!(zone.id, "leds");
+        assert_eq!(zone.name, "LEDs");
+        assert!(matches!(zone.topology, ZoneTopology::Linear));
+        assert_eq!(zone.leds.len(), 1);
+        assert!((zone.leds[0].x - 0.5).abs() < f32::EPSILON);
+        assert!((zone.leds[0].y - 0.5).abs() < f32::EPSILON);
+    }
+
+    #[test]
+    fn linear_rgb_zone_multiple_leds_evenly_spaced() {
+        let zone = linear_lighting_channel("leds", "LEDs", 5);
+        assert_eq!(zone.leds.len(), 5);
+        assert!((zone.leds[0].x - 0.0).abs() < f32::EPSILON);
+        assert!((zone.leds[4].x - 1.0).abs() < f32::EPSILON);
+        for led in &zone.leds {
+            assert!((led.y - 0.5).abs() < f32::EPSILON);
+        }
+    }
 
     #[test]
     fn linear_positions_span_zero_to_one() {
