@@ -215,7 +215,7 @@ fn catalog_error_code(
 
 fn ipc_error(e: &anyhow::Error, request_id: Option<String>) -> IpcError {
     IpcError {
-        message: e.to_string(),
+        message: format!("{e:#}"),
         code: e
             .downcast_ref::<halod_plugin_signing::CatalogError>()
             .map(catalog_error_code),
@@ -720,6 +720,17 @@ mod tests {
         let frame = rx.recv().await.unwrap();
         let reply: Value = serde_json::from_slice(&frame[5..]).unwrap();
         assert_eq!(reply["code"], "signature_mismatch");
+    }
+
+    #[test]
+    fn error_messages_keep_every_context_layer() {
+        let error = anyhow::anyhow!("permission denied")
+            .context("opening /plugins")
+            .context("installing demo");
+        assert_eq!(
+            ipc_error(&error, None).message,
+            "installing demo: opening /plugins: permission denied"
+        );
     }
 
     #[tokio::test]
