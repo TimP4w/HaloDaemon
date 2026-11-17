@@ -274,12 +274,7 @@ fn append_bundled_asset_licenses(workspace: &std::path::Path, buf: &mut Vec<u8>)
          Bootstrap Icons (computer device SVG)\n\
            Copyright: 2019-2024 The Bootstrap Authors\n\
            License: MIT\n\
-           URL: https://github.com/twbs/icons\n\n\
-         Visual Studio Code Codicons (integrity shield SVG)\n\
-           Copyright: Microsoft Corporation\n\
-           License: CC-BY-4.0\n\
-           Source: https://github.com/microsoft/vscode-codicons\n\
-           License URL: https://github.com/microsoft/vscode-codicons/blob/main/LICENSE\n\n",
+           URL: https://github.com/twbs/icons\n\n",
     );
     buf.extend_from_slice(header.as_bytes());
 
