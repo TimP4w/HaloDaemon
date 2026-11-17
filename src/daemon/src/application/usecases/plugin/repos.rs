@@ -3,6 +3,7 @@ use std::path::{Path, PathBuf};
 use std::sync::Arc;
 
 use anyhow::{anyhow, bail, Context as _, Result};
+use halod_plugin_signing::package::validate_identifier;
 use halod_plugin_signing::{CatalogError, CatalogPackage, HOST_PLUGIN_API};
 use halod_shared::types::PluginRepoLocation;
 
@@ -310,6 +311,7 @@ async fn install_staged(app: &Arc<AppState>, repo: &str, id: &str, staging: Path
 }
 
 pub async fn uninstall_plugin(id: String, app: Arc<AppState>) -> Result<()> {
+    validate_identifier("plugin id", &id)?;
     let dirs: Vec<PathBuf> = remote_slugs(&app)
         .await
         .into_iter()
@@ -428,6 +430,29 @@ mod tests {
         let staging = catalog::repo_dir(slug).join(format!(".{id}.staging-{version}"));
         crate::test_support::write_plugin_package(&staging, id, version, "3.0");
         staging.join(id)
+    }
+
+    #[tokio::test]
+    async fn uninstall_rejects_ids_that_leave_the_plugin_store() {
+        crate::test_support::with_tmp_config(|app| async move {
+            with_remote_repo(&app, "official").await;
+            with_remote_repo(&app, "community").await;
+            let kept = [
+                catalog::repo_dir("official").join("demo"),
+                crate::config::plugins_dir().join("x"),
+            ];
+            for dir in &kept {
+                std::fs::create_dir_all(dir).unwrap();
+            }
+            for id in ["../x", "../../official", "../official", "", "."] {
+                assert!(uninstall_plugin(id.to_owned(), Arc::clone(&app))
+                    .await
+                    .is_err());
+            }
+            assert!(kept.iter().all(|dir| dir.is_dir()));
+            assert!(catalog::repo_dir("official").is_dir());
+        })
+        .await;
     }
 
     #[tokio::test]

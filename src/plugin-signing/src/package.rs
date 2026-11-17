@@ -168,7 +168,7 @@ pub fn normalized_relative_path(path: &Path) -> Result<String> {
     Ok(parts.join("/"))
 }
 
-pub(crate) fn validate_identifier(label: &str, value: &str) -> Result<()> {
+pub fn validate_identifier(label: &str, value: &str) -> Result<()> {
     if value.is_empty()
         || !value
             .bytes()
