@@ -283,29 +283,40 @@ pub async fn install_plugin(repo: String, id: String, app: Arc<AppState>) -> Res
 }
 
 async fn install_staged(app: &Arc<AppState>, repo: &str, id: &str, staging: PathBuf) -> Result<()> {
-    let target = catalog::repo_dir(repo).join(id);
-    let backup = catalog::repo_dir(repo).join(format!(".{id}.old"));
-    let (swap_target, swap_backup) = (target.clone(), backup.clone());
-    blocking(move || swap_in(&staging, &swap_target, &swap_backup)).await?;
-
-    reload_registry(app).await;
-    if let Some(problem) = app.registry.load_problem(&target) {
-        let (restore_target, restore_backup) = (target.clone(), backup.clone());
-        blocking(move || swap_back(&restore_target, &restore_backup)).await?;
-        reconcile_plugins(app, &[id.to_owned()]).await;
-        bail!("{id} failed to load: {problem}");
-    }
-    let others: Vec<PathBuf> = remote_slugs(app)
+    let mut copies: Vec<(PathBuf, PathBuf)> = remote_slugs(app)
         .await
         .into_iter()
         .filter(|slug| *slug != repo)
-        .map(|slug| catalog::repo_dir(&slug).join(id))
+        .map(|slug| {
+            let dir = catalog::repo_dir(&slug);
+            (dir.join(id), dir.join(format!(".{id}.old")))
+        })
         .collect();
+    let target = catalog::repo_dir(repo).join(id);
+    let backup = catalog::repo_dir(repo).join(format!(".{id}.old"));
+    copies.insert(0, (target.clone(), backup));
+    let swap_copies = copies.clone();
     blocking(move || {
-        remove_dir(&backup)?;
-        others.iter().try_for_each(|dir| remove_dir(dir))
+        swap_in(&staging, &swap_copies[0].0, &swap_copies[0].1)?;
+        swap_copies[1..]
+            .iter()
+            .try_for_each(|(dir, backup)| set_aside(dir, backup))
     })
     .await?;
+
+    reload_registry(app).await;
+    if let Some(problem) = app.registry.load_problem(&target) {
+        blocking(move || {
+            copies
+                .iter()
+                .try_for_each(|(dir, backup)| swap_back(dir, backup))
+        })
+        .await?;
+        reload_registry(app).await;
+        reconcile_plugins(app, &[id.to_owned()]).await;
+        bail!("{id} failed to load: {problem}");
+    }
+    blocking(move || copies.iter().try_for_each(|(_, backup)| remove_dir(backup))).await?;
     reconcile_plugins(app, &[id.to_owned()]).await;
     Ok(())
 }
@@ -370,6 +381,14 @@ fn swap_in(staging: &Path, target: &Path, backup: &Path) -> Result<()> {
         }
         let _ = std::fs::remove_dir_all(staging);
         return Err(error).with_context(|| format!("installing into {}", target.display()));
+    }
+    Ok(())
+}
+
+fn set_aside(dir: &Path, backup: &Path) -> Result<()> {
+    remove_dir(backup)?;
+    if dir.exists() {
+        std::fs::rename(dir, backup)?;
     }
     Ok(())
 }
@@ -451,6 +470,43 @@ mod tests {
             }
             assert!(kept.iter().all(|dir| dir.is_dir()));
             assert!(catalog::repo_dir("official").is_dir());
+        })
+        .await;
+    }
+
+    fn installed_version(app: &AppState, id: &str) -> Option<String> {
+        app.registry
+            .installed()
+            .into_iter()
+            .find(|(_, installed, _)| installed == id)
+            .map(|(_, _, version)| version.to_string())
+    }
+
+    #[tokio::test]
+    async fn installing_from_another_repo_moves_the_plugin_there() {
+        crate::test_support::with_tmp_config(|app| async move {
+            with_remote_repo(&app, "official").await;
+            with_remote_repo(&app, "community").await;
+            install_staged(
+                &app,
+                "official",
+                "demo",
+                staged("official", "demo", "1.0.0"),
+            )
+            .await
+            .unwrap();
+            install_staged(
+                &app,
+                "community",
+                "demo",
+                staged("community", "demo", "2.0.0"),
+            )
+            .await
+            .unwrap();
+            assert_eq!(installed_from(&app, "demo").as_deref(), Some("community"));
+            assert_eq!(installed_version(&app, "demo").as_deref(), Some("2.0.0"));
+            assert!(!catalog::repo_dir("official").join("demo").exists());
+            assert!(!catalog::repo_dir("official").join(".demo.old").exists());
         })
         .await;
     }
