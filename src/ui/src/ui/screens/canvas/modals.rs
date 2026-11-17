@@ -19,31 +19,30 @@ use super::params::{assign_zone_cmd, upsert_instance_cmd};
 use super::rack::instance_name;
 use super::{CanvasUi, DEBOUNCE};
 use crate::domain::models::device;
+use halod_shared::ids::DeviceId;
 
-type ZoneKey = (String, String);
+type ZoneKey = (DeviceId, String);
 
 /// Every listable RGB zone as `(device id, device name, zones)`.
 fn rgb_zone_groups(
     state: &TopicStore,
-) -> Vec<(&str, &str, &[halod_shared::types::LightingChannel])> {
+) -> Vec<(&DeviceId, &str, &[halod_shared::types::LightingChannel])> {
     state
         .devices
         .iter()
         .filter(|d| !device::is_hidden(d))
         .filter_map(|d| {
             d.capabilities.iter().find_map(|c| match c {
-                DeviceCapability::Lighting(r) if !r.descriptor.channels.is_empty() => Some((
-                    d.id.as_str(),
-                    d.name.as_str(),
-                    r.descriptor.channels.as_slice(),
-                )),
+                DeviceCapability::Lighting(r) if !r.descriptor.channels.is_empty() => {
+                    Some((&d.id, d.name.as_str(), r.descriptor.channels.as_slice()))
+                }
                 _ => None,
             })
         })
         .collect()
 }
 
-fn placed_of<'a>(state: &'a TopicStore, dev: &str, zone: &str) -> Option<&'a PlacedZone> {
+fn placed_of<'a>(state: &'a TopicStore, dev: &DeviceId, zone: &str) -> Option<&'a PlacedZone> {
     state
         .lighting
         .canvas
@@ -127,7 +126,7 @@ pub(super) fn zones_assign_modal(
             for (dev_id, dev_name, zones) in rgb_zone_groups(state) {
                 let on = zones
                     .iter()
-                    .filter(|z| draft.contains(&(dev_id.to_string(), z.id.clone())))
+                    .filter(|z| draft.contains(&(dev_id.clone(), z.id.clone())))
                     .count();
                 ui.add_space(theme::SPACE_5);
                 egui::Sides::new().show(
@@ -153,7 +152,7 @@ pub(super) fn zones_assign_modal(
                 );
                 ui.add_space(theme::SPACE_3);
                 for z in zones {
-                    let key = (dev_id.to_string(), z.id.clone());
+                    let key = (dev_id.clone(), z.id.clone());
                     let checked = draft.contains(&key);
                     let used_by = placed_of(state, dev_id, &z.id)
                         .filter(|p| !checked && modal_zone_state(Some(p), &inst_id, is_default).1)
@@ -302,7 +301,10 @@ pub(super) fn new_instance_modal(
                                 upsert_instance_cmd(
                                     id,
                                     entry.effect_id.clone(),
-                                    entry.preset_name.clone(),
+                                    Some(default_instance_name(
+                                        effects,
+                                        entry.preset_name.as_deref().unwrap_or(&entry.label),
+                                    )),
                                     entry.params.clone(),
                                 ),
                             );
@@ -395,6 +397,21 @@ fn modal_zone_state(placed: Option<&PlacedZone>, inst_id: &str, is_default: bool
     (on, placed.is_some() && !on)
 }
 
+fn default_instance_name(
+    effects: &HashMap<String, halod_shared::types::EffectDef>,
+    effect_name: &str,
+) -> String {
+    let taken: std::collections::HashSet<&str> =
+        effects.values().filter_map(|d| d.name.as_deref()).collect();
+    let mut name = effect_name.to_string();
+    let mut n = 1;
+    while taken.contains(name.as_str()) {
+        n += 1;
+        name = format!("{effect_name} {n}");
+    }
+    name
+}
+
 /// A fresh instance id not already present in `effects`.
 fn new_instance_id(effects: &HashMap<String, halod_shared::types::EffectDef>) -> String {
     (1..)
@@ -434,6 +451,21 @@ mod tests {
     }
 
     #[test]
+    fn a_new_layer_is_named_after_its_effect_without_clashing() {
+        let named = |name: &str| EffectDef {
+            effect_id: "rainbow".into(),
+            name: Some(name.into()),
+            params: HashMap::new(),
+        };
+        let mut effects: HashMap<String, EffectDef> = HashMap::new();
+        assert_eq!(default_instance_name(&effects, "Rainbow"), "Rainbow");
+        effects.insert("effect-1".into(), named("Rainbow"));
+        effects.insert("effect-2".into(), named("Rainbow 2"));
+        assert_eq!(default_instance_name(&effects, "Rainbow"), "Rainbow 3");
+        assert_eq!(default_instance_name(&effects, "Breathing"), "Breathing");
+    }
+
+    #[test]
     fn draft_commands_toggle_only_changed_zones() {
         let mut state = TopicStore::default();
         state.lighting.canvas.placed_zones = vec![
@@ -441,7 +473,7 @@ mod tests {
             zone_with("b", Some("effect-2")),
             zone_with("c", Some("effect-1")),
         ];
-        let key = |z: &str| ("d".to_string(), z.to_string());
+        let key = |z: &str| ("d".parse::<DeviceId>().unwrap(), z.to_string());
         let unchanged: HashSet<_> = [key("a"), key("c")].into();
         assert!(draft_commands(&state, "effect-1", false, &unchanged).is_empty());
 

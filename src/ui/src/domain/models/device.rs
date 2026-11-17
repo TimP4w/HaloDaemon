@@ -7,6 +7,7 @@
 //! to a `Color32`.
 
 use crate::domain::topic_store::TopicStore;
+use halod_shared::ids::DeviceId;
 use halod_shared::types::{
     BatteryStatus, ConflictConfidence, ConnectionType, DeviceCapability, DeviceType, SensorType,
     SensorUnit, VisibilityState, WireDevice, WriteRateStatus,
@@ -34,14 +35,14 @@ pub fn conflict_presentation(
                 .iter()
                 .find(|other| other.id == *id)
                 .map(|other| other.name.clone())
-                .unwrap_or_else(|| id.clone())
+                .unwrap_or_else(|| id.to_string())
         })
         .collect();
     let recommended_name = devices
         .iter()
         .find(|other| other.id == conflict.recommended_id)
         .map(|other| other.name.clone())
-        .unwrap_or_else(|| conflict.recommended_id.clone());
+        .unwrap_or_else(|| conflict.recommended_id.to_string());
     let is_recommended = conflict.recommended_id == d.id;
     Some(ConflictPresentation {
         peer_names,
@@ -91,7 +92,10 @@ pub fn resolve_zone(
 /// Find the parent hub whose RGB chain lists `device_id` and return its
 /// write-rate status. Chain accessories share their parent's transport, so
 /// their own `write_rate` is always `None`.
-pub(crate) fn find_hub_write_rate(state: &TopicStore, device_id: &str) -> Option<WriteRateStatus> {
+pub(crate) fn find_hub_write_rate(
+    state: &TopicStore,
+    device_id: &DeviceId,
+) -> Option<WriteRateStatus> {
     state.devices.iter().find_map(|parent| {
         let is_hub_for_device = parent.lighting().is_some_and(|lighting| {
             lighting.descriptor.channels.iter().any(|channel| {
@@ -335,16 +339,16 @@ mod tests {
     fn conflict_presentation_resolves_peer_and_recommendation() {
         use halod_shared::types::{ConflictConfidence, DeviceConflictSummary};
         let primary = WireDevice {
-            id: "native".into(),
+            id: "native".parse().unwrap(),
             name: "Native".into(),
             ..Default::default()
         };
         let duplicate = WireDevice {
-            id: "openrgb".into(),
+            id: "openrgb".parse().unwrap(),
             name: "OpenRGB".into(),
             conflict: Some(DeviceConflictSummary {
-                peer_ids: vec!["native".into()],
-                recommended_id: "native".into(),
+                peer_ids: vec!["native".parse().unwrap()],
+                recommended_id: "native".parse().unwrap(),
                 confidence: ConflictConfidence::Confirmed,
                 participants: vec![],
             }),
@@ -491,7 +495,7 @@ mod tests {
         assert!(!listable(&dev(DeviceType::Sensor, vec![])));
 
         let mut integration_root = dev(DeviceType::Other, vec![]);
-        integration_root.integration_id = Some("openrgb".into());
+        integration_root.integration_id = Some("openrgb".parse().unwrap());
         assert!(is_integration_root(&integration_root));
         assert!(!listable(&integration_root));
 
@@ -666,7 +670,7 @@ mod tests {
             LightingStatus, ZoneTopology,
         };
         WireDevice {
-            id: hub_id.into(),
+            id: hub_id.parse().unwrap(),
             capabilities: vec![DeviceCapability::Lighting(LightingStatus {
                 descriptor: LightingDescriptor {
                     channels: vec![LightingChannel {
@@ -678,7 +682,7 @@ mod tests {
                         division: LightingDivision::Divisible {
                             max_leds: 40,
                             segments: vec![LightingSegmentInfo {
-                                device_id: child_id.into(),
+                                device_id: child_id.parse().unwrap(),
                                 channel_id: "lighting".into(),
                                 name: "Fan".into(),
                                 topology: ZoneTopology::Ring,
@@ -716,7 +720,7 @@ mod tests {
         };
         let hub = hub_with_child("hub1", "fan1", Some(hub_rate));
         let child = WireDevice {
-            id: "fan1".into(),
+            id: "fan1".parse().unwrap(),
             write_rate: Some(own_rate),
             ..Default::default()
         };
@@ -739,7 +743,7 @@ mod tests {
         };
         let hub = hub_with_child("hub1", "fan1", Some(hub_rate));
         let child = WireDevice {
-            id: "fan1".into(),
+            id: "fan1".parse().unwrap(),
             write_rate: None,
             ..Default::default()
         };
@@ -767,8 +771,14 @@ mod tests {
             ..Default::default()
         };
 
-        assert_eq!(find_hub_write_rate(&state, "fan1"), Some(hub_rate));
-        assert_eq!(find_hub_write_rate(&state, "unrelated"), None);
+        assert_eq!(
+            find_hub_write_rate(&state, &"fan1".parse().unwrap()),
+            Some(hub_rate)
+        );
+        assert_eq!(
+            find_hub_write_rate(&state, &"unrelated".parse().unwrap()),
+            None
+        );
     }
 
     #[test]
@@ -778,6 +788,6 @@ mod tests {
             ..Default::default()
         };
 
-        assert_eq!(find_hub_write_rate(&state, "fan1"), None);
+        assert_eq!(find_hub_write_rate(&state, &"fan1".parse().unwrap()), None);
     }
 }

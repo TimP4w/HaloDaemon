@@ -3,10 +3,11 @@ use std::path::{Path, PathBuf};
 use std::sync::Arc;
 
 use anyhow::{anyhow, bail, Context as _, Result};
-use halod_plugin_signing::package::validate_identifier;
+use halod_plugin_signing::declarations::{read_declarations, PackageDeclarations};
 use halod_plugin_signing::{CatalogError, CatalogPackage, HOST_PLUGIN_API};
-use halod_shared::types::PluginRepoLocation;
+use halod_shared::types::{NotificationCode, PluginRepoLocation};
 
+use crate::application::notifications;
 use crate::application::state::AppState;
 use crate::config::{PluginRepoRecord, PluginRepoSource};
 use crate::domain::events::{Change, ChangeSink as _};
@@ -14,9 +15,13 @@ use crate::domain::plugin::catalog::{self, RepoCatalog};
 use crate::domain::plugin::repo::RepositoryTrust;
 use crate::util::backoff::{schedule, Retry};
 
-use super::plugins::{purge_plugin_state, reconcile_plugins, reload_registry};
+use super::plugins;
+use super::plugins::{
+    purge_plugin_state, reconcile_plugins, refresh_recommendations, reload_registry,
+};
 use crate::application::usecases::registry::runtime;
 use crate::constants::OFFICIAL_PLUGIN_REPO_SLUG;
+use halod_shared::ids::PluginId;
 
 const REFRESH_ATTEMPTS: u32 = 4;
 
@@ -52,6 +57,10 @@ async fn blocking<T: Send + 'static>(
         .context("plugin repository task panicked")?
 }
 
+async fn record_of(app: &AppState, slug: &str) -> Result<PluginRepoRecord> {
+    record(app, slug).await
+}
+
 async fn record(app: &AppState, slug: &str) -> Result<PluginRepoRecord> {
     app.config
         .read()
@@ -64,7 +73,7 @@ async fn record(app: &AppState, slug: &str) -> Result<PluginRepoRecord> {
         .ok_or_else(|| anyhow!("unknown plugin repository '{slug}'"))
 }
 
-async fn remember(app: &AppState, slug: &str, catalog: halod_plugin_signing::Catalog) {
+async fn remember(app: &Arc<AppState>, slug: &str, catalog: halod_plugin_signing::Catalog) {
     app.plugin_catalogs.lock().await.insert(
         slug.to_owned(),
         RepoCatalog {
@@ -72,6 +81,7 @@ async fn remember(app: &AppState, slug: &str, catalog: halod_plugin_signing::Cat
             last_sync: Some(chrono::Utc::now().to_rfc3339()),
         },
     );
+    refresh_recommendations(app).await;
 }
 
 pub async fn add_repo(source: PluginRepoLocation, app: Arc<AppState>) -> Result<()> {
@@ -85,10 +95,15 @@ pub async fn add_repo(source: PluginRepoLocation, app: Arc<AppState>) -> Result<
             (slug_for(name), PluginRepoSource::Url(url))
         }
         PluginRepoLocation::Local(path) => {
-            let dir = std::fs::canonicalize(&path).with_context(|| format!("opening {path}"))?;
-            if !dir.is_dir() {
-                bail!("{} is not a directory", dir.display());
-            }
+            let dir = blocking(move || {
+                let dir =
+                    std::fs::canonicalize(&path).with_context(|| format!("opening {path}"))?;
+                if !dir.is_dir() {
+                    bail!("{} is not a directory", dir.display());
+                }
+                Ok(dir)
+            })
+            .await?;
             let name = dir.file_name().and_then(|n| n.to_str()).unwrap_or("folder");
             (
                 slug_for(&format!("local-{name}")),
@@ -169,9 +184,14 @@ async fn refresh_one(app: &Arc<AppState>, slug: &str) -> Result<()> {
     let Some(url) = url_of(&record).map(str::to_owned) else {
         return Ok(());
     };
+    let bytes = blocking(move || catalog::download(&url)).await?;
+    let _store = app.plugin_store.lock().await;
+    let Ok(record) = record_of(app, slug).await else {
+        return Ok(());
+    };
     let trust = RepositoryTrust::for_record(&record);
-    let fetch_slug = slug.to_owned();
-    let catalog = blocking(move || catalog::fetch(&fetch_slug, &url, &trust)).await?;
+    let accept_slug = slug.to_owned();
+    let catalog = blocking(move || catalog::accept(&accept_slug, &bytes, &trust)).await?;
     if record.trusted_key.is_none() && catalog.signing_key.is_some() {
         let mut cfg = app.config.write().await;
         if let Some(stored) = cfg.plugins.repos.iter_mut().find(|r| r.slug == slug) {
@@ -248,7 +268,7 @@ pub fn refresh_in_background(app: Arc<AppState>) {
     });
 }
 
-async fn selected(app: &Arc<AppState>, slug: &str, id: &str) -> Result<CatalogPackage> {
+async fn selected(app: &Arc<AppState>, slug: &str, id: &PluginId) -> Result<CatalogPackage> {
     if !app.plugin_catalogs.lock().await.contains_key(slug) {
         refresh_one(app, slug).await?;
     }
@@ -258,7 +278,7 @@ async fn selected(app: &Arc<AppState>, slug: &str, id: &str) -> Result<CatalogPa
         .and_then(|repo| {
             repo.catalog
                 .select(HOST_PLUGIN_API)
-                .get(id)
+                .get(id.as_str())
                 .copied()
                 .cloned()
         })
@@ -273,12 +293,17 @@ async fn selected(app: &Arc<AppState>, slug: &str, id: &str) -> Result<CatalogPa
     Ok(entry)
 }
 
-pub async fn install_plugin(repo: String, id: String, app: Arc<AppState>) -> Result<()> {
+pub async fn install_plugin(
+    repo: String,
+    id: PluginId,
+    permissions_confirmed: bool,
+    app: Arc<AppState>,
+) -> Result<()> {
     let staging = fetch_and_stage(&app, &repo, &id).await?;
-    install_staged(&app, &repo, &id, staging).await
+    install_staged(&app, &repo, &id, staging, permissions_confirmed).await
 }
 
-async fn fetch_and_stage(app: &Arc<AppState>, repo: &str, id: &str) -> Result<PathBuf> {
+async fn fetch_and_stage(app: &Arc<AppState>, repo: &str, id: &PluginId) -> Result<PathBuf> {
     let record = record(app, repo).await?;
     let url = url_of(&record)
         .ok_or_else(|| anyhow!("plugins in a local folder are not installed"))?
@@ -288,30 +313,68 @@ async fn fetch_and_stage(app: &Arc<AppState>, repo: &str, id: &str) -> Result<Pa
     blocking(move || catalog::stage(&stage_slug, &url, &entry)).await
 }
 
-async fn install_staged(app: &Arc<AppState>, repo: &str, id: &str, staging: PathBuf) -> Result<()> {
+async fn install_staged(
+    app: &Arc<AppState>,
+    repo: &str,
+    id: &PluginId,
+    staging: PathBuf,
+    permissions_confirmed: bool,
+) -> Result<()> {
     let _store = app.plugin_store.lock().await;
-    swap_and_load(app, repo, id, staging).await
+    swap_and_load(app, repo, id, staging, permissions_confirmed).await
 }
 
-async fn swap_and_load(app: &Arc<AppState>, repo: &str, id: &str, staging: PathBuf) -> Result<()> {
+fn update_needs_permissions(
+    previous: Option<&PackageDeclarations>,
+    next: &PackageDeclarations,
+) -> bool {
+    previous.is_none_or(|previous| {
+        next.uses.widens(&previous.uses) || next.matches.widens(&previous.matches)
+    })
+}
+
+async fn swap_and_load(
+    app: &Arc<AppState>,
+    repo: &str,
+    id: &PluginId,
+    staging: PathBuf,
+    permissions_confirmed: bool,
+) -> Result<()> {
+    let next = blocking({
+        let manifest = staging.join("plugin.yaml");
+        move || read_declarations(&std::fs::read(manifest)?)
+    })
+    .await?;
+    let previous = app.registry.declarations_for(id);
+    let disabled_for_update = !permissions_confirmed
+        && update_needs_permissions(previous.as_ref(), &next)
+        && app.config.read().await.plugins.enabled.contains(id);
+    if disabled_for_update {
+        plugins::set_enabled(id.clone(), false, Arc::clone(app)).await?;
+    }
     let mut copies: Vec<(PathBuf, PathBuf)> = remote_slugs(app)
         .await
         .into_iter()
         .filter(|slug| *slug != repo)
         .map(|slug| {
             let dir = catalog::repo_dir(&slug);
-            (dir.join(id), dir.join(format!(".{id}.old")))
+            (dir.join(id.as_str()), dir.join(format!(".{id}.old")))
         })
         .collect();
-    let target = catalog::repo_dir(repo).join(id);
+    let target = catalog::repo_dir(repo).join(id.as_str());
     let backup = catalog::repo_dir(repo).join(format!(".{id}.old"));
     copies.insert(0, (target.clone(), backup));
     let swap_copies = copies.clone();
     blocking(move || {
         swap_in(&staging, &swap_copies[0].0, &swap_copies[0].1)?;
-        swap_copies[1..]
+        if let Err(error) = swap_copies[1..]
             .iter()
             .try_for_each(|(dir, backup)| set_aside(dir, backup))
+        {
+            swap_back(&swap_copies[0].0, &swap_copies[0].1)?;
+            return Err(error);
+        }
+        Ok(())
     })
     .await?;
 
@@ -324,21 +387,34 @@ async fn swap_and_load(app: &Arc<AppState>, repo: &str, id: &str, staging: PathB
         })
         .await?;
         reload_registry(app).await;
-        reconcile_plugins(app, &[id.to_owned()]).await;
+        if disabled_for_update {
+            plugins::set_enabled(id.clone(), true, Arc::clone(app)).await?;
+        } else {
+            reconcile_plugins(app, std::slice::from_ref(id)).await;
+        }
         bail!("{id} failed to load: {problem}");
     }
     blocking(move || copies.iter().try_for_each(|(_, backup)| remove_dir(backup))).await?;
-    reconcile_plugins(app, &[id.to_owned()]).await;
+    if disabled_for_update {
+        notifications::send(
+            app,
+            NotificationCode::PluginUpdateNeedsPermissions {
+                plugin: id.clone(),
+                name: next.name,
+            },
+        )
+        .await;
+    }
+    reconcile_plugins(app, std::slice::from_ref(id)).await;
     Ok(())
 }
 
-pub async fn uninstall_plugin(id: String, app: Arc<AppState>) -> Result<()> {
-    validate_identifier("plugin id", &id)?;
+pub async fn uninstall_plugin(id: PluginId, app: Arc<AppState>) -> Result<()> {
     let _store = app.plugin_store.lock().await;
     let dirs: Vec<PathBuf> = remote_slugs(&app)
         .await
         .into_iter()
-        .map(|slug| catalog::repo_dir(&slug).join(&id))
+        .map(|slug| catalog::repo_dir(&slug).join(id.as_str()))
         .filter(|dir| dir.is_dir())
         .collect();
     if dirs.is_empty() {
@@ -356,7 +432,7 @@ pub async fn update_all_plugins(app: Arc<AppState>) -> Result<()> {
     let mut failures = Vec::new();
     for (slug, id) in updates {
         let installed = match fetch_and_stage(&app, &slug, &id).await {
-            Ok(staging) => swap_and_load(&app, &slug, &id, staging).await,
+            Ok(staging) => swap_and_load(&app, &slug, &id, staging, false).await,
             Err(error) => Err(error),
         };
         if let Err(error) = installed {
@@ -370,9 +446,9 @@ pub async fn update_all_plugins(app: Arc<AppState>) -> Result<()> {
 }
 
 fn pending_updates(
-    installed: Vec<(String, String, semver::Version)>,
+    installed: Vec<(String, PluginId, semver::Version)>,
     catalogs: &std::collections::HashMap<String, RepoCatalog>,
-) -> Vec<(String, String)> {
+) -> Vec<(String, PluginId)> {
     installed
         .into_iter()
         .filter(|(slug, id, version)| {
@@ -486,10 +562,11 @@ mod tests {
                 std::fs::create_dir_all(dir).unwrap();
             }
             for id in ["../x", "../../official", "../official", "", "."] {
-                assert!(uninstall_plugin(id.to_owned(), Arc::clone(&app))
-                    .await
-                    .is_err());
+                assert!(id.parse::<PluginId>().is_err(), "{id}");
             }
+            assert!(uninstall_plugin("x".parse().unwrap(), Arc::clone(&app))
+                .await
+                .is_err());
             assert!(kept.iter().all(|dir| dir.is_dir()));
             assert!(catalog::repo_dir("official").is_dir());
         })
@@ -512,16 +589,18 @@ mod tests {
             install_staged(
                 &app,
                 "official",
-                "demo",
+                &"demo".parse().unwrap(),
                 staged("official", "demo", "1.0.0"),
+                false,
             )
             .await
             .unwrap();
             install_staged(
                 &app,
                 "community",
-                "demo",
+                &"demo".parse().unwrap(),
                 staged("community", "demo", "2.0.0"),
+                false,
             )
             .await
             .unwrap();
@@ -540,23 +619,27 @@ mod tests {
             install_staged(
                 &app,
                 "official",
-                "demo",
+                &"demo".parse().unwrap(),
                 staged("official", "demo", "1.0.0"),
+                false,
             )
             .await
             .unwrap();
+            let demo: PluginId = "demo".parse().unwrap();
             let (first, second) = tokio::join!(
                 install_staged(
                     &app,
                     "official",
-                    "demo",
-                    staged("official", "demo", "1.1.0")
+                    &demo,
+                    staged("official", "demo", "1.1.0"),
+                    false
                 ),
                 install_staged(
                     &app,
                     "official",
-                    "demo",
-                    staged("official", "demo", "1.2.0")
+                    &demo,
+                    staged("official", "demo", "1.2.0"),
+                    false
                 ),
             );
             first.unwrap();
@@ -580,15 +663,16 @@ mod tests {
             install_staged(
                 &app,
                 "official",
-                "demo",
+                &"demo".parse().unwrap(),
                 staged("official", "demo", "1.0.0"),
+                false,
             )
             .await
             .unwrap();
             let broken = staged("official", "demo", "2.0.0");
             std::fs::write(broken.join("plugin.yaml"), "id: demo\n").unwrap();
 
-            let error = install_staged(&app, "official", "demo", broken)
+            let error = install_staged(&app, "official", &"demo".parse().unwrap(), broken, false)
                 .await
                 .unwrap_err();
 
@@ -635,12 +719,15 @@ mod tests {
     #[test]
     fn updates_are_only_offered_for_newer_compatible_versions() {
         let package = |id: &str, version: &str, api: &str| CatalogPackage {
-            id: id.into(),
+            id: id.parse().unwrap(),
+            name: id.into(),
             version: version.parse().unwrap(),
             api: api.parse().unwrap(),
             path: format!("packages/{id}.tar.gz"),
             sha256: "a".repeat(64),
             size: 1,
+            matches: Default::default(),
+            uses: Default::default(),
         };
         let catalog = halod_plugin_signing::Catalog {
             schema: halod_plugin_signing::catalog::CATALOG_SCHEMA,
@@ -667,14 +754,14 @@ mod tests {
             .map(|id| {
                 (
                     "official".to_owned(),
-                    id.to_owned(),
+                    id.parse().unwrap(),
                     "1.0.0".parse().unwrap(),
                 )
             })
             .collect();
         assert_eq!(
             pending_updates(installed, &catalogs),
-            [("official".to_owned(), "newer".to_owned())]
+            [("official".to_owned(), "newer".parse().unwrap())]
         );
     }
 
@@ -685,8 +772,9 @@ mod tests {
             install_staged(
                 &app,
                 "official",
-                "demo",
+                &"demo".parse().unwrap(),
                 staged("official", "demo", "1.0.0"),
+                false,
             )
             .await
             .unwrap();
@@ -697,9 +785,154 @@ mod tests {
                 .await
                 .plugins
                 .enabled
-                .contains(&"demo".to_owned()));
+                .contains(&"demo".parse().unwrap()));
         })
         .await;
+    }
+
+    fn staged_using(slug: &str, version: &str, transports: &str) -> PathBuf {
+        let package = staged(slug, "demo", version);
+        std::fs::write(
+            package.join("plugin.yaml"),
+            format!("id: demo\nversion: {version}\napi: \"3.0\"\ntype: integration\ntransports:\n  command:\n    commands: [nvidia-smi]\n{transports}"),
+        )
+        .unwrap();
+        package
+    }
+
+    const HTTP: &str = "  http:\n    origins: [https://api.example.com]\n";
+
+    async fn install_demo(app: &Arc<AppState>, transports: &str) {
+        with_remote_repo(app, "official").await;
+        install_staged(
+            app,
+            "official",
+            &"demo".parse().unwrap(),
+            staged_using("official", "1.0.0", transports),
+            false,
+        )
+        .await
+        .unwrap();
+    }
+
+    async fn install_enabled_demo(app: &Arc<AppState>, transports: &str) {
+        install_demo(app, transports).await;
+        let mut cfg = app.config.write().await;
+        cfg.plugins.enabled.push("demo".parse().unwrap());
+        app.registry.replace_policy(&cfg.plugins);
+    }
+
+    async fn demo_enabled(app: &AppState) -> bool {
+        app.config
+            .read()
+            .await
+            .plugins
+            .enabled
+            .contains(&"demo".parse().unwrap())
+    }
+
+    async fn update_demo(
+        app: &Arc<AppState>,
+        transports: &str,
+        permissions_confirmed: bool,
+    ) -> Vec<NotificationCode> {
+        let mut events = app.data_bus.subscribe_events();
+        install_staged(
+            app,
+            "official",
+            &"demo".parse().unwrap(),
+            staged_using("official", "1.1.0", transports),
+            permissions_confirmed,
+        )
+        .await
+        .unwrap();
+        let mut sent = Vec::new();
+        while let Ok(event) = events.try_recv() {
+            let halod_shared::bus::BusEventPayload::Notification(n) = event.payload;
+            sent.push(n.code);
+        }
+        sent
+    }
+
+    fn needs_permissions(sent: &[NotificationCode]) -> bool {
+        sent.iter()
+            .any(|code| matches!(code, NotificationCode::PluginUpdateNeedsPermissions { .. }))
+    }
+
+    #[tokio::test]
+    async fn an_update_needing_more_permissions_lands_disabled_and_notifies() {
+        crate::test_support::with_tmp_config(|app| async move {
+            install_enabled_demo(&app, "").await;
+            let sent = update_demo(&app, HTTP, false).await;
+            assert!(!demo_enabled(&app).await);
+            assert!(needs_permissions(&sent), "{sent:?}");
+        })
+        .await;
+    }
+
+    #[tokio::test]
+    async fn a_confirmed_wider_update_stays_enabled_without_a_notification() {
+        crate::test_support::with_tmp_config(|app| async move {
+            install_enabled_demo(&app, "").await;
+            let sent = update_demo(&app, HTTP, true).await;
+            assert!(demo_enabled(&app).await);
+            assert!(!needs_permissions(&sent), "{sent:?}");
+        })
+        .await;
+    }
+
+    #[tokio::test]
+    async fn a_wider_update_of_a_disabled_plugin_does_not_notify() {
+        crate::test_support::with_tmp_config(|app| async move {
+            install_demo(&app, "").await;
+            let sent = update_demo(&app, HTTP, false).await;
+            assert!(!needs_permissions(&sent), "{sent:?}");
+            assert!(!demo_enabled(&app).await);
+        })
+        .await;
+    }
+
+    #[tokio::test]
+    async fn an_update_needing_fewer_permissions_stays_enabled() {
+        crate::test_support::with_tmp_config(|app| async move {
+            install_enabled_demo(&app, HTTP).await;
+            let sent = update_demo(&app, "", false).await;
+            assert!(demo_enabled(&app).await);
+            assert!(!needs_permissions(&sent));
+        })
+        .await;
+    }
+
+    #[test]
+    fn permissions_are_needed_for_wider_uses_wider_matches_or_an_unknown_previous() {
+        use halod_shared::types::{HidIdentity, Permission};
+        let mut base = PackageDeclarations {
+            name: "demo".into(),
+            matches: Default::default(),
+            uses: Default::default(),
+        };
+        base.uses.permissions = vec![Permission::Hid];
+        base.matches.hid = vec![HidIdentity {
+            vid: 0x1234,
+            pids: vec![1],
+            usage_page: None,
+            usage: None,
+            interface: None,
+        }];
+        assert!(!update_needs_permissions(Some(&base), &base));
+        assert!(update_needs_permissions(None, &base));
+        let mut wider_uses = base.clone();
+        wider_uses.uses.permissions.push(Permission::Network);
+        assert!(update_needs_permissions(Some(&base), &wider_uses));
+        let mut any_hid = base.clone();
+        any_hid.matches.hid_any = true;
+        assert!(update_needs_permissions(Some(&base), &any_hid));
+        let mut more_pids = base.clone();
+        more_pids.matches.hid[0].pids.push(2);
+        assert!(update_needs_permissions(Some(&base), &more_pids));
+        let mut fewer = base.clone();
+        fewer.uses.permissions.clear();
+        assert!(!update_needs_permissions(Some(&base), &fewer));
     }
 
     fn dir_with(path: &Path, marker: &str) {

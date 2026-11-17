@@ -106,10 +106,14 @@ pub enum CatalogErrorCode {
 #[derive(Debug, Clone, PartialEq, Eq, Serialize, Deserialize)]
 pub struct AvailablePlugin {
     pub repo: String,
-    pub id: String,
+    pub id: crate::ids::PluginId,
+    pub name: String,
     pub version: String,
     pub api: String,
     pub compatible: bool,
+    pub uses: PackageUses,
+    #[serde(default)]
+    pub matches: PackageMatches,
 }
 
 /// The boundary between "trusted to talk to its matched device" and "trusted to reach outside it".
@@ -143,16 +147,88 @@ pub enum PluginProvenance {
     Local,
 }
 
-/// What a plugin's manifest declares it uses; display-only.
+/// What a plugin's manifest declares it uses; an update that widens it needs the user's permission again.
 #[derive(Debug, Clone, Default, PartialEq, Eq, Serialize, Deserialize)]
-pub struct PluginAccess {
-    #[serde(default)]
+#[serde(deny_unknown_fields)]
+pub struct PackageUses {
     pub permissions: Vec<Permission>,
-    #[serde(default)]
     pub commands: Vec<String>,
     /// Exact keys, except for the host-managed `host.sensors.*` scope.
-    #[serde(default)]
     pub data_reads: Vec<String>,
+}
+
+impl PackageUses {
+    pub fn widens(&self, previous: &PackageUses) -> bool {
+        fn beyond<T: PartialEq>(next: &[T], previous: &[T]) -> bool {
+            next.iter().any(|item| !previous.contains(item))
+        }
+        beyond(&self.permissions, &previous.permissions)
+            || beyond(&self.commands, &previous.commands)
+            || beyond(&self.data_reads, &previous.data_reads)
+    }
+}
+
+#[derive(Debug, Clone, PartialEq, Eq, Serialize, Deserialize)]
+#[serde(deny_unknown_fields)]
+pub struct HidIdentity {
+    pub vid: u16,
+    pub pids: Vec<u16>,
+    #[serde(default, skip_serializing_if = "Option::is_none")]
+    pub usage_page: Option<u16>,
+    #[serde(default, skip_serializing_if = "Option::is_none")]
+    pub usage: Option<u16>,
+    #[serde(default, skip_serializing_if = "Option::is_none")]
+    pub interface: Option<i32>,
+}
+
+#[derive(Debug, Clone, PartialEq, Eq, Serialize, Deserialize)]
+#[serde(deny_unknown_fields)]
+pub struct UsbIdentity {
+    pub vid: u16,
+    pub pids: Vec<u16>,
+    pub interface: u8,
+}
+
+#[derive(Debug, Clone, Default, PartialEq, Eq, Serialize, Deserialize)]
+#[serde(deny_unknown_fields)]
+pub struct PciIdentity {
+    #[serde(default, skip_serializing_if = "Option::is_none")]
+    pub vendor: Option<u16>,
+    #[serde(default, skip_serializing_if = "Option::is_none")]
+    pub device: Option<u16>,
+    #[serde(default, skip_serializing_if = "Option::is_none")]
+    pub sub_vendor: Option<u16>,
+    #[serde(default, skip_serializing_if = "Option::is_none")]
+    pub sub_device: Option<u16>,
+}
+
+#[derive(Debug, Clone, Default, PartialEq, Eq, Serialize, Deserialize)]
+#[serde(deny_unknown_fields)]
+pub struct PackageMatches {
+    pub platforms: Vec<String>,
+    #[serde(default, skip_serializing_if = "std::ops::Not::not")]
+    pub hid_any: bool,
+    pub hid: Vec<HidIdentity>,
+    pub usb: Vec<UsbIdentity>,
+    pub smbus_gpu: Vec<PciIdentity>,
+    pub commands: Vec<String>,
+}
+
+impl PackageMatches {
+    pub fn supports_platform(&self, os: &str) -> bool {
+        self.platforms.is_empty() || self.platforms.iter().any(|platform| platform == os)
+    }
+
+    pub fn widens(&self, previous: &PackageMatches) -> bool {
+        fn beyond<T: PartialEq>(next: &[T], previous: &[T]) -> bool {
+            next.iter().any(|item| !previous.contains(item))
+        }
+        (self.hid_any && !previous.hid_any)
+            || beyond(&self.hid, &previous.hid)
+            || beyond(&self.usb, &previous.usb)
+            || beyond(&self.smbus_gpu, &previous.smbus_gpu)
+            || beyond(&self.commands, &previous.commands)
+    }
 }
 
 #[derive(Debug, Clone, PartialEq, Eq, Serialize, Deserialize)]
@@ -391,9 +467,11 @@ pub enum PluginRecommendationMatch {
 
 #[derive(Debug, Clone, PartialEq, Eq, Serialize, Deserialize)]
 pub struct PluginRecommendation {
-    pub plugin_id: String,
+    pub plugin_id: crate::ids::PluginId,
     pub plugin_name: String,
     pub hardware: PluginRecommendationMatch,
+    #[serde(default, skip_serializing_if = "Option::is_none")]
+    pub install_from: Option<String>,
     /// Always true until the access probe lands.
     #[serde(default = "default_true")]
     pub accessible: bool,
@@ -410,16 +488,16 @@ pub struct UdevRulesStatus {
     pub generated_rule_count: usize,
     /// Empty when the rules are current or only the daemon baseline drifted.
     #[serde(default, skip_serializing_if = "Vec::is_empty")]
-    pub plugins_requiring_update: Vec<String>,
+    pub plugins_requiring_update: Vec<crate::ids::PluginId>,
     #[serde(default, skip_serializing_if = "std::collections::BTreeMap::is_empty")]
-    pub missing_rules_by_plugin: std::collections::BTreeMap<String, Vec<String>>,
+    pub missing_rules_by_plugin: std::collections::BTreeMap<crate::ids::PluginId, Vec<String>>,
     #[serde(default, skip_serializing_if = "Vec::is_empty")]
-    pub contributing_plugin_ids: Vec<String>,
+    pub contributing_plugin_ids: Vec<crate::ids::PluginId>,
 }
 
 #[derive(Debug, Clone, Serialize, Deserialize)]
 pub struct PluginInfo {
-    pub id: String,
+    pub id: crate::ids::PluginId,
     pub name: String,
     #[serde(default)]
     pub translations: BTreeMap<String, BTreeMap<String, String>>,
@@ -463,7 +541,9 @@ pub struct PluginInfo {
     #[serde(default)]
     pub provenance: PluginProvenance,
     #[serde(default)]
-    pub access: PluginAccess,
+    pub uses: PackageUses,
+    #[serde(default)]
+    pub matches: PackageMatches,
     #[serde(default)]
     pub provides: Vec<String>,
     #[serde(default)]
@@ -597,4 +677,49 @@ pub struct PluginConfigField {
     pub help: Option<String>,
     #[serde(default, skip_serializing_if = "Option::is_none")]
     pub placeholder: Option<String>,
+}
+
+#[cfg(test)]
+mod tests {
+    use super::*;
+    use proptest::prelude::*;
+
+    const PERMISSIONS: [Permission; 4] = [
+        Permission::Hid,
+        Permission::Usb,
+        Permission::Network,
+        Permission::Command,
+    ];
+
+    fn uses(mask: u8, commands: &[&str]) -> PackageUses {
+        PackageUses {
+            permissions: PERMISSIONS
+                .iter()
+                .enumerate()
+                .filter(|(bit, _)| mask & (1 << bit) != 0)
+                .map(|(_, permission)| *permission)
+                .collect(),
+            commands: commands.iter().map(|c| (*c).to_owned()).collect(),
+            data_reads: Vec::new(),
+        }
+    }
+
+    proptest! {
+        #[test]
+        fn widens_exactly_when_the_next_set_is_not_a_subset(previous in 0u8..16, next in 0u8..16) {
+            prop_assert_eq!(
+                uses(next, &[]).widens(&uses(previous, &[])),
+                next & !previous != 0
+            );
+        }
+    }
+
+    #[test]
+    fn a_new_program_or_data_read_widens() {
+        assert!(uses(0, &["nvidia-smi"]).widens(&uses(0, &[])));
+        assert!(!uses(0, &[]).widens(&uses(0, &["nvidia-smi"])));
+        let mut reads = uses(0, &[]);
+        reads.data_reads.push("host.sensors.*".into());
+        assert!(reads.widens(&uses(0, &[])));
+    }
 }

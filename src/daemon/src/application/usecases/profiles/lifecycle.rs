@@ -11,6 +11,7 @@ use crate::domain::events::Change;
 use crate::domain::profiles::device_state::persist_device_state;
 use crate::domain::profiles::model::Profile;
 use crate::domain::profiles::observers::active_window::ControlMsg;
+use halod_shared::ids::DeviceId;
 use halod_shared::types::DEFAULT_PROFILE_NAME;
 
 /// Applies the active profile's stored device states to all currently-connected devices.
@@ -229,8 +230,8 @@ pub async fn rename_profile(old_name: String, new_name: String, app: Arc<AppStat
 
 /// Persist the RGB Lighting view's device/zone selection in the active profile.
 pub async fn set_lighting_targets(
-    device_ids: Vec<String>,
-    channels: std::collections::HashMap<String, Vec<String>>,
+    device_ids: Vec<DeviceId>,
+    channels: std::collections::HashMap<DeviceId, Vec<String>>,
     app: Arc<AppState>,
 ) -> Result<()> {
     let cap = halod_shared::types::MAX_LIGHTING_TARGET_IDS;
@@ -264,8 +265,8 @@ mod tests {
         let app = app_with(vec![]);
         add_profile("Gaming".into(), app.clone()).await.unwrap();
         set_lighting_targets(
-            vec!["dev1".into()],
-            std::collections::HashMap::from([("dev1".to_string(), vec!["z0".to_string()])]),
+            vec!["dev1".parse().unwrap()],
+            std::collections::HashMap::from([("dev1".parse().unwrap(), vec!["z0".into()])]),
             app.clone(),
         )
         .await
@@ -402,18 +403,19 @@ mod tests {
                 .unwrap()
                 .device_states
                 .insert(
-                    "dev1".into(),
+                    "dev1".parse().unwrap(),
                     serde_json::json!({ "rgb": {"m": "static"}, "fan_curve": {"a": 1} }),
                 );
             let mut gaming = Profile::default();
-            gaming
-                .device_states
-                .insert("dev1".into(), serde_json::json!({ "fan_curve": {"a": 2} }));
+            gaming.device_states.insert(
+                "dev1".parse().unwrap(),
+                serde_json::json!({ "fan_curve": {"a": 2} }),
+            );
             cfg.profiles.insert("Gaming".into(), gaming);
             cfg.active_profile = "Gaming".into();
         }
         let cfg = app.config.read().await;
-        let eff = cfg.effective_device_state("dev1");
+        let eff = cfg.effective_device_state(&"dev1".parse().unwrap());
         assert_eq!(eff["rgb"]["m"], "static");
         assert_eq!(eff["fan_curve"]["a"], 2);
     }
@@ -431,14 +433,18 @@ mod tests {
             .active_profile_data_mut()
             .device_states
             .insert(
-                "lcd0".into(),
+                "lcd0".parse().unwrap(),
                 serde_json::json!({ "lcd": { "template_id": "custom" } }),
             );
 
         load_active_profile(app.clone()).await;
 
         assert!(
-            app.lcd.engine().unwrap().has_slot("lcd0").await,
+            app.lcd
+                .engine()
+                .unwrap()
+                .has_slot(&"lcd0".parse().unwrap())
+                .await,
             "engine must re-activate the restored template"
         );
     }
@@ -455,7 +461,7 @@ mod tests {
             .active_profile_data_mut()
             .device_states
             .insert(
-                "lcd0".into(),
+                "lcd0".parse().unwrap(),
                 serde_json::json!({ "lcd": { "template_id": "custom" } }),
             );
 
@@ -464,13 +470,17 @@ mod tests {
         app.lcd
             .engine()
             .unwrap()
-            .set_template_active("lcd0", "custom", &Default::default())
+            .set_template_active(&"lcd0".parse().unwrap(), "custom", &Default::default())
             .await;
 
         load_active_profile(app.clone()).await;
 
         assert!(
-            app.lcd.engine().unwrap().has_slot("lcd0").await,
+            app.lcd
+                .engine()
+                .unwrap()
+                .has_slot(&"lcd0".parse().unwrap())
+                .await,
             "template must survive the remove+re-add cycle"
         );
         assert_eq!(
@@ -491,7 +501,7 @@ mod tests {
             .active_profile_data_mut()
             .device_states
             .insert(
-                "lcd0".into(),
+                "lcd0".parse().unwrap(),
                 serde_json::json!({
                     "lcd": { "mode": "video", "video_path": "/nonexistent/gone.mp4" }
                 }),
@@ -526,7 +536,7 @@ mod tests {
             .active_profile_data_mut()
             .device_states
             .insert(
-                "lcd0".into(),
+                "lcd0".parse().unwrap(),
                 serde_json::json!({
                     "lcd": { "mode": "video", "video_path": path_str.clone() }
                 }),
@@ -550,7 +560,10 @@ mod tests {
                 .get_mut(DEFAULT_PROFILE_NAME)
                 .unwrap()
                 .device_states
-                .insert("fan_0".into(), serde_json::json!({ "fan_curve": {"a": 1} }));
+                .insert(
+                    "fan_0".parse().unwrap(),
+                    serde_json::json!({ "fan_curve": {"a": 1} }),
+                );
         }
         add_profile("Gaming".into(), app.clone()).await.unwrap();
         let cfg = app.config.read().await;

@@ -103,4 +103,6 @@ device:
   children_pair_new_device: Accoppia nuovo dispositivo
   children_paired_slots: Slot accoppiati
   children_unpair: Scollega
+  children_unpair_title: "Scollegare %{name}?"
+  children_unpair_confirm: "%{name} verrà rimosso dal ricevitore. Per usarlo dovrai associarlo di nuovo."
   children_available: Disponibile

@@ -33,6 +33,7 @@ use crate::domain::plugin;
 use crate::domain::plugin::ProbeMode;
 use crate::domain::plugin::Registry;
 pub use halod_shared::debug_info::SmbusBusKind;
+use halod_shared::ids::PluginId;
 
 /// A PCI-identity filter that gates a GPU-bus scan to known cards, so the daemon
 /// never pokes an RGB address on a graphics card it doesn't recognise — the GPU
@@ -65,6 +66,18 @@ impl PciMatch {
             && self.device.is_none_or(|v| v == bus.pci_device)
             && self.sub_vendor.is_none_or(|v| v == bus.pci_sub_vendor)
             && self.sub_device.is_none_or(|v| v == bus.pci_sub_device)
+    }
+}
+
+impl From<&halod_shared::types::PciIdentity> for PciMatch {
+    fn from(identity: &halod_shared::types::PciIdentity) -> Self {
+        Self {
+            vendor: identity.vendor,
+            device: identity.device,
+            sub_vendor: identity.sub_vendor,
+            sub_device: identity.sub_device,
+            confirmed: false,
+        }
     }
 }
 
@@ -219,7 +232,7 @@ struct ScanJob {
 enum PreScan {
     None,
     Plugin {
-        plugin_id: String,
+        plugin_id: PluginId,
         source: String,
         modules: std::collections::BTreeMap<String, String>,
         scope: Vec<u8>,

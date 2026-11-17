@@ -37,9 +37,7 @@ impl RotatingLog {
         state.written += line.len() as u64;
         if state.written >= MAX_LOG_BYTES {
             shift_rotations(&self.path, MAX_ROTATED);
-            if let Some(fresh) = open_log(&self.path) {
-                *state = fresh;
-            }
+            continue_after_rotation(state, open_log(&self.path));
         }
     }
 
@@ -48,6 +46,13 @@ impl RotatingLog {
         if let Some(state) = guard.as_mut() {
             let _ = state.file.flush();
         }
+    }
+}
+
+fn continue_after_rotation(state: &mut LogState, reopened: Option<LogState>) {
+    match reopened {
+        Some(fresh) => *state = fresh,
+        None => state.written = 0,
     }
 }
 
@@ -102,6 +107,16 @@ mod tests {
 
         log.write_line("x");
         assert!(rotated_path(&base, 1).exists());
+    }
+
+    #[test]
+    fn a_failed_reopen_restarts_the_byte_count_instead_of_rotating_every_line() {
+        let dir = tempfile::tempdir().unwrap();
+        let base = dir.path().join("halod.log");
+        let mut state = open_log(&base).unwrap();
+        state.written = MAX_LOG_BYTES;
+        continue_after_rotation(&mut state, None);
+        assert_eq!(state.written, 0);
     }
 
     #[test]

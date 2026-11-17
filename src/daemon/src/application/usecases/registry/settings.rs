@@ -19,8 +19,6 @@ pub async fn set_engine_config(
     failsafe_duty: Option<u8>,
     app: Arc<AppState>,
 ) -> Result<()> {
-    let failsafe_duty = failsafe_duty.map(|d| d.min(100));
-
     {
         let mut cfg = app.config.write().await;
         match kind {
@@ -29,11 +27,12 @@ pub async fn set_engine_config(
                     cfg.cooling.fan_curve_enabled = v;
                 }
                 if let Some(ms) = tick_ms {
-                    cfg.cooling.fan_curve_tick_ms = ms.clamp(500, 60_000);
+                    cfg.cooling.fan_curve_tick_ms = ms;
                 }
                 if let Some(d) = failsafe_duty {
                     cfg.cooling.fan_failsafe_duty = d;
                 }
+                cfg.cooling.sanitize();
             }
             EngineKind::Canvas => {
                 if let Some(v) = enabled {

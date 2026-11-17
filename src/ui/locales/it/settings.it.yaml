@@ -1,6 +1,6 @@
 settings:
   language_sub: "Lingua dell’interfaccia"
-  credits_sub: "Persone e progetti che hanno reso possibile halod"
+  credits_sub: "Persone e progetti che hanno reso possibile HaloDaemon"
   version_sub: "Build %{build} · %{license}"
   version_title: "Versione"
   show_hidden_sub: "Includi i dispositivi nascosti dalla Home"
@@ -17,19 +17,34 @@ settings:
   daemon_disconnected_sub: "Non connesso"
   daemon_connected_sub: "Connesso · versione %{version}"
   fps_value: "%{n} fps"
-  failsafe_sub: "Usato quando il sensore di una curva non è disponibile per più di 10 s"
+  failsafe_sub: "Usato quando il sensore di una curva manca da più di 10 s o è bloccato"
   failsafe_title: "Duty di sicurezza ventole"
+  fan_ramp_up_title: "Velocità di accelerazione ventole"
+  fan_ramp_up_sub: "Quanto velocemente le ventole accelerano quando la temperatura sale"
+  fan_ramp_down_title: "Velocità di rallentamento ventole"
+  fan_ramp_down_sub: "Quanto velocemente le ventole rallentano quando la temperatura scende"
+  fan_hysteresis_title: "Isteresi ventole"
+  fan_hysteresis_sub: "Di quanto deve scendere la temperatura prima che le ventole rallentino"
+  fan_smoothing_title: "Livellamento temperatura"
+  fan_smoothing_sub: "Media le letture così i picchi brevi non accelerano le ventole"
+  fan_stale_title: "Rilevamento sensore bloccato"
+  fan_stale_sub: "Usa il duty di sicurezza quando un sensore smette di cambiare"
+  fan_instant: "Immediato"
+  fan_off: "Disattivato"
+  fan_rate_value: "%{n} %/s"
+  fan_celsius_value: "%{n} °C"
+  fan_seconds_value: "%{n} s"
   fan_tick_value: "Ogni %{secs} s"
   fan_engine_sub: "Con quale frequenza le curve leggono i sensori e impostano il duty"
   fan_engine_title: "Curve ventole"
   canvas_engine_sub: "Con quale frequenza il canvas campiona e invia i fotogrammi"
   canvas_engine_title: "Canvas illuminazione"
   section_application_sub: "Avvio, area di notifica e lingua"
-  section_engines_sub: "Con quale frequenza halod aggiorna illuminazione, schermi e ventole"
-  section_devices_sub: "Rilevamento e connessione al servizio halod"
-  section_healthcheck_sub: "Accessi di sistema di cui halod ha bisogno per il tuo hardware"
-  section_logging_sub: "Dove halod scrive il log e quanto dettaglio conserva"
-  section_about_sub: "halod, un demone per controllare le periferiche"
+  section_engines_sub: "Con quale frequenza HaloDaemon aggiorna illuminazione, schermi e ventole"
+  section_devices_sub: "Rilevamento e connessione al servizio HaloDaemon"
+  section_healthcheck_sub: "Accessi di sistema di cui HaloDaemon ha bisogno per il tuo hardware"
+  section_logging_sub: "Dove HaloDaemon scrive il log e quanto dettaglio conserva"
+  section_about_sub: "HaloDaemon, un demone per controllare le periferiche"
   recheck_title: "Esegui tutte le verifiche"
   recheck_sub: "Controlla di nuovo gli accessi di sistema"
   title: Impostazioni
@@ -40,7 +55,7 @@ settings:
   section_about: "Informazioni"
   section_healthcheck: "Verifica del sistema"
   start_on_boot_title: Avvia all'accesso
-  start_on_boot_sub: "Avvia halod nell’area di notifica all’accesso"
+  start_on_boot_sub: "Avvia HaloDaemon nell’area di notifica all’accesso"
   start_on_boot_managed_sub: Questa opzione è gestita dalla configurazione di sistema. Modificala da lì.
   start_on_boot_managed_value: Controllato dal sistema
   close_to_tray_title: Chiudi nell'area di notifica
@@ -55,7 +70,7 @@ settings:
   replay_tutorials_sub: "Mostra di nuovo la guida la prossima volta che apri ogni pagina"
   replay_button: Ripeti
   lcd_engine_sub: "Frequenza dei contenuti dinamici sugli LCD"
-  daemon_title: "Servizio halod"
+  daemon_title: "Servizio HaloDaemon"
   rediscover_title: "Rileva di nuovo i dispositivi"
   rediscover_sub: "Cerca nuovi dispositivi su USB, HID, hwmon e SMBus"
   scan_now_button: Scansiona ora
@@ -75,7 +90,7 @@ settings:
   diagnostics_sub: "Ogni dispositivo HID connesso, quali sono stati riconosciuti e il livello di accesso attuale"
   open_button: "Apri"
   third_party_title: "Licenze di terze parti"
-  third_party_sub: "Componenti open source usati da halod"
+  third_party_sub: "Componenti open source usati da HaloDaemon"
   view_button: "Visualizza"
   repository_title: Repository
   licenses_modal_body: Componenti open source inclusi o utilizzati da HaloDaemon, raggruppati per licenza.

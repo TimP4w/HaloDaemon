@@ -47,6 +47,7 @@ use std::sync::Arc;
 
 use crate::domain::device::Device;
 use crate::domain::registry::observers::discovery::DiscoveryHandle;
+use halod_shared::ids::{DeviceId, PluginId};
 
 mod scan;
 
@@ -79,7 +80,7 @@ pub(crate) fn restore_in_flight() -> bool {
 /// layer uses this marker to avoid a second generic stack-trace toast.
 #[derive(Debug)]
 pub(crate) struct SurfacedPluginError {
-    pub plugin: String,
+    pub plugin: PluginId,
     pub detail: String,
 }
 
@@ -103,7 +104,7 @@ fn declared_write_rate_limit(max_bytes_per_sec: Option<u32>) -> Option<WriteRate
 /// effect or another plugin's.
 #[derive(Clone)]
 pub struct PluginEffectEntry {
-    pub plugin_id: String,
+    pub plugin_id: PluginId,
     pub script_source: String,
     pub module_sources: std::collections::BTreeMap<String, String>,
     pub kind: EffectKind,
@@ -113,7 +114,7 @@ pub struct PluginEffectEntry {
 
 #[derive(Clone)]
 pub struct PluginWidgetEntry {
-    pub plugin_id: String,
+    pub plugin_id: PluginId,
     pub script_source: String,
     pub module_sources: std::collections::BTreeMap<String, String>,
     pub catalog_id: String,
@@ -123,7 +124,7 @@ pub struct PluginWidgetEntry {
 
 #[derive(Clone)]
 pub struct PluginPresetEntry {
-    pub plugin_id: String,
+    pub plugin_id: PluginId,
     pub catalog_id: String,
     pub descriptor: halod_shared::types::LcdPresetDescriptor,
     pub plugin_dir: std::path::PathBuf,
@@ -182,16 +183,16 @@ struct PluginState {
     presets: Vec<PluginPresetEntry>,
     /// Plugin ids the user disabled. `match_handle` skips these, so a disabled
     /// plugin no longer shadows its built-in host device.
-    disabled: HashSet<String>,
+    disabled: HashSet<PluginId>,
     /// Integration ids disabled *as an integration* — independent of `disabled`
     /// (which governs whether the Lua may run at all). Only meaningful for
     /// `PluginKind::Integration` plugins.
-    integrations_disabled: HashSet<String>,
-    integrations_configured: HashSet<String>,
-    origins: HashMap<String, Origin>,
+    integrations_disabled: HashSet<PluginId>,
+    integrations_configured: HashSet<PluginId>,
+    origins: HashMap<PluginId, Origin>,
     /// Non-secure config values the user set per plugin. Secure values never
     /// live here — see the secret store.
-    config_values: HashMap<String, HashMap<String, String>>,
+    config_values: HashMap<PluginId, HashMap<String, String>>,
 }
 
 /// Bound repeated opens from polling discovery scanners. A busy interface is
@@ -229,8 +230,8 @@ pub struct Registry {
     /// Cached requirement statuses per plugin id. Populated lazily and refreshed
     /// at event points (startup, reconcile) so probes — some of which spawn
     /// processes or open device nodes — never run on every state poll.
-    requirement_cache: RwLock<HashMap<String, Vec<halod_shared::types::PluginRequirementStatus>>>,
-    integration_setups: RwLock<HashMap<String, halod_shared::types::IntegrationSetupStatus>>,
+    requirement_cache: RwLock<HashMap<PluginId, Vec<halod_shared::types::PluginRequirementStatus>>>,
+    integration_setups: RwLock<HashMap<PluginId, halod_shared::types::IntegrationSetupStatus>>,
     /// Delayed runtime-error reprobes, keyed by plugin id. A single failing RGB
     /// frame fans out across device calls, so recovery is coalesced per plugin,
     /// and a reconcile re-applies device state — so a failure that survives one
@@ -239,7 +240,8 @@ pub struct Registry {
     /// Failed transport opens in the current plugin-load episode, keyed by the
     /// stable plugin device id. A successful open, plugin reload, or a USB
     /// replug resets it.
-    transport_open_failures: RwLock<HashMap<(String, String), crate::util::backoff::FailureStreak>>,
+    transport_open_failures:
+        RwLock<HashMap<(PluginId, DeviceId), crate::util::backoff::FailureStreak>>,
     content_revision: std::sync::atomic::AtomicU64,
 }
 
@@ -325,7 +327,7 @@ pub fn udev_rules_from_catalog(url: &str) -> anyhow::Result<String> {
         }
         let archive = https_get(&package_url(url, &entry.path)?, MAX_ARCHIVE_BYTES)?;
         entry.verify(&archive)?;
-        extract_archive(&archive, &root.path().join(&entry.id))?;
+        extract_archive(&archive, &root.path().join(entry.id.as_str()))?;
     }
     let registry = Registry::default();
     registry.load_all(&[crate::config::PluginRepoRecord {
@@ -334,27 +336,6 @@ pub fn udev_rules_from_catalog(url: &str) -> anyhow::Result<String> {
         trusted_key: None,
     }]);
     Ok(registry.udev_rules())
-}
-
-fn access_for_manifest(manifest: &PluginManifest) -> halod_shared::types::PluginAccess {
-    let mut data_reads: Vec<String> = manifest
-        .consumes
-        .iter()
-        .filter(|key| !key.starts_with(&format!("{}.", manifest.plugin_id)))
-        .cloned()
-        .collect();
-    data_reads.sort();
-    data_reads.dedup();
-    halod_shared::types::PluginAccess {
-        permissions: manifest.permissions(),
-        commands: manifest
-            .transports
-            .command
-            .as_ref()
-            .map(|command| command.commands.clone())
-            .unwrap_or_default(),
-        data_reads,
-    }
 }
 
 fn effect_entries_for(manifest: &PluginManifest) -> Vec<PluginEffectEntry> {
@@ -404,7 +385,7 @@ fn preset_entries_for(manifest: &PluginManifest) -> Vec<PluginPresetEntry> {
 }
 
 impl Registry {
-    fn effect_enabled(state: &PluginState, plugin_id: &str) -> bool {
+    fn effect_enabled(state: &PluginState, plugin_id: &PluginId) -> bool {
         state.manifests.iter().any(|m| m.plugin_id == plugin_id)
             && !state.disabled.contains(plugin_id)
     }
@@ -432,7 +413,7 @@ impl Registry {
         self.effect_descriptors(EffectKind::Direct)
     }
 
-    fn lcd_entry_active(state: &PluginState, plugin_id: &str) -> bool {
+    fn lcd_entry_active(state: &PluginState, plugin_id: &PluginId) -> bool {
         state
             .manifests
             .iter()
@@ -641,7 +622,7 @@ impl Registry {
 
     /// Start a fresh transport-open episode for one plugin. Used when its
     /// enable state changes so disabling and re-enabling is an explicit retry.
-    fn reset_transport_open_failures_for(&self, plugin_id: &str) {
+    fn reset_transport_open_failures_for(&self, plugin_id: &PluginId) {
         self.transport_open_failures
             .write()
             .retain(|(failed_plugin_id, _), _| failed_plugin_id != plugin_id);
@@ -651,7 +632,7 @@ impl Registry {
     /// Plugging a device in is a retry boundary for the plugins that could
     /// drive it, and only those.
     pub(crate) fn reset_transport_open_failures_for_usb(&self, vid: u16, pid: u16) {
-        let plugins: Vec<String> = self
+        let plugins: Vec<PluginId> = self
             .snapshot()
             .manifests
             .iter()
@@ -676,7 +657,7 @@ impl Registry {
     /// Transport kinds of plugins with an open or init failure that still has
     /// attempts left, so a retry loop can rescan only the buses that need it.
     pub(crate) fn retryable_open_failure_kinds(&self) -> HashSet<&'static str> {
-        let plugins: HashSet<String> = self
+        let plugins: HashSet<PluginId> = self
             .transport_open_failures
             .read()
             .iter()
@@ -691,18 +672,18 @@ impl Registry {
             .collect()
     }
 
-    fn transport_open_blocked(&self, key: &(String, String)) -> bool {
+    fn transport_open_blocked(&self, key: &(PluginId, DeviceId)) -> bool {
         self.transport_open_failures
             .read()
             .get(key)
             .is_some_and(|streak| {
                 streak.failures() >= TRANSPORT_OPEN_ATTEMPTS
-                    || !streak.elapsed(std::time::Instant::now(), TRANSPORT_OPEN_BACKOFF)
+                    || !streak.elapsed(tokio::time::Instant::now(), TRANSPORT_OPEN_BACKOFF)
             })
     }
 
-    fn note_transport_open_failure(&self, key: (String, String)) -> u32 {
-        let now = std::time::Instant::now();
+    fn note_transport_open_failure(&self, key: (PluginId, DeviceId)) -> u32 {
+        let now = tokio::time::Instant::now();
         self.transport_open_failures
             .write()
             .entry(key)
@@ -711,36 +692,36 @@ impl Registry {
             .failures()
     }
 
-    fn is_disabled(&self, plugin_id: &str) -> bool {
+    fn is_disabled(&self, plugin_id: &PluginId) -> bool {
         self.snapshot().disabled.contains(plugin_id)
     }
 
     pub fn integration_setup_status(
         &self,
-        plugin_id: &str,
+        plugin_id: &PluginId,
     ) -> Option<halod_shared::types::IntegrationSetupStatus> {
         self.integration_setups.read().get(plugin_id).cloned()
     }
 
     pub fn set_integration_setup_status(
         &self,
-        plugin_id: String,
+        plugin_id: PluginId,
         status: halod_shared::types::IntegrationSetupStatus,
     ) {
         self.integration_setups.write().insert(plugin_id, status);
     }
 
-    pub fn clear_integration_setup_status(&self, plugin_id: &str) {
+    pub fn clear_integration_setup_status(&self, plugin_id: &PluginId) {
         self.integration_setups.write().remove(plugin_id);
     }
 
-    fn is_integration_disabled(&self, plugin_id: &str) -> bool {
+    fn is_integration_disabled(&self, plugin_id: &PluginId) -> bool {
         self.snapshot().integrations_disabled.contains(plugin_id)
     }
 
     /// Whether `plugin_id`'s manifest may execute on the current host. Unknown
     /// plugins report `false`.
-    pub(crate) fn supports_current_platform(&self, plugin_id: &str) -> bool {
+    pub(crate) fn supports_current_platform(&self, plugin_id: &PluginId) -> bool {
         self.snapshot()
             .manifests
             .iter()
@@ -748,16 +729,27 @@ impl Registry {
             .is_some_and(|m| m.supports_current_platform())
     }
 
-    pub(crate) fn granted_for(&self, plugin_id: &str) -> Vec<Permission> {
+    pub(crate) fn declarations_for(
+        &self,
+        plugin_id: &PluginId,
+    ) -> Option<halod_plugin_signing::declarations::PackageDeclarations> {
         self.snapshot()
             .manifests
             .iter()
             .find(|m| m.plugin_id == plugin_id)
-            .map(PluginManifest::permissions)
+            .map(|m| m.declarations.clone())
+    }
+
+    pub(crate) fn granted_for(&self, plugin_id: &PluginId) -> Vec<Permission> {
+        self.snapshot()
+            .manifests
+            .iter()
+            .find(|m| m.plugin_id == plugin_id)
+            .map(|m| m.declarations.uses.permissions.clone())
             .unwrap_or_default()
     }
 
-    pub(crate) fn plugins_from_repo(&self, slug: &str) -> Vec<String> {
+    pub(crate) fn plugins_from_repo(&self, slug: &str) -> Vec<PluginId> {
         self.snapshot()
             .origins
             .iter()
@@ -767,7 +759,7 @@ impl Registry {
     }
 
     /// `(repo, id, version)` of every loaded plugin.
-    pub(crate) fn installed(&self) -> Vec<(String, String, semver::Version)> {
+    pub(crate) fn installed(&self) -> Vec<(String, PluginId, semver::Version)> {
         let state = self.snapshot();
         state
             .manifests
@@ -800,7 +792,7 @@ impl Registry {
     /// manifest `default`, overridden by any value the user has set. Unknown keys
     /// the user may have stored (e.g. after a manifest edit removed a field) are
     /// not included — only keys the manifest still declares.
-    pub fn config_for(&self, plugin_id: &str) -> HashMap<String, String> {
+    pub fn config_for(&self, plugin_id: &PluginId) -> HashMap<String, String> {
         let state = self.snapshot();
         match state.manifests.iter().find(|m| m.plugin_id == plugin_id) {
             Some(manifest) => config_values_for(&state, manifest),
@@ -859,22 +851,22 @@ fn resolved_config_value(
 /// What a health record is about: a whole plugin, or one of its devices.
 #[derive(Debug, Clone, PartialEq, Eq, Hash)]
 struct HealthScope {
-    plugin: String,
-    device: Option<String>,
+    plugin: PluginId,
+    device: Option<DeviceId>,
 }
 
 impl HealthScope {
-    fn plugin(plugin_id: &str) -> Self {
+    fn plugin(plugin_id: &PluginId) -> Self {
         Self {
-            plugin: plugin_id.to_owned(),
+            plugin: plugin_id.into(),
             device: None,
         }
     }
 
-    fn device(plugin_id: &str, device_id: &str) -> Self {
+    fn device(plugin_id: &PluginId, device_id: &DeviceId) -> Self {
         Self {
-            plugin: plugin_id.to_owned(),
-            device: Some(device_id.to_owned()),
+            plugin: plugin_id.into(),
+            device: Some(device_id.into()),
         }
     }
 }
@@ -916,7 +908,7 @@ impl Registry {
 
     /// Aggregate direct plugin and per-device health records. Failed wins over
     /// degraded; the newest issue at that severity is retained for display.
-    fn health_for(&self, plugin_id: &str) -> HealthState {
+    fn health_for(&self, plugin_id: &PluginId) -> HealthState {
         let mut aggregate = HealthState::default();
         let severity = |status| match status {
             HealthStatus::Healthy => 0,
@@ -948,8 +940,8 @@ impl Registry {
     pub(super) async fn report_runtime_error(
         &self,
         app: &Arc<crate::application::state::AppState>,
-        plugin_id: &str,
-        device_id: &str,
+        plugin_id: &PluginId,
+        device_id: &DeviceId,
         detail: String,
     ) {
         // A callback may finish after either toggle was switched off. Its
@@ -987,8 +979,8 @@ impl Registry {
     async fn surface_runtime_error(
         &self,
         app: &Arc<crate::application::state::AppState>,
-        plugin_id: &str,
-        device_id: &str,
+        plugin_id: &PluginId,
+        device_id: &DeviceId,
         detail: String,
     ) {
         let scope = HealthScope::device(plugin_id, device_id);
@@ -1007,7 +999,7 @@ impl Registry {
         crate::application::notifications::send(
             app,
             halod_shared::types::NotificationCode::PluginRuntimeError {
-                plugin: plugin_id.to_owned(),
+                plugin: plugin_id.clone(),
                 detail,
             },
         )
@@ -1034,7 +1026,7 @@ impl Registry {
 
     async fn retry_after_runtime_error(
         app: Arc<crate::application::state::AppState>,
-        plugin_id: String,
+        plugin_id: PluginId,
         attempt: u32,
     ) -> crate::util::backoff::Retry {
         if app.registry.is_disabled(&plugin_id) {
@@ -1060,7 +1052,7 @@ impl Registry {
 
     /// Clear a device's outstanding-error flag after a successful call. On the
     /// failing→ok transition the plugin's persisted runtime issue is cleared too.
-    pub(super) fn clear_runtime_error(&self, plugin_id: &str, device_id: &str) {
+    pub(super) fn clear_runtime_error(&self, plugin_id: &PluginId, device_id: &DeviceId) {
         if self.clear_health(&HealthScope::device(plugin_id, device_id)) {
             self.runtime_recovery.clear(plugin_id);
         }
@@ -1071,20 +1063,20 @@ impl Registry {
     /// toast; this record keeps the failure visible after that toast expires.
     pub(crate) fn report_init_error(
         &self,
-        plugin_id: &str,
-        device_id: &str,
+        plugin_id: &PluginId,
+        device_id: &DeviceId,
         detail: String,
     ) -> u32 {
         let scope = HealthScope::device(plugin_id, device_id);
         self.set_health(scope, PluginIssueKind::InitFailed, detail);
-        self.note_transport_open_failure((plugin_id.to_owned(), device_id.to_owned()))
+        self.note_transport_open_failure((plugin_id.clone(), device_id.clone()))
     }
 
     /// A later successful initialization ends the per-device failure episode.
-    pub(crate) fn clear_init_error(&self, plugin_id: &str, device_id: &str) {
+    pub(crate) fn clear_init_error(&self, plugin_id: &PluginId, device_id: &DeviceId) {
         self.transport_open_failures
             .write()
-            .remove(&(plugin_id.to_owned(), device_id.to_owned()));
+            .remove(&(plugin_id.clone(), device_id.clone()));
         let scope = HealthScope::device(plugin_id, device_id);
         let should_clear = self
             .health
@@ -1103,8 +1095,7 @@ impl Registry {
     pub(super) async fn report_connect_error(
         &self,
         app: &Arc<crate::application::state::AppState>,
-        plugin_id: &str,
-        display_name: &str,
+        plugin_id: &PluginId,
         detail: String,
     ) {
         // The blocking connect may complete after the integration/plugin was
@@ -1132,7 +1123,7 @@ impl Registry {
         crate::application::notifications::send(
             app,
             halod_shared::types::NotificationCode::PluginConnectFailed {
-                plugin: display_name.to_owned(),
+                plugin: plugin_id.clone(),
                 detail,
             },
         )
@@ -1140,7 +1131,7 @@ impl Registry {
     }
 
     /// Clear a plugin's outstanding connect-error flag after a successful connect.
-    pub(super) fn clear_connect_error(&self, plugin_id: &str) {
+    pub(super) fn clear_connect_error(&self, plugin_id: &PluginId) {
         self.clear_health(&HealthScope::plugin(plugin_id));
     }
 
@@ -1148,7 +1139,7 @@ impl Registry {
     /// deliberately stopped. Removing episode-dedup keys lets a later re-enable
     /// report a genuinely fresh failure, while clearing the persisted issue
     /// immediately removes its card/sidebar warning.
-    pub(crate) fn clear_operational_errors(&self, plugin_id: &str, device_ids: &[String]) {
+    pub(crate) fn clear_operational_errors(&self, plugin_id: &PluginId, device_ids: &[DeviceId]) {
         self.health.write().retain(|scope, _| {
             scope.plugin != plugin_id
                 || scope
@@ -1163,7 +1154,7 @@ impl Registry {
     /// device ids, so waiting for successful callbacks from the old ids would
     /// leave their aggregated sidebar issue stuck forever. Load diagnostics are
     /// retained because reconnecting cannot resolve package-content problems.
-    pub(crate) fn clear_integration_operational_errors(&self, plugin_id: &str) {
+    pub(crate) fn clear_integration_operational_errors(&self, plugin_id: &PluginId) {
         self.health.write().retain(|scope, state| {
             let belongs_to_integration = scope.plugin == plugin_id;
             let operational = state.issue.as_ref().is_some_and(|issue| {
@@ -1180,7 +1171,7 @@ impl Registry {
 
     /// Record a non-fatal load warning (bad logo, id collision) as a persisted
     /// plugin issue, surfaced on the plugin page / sidebar without a toast.
-    fn set_load_warning(&self, plugin_id: &str, reason: String) {
+    fn set_load_warning(&self, plugin_id: &PluginId, reason: String) {
         self.set_health(
             HealthScope::plugin(plugin_id),
             PluginIssueKind::LoadWarning,
@@ -1205,7 +1196,7 @@ impl Registry {
     pub fn resolved_config_for(
         &self,
         secrets: &dyn crate::infrastructure::secrets::SecretStore,
-        plugin_id: &str,
+        plugin_id: &PluginId,
         granted: &[Permission],
     ) -> ResolvedConfig {
         let mut config = self.config_for(plugin_id);
@@ -1247,7 +1238,7 @@ impl Registry {
     /// Keys of `plugin_id`'s declared `secure = true` config fields, for splitting
     /// an incoming `SetPluginConfig` (or a plugin delete) between the plaintext
     /// config store and the secret store. Empty for an unknown plugin id.
-    pub fn secure_config_keys_for(&self, plugin_id: &str) -> Vec<String> {
+    pub fn secure_config_keys_for(&self, plugin_id: &PluginId) -> Vec<String> {
         self.snapshot()
             .manifests
             .iter()
@@ -1269,7 +1260,7 @@ impl Registry {
     /// Unknown keys pass through untouched for the validator to reject.
     pub fn normalize_config_values(
         &self,
-        plugin_id: &str,
+        plugin_id: &PluginId,
         values: &HashMap<String, String>,
     ) -> HashMap<String, String> {
         let snap = self.snapshot();
@@ -1292,7 +1283,7 @@ impl Registry {
 
     pub fn validate_config_values(
         &self,
-        plugin_id: &str,
+        plugin_id: &PluginId,
         values: &HashMap<String, String>,
     ) -> anyhow::Result<()> {
         let snap = self.snapshot();
@@ -1349,7 +1340,7 @@ impl Registry {
     /// The single enabled, permission-satisfied `Integration` manifest for
     /// `plugin_id`, for a scoped reconnect of just that one integration. `None`
     /// if it's missing, plugin-disabled, integration-disabled, or ungranted.
-    pub(super) fn integration_manifest(&self, plugin_id: &str) -> Option<PluginManifest> {
+    pub(super) fn integration_manifest(&self, plugin_id: &PluginId) -> Option<PluginManifest> {
         self.integration_manifests()
             .into_iter()
             .find(|m| m.plugin_id == plugin_id)
@@ -1360,7 +1351,10 @@ impl Registry {
     /// on/off switch: pairing credentials must be obtainable before the user
     /// enables the integration. Generic plugin disable, platform and
     /// requirement gates remain in force.
-    pub(crate) fn setup_integration_manifest(&self, plugin_id: &str) -> Option<PluginManifest> {
+    pub(crate) fn setup_integration_manifest(
+        &self,
+        plugin_id: &PluginId,
+    ) -> Option<PluginManifest> {
         let state = self.snapshot();
         state
             .manifests
@@ -1372,7 +1366,7 @@ impl Registry {
             .cloned()
     }
 
-    pub(crate) fn integration_is_configured(&self, plugin_id: &str) -> bool {
+    pub(crate) fn integration_is_configured(&self, plugin_id: &PluginId) -> bool {
         let state = self.snapshot();
         state
             .manifests
@@ -1444,7 +1438,7 @@ impl Registry {
     /// without any continuous polling.
     pub fn refresh_requirements(&self) {
         let state = self.snapshot();
-        let fresh: HashMap<String, Vec<halod_shared::types::PluginRequirementStatus>> = state
+        let fresh: HashMap<PluginId, Vec<halod_shared::types::PluginRequirementStatus>> = state
             .manifests
             .iter()
             .map(|m| (m.plugin_id.clone(), requirements::evaluate(m)))
@@ -1467,16 +1461,40 @@ impl Registry {
         hid: &[halod_shared::debug_info::HidEntryDebugInfo],
         usb: &[recommend::UsbEntry],
         gpu_smbus: &[crate::infrastructure::drivers::transports::smbus::BusInfo],
+        catalogs: &HashMap<String, catalog::RepoCatalog>,
     ) {
         let state = self.snapshot();
-        let recs = recommend::recommendations(
+        let mut slugs: Vec<&String> = catalogs.keys().collect();
+        slugs.sort_by_key(|slug| {
+            (
+                slug.as_str() != crate::constants::OFFICIAL_PLUGIN_REPO_SLUG,
+                *slug,
+            )
+        });
+        let selected: Vec<(
+            &str,
+            std::collections::BTreeMap<&str, &halod_plugin_signing::CatalogPackage>,
+        )> = slugs
+            .into_iter()
+            .map(|slug| {
+                (
+                    slug.as_str(),
+                    catalogs[slug]
+                        .catalog
+                        .select(halod_plugin_signing::HOST_PLUGIN_API),
+                )
+            })
+            .collect();
+        let candidates = recommend::candidates(
             &state.manifests,
             &|id| !state.disabled.contains(id),
-            hid,
-            usb,
-            gpu_smbus,
-            &|executable| command_resolve::resolve(executable).is_some(),
+            selected
+                .iter()
+                .flat_map(|(slug, entries)| entries.values().map(move |entry| (*slug, *entry))),
         );
+        let recs = recommend::recommendations(&candidates, hid, usb, gpu_smbus, &|executable| {
+            command_resolve::resolve(executable).is_some()
+        });
         *self.recommendations.write() = recs;
     }
 
@@ -1581,7 +1599,8 @@ impl Registry {
                 .get(&m.plugin_id)
                 .map(|origin| origin.provenance)
                 .unwrap_or_default(),
-            access: access_for_manifest(m),
+            uses: m.declarations.uses.clone(),
+            matches: m.declarations.matches.clone(),
             provides: m.provides.iter().map(|item| item.key.clone()).collect(),
             consumes: m.consumes.clone(),
             data_records: vec![],
@@ -1601,7 +1620,7 @@ impl Registry {
     }
 
     /// Read a plugin's display-only asset (logo/effect thumbnail) from `<plugin_dir>/assets/<name>`.
-    pub fn read_asset(&self, plugin_id: &str, name: &str) -> anyhow::Result<Vec<u8>> {
+    pub fn read_asset(&self, plugin_id: &PluginId, name: &str) -> anyhow::Result<Vec<u8>> {
         halod_shared::types::validate_image_filename(name)
             .map_err(|e| anyhow::anyhow!("invalid asset name '{name}': {e}"))?;
         let state = self.snapshot();
@@ -1759,7 +1778,7 @@ pub(crate) fn rasterize_widget_svg(
 /// rejected and surfaced here instead of silently dropped.
 #[derive(Clone, Debug)]
 pub struct PluginLoadWarning {
-    pub plugin_id: String,
+    pub plugin_id: PluginId,
     pub path: String,
     pub reason: String,
 }
@@ -1819,7 +1838,7 @@ fn validate_logo(dir: &Path, manifest: &mut PluginManifest, warnings: &mut Vec<P
 #[derive(Default)]
 struct LoadScan {
     manifests: Vec<PluginManifest>,
-    origins: HashMap<String, Origin>,
+    origins: HashMap<PluginId, Origin>,
     warnings: Vec<PluginLoadWarning>,
     invalid: Vec<(PluginManifest, String, Option<PluginIssueContext>)>,
     skipped: Vec<SkippedPlugin>,
@@ -2024,19 +2043,19 @@ fn device_id(
     manifest: &PluginManifest,
     spec: &manifest::DeviceSpec,
     handle: &DiscoveryHandle<'_>,
-) -> String {
+) -> DeviceId {
     // SMN describes the single physical CPU package, not one bus endpoint.
     // Its native predecessor used a fixed stable identity; retain an explicit
     // plugin identity verbatim instead of adding CPUID-derived churn.
     #[cfg(target_os = "windows")]
     if matches!(handle, DiscoveryHandle::AmdSmn { .. }) && manifest.identity.id.is_some() {
-        return manifest.id_prefix().to_owned();
+        return manifest.id_prefix().into();
     }
     let suffix = transport::descriptor_for(spec.transport.kind())
-        .and_then(|d| d.discovery.as_ref())
+        .and_then(transport::PluginTransportDescriptor::discovery)
         .map(|discovery| (discovery.id_suffix)(handle))
         .unwrap_or_else(|| "0".to_owned());
-    format!("{}-{}", manifest.id_prefix(), suffix)
+    DeviceId::sanitized(&format!("{}-{}", manifest.id_prefix(), suffix))
 }
 
 fn spec_targets_usb_id(spec: &manifest::DeviceSpec, vid: u16, pid: u16) -> bool {
@@ -2069,7 +2088,7 @@ impl Registry {
         spec: &manifest::DeviceSpec,
         handle: &DiscoveryHandle<'_>,
         ready: ReadyPlugin,
-        known: &HashSet<String>,
+        known: &HashSet<DeviceId>,
     ) -> Option<Arc<dyn Device>> {
         let id = device_id(manifest, spec, handle);
         if known.contains(&id) {
@@ -2109,7 +2128,7 @@ impl Registry {
             device::RuntimeState::OpeningTransport,
         ));
         let transport = match transport::descriptor_for(spec.transport.kind())
-            .map(|d| (d.open)(manifest, handle, &config, &granted, write_rate_limit))
+            .map(|d| (d.open())(manifest, handle, &config, &granted, write_rate_limit))
         {
             Some(Ok(t)) => t,
             Some(Err(e)) => {
@@ -2231,7 +2250,7 @@ impl Registry {
         &self,
         app: &Arc<crate::application::state::AppState>,
         handle: &DiscoveryHandle<'_>,
-        known: &HashSet<String>,
+        known: &HashSet<DeviceId>,
     ) -> Option<Arc<dyn Device>> {
         // The snapshot is a frozen `Arc`, not a lock guard, so `build_device` can
         // freely take its own snapshots with no risk of a recursive-read deadlock.
@@ -2270,7 +2289,7 @@ impl Registry {
 
     /// Collect every [`DeviceSpec`] declared by the named plugins' manifests
     /// (current registry snapshot). Used to build a scoped [`DiscoveryFilter`].
-    pub fn device_specs_for(&self, plugin_ids: &[String]) -> Vec<DeviceSpec> {
+    pub fn device_specs_for(&self, plugin_ids: &[PluginId]) -> Vec<DeviceSpec> {
         let state = self.snapshot();
         state
             .manifests

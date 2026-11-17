@@ -71,12 +71,12 @@ fn validate(spec: &DeviceSpec) -> Result<()> {
     Ok(())
 }
 
-pub(super) const DESCRIPTOR: PluginTransportDescriptor = PluginTransportDescriptor {
+pub(super) const DESCRIPTOR: PluginTransportDescriptor = PluginTransportDescriptor::Discovered {
     kind: "smbus",
     open,
-    discovery: Some(Discovery {
+    discovery: Discovery {
         matches,
         id_suffix,
         validate,
-    }),
+    },
 };

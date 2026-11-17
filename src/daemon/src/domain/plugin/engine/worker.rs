@@ -2087,7 +2087,7 @@ mod tests {
         let source = tempfile::tempdir().unwrap();
         let dir = crate::test_support::write_plugin_package(source.path(), "plain", "1.0.0", "3.0");
         let manifest = crate::domain::plugin::parse_manifest_from_dir(&dir).unwrap();
-        let granted = manifest.permissions();
+        let granted = manifest.declarations.uses.permissions.clone();
         let config = HashMap::new();
         assert!(http_runtime_for(&manifest, &granted, &config).is_none());
         assert!(udp_runtime_for(&manifest, &granted, &config).is_none());

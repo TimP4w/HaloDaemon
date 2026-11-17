@@ -17,6 +17,7 @@ use halod_shared::debug_info::{
     DebugInfo, DependencyRule, DependencyStatus, DeviceDebugInfo, HidEntryDebugInfo, OsKind,
     SmbusBusDebugInfo, SmbusBusKind, SystemDebugInfo,
 };
+use halod_shared::ids::DeviceId;
 
 pub async fn get_debug_info(client: ClientHandle, app: Arc<AppState>) -> Result<()> {
     let info = collect(app).await;
@@ -328,7 +329,7 @@ fn smbus_to_wire(b: BusInfo, kind: SmbusBusKind) -> SmbusBusDebugInfo {
 /// `(device_id, hid_key)` pairs for every device the HID transport is tracking.
 /// The HID key has the shape
 /// `vid:pid:serial` (all hex, serial may be empty).
-async fn snapshot_tracking_keys(app: &Arc<AppState>) -> Vec<(String, String)> {
+async fn snapshot_tracking_keys(app: &Arc<AppState>) -> Vec<(DeviceId, String)> {
     use crate::application::state::HidTrackingEntry;
     let tracking = app.hid.snapshot().await;
     let mut out = Vec::new();
@@ -357,7 +358,7 @@ fn matches_hid_key(key: &str, entry: &HidEntryDebugInfo) -> bool {
 
 async fn build_device_debug(
     device: &dyn Device,
-    tracking_keys: &[(String, String)],
+    tracking_keys: &[(DeviceId, String)],
     hid_entries: &[HidEntryDebugInfo],
 ) -> DeviceDebugInfo {
     let wire = device.serialize().await;
@@ -427,21 +428,21 @@ fn source_fields(device: &dyn Device) -> Vec<(String, String)> {
     let mut fields = match (&origin, device.integration_id()) {
         (_, Some(id)) => vec![
             ("source_kind".into(), "integration_root".into()),
-            ("integration_id".into(), id),
+            ("integration_id".into(), id.to_string()),
         ],
         (DeviceOrigin::Integration(id), None) => vec![
             ("source_kind".into(), "integration_controller".into()),
-            ("integration_id".into(), id.clone()),
+            ("integration_id".into(), id.to_string()),
         ],
         (DeviceOrigin::Plugin(id), None) => vec![
             ("source_kind".into(), "plugin".into()),
-            ("plugin_id".into(), id.clone()),
+            ("plugin_id".into(), id.to_string()),
         ],
         (DeviceOrigin::Builtin, None) => vec![("source_kind".into(), "builtin".into())],
     };
     if let Some(plugin_id) = device.owning_plugin_id() {
         if !fields.iter().any(|(key, _)| key == "plugin_id") {
-            fields.push(("plugin_id".into(), plugin_id));
+            fields.push(("plugin_id".into(), plugin_id.to_string()));
         }
     }
     fields

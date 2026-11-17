@@ -8,6 +8,7 @@ use crate::application::state::AppState;
 use crate::application::usecases::registry::registration;
 use crate::domain::events::Change;
 use crate::domain::registry::require_device_owned_id;
+use halod_shared::ids::DeviceId;
 
 /// Reconcile the explicitly-owned children of a dynamic controller. Plugin
 /// children use stable hardware ids (for example a receiver serial), so a
@@ -117,7 +118,7 @@ pub(crate) async fn revive_owned_children(
     revived
 }
 
-pub async fn start_pairing(id: String, timeout_secs: u8, app: Arc<AppState>) -> Result<()> {
+pub async fn start_pairing(id: DeviceId, timeout_secs: u8, app: Arc<AppState>) -> Result<()> {
     let device = require_device_owned_id(&id, &app).await?;
     let cap = device
         .as_pairing()
@@ -127,7 +128,7 @@ pub async fn start_pairing(id: String, timeout_secs: u8, app: Arc<AppState>) -> 
     Ok(())
 }
 
-pub async fn stop_pairing(id: String, app: Arc<AppState>) -> Result<()> {
+pub async fn stop_pairing(id: DeviceId, app: Arc<AppState>) -> Result<()> {
     let device = require_device_owned_id(&id, &app).await?;
     let cap = device
         .as_pairing()
@@ -137,7 +138,7 @@ pub async fn stop_pairing(id: String, app: Arc<AppState>) -> Result<()> {
     Ok(())
 }
 
-pub async fn unpair(id: String, slot: u8, app: Arc<AppState>) -> Result<()> {
+pub async fn unpair(id: DeviceId, slot: u8, app: Arc<AppState>) -> Result<()> {
     let device = require_device_owned_id(&id, &app).await?;
     let cap = device
         .as_pairing()
@@ -175,7 +176,7 @@ mod tests {
     #[tokio::test]
     async fn start_pairing_forwards_timeout() {
         let (mock, app) = receiver();
-        start_pairing("mock_receiver".into(), 30, app)
+        start_pairing("mock_receiver".parse().unwrap(), 30, app)
             .await
             .unwrap();
         assert_eq!(mock.calls(), ["start_pairing 30"]);
@@ -184,14 +185,18 @@ mod tests {
     #[tokio::test]
     async fn stop_pairing_closes_lock() {
         let (mock, app) = receiver();
-        stop_pairing("mock_receiver".into(), app).await.unwrap();
+        stop_pairing("mock_receiver".parse().unwrap(), app)
+            .await
+            .unwrap();
         assert_eq!(mock.calls(), ["stop_pairing"]);
     }
 
     #[tokio::test]
     async fn unpair_forwards_slot() {
         let (mock, app) = receiver();
-        unpair("mock_receiver".into(), 3, app).await.unwrap();
+        unpair("mock_receiver".parse().unwrap(), 3, app)
+            .await
+            .unwrap();
         assert_eq!(mock.calls(), ["unpair 3"]);
     }
 
@@ -206,16 +211,19 @@ mod tests {
             for id in ["child-asleep", "child-awake"] {
                 cfg.active_profile_data_mut()
                     .device_states
-                    .insert(id.into(), serde_json::json!({ "x": 1 }));
+                    .insert(id.parse().unwrap(), serde_json::json!({ "x": 1 }));
             }
         }
         app.device_registry
             .children
             .lock()
             .await
-            .entry("mock_controller".into())
+            .entry("mock_controller".parse().unwrap())
             .or_default()
-            .extend(["child-asleep".to_string(), "child-awake".to_string()]);
+            .extend([
+                "child-asleep".parse().unwrap(),
+                "child-awake".parse().unwrap(),
+            ]);
 
         assert!(revive_owned_children(&root, &app).await);
         assert!(
@@ -242,6 +250,8 @@ mod tests {
     #[tokio::test]
     async fn start_pairing_unknown_device_errors() {
         let app = app_with(vec![]);
-        assert!(start_pairing("nope".into(), 30, app).await.is_err());
+        assert!(start_pairing("nope".parse().unwrap(), 30, app)
+            .await
+            .is_err());
     }
 }

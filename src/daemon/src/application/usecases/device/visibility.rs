@@ -11,10 +11,11 @@ use crate::application::usecases::registry::registration;
 use crate::domain::events::Change;
 use crate::domain::profiles::device_state::persist_device_state;
 use crate::domain::registry::model::ensure_record;
+use halod_shared::ids::DeviceId;
 use halod_shared::types::{ChannelKind, VisibilityState};
 
 pub async fn set_device_visibility(
-    device_id: String,
+    device_id: DeviceId,
     new_state: VisibilityState,
     app: Arc<AppState>,
 ) -> Result<()> {
@@ -86,7 +87,7 @@ pub async fn set_device_visibility(
 }
 
 pub async fn set_channel_visibility(
-    device_id: String,
+    device_id: DeviceId,
     kind: ChannelKind,
     channel_id: String,
     state: VisibilityState,
@@ -155,9 +156,13 @@ mod tests {
         let device = Arc::new(MockDevice::new("dev1").with_rgb().with_fan());
         let app = app_with(vec![device.clone()]);
 
-        set_device_visibility("dev1".into(), VisibilityState::Hidden, app.clone())
-            .await
-            .unwrap();
+        set_device_visibility(
+            "dev1".parse().unwrap(),
+            VisibilityState::Hidden,
+            app.clone(),
+        )
+        .await
+        .unwrap();
 
         let cfg = app.config.read().await;
         let record = cfg.known_devices.get("dev1").unwrap();
@@ -179,9 +184,13 @@ mod tests {
         }
         let app = app_with(vec![device.clone()]);
 
-        set_device_visibility("dev1".into(), VisibilityState::Hidden, app.clone())
-            .await
-            .unwrap();
+        set_device_visibility(
+            "dev1".parse().unwrap(),
+            VisibilityState::Hidden,
+            app.clone(),
+        )
+        .await
+        .unwrap();
 
         assert!(device.fan.as_ref().unwrap().curve("default").is_none());
     }
@@ -205,7 +214,7 @@ mod tests {
             &(device.clone() as Arc<dyn crate::domain::device::Device>),
         );
         app.config.write().await.known_devices.insert(
-            "dev1".into(),
+            "dev1".parse().unwrap(),
             crate::domain::registry::model::DeviceRecord {
                 name: String::new(),
                 vendor: String::new(),
@@ -216,9 +225,13 @@ mod tests {
 
         assert!(device.fan.as_ref().unwrap().curve("default").is_none());
 
-        set_device_visibility("dev1".into(), VisibilityState::Hidden, app.clone())
-            .await
-            .unwrap();
+        set_device_visibility(
+            "dev1".parse().unwrap(),
+            VisibilityState::Hidden,
+            app.clone(),
+        )
+        .await
+        .unwrap();
         let cfg = app.config.read().await;
         assert_eq!(
             cfg.known_devices.get("dev1").unwrap().active_state,
@@ -230,9 +243,13 @@ mod tests {
     async fn set_device_visibility_for_unknown_device_still_writes_config() {
         let app = app_with(vec![]);
 
-        set_device_visibility("ghost".into(), VisibilityState::Hidden, app.clone())
-            .await
-            .unwrap();
+        set_device_visibility(
+            "ghost".parse().unwrap(),
+            VisibilityState::Hidden,
+            app.clone(),
+        )
+        .await
+        .unwrap();
 
         let cfg = app.config.read().await;
         let record = cfg.known_devices.get("ghost").unwrap();

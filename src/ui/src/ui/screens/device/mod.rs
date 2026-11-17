@@ -36,6 +36,7 @@ use crate::ui::screens::canvas::LedColorMap;
 use crate::ui::theme::SPACE_2;
 use crate::ui::theme::SPACE_6;
 use crate::ui::theme::SPACE_8;
+use halod_shared::ids::DeviceId;
 use header::header;
 
 /// Debounce window for coalesced slider/curve/paint commands.
@@ -46,7 +47,7 @@ const DEBOUNCE_SECS: f64 = 0.14;
 /// state rebroadcast (see [`editing`]).
 #[derive(Default)]
 pub struct DeviceUi {
-    pub id: String,
+    pub id: DeviceId,
     pub tab: usize,
     /// Selected tab tracked by kind, so the selection survives the tab set
     /// changing shape (e.g. adding the first chain link makes a "Devices" tab
@@ -70,6 +71,8 @@ pub struct DeviceUi {
     /// Set to true when rename editing starts; cleared after requesting focus
     /// so the TextEdit receives keyboard input on the first frame.
     pub rename_just_started: bool,
+    pub pending_unpair: Option<(u8, String)>,
+    pub pending_disable: Option<(DeviceId, String)>,
     pub lighting: LightingTab,
     pub cooling: CoolingTab,
     pub perf: PerfTab,
@@ -226,6 +229,12 @@ pub struct LcdTab {
     pub preview_keepalive_at: f64,
     /// Cached preview texture for the display card.
     pub preview_tex: Option<egui::TextureHandle>,
+    pub preview_rx: Option<std::sync::mpsc::Receiver<Option<lcd::gif::DecodedRgba>>>,
+    pub preview_attempt_len: Option<Option<u64>>,
+    pub thumb_rx: Option<(
+        String,
+        std::sync::mpsc::Receiver<Option<lcd::gif::DecodedRgba>>,
+    )>,
     /// Key identifying what `preview_tex` holds (e.g. `"frame:42"` or
     /// `"img:foo.png"`); the texture is rebuilt whenever the key changes.
     pub preview_key: String,
@@ -277,7 +286,7 @@ impl DeviceUi {
     }
 
     /// Fresh edit state for the device `id`.
-    pub fn new(id: String) -> Self {
+    pub fn new(id: DeviceId) -> Self {
         DeviceUi {
             id,
             ..Default::default()
@@ -361,7 +370,7 @@ pub struct FrameCtx<'a> {
     pub lcd_template: Option<(String, halod_shared::lcd_custom::CustomTemplateDef)>,
     pub lcd_editor_render: Option<DecodedEditorRender>,
     pub led_colors: &'a LedColorMap,
-    pub write_rate_history: &'a HashMap<String, std::collections::VecDeque<f32>>,
+    pub write_rate_history: &'a HashMap<DeviceId, std::collections::VecDeque<f32>>,
     pub plugin_assets: &'a HashMap<String, Vec<u8>>,
 }
 
@@ -397,7 +406,7 @@ pub struct TabCtx<'a> {
 /// `device_id` — the signal the LCD spinner gates clear on.
 pub(super) fn is_terminal_upload_for(
     terminal: Option<&halod_shared::types::LcdUploadProgress>,
-    device_id: &str,
+    device_id: &DeviceId,
 ) -> bool {
     use halod_shared::types::LcdUploadStage;
     matches!(
@@ -432,7 +441,7 @@ pub fn request_cooling_tab(ctx: &egui::Context) {
 pub fn show(
     ui: &mut egui::Ui,
     frame: FrameCtx,
-    id: &str,
+    id: &DeviceId,
     ui_state: &mut DeviceUi,
     page: &mut Page,
 ) {
@@ -447,7 +456,7 @@ pub fn show(
         return;
     }
     if ui_state.id != id {
-        *ui_state = DeviceUi::new(id.to_string());
+        *ui_state = DeviceUi::new(id.into());
     }
     // Honour a one-shot tab request (e.g. Cooling page's "Open device").
     if ui
@@ -511,7 +520,7 @@ pub fn show(
                         TabKind::Performance => performance::show(ui, &ctx, ui_state),
                         TabKind::Controls => controls::show(ui, &ctx, ui_state),
                         TabKind::Onboard => onboard::show(ui, &ctx),
-                        TabKind::Pairing => children::pairing(ui, &ctx),
+                        TabKind::Pairing => children::pairing(ui, &ctx, ui_state),
                         TabKind::Chains => chains::show(ui, &ctx),
                         TabKind::Devices => children::show(ui, &ctx, page),
                         TabKind::Info => info::show(ui, &ctx, ui_state),
@@ -554,7 +563,7 @@ mod tests {
 
     #[test]
     fn editing_guard_expires_after_window() {
-        let mut st = DeviceUi::new("dev".into());
+        let mut st = DeviceUi::new("dev".parse().unwrap());
         st.last_edit = 10.0;
         assert!(editing(&st, 10.0));
         assert!(editing(&st, 11.4)); // still within the 1.5 s window
@@ -564,7 +573,7 @@ mod tests {
 
     #[test]
     fn guarded_returns_scratch_while_editing_else_live() {
-        let mut st = DeviceUi::new("dev".into());
+        let mut st = DeviceUi::new("dev".parse().unwrap());
         // Before any edit: always live.
         assert_eq!(st.guarded("b", 40.0, 0.0), 40.0);
         st.set("b", 75.0, 100.0);
@@ -579,7 +588,7 @@ mod tests {
     #[test]
     fn queue_and_flush_pending_respects_debounce() {
         let (tx, mut rx) = tokio::sync::mpsc::unbounded_channel();
-        let mut st = DeviceUi::new("dev".into());
+        let mut st = DeviceUi::new("dev".parse().unwrap());
         st.queue("k", DaemonCommand::GetDebugInfo, 10.0);
         // Not yet due — nothing flushed, command still pending.
         flush_pending(&mut st, &tx, 10.0 + DEBOUNCE_SECS - 0.01);
@@ -593,7 +602,7 @@ mod tests {
 
     #[test]
     fn queue_keeps_only_latest_value_per_key() {
-        let mut st = DeviceUi::new("dev".into());
+        let mut st = DeviceUi::new("dev".parse().unwrap());
         st.queue("k", DaemonCommand::GetDebugInfo, 1.0);
         st.queue("k", DaemonCommand::ListLcdImages, 2.0);
         assert_eq!(st.pending.len(), 1);

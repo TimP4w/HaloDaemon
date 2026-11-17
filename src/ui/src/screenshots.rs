@@ -36,6 +36,7 @@ use crate::ui::screens::device::DeviceUi;
 use crate::ui::screens::device::LcdMediaTab;
 use crate::ui::screens::onboarding::OnboardingUi;
 use crate::ui::theme;
+use halod_shared::ids::DeviceId;
 
 /// Logical window size, matching the production viewport in `main.rs`.
 const SIZE: (f32, f32) = (1320.0, 860.0);
@@ -194,7 +195,7 @@ fn live_tour() {
     shot(&mut h, "plugins", &|a| a.page = Page::Plugins);
     shot(&mut h, "plugin-openrgb", &|a| {
         a.page = Page::Plugins;
-        a.plugins_ui.select_plugin("openrgb");
+        a.plugins_ui.select_plugin(&"openrgb".parse().unwrap());
     });
     shot(&mut h, "settings", &|a| a.page = Page::Settings);
     shell_overlay_shots(&mut h, &shot);
@@ -257,6 +258,11 @@ fn shell_overlay_shots(
         a.toasts.ingest(
             [
                 note(NotificationCode::DeviceWriteFailed {
+                    device_id: state
+                        .devices
+                        .first()
+                        .map(|d| d.id.clone())
+                        .unwrap_or_default(),
                     device,
                     detail: String::new(),
                 }),
@@ -646,7 +652,7 @@ fn plugins_state() -> TopicStore {
 /// index is resolved from the device's capabilities so it survives tab-set
 /// changes (the `tab_kind` field that would do this natively is module-private).
 fn device_ui_on_tab(state: &TopicStore, id: &str, kind: TabKind) -> DeviceUi {
-    let mut ui = DeviceUi::new(id.to_string());
+    let mut ui = DeviceUi::new(id.parse().unwrap());
     if let Some(dev) = state.devices.iter().find(|d| d.id == id) {
         ui.tab = tabs_for(dev)
             .iter()
@@ -781,7 +787,9 @@ fn cooling_appstate_field() -> serde_json::Value {
             {"id": "balanced", "name": "Balanced", "points": [[30.0, 30.0], [55.0, 55.0], [80.0, 90.0]]},
             {"id": "performance", "name": "Performance", "points": [[30.0, 40.0], [60.0, 100.0]]},
         ],
-        "config": {"fan_curve_enabled": true, "fan_curve_tick_ms": 1000, "fan_failsafe_duty": 60},
+        "config": {"fan_curve_enabled": true, "fan_curve_tick_ms": 1000, "fan_failsafe_duty": 60,
+                   "fan_ramp_up_pct_per_s": 0.0, "fan_ramp_down_pct_per_s": 5.0, "fan_hysteresis_c": 3.0,
+                   "fan_smoothing_secs": 0.0, "fan_sensor_stale_secs": 0.0},
     })
 }
 
@@ -844,7 +852,7 @@ fn lcd_template() -> halod_shared::lcd_custom::CustomTemplateDef {
 /// widget (a simple accent-tinted shape by kind) so the captured docs image
 /// shows populated widgets.
 fn placeholder_editor_render(
-    device_id: &str,
+    device_id: &DeviceId,
     def: &halod_shared::lcd_custom::CustomTemplateDef,
 ) -> ipc::DecodedEditorRender {
     use halod_shared::lcd_custom::{WidgetRenderState, WidgetRenderStatus};
@@ -870,7 +878,7 @@ fn placeholder_editor_render(
         });
     }
     ipc::DecodedEditorRender {
-        device_id: device_id.to_string(),
+        device_id: device_id.clone(),
         canvas_w: 240,
         canvas_h: 240,
         sprites,
@@ -1039,7 +1047,7 @@ fn rgb() {
     let state = lighting_device_state();
     let ui = device_ui_on_tab(&state, "argb-strip", TabKind::Lighting);
     capture("rgb", state, move |a| {
-        a.page = Page::Device("argb-strip".into());
+        a.page = Page::Device("argb-strip".parse().unwrap());
         a.device_ui = ui;
     });
 }
@@ -1050,7 +1058,7 @@ fn fan() {
     let state = cooling_state();
     let ui = device_ui_on_tab(&state, "aio-001", TabKind::Cooling);
     capture("fan", state, move |a| {
-        a.page = Page::Device("aio-001".into());
+        a.page = Page::Device("aio-001".parse().unwrap());
         a.device_ui = ui;
     });
 }
@@ -1065,9 +1073,9 @@ fn lcd() {
     ui.lcd.editor.def = lcd_template();
     ui.lcd.editor.seeded = true;
     ui.lcd.editor.selected.insert("w2".to_string());
-    let render = placeholder_editor_render("kraken-lcd", &ui.lcd.editor.def);
+    let render = placeholder_editor_render(&"kraken-lcd".parse().unwrap(), &ui.lcd.editor.def);
     capture("lcd", state, move |a| {
-        a.page = Page::Device("kraken-lcd".into());
+        a.page = Page::Device("kraken-lcd".parse().unwrap());
         a.device_ui = ui;
         a.ui.lcd_editor_render.set(Some(render));
     });
@@ -1079,7 +1087,7 @@ fn dpi() {
     let state = dpi_state();
     let ui = device_ui_on_tab(&state, "g502", TabKind::Performance);
     capture("dpi", state, move |a| {
-        a.page = Page::Device("g502".into());
+        a.page = Page::Device("g502".parse().unwrap());
         a.device_ui = ui;
     });
 }

@@ -61,6 +61,7 @@ use crate::infrastructure::drivers::transports::smbus::SmBusSyncOps;
 use crate::infrastructure::drivers::transports::usb::UsbLocation;
 use crate::infrastructure::udp::UdpBackend;
 use crate::infrastructure::udp::UdpRuntime;
+use halod_shared::ids::DeviceId;
 
 /// One recorded write, tagged with the collection it was routed to so a test
 /// can assert long frames went to the companion and short frames to primary.
@@ -996,7 +997,7 @@ fn open_integration(
             transport: transport_kind.into(),
             ..Default::default()
         },
-        manifest.permissions(),
+        manifest.declarations.uses.permissions.clone(),
         resolved_config,
         handle.clone(),
         Arc::new(Mutex::new(Vec::new())),
@@ -1019,6 +1020,22 @@ fn open_integration(
             "initialize",
             lua.create_function(move |_, _self: Table| {
                 Ok(handle.block_on(worker.initialize()).map_err(to_lua_err)?.ok)
+            })
+            .map_err(from_lua_err)?,
+        )
+        .map_err(from_lua_err)?;
+    }
+    {
+        let worker = worker.clone();
+        let handle = handle.clone();
+        dev.set(
+            "discover",
+            lua.create_function(move |lua, (_self, context): (Table, Value)| {
+                let context: serde_json::Value = lua.from_value(context)?;
+                let candidates = handle
+                    .block_on(worker.setup_discover(context))
+                    .map_err(to_lua_err)?;
+                lua.to_value(&candidates)
             })
             .map_err(from_lua_err)?,
         )
@@ -1436,7 +1453,7 @@ fn open_device(
     };
     let device = Arc::new_cyclic(|weak| {
         let mut device = LuaDevice::new(LuaDeviceParts {
-            id: "plugin-test".to_owned(),
+            id: DeviceId::sanitized("plugin-test"),
             manifest,
             spec: Some(spec),
             notify: std::sync::Weak::new(),
@@ -1449,7 +1466,7 @@ fn open_device(
                 handle: handle.clone(),
                 // The harness grants every declared permission (so gated transports
                 // open), uses no config, and has no `AppState` to notify.
-                granted: manifest.permissions(),
+                granted: manifest.declarations.uses.permissions.clone(),
                 config: std::collections::HashMap::new(),
                 data: super::engine::data_api::DataRuntime::new(
                     data_bus,
@@ -1754,7 +1771,7 @@ fn open_device(
                     let out = lua.create_table()?;
                     for (i, controller) in controllers.iter().enumerate() {
                         let item = lua.create_table()?;
-                        item.set("id", controller.id())?;
+                        item.set("id", controller.id().as_str())?;
                         item.set("name", controller.name())?;
                         item.set("device_type", lua.to_value(&controller.wire_device_type())?)?;
                         item.set("has_cooling", controller.as_cooling().is_some())?;

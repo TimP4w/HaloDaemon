@@ -15,13 +15,14 @@ use crate::application::usecases::profiles::lifecycle;
 use crate::application::usecases::registry::chain;
 use crate::domain::plugin::catalog::RepoCatalog;
 use crate::domain::plugin::repo::RepositoryTrust;
+use halod_shared::ids::DeviceId;
 pub use state::{HidTracking, HidTrackingEntry};
 
 /// Look up the device with the given `id` and return an owned clone, holding the
 /// `devices` lock only for the lookup. Error if the device is not found or is
 /// disabled — every device-action usecase routes through here, so a disabled
 /// device rejects all actions. Visibility changes use a raw lookup instead.
-pub async fn require_device_owned_id(id: &str, app: &AppState) -> Result<Arc<dyn Device>> {
+pub async fn require_device_owned_id(id: &DeviceId, app: &AppState) -> Result<Arc<dyn Device>> {
     let device = app
         .find_device_by_id(id)
         .await
@@ -122,7 +123,7 @@ mod guard_tests {
         dev.set_active_state(VisibilityState::Disabled);
         let app = app_with(vec![dev]);
 
-        let result = require_device_owned_id("dev1", &app).await;
+        let result = require_device_owned_id(&"dev1".parse().unwrap(), &app).await;
         let msg = result.err().map(|e| e.to_string()).unwrap_or_default();
         assert!(
             msg.contains("disabled"),
@@ -135,7 +136,9 @@ mod guard_tests {
         let dev = Arc::new(MockDevice::new("dev1").with_rgb());
         let app = app_with(vec![dev]);
 
-        assert!(require_device_owned_id("dev1", &app).await.is_ok());
+        assert!(require_device_owned_id(&"dev1".parse().unwrap(), &app)
+            .await
+            .is_ok());
     }
 }
 
@@ -155,14 +158,16 @@ mod tests {
     #[tokio::test]
     async fn require_device_owned_id_returns_matching_device() {
         let app = app_with_devices(&["dev_a", "dev_b"]);
-        let found = require_device_owned_id("dev_b", &app).await.unwrap();
+        let found = require_device_owned_id(&"dev_b".parse().unwrap(), &app)
+            .await
+            .unwrap();
         assert_eq!(found.id(), "dev_b");
     }
 
     #[tokio::test]
     async fn require_device_owned_id_errors_when_not_found() {
         let app = app_with_devices(&["dev_a"]);
-        let err = require_device_owned_id("dev_z", &app)
+        let err = require_device_owned_id(&"dev_z".parse().unwrap(), &app)
             .await
             .err()
             .expect("expected error");

@@ -22,9 +22,12 @@ use crate::domain::tour::AnchorId;
 use crate::runtime::ipc::CommandTx;
 use crate::ui::screens::startup;
 use crate::ui::theme::{self, a};
+use halod_shared::ids::DeviceId;
 
 const GAP: f32 = 12.0;
 const SECTION_GAP: f32 = 20.0;
+const CONFLICT_STRIP_H: f32 = 30.0;
+const CONFLICT_STRIP_GAP: f32 = 12.0;
 
 /// Everything the Home screen owns across frames.
 #[derive(Default)]
@@ -38,6 +41,7 @@ pub struct HomeUi {
     /// Open duplicate-device resolve dialog: every conflict group with the
     /// owner the user has picked to keep. `None` when the dialog is closed.
     pub conflict_resolve: Option<Vec<ConflictGroup>>,
+    pub pending_disable: Option<(DeviceId, String)>,
     pub widgets: widget_row::EditState,
 }
 
@@ -114,6 +118,7 @@ pub fn show(
                         cmd,
                         &mut home.rename,
                         &mut home.confirm_remove,
+                        &mut home.pending_disable,
                         &mut home.conflict_resolve,
                         page,
                         discovering,
@@ -124,6 +129,11 @@ pub fn show(
 
     if allow_modals {
         remove_confirm_modal(ui.ctx(), cmd, &mut home.confirm_remove);
+        if let Some((id, _)) =
+            crate::ui::screens::device::info::disable_confirm(ui.ctx(), &mut home.pending_disable)
+        {
+            crate::runtime::ipc::send(cmd, crate::ui::screens::device::info::disable_command(id));
+        }
         conflict_modal(ui.ctx(), cmd, &mut home.conflict_resolve);
     }
 }
@@ -131,9 +141,9 @@ pub fn show(
 /// A pending "remove chained device" confirmation: the child to unlink plus the
 /// parent device and channel that host it.
 pub struct ConfirmRemove {
-    pub child_id: String,
+    pub child_id: DeviceId,
     pub child_name: String,
-    pub parent_id: String,
+    pub parent_id: DeviceId,
     pub channel_id: String,
 }
 
@@ -142,13 +152,13 @@ pub struct ConfirmRemove {
 /// stays stable while the live list refreshes.
 pub struct ConflictGroup {
     pub devices: Vec<ConflictChoiceDevice>,
-    pub recommended_id: String,
+    pub recommended_id: DeviceId,
     /// The device id currently selected to keep; defaults to `recommended_id`.
-    pub pick: String,
+    pub pick: DeviceId,
 }
 
 pub struct ConflictChoiceDevice {
-    pub id: String,
+    pub id: DeviceId,
     pub name: String,
     pub source: ConflictDeviceSource,
 }
@@ -185,6 +195,7 @@ fn conflict_key(d: &WireDevice) -> Option<String> {
     let mut ids = conflict.peer_ids.clone();
     ids.push(d.id.clone());
     ids.sort();
+    let ids: Vec<&str> = ids.iter().map(|id| id.as_str()).collect();
     Some(format!("{:?}:{}", conflict.confidence, ids.join("\u{1f}")))
 }
 
@@ -219,18 +230,18 @@ fn conflict_group_count(all_devices: &[WireDevice]) -> usize {
         .count()
 }
 
-fn ids_to_disable(group: &ConflictGroup, kept_id: &str) -> Vec<String> {
+fn ids_to_disable(group: &ConflictGroup, kept_id: &DeviceId) -> Vec<DeviceId> {
     group
         .devices
         .iter()
-        .filter(|device| device.id != kept_id)
+        .filter(|device| device.id != *kept_id)
         .map(|device| device.id.clone())
         .collect()
 }
 
 /// Every device id to disable when the whole resolution is applied: for each
 /// group, all participants except the one the user kept.
-fn disables_for(groups: &[ConflictGroup]) -> Vec<String> {
+fn disables_for(groups: &[ConflictGroup]) -> Vec<DeviceId> {
     groups
         .iter()
         .flat_map(|group| ids_to_disable(group, &group.pick))
@@ -530,7 +541,7 @@ fn conflict_source_label(source: &ConflictDeviceSource) -> String {
 /// returns that parent device id and the hosting channel id. Hardware-detected
 /// (`locked`) links are controlled by the hardware and can't be removed, so
 /// they yield `None`.
-fn chain_parent(devices: &[WireDevice], child_id: &str) -> Option<(String, String)> {
+fn chain_parent(devices: &[WireDevice], child_id: &DeviceId) -> Option<(DeviceId, String)> {
     devices.iter().find_map(|p| {
         p.capabilities.iter().find_map(|c| match c {
             DeviceCapability::Lighting(r) => r.descriptor.channels.iter().find_map(|channel| {
@@ -573,7 +584,7 @@ fn remove_confirm_modal(
                 device_id: target.parent_id,
                 op: DeviceOp::LightingRemoveSegment {
                     channel_id: target.channel_id,
-                    segment_id: target.child_id,
+                    segment_id: target.child_id.clone(),
                 },
             },
         );
@@ -590,6 +601,7 @@ fn card_menu(
     cmd: &CommandTx,
     rename: &mut Option<Rename>,
     confirm_remove: &mut Option<ConfirmRemove>,
+    pending_disable: &mut Option<(DeviceId, String)>,
 ) {
     // Fix (not min) the width — a min-width menu here would grow every frame.
     ui.set_width(186.0);
@@ -647,7 +659,8 @@ fn card_menu(
             if widgets::context_menu_item(ui, &t!("home.disable_device"), theme::OFFLINE_TEXT)
                 .clicked()
             {
-                set_vis(ui, cmd, &d.id, VisibilityState::Disabled);
+                *pending_disable = Some((d.id.clone(), d.name.clone()));
+                ui.close();
             }
         }
         VisibilityState::Hidden => {
@@ -657,7 +670,8 @@ fn card_menu(
             if widgets::context_menu_item(ui, &t!("home.disable_device"), theme::OFFLINE_TEXT)
                 .clicked()
             {
-                set_vis(ui, cmd, &d.id, VisibilityState::Disabled);
+                *pending_disable = Some((d.id.clone(), d.name.clone()));
+                ui.close();
             }
         }
         VisibilityState::Disabled => {
@@ -680,25 +694,28 @@ fn card_menu(
     }
 }
 
-fn set_vis(ui: &mut egui::Ui, cmd: &CommandTx, id: &str, state: VisibilityState) {
+fn set_vis(ui: &mut egui::Ui, cmd: &CommandTx, id: &DeviceId, state: VisibilityState) {
     crate::runtime::ipc::send(
         cmd,
         halod_shared::commands::DaemonCommand::Device {
-            device_id: id.to_string(),
+            device_id: id.clone(),
             op: DeviceOp::SetDeviceVisibility { state },
         },
     );
     ui.close();
 }
 
-fn header(ui: &mut egui::Ui, state: &TopicStore, home: &mut HomeUi) {
-    let total = state.devices.iter().filter(|d| model::listable(d)).count();
-    let online = state
-        .devices
-        .iter()
-        .filter(|d| model::listable(d) && d.connected)
+fn device_counts(devices: &[WireDevice]) -> (usize, usize) {
+    let listed = devices.iter().filter(|d| model::listable(d));
+    let total = listed.clone().count();
+    let attention = listed
+        .filter(|d| !model::is_hidden(d) && !d.connected)
         .count();
-    let attention = total - online;
+    (total, attention)
+}
+
+fn header(ui: &mut egui::Ui, state: &TopicStore, home: &mut HomeUi) {
+    let (total, attention) = device_counts(&state.devices);
 
     let sub = if matches!(
         state.discovery.phase,
@@ -775,6 +792,7 @@ fn grid(
     cmd: &CommandTx,
     rename: &mut Option<Rename>,
     confirm_remove: &mut Option<ConfirmRemove>,
+    pending_disable: &mut Option<(halod_shared::ids::DeviceId, String)>,
     conflict_resolve: &mut Option<Vec<ConflictGroup>>,
     page: &mut Page,
     discovering: bool,
@@ -782,11 +800,16 @@ fn grid(
     let avail = ui.available_width();
     let cols = (((avail + GAP) / (300.0 + GAP)).floor() as usize).clamp(1, 3);
     let w = (avail - GAP * (cols - 1) as f32) / cols as f32;
-    let row_h = |row: &[&WireDevice]| {
-        if row.iter().any(|d| !model::metrics(d).is_empty()) {
+    let row_h = |row: &[&WireDevice], partial: bool| {
+        let base = if partial || row.iter().any(|d| !model::metrics(d).is_empty()) {
             138.0
         } else {
             68.0
+        };
+        if row.iter().any(|d| d.conflict.is_some()) {
+            base + CONFLICT_STRIP_GAP + CONFLICT_STRIP_H
+        } else {
+            base
         }
     };
 
@@ -800,7 +823,7 @@ fn grid(
     let rows = (devices.len() + placeholders).div_ceil(cols);
     for r in 0..rows {
         let row = &devices[(r * cols).min(devices.len())..((r + 1) * cols).min(devices.len())];
-        let h = if row.len() < cols { 138.0 } else { row_h(row) };
+        let h = row_h(row, row.len() < cols);
         ui.horizontal(|ui| {
             ui.spacing_mut().item_spacing.x = GAP;
             for d in row {
@@ -820,7 +843,17 @@ fn grid(
                 {
                     *page = Page::Device(d.id.clone());
                 }
-                resp.context_menu(|ui| card_menu(ui, d, all_devices, cmd, rename, confirm_remove));
+                resp.context_menu(|ui| {
+                    card_menu(
+                        ui,
+                        d,
+                        all_devices,
+                        cmd,
+                        rename,
+                        confirm_remove,
+                        pending_disable,
+                    )
+                });
             }
             for _ in row.len()..cols.min(devices.len() + placeholders - r * cols) {
                 let (rect, _) = ui.allocate_exact_size(Vec2::new(w, h), Sense::hover());
@@ -868,6 +901,16 @@ fn skeleton_card(p: &egui::Painter, rect: Rect) {
     );
 }
 
+fn device_status_tag(d: &WireDevice) -> (String, widgets::TagTone) {
+    if d.active_state == VisibilityState::Disabled {
+        (t!("home.disabled").into_owned(), widgets::TagTone::Neutral)
+    } else if d.connected {
+        (model::transport_label(d), widgets::TagTone::Neutral)
+    } else {
+        (t!("home.offline").into_owned(), widgets::TagTone::Danger)
+    }
+}
+
 fn device_card(
     ui: &mut egui::Ui,
     rect: Rect,
@@ -896,20 +939,8 @@ fn device_card(
     p.rect_filled(tile, theme::RADIUS_SM + 1.0, theme::TILE_BG);
     widgets::device_badge(p, tile, d.device_type);
 
-    let tag_rect = widgets::paint_tag(
-        p,
-        Pos2::new(inner.right(), tile.center().y),
-        &if d.connected {
-            model::transport_label(d)
-        } else {
-            t!("home.offline").into_owned()
-        },
-        if d.connected {
-            widgets::TagTone::Neutral
-        } else {
-            widgets::TagTone::Danger
-        },
-    );
+    let (status, tone) = device_status_tag(d);
+    let tag_rect = widgets::paint_tag(p, Pos2::new(inner.right(), tile.center().y), &status, tone);
 
     let text_left = tile.right() + 12.0;
     let text_w = (tag_rect.left() - 8.0 - text_left).max(20.0);
@@ -931,9 +962,9 @@ fn device_card(
 
     let metrics = model::metrics(d);
     if !metrics.is_empty() {
-        let strip = Rect::from_min_max(
-            Pos2::new(inner.left(), inner.bottom() - widgets::STAT_STRIP_H),
-            inner.max,
+        let strip = Rect::from_min_size(
+            Pos2::new(inner.left(), tile.bottom() + 14.0),
+            Vec2::new(inner.width(), widgets::STAT_STRIP_H),
         );
         let items: Vec<(&str, &str)> = metrics
             .iter()
@@ -945,49 +976,111 @@ fn device_card(
     if !d.connected || d.active_state != VisibilityState::Visible {
         p.rect_filled(rect, theme::RADIUS_MD, a(theme::MAIN_BG, 0.5));
     }
-    conflict_control(ui, rect, d, all_devices, conflict_resolve)
+    conflict_control(ui, inner, d, all_devices, conflict_resolve)
 }
 
 fn conflict_control(
     ui: &mut egui::Ui,
-    rect: Rect,
+    inner: Rect,
     d: &WireDevice,
     all_devices: &[WireDevice],
     conflict_resolve: &mut Option<Vec<ConflictGroup>>,
 ) -> bool {
+    use halod_shared::types::ConflictConfidence;
     let Some(conflict) = model::conflict_presentation(d, all_devices) else {
         return false;
     };
-    let label = if conflict.is_recommended {
-        t!("home.conflict_recommended").into_owned()
-    } else if conflict.confidence == halod_shared::types::ConflictConfidence::Confirmed {
-        t!("home.conflict_confirmed").into_owned()
+    let peers = conflict.peer_names.join(", ");
+    let (label, action, fill, border, ink, action_ink) = if conflict.is_recommended {
+        (
+            t!("home.conflict_recommended"),
+            t!("home.conflict_review"),
+            theme::OK_FILL,
+            theme::OK_BORDER,
+            theme::ONLINE_TEXT,
+            theme::ONLINE_TEXT,
+        )
+    } else if conflict.confidence == ConflictConfidence::Confirmed {
+        (
+            t!("home.conflict_duplicate_of", name = peers),
+            t!("home.conflict_resolve"),
+            a(theme::STAT_AMBER, 0.09),
+            a(theme::STAT_AMBER, 0.34),
+            theme::WARN_TEXT,
+            theme::STAT_AMBER,
+        )
     } else {
-        t!("home.conflict_possible").into_owned()
+        (
+            t!("home.conflict_possibly", name = peers),
+            t!("home.conflict_check"),
+            theme::INNER_BG,
+            theme::BORDER_STRONG,
+            theme::TEXT_SOFT,
+            theme::LINK,
+        )
     };
-    let y = rect.top() + 64.0;
-    let chip = Rect::from_min_size(
-        Pos2::new(rect.right() - 106.0, y - 9.0),
-        Vec2::new(96.0, 18.0),
+
+    let strip = Rect::from_min_max(
+        Pos2::new(inner.left(), inner.bottom() - CONFLICT_STRIP_H),
+        inner.max,
     );
-    let response = ui.interact(chip, egui::Id::unique(("conflict", &d.id)), Sense::click());
-    let color = if conflict.confidence == halod_shared::types::ConflictConfidence::Confirmed {
-        theme::OFFLINE_TEXT
+    let response = ui.interact(strip, egui::Id::unique(("conflict", &d.id)), Sense::click());
+    let hover = ui
+        .ctx()
+        .animate_bool_with_time(response.id, response.hovered(), 0.12);
+    let p = ui.painter();
+    p.rect_filled(strip, theme::RADIUS_SM, fill);
+    p.rect_stroke(
+        strip,
+        theme::RADIUS_SM,
+        Stroke::new(1.0, theme::lerp_color(border, action_ink, hover * 0.5)),
+        egui::StrokeKind::Inside,
+    );
+
+    let icon = Rect::from_center_size(
+        Pos2::new(strip.left() + 17.0, strip.center().y),
+        Vec2::splat(13.0),
+    );
+    if conflict.is_recommended {
+        crate::ui::icons::draw(ui, icon, crate::ui::icons::Icon::Check, ink);
+    } else if conflict.confidence == ConflictConfidence::Confirmed {
+        warning_glyph(p, icon.center(), 13.0, ink);
     } else {
-        theme::TEXT_MUT
-    };
-    ui.painter().text(
-        chip.right_top(),
-        Align2::RIGHT_TOP,
-        &label,
-        theme::micro(),
-        color,
+        p.circle_stroke(icon.center(), 6.0, Stroke::new(1.3, ink));
+        p.text(
+            icon.center(),
+            Align2::CENTER_CENTER,
+            "?",
+            theme::micro(),
+            ink,
+        );
+    }
+
+    let action_galley = p.layout_no_wrap(action.into_owned(), theme::medium(12.0), action_ink);
+    let action_pos = Pos2::new(
+        strip.right() - 10.0 - action_galley.size().x,
+        strip.center().y - action_galley.size().y / 2.0,
     );
+    let text_left = icon.right() + 8.0;
+    let text_w = (action_pos.x - 10.0 - text_left).max(20.0);
+    let font = theme::body_sm();
+    p.text(
+        Pos2::new(text_left, strip.center().y),
+        Align2::LEFT_CENTER,
+        ellipsize(p, &label, &font, text_w),
+        font,
+        ink,
+    );
+    p.galley(action_pos, action_galley, action_ink);
+
+    if response.hovered() {
+        ui.ctx().set_cursor_icon(egui::CursorIcon::PointingHand);
+    }
     let clicked = response.clicked();
     response.on_hover_text(if conflict.is_recommended {
         t!("home.conflict_owner", name = conflict.recommended_name)
     } else {
-        t!("home.conflict_with", name = conflict.peer_names.join(", "))
+        t!("home.conflict_with", name = peers)
     });
     if clicked {
         *conflict_resolve = Some(conflict_groups(all_devices));
@@ -1011,7 +1104,7 @@ mod tests {
     fn hub_with_links(links: Vec<halod_shared::types::LightingSegmentInfo>) -> WireDevice {
         use halod_shared::types::*;
         WireDevice {
-            id: "hub1".into(),
+            id: "hub1".parse().unwrap(),
             name: "Hub".into(),
             vendor: "v".into(),
             model: "m".into(),
@@ -1050,7 +1143,7 @@ mod tests {
     fn link(child: &str, locked: bool) -> halod_shared::types::LightingSegmentInfo {
         use halod_shared::types::*;
         LightingSegmentInfo {
-            device_id: child.into(),
+            device_id: child.parse().unwrap(),
             channel_id: "lighting".into(),
             name: "Strip".into(),
             topology: ZoneTopology::Linear,
@@ -1061,11 +1154,24 @@ mod tests {
     }
 
     #[test]
+    fn a_disabled_device_is_tagged_disabled_not_offline() {
+        let mut d = WireDevice {
+            connected: false,
+            active_state: VisibilityState::Disabled,
+            ..Default::default()
+        };
+        assert_eq!(device_status_tag(&d).0, t!("home.disabled"));
+        d.active_state = VisibilityState::Visible;
+        assert_eq!(device_status_tag(&d).0, t!("home.offline"));
+        assert_eq!(device_status_tag(&d).1, widgets::TagTone::Danger);
+    }
+
+    #[test]
     fn chain_parent_finds_unlocked_link_parent_and_channel() {
         let devices = vec![hub_with_links(vec![link("child1", false)])];
         assert_eq!(
-            chain_parent(&devices, "child1"),
-            Some(("hub1".into(), "h1".into()))
+            chain_parent(&devices, &"child1".parse().unwrap()),
+            Some(("hub1".parse().unwrap(), "h1".into()))
         );
     }
 
@@ -1073,9 +1179,9 @@ mod tests {
     fn chain_parent_ignores_locked_and_unknown_children() {
         let devices = vec![hub_with_links(vec![link("child1", true)])];
         // Hardware-detected (locked) links are not removable.
-        assert_eq!(chain_parent(&devices, "child1"), None);
+        assert_eq!(chain_parent(&devices, &"child1".parse().unwrap()), None);
         // A device that is nobody's child yields nothing.
-        assert_eq!(chain_parent(&devices, "stranger"), None);
+        assert_eq!(chain_parent(&devices, &"stranger".parse().unwrap()), None);
     }
 
     fn group(ids: &[(&str, &str)], recommended: &str) -> ConflictGroup {
@@ -1083,13 +1189,13 @@ mod tests {
             devices: ids
                 .iter()
                 .map(|(id, name)| ConflictChoiceDevice {
-                    id: (*id).into(),
+                    id: (*id).parse().unwrap(),
                     name: (*name).into(),
                     source: ConflictDeviceSource::Builtin,
                 })
                 .collect(),
-            recommended_id: recommended.into(),
-            pick: recommended.into(),
+            recommended_id: recommended.parse().unwrap(),
+            pick: recommended.parse().unwrap(),
         }
     }
 
@@ -1097,11 +1203,11 @@ mod tests {
     fn dev_with_conflict(id: &str, peers: &[&str], recommended: &str) -> WireDevice {
         use halod_shared::types::*;
         let mut d = hub_with_links(vec![]);
-        d.id = id.into();
+        d.id = id.parse().unwrap();
         d.name = id.to_uppercase();
         d.conflict = Some(DeviceConflictSummary {
-            peer_ids: peers.iter().map(|p| (*p).to_string()).collect(),
-            recommended_id: recommended.into(),
+            peer_ids: peers.iter().map(|p| (*p).parse().unwrap()).collect(),
+            recommended_id: recommended.parse().unwrap(),
             confidence: ConflictConfidence::Confirmed,
             participants: vec![],
         });
@@ -1114,8 +1220,28 @@ mod tests {
             &[("builtin", "Built-in host device"), ("openrgb", "OpenRGB")],
             "builtin",
         );
-        assert_eq!(ids_to_disable(&group, "builtin"), vec!["openrgb"]);
-        assert_eq!(ids_to_disable(&group, "openrgb"), vec!["builtin"]);
+        assert_eq!(
+            ids_to_disable(&group, &"builtin".parse().unwrap()),
+            vec!["openrgb"]
+        );
+        assert_eq!(
+            ids_to_disable(&group, &"openrgb".parse().unwrap()),
+            vec!["builtin"]
+        );
+    }
+
+    #[test]
+    fn hidden_and_disabled_devices_never_need_attention() {
+        let mut devices: Vec<WireDevice> = ["a", "b", "c", "d"]
+            .iter()
+            .map(|id| dev_with_conflict(id, &[], id))
+            .collect();
+        for d in &mut devices[1..] {
+            d.connected = false;
+        }
+        devices[2].active_state = VisibilityState::Hidden;
+        devices[3].active_state = VisibilityState::Disabled;
+        assert_eq!(device_counts(&devices), (4, 1));
     }
 
     #[test]
@@ -1141,7 +1267,7 @@ mod tests {
     fn disables_for_keeps_each_groups_pick_and_disables_the_rest() {
         let groups = vec![group(&[("a", "A"), ("b", "B")], "a"), {
             let mut g = group(&[("c", "C"), ("d", "D")], "c");
-            g.pick = "d".into(); // user overrode the recommendation here
+            g.pick = "d".parse().unwrap(); // user overrode the recommendation here
             g
         }];
         // Group 1 keeps its recommended 'a'; group 2 keeps the overridden 'd'.

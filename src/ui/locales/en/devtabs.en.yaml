@@ -3,6 +3,8 @@ devtabs:
   hide_from_home: Hide from Home
   show_on_home: Show on Home
   disable_device: Disable device
+  disable_device_title: "Disable %{name}?"
+  disable_device_confirm: "HaloDaemon stops controlling %{name} until you enable it again."
   enable_device: Enable device
   read_only: Read-only
   tab_devices: Devices
@@ -23,7 +25,6 @@ devtabs:
   save: Save
   cancel: Cancel
 
-  battery_n: "Battery %{n}"
   battery: Battery
   offline: Offline
   charging_bolt: "⚡ charging"

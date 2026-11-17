@@ -3,6 +3,8 @@ devtabs:
   hide_from_home: Nascondi dalla Home
   show_on_home: Mostra nella Home
   disable_device: Disattiva dispositivo
+  disable_device_title: "Disattivare %{name}?"
+  disable_device_confirm: "HaloDaemon smette di controllare %{name} finché non lo riattivi."
   enable_device: Attiva dispositivo
   read_only: Sola lettura
   tab_devices: Dispositivi
@@ -23,7 +25,6 @@ devtabs:
   save: Salva
   cancel: Annulla
 
-  battery_n: "Batteria %{n}"
   battery: Batteria
   offline: Offline
   charging_bolt: "⚡ in carica"
@@ -87,7 +88,7 @@ devtabs:
   eq_device: Dispositivo
   eq_custom: Personalizzato
 
-  onboard_intro: I profili salvati nella memoria interna del dispositivo funzionano anche quando halod non è in esecuzione.
+  onboard_intro: I profili salvati nella memoria interna del dispositivo funzionano anche quando HaloDaemon non è in esecuzione.
   host_mode: Modalità host
   host_mode_desc: Consenti a HaloDaemon di gestire questo dispositivo. Disattiva questa opzione per usare autonomamente i profili salvati sul dispositivo.
   slot_n: "Slot %{n}"

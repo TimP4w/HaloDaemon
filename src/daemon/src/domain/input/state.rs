@@ -1,5 +1,6 @@
 // SPDX-License-Identifier: GPL-3.0-or-later
 use crate::domain::input::engine::action_executor::ActionExecutor;
+use halod_shared::ids::DeviceId;
 use parking_lot::Mutex;
 use std::collections::HashSet;
 use std::sync::{Arc, OnceLock};
@@ -8,7 +9,7 @@ use std::sync::{Arc, OnceLock};
 #[derive(Debug, Clone)]
 pub struct ButtonEvent {
     /// ID of the device that emitted the event.
-    pub device_id: String,
+    pub device_id: DeviceId,
     /// CIDs that transitioned to pressed since the last event.
     pub pressed: Vec<u16>,
     /// CIDs that transitioned to released since the last event.
@@ -19,7 +20,7 @@ pub struct ButtonEvent {
 pub struct InputState {
     shutdown_tx: tokio::sync::watch::Sender<bool>,
     /// Held Layer Shift tokens, keyed by (device_id, cid); active iff non-empty.
-    layer_shift_held: Mutex<HashSet<(String, u16)>>,
+    layer_shift_held: Mutex<HashSet<(DeviceId, u16)>>,
     /// Injection backend; unset on headless Linux.
     executor: OnceLock<Arc<ActionExecutor>>,
 }
@@ -46,21 +47,21 @@ impl InputState {
     }
 
     /// Hold a Layer Shift token; idempotent if already held.
-    pub fn layer_shift_press(&self, device_id: &str, cid: u16) {
+    pub fn layer_shift_press(&self, device_id: &DeviceId, cid: u16) {
         self.layer_shift_held
             .lock()
-            .insert((device_id.to_owned(), cid));
+            .insert((device_id.clone(), cid));
     }
 
     /// Release a Layer Shift token; a no-op if it wasn't held.
-    pub fn layer_shift_release(&self, device_id: &str, cid: u16) {
+    pub fn layer_shift_release(&self, device_id: &DeviceId, cid: u16) {
         self.layer_shift_held
             .lock()
-            .remove(&(device_id.to_owned(), cid));
+            .remove(&(device_id.clone(), cid));
     }
 
     /// Direct disconnect cleanup, not just the synthetic-release broadcast.
-    pub fn layer_shift_clear_device(&self, device_id: &str) {
+    pub fn layer_shift_clear_device(&self, device_id: &DeviceId) {
         self.layer_shift_held.lock().retain(|(d, _)| d != device_id);
     }
 

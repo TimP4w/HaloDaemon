@@ -105,7 +105,7 @@ mod tests {
     fn transaction_upserts_and_removes_devices_atomically() {
         let mut store = TopicStore::default();
         let first = WireDevice {
-            id: "first".into(),
+            id: "first".parse().unwrap(),
             ..Default::default()
         };
         store.apply_transaction(BusTransaction {
@@ -118,7 +118,7 @@ mod tests {
             tombstones: Vec::new(),
         });
         let second = WireDevice {
-            id: "second".into(),
+            id: "second".parse().unwrap(),
             ..Default::default()
         };
         store.apply_transaction(BusTransaction {

@@ -43,6 +43,13 @@ lcd:
   accent: Accento
   font: Font
   center: Centro
+  layer_bring_forward: Porta avanti
+  layer_send_backward: Porta indietro
+  layer_bring_to_front: Porta in primo piano
+  layer_send_to_back: Porta in fondo
+  layer_duplicate: Duplica
+  layer_center_horizontally: Centra orizzontalmente
+  layer_center_vertically: Centra verticalmente
   background: Sfondo
   dim: Attenua
   bg_flow: Flusso

@@ -8,13 +8,12 @@ use std::collections::{HashMap, HashSet};
 use crate::domain::state::Page;
 use crate::domain::topic_store::TopicStore;
 use egui::{Align2, Margin, Pos2, Rect, RichText, Sense, Stroke, Vec2};
-use halod_shared::commands::{DaemonCommand, DeviceOp};
+use halod_shared::commands::{DaemonCommand, IntegrationOp};
 use halod_shared::types::{
-    IntegrationLifecycleState, IntegrationSetupMode, IntegrationSetupPhase, PluginInfo,
-    PluginIssue, PluginIssueKind, WireDevice,
+    IntegrationAuthKind, IntegrationLifecycleState, IntegrationSetupMode, IntegrationSetupPhase,
+    PluginInfo, WireDevice,
 };
 
-use crate::domain::models::plugin_issues::plugin_issue_detail;
 use crate::domain::models::sensors::{views as sensor_views, SensorView};
 use crate::runtime::ipc::{self, CommandTx};
 use crate::ui::components::{self as widgets, ButtonKind};
@@ -23,16 +22,17 @@ use crate::ui::screens::plugin_config::{
 };
 use crate::ui::screens::plugins::plugin_name;
 use crate::ui::theme;
+use halod_shared::ids::PluginId;
 
 #[derive(Default)]
 pub struct IntegrationPanel {
-    config_edit: Option<(String, HashMap<String, String>)>,
+    config_edit: Option<(PluginId, HashMap<String, String>)>,
     /// Integrations whose resume is applying → target state.
-    in_flight: HashMap<String, bool>,
+    in_flight: HashMap<PluginId, bool>,
     issue_modal: Option<(String, String)>,
     setup_candidate: Option<String>,
     opened_oauth_urls: HashSet<String>,
-    reset_confirm: Option<(String, String)>,
+    reset_confirm: Option<(PluginId, String)>,
     serial_ports: Vec<halod_shared::types::SerialPortInfo>,
 }
 
@@ -46,7 +46,7 @@ pub struct IntegrationStatus {
 /// `{root_id}_ctrl_` prefix the daemon assigns.
 fn exposed_devices<'a>(
     state: &'a TopicStore,
-    plugin_id: &str,
+    plugin_id: &PluginId,
 ) -> impl Iterator<Item = &'a WireDevice> {
     let prefix = state
         .devices
@@ -60,7 +60,7 @@ fn exposed_devices<'a>(
 }
 
 /// Sensors on the integration's root and on every device it exposes.
-fn exposed_sensors(state: &TopicStore, plugin_id: &str) -> Vec<SensorView> {
+fn exposed_sensors(state: &TopicStore, plugin_id: &PluginId) -> Vec<SensorView> {
     state
         .devices
         .iter()
@@ -70,7 +70,7 @@ fn exposed_sensors(state: &TopicStore, plugin_id: &str) -> Vec<SensorView> {
         .collect()
 }
 
-pub fn integration_status(state: &TopicStore, plugin_id: &str) -> IntegrationStatus {
+pub fn integration_status(state: &TopicStore, plugin_id: &PluginId) -> IntegrationStatus {
     IntegrationStatus {
         connected: state
             .devices
@@ -171,6 +171,18 @@ fn action_row(ui: &mut egui::Ui, body: impl FnOnce(&mut egui::Ui)) {
 }
 
 impl IntegrationPanel {
+    pub(super) fn resuming(&self, id: &PluginId) -> bool {
+        self.in_flight.contains_key(id)
+    }
+
+    pub(super) fn begin_resume(&mut self, id: &PluginId) {
+        self.in_flight.insert(id.clone(), true);
+    }
+
+    pub(super) fn forget_in_flight(&mut self) {
+        self.in_flight.clear();
+    }
+
     /// Dialogs owned by the panel; call once per frame after the page body.
     pub fn modals(&mut self, ctx: &egui::Context, cmd: &CommandTx) {
         if self.reset_confirm.is_some() {
@@ -189,9 +201,9 @@ impl IntegrationPanel {
                 self.config_edit = None;
                 ipc::send(
                     cmd,
-                    DaemonCommand::Device {
-                        device_id: id,
-                        op: DeviceOp::ResetIntegrationSetup,
+                    DaemonCommand::Integration {
+                        plugin_id: id.clone(),
+                        op: IntegrationOp::ResetSetup,
                     },
                 );
             }
@@ -235,15 +247,15 @@ impl IntegrationPanel {
                 {
                     ipc::send(
                         cmd,
-                        DaemonCommand::Device {
-                            device_id: p.id.clone(),
-                            op: DeviceOp::BeginIntegrationSetup,
+                        DaemonCommand::Integration {
+                            plugin_id: p.id.clone(),
+                            op: IntegrationOp::BeginSetup,
                         },
                     );
                 }
             }
             PanelView::Paused => {
-                let resuming = self.in_flight.contains_key(&p.id);
+                let resuming = self.resuming(&p.id);
                 let label = t!("integrations.resume");
                 if widgets::Banner::neutral(&t!("integrations.paused"))
                     .action(
@@ -256,12 +268,12 @@ impl IntegrationPanel {
                     )
                     .show(ui)
                 {
-                    self.in_flight.insert(p.id.clone(), true);
+                    self.begin_resume(&p.id);
                     ipc::send(
                         cmd,
-                        DaemonCommand::SetIntegrationEnabled {
-                            id: p.id.clone(),
-                            enabled: true,
+                        DaemonCommand::Integration {
+                            plugin_id: p.id.clone(),
+                            op: IntegrationOp::SetEnabled { enabled: true },
                         },
                     );
                 }
@@ -280,38 +292,36 @@ impl IntegrationPanel {
         page: &mut Page,
     ) {
         let status = integration_status(state, &p.id);
-        let state_label = match integration_state(p, &status) {
-            IntegrationState::Active => {
+        let integration = integration_state(p, &status);
+        match running_banner(integration, p.health.issue.is_some()) {
+            Some(RunningBanner::Connected) => {
                 let text = match connection_address(p) {
                     Some(address) => t!(
                         "integrations.connected_to",
                         address = address,
-                        count = status.device_count
+                        count = status.device_count,
+                        sensors = status.sensor_count
                     ),
-                    None => t!("integrations.connected", count = status.device_count),
+                    None => t!(
+                        "integrations.connected",
+                        count = status.device_count,
+                        sensors = status.sensor_count
+                    ),
                 };
                 widgets::Banner::ok(&text).show(ui);
-                t!("integrations.status_active")
+                ui.add_space(theme::SPACE_9);
             }
-            _ => {
+            Some(RunningBanner::NotConnected) => {
                 widgets::Banner::warn(&t!("integrations.status_connecting")).show(ui);
-                t!("integrations.status_configured")
+                ui.add_space(theme::SPACE_9);
             }
-        };
-        if let Some(issue) = &p.health.issue {
-            ui.add_space(theme::SPACE_5);
-            if integration_issue_bar(ui, issue) {
-                self.issue_modal = Some((
-                    t!(
-                        "integrations.issue_modal_title",
-                        integration = plugin_name(p)
-                    )
-                    .to_string(),
-                    plugin_issue_detail(issue),
-                ));
-            }
+            None => {}
         }
-        ui.add_space(theme::SPACE_9);
+        let state_label = if integration == IntegrationState::Active {
+            t!("integrations.status_active")
+        } else {
+            t!("integrations.status_configured")
+        };
         let devices = status.device_count.to_string();
         let sensors = status.sensor_count.to_string();
         let devices_label = t!("integrations.devices");
@@ -375,9 +385,9 @@ impl IntegrationPanel {
             |values| {
                 ipc::send(
                     cmd,
-                    DaemonCommand::SetIntegrationConfig {
-                        id: p.id.clone(),
-                        values,
+                    DaemonCommand::Integration {
+                        plugin_id: p.id.clone(),
+                        op: IntegrationOp::SetConfig { values },
                     },
                 );
             },
@@ -393,7 +403,7 @@ impl IntegrationPanel {
     ) {
         let time = ui.input(|i| i.time) as f32;
         let mut close = false;
-        let labels = rail_labels();
+        let labels = rail_labels(setup);
         let step = rail_step(setup);
         egui::Frame::NONE
             .fill(theme::INNER_BG)
@@ -431,6 +441,11 @@ impl IntegrationPanel {
                 widgets::progress_steps(ui, &labels, step);
                 ui.add_space(theme::SPACE_9);
                 match setup.phase {
+                    IntegrationSetupPhase::Init | IntegrationSetupPhase::Discovering
+                        if setup.auth == IntegrationAuthKind::None =>
+                    {
+                        self.setup_configure(ui, plugin, setup, cmd, time)
+                    }
                     IntegrationSetupPhase::Init => self.setup_init(ui, plugin, setup, cmd),
                     IntegrationSetupPhase::Discovering => {
                         self.setup_discovery(ui, plugin, setup, cmd, time)
@@ -446,12 +461,12 @@ impl IntegrationPanel {
         }
     }
 
-    pub fn cancel_setup(&mut self, cmd: &CommandTx, id: &str) {
+    pub fn cancel_setup(&mut self, cmd: &CommandTx, id: &PluginId) {
         ipc::send(
             cmd,
-            DaemonCommand::Device {
-                device_id: id.to_owned(),
-                op: DeviceOp::CancelIntegrationSetup,
+            DaemonCommand::Integration {
+                plugin_id: id.clone(),
+                op: IntegrationOp::CancelSetup,
             },
         );
         self.setup_candidate = None;
@@ -531,14 +546,91 @@ impl IntegrationPanel {
                 let values = config_values_to_send(edits, &plugin.config_fields);
                 crate::runtime::ipc::send(
                     cmd,
-                    halod_shared::commands::DaemonCommand::Device {
-                        device_id: plugin.id.clone(),
-                        op: DeviceOp::SubmitIntegrationSetup {
+                    halod_shared::commands::DaemonCommand::Integration {
+                        plugin_id: plugin.id.clone(),
+                        op: IntegrationOp::SubmitSetup {
                             candidate_id: None,
                             values,
                         },
                     },
                 );
+            }
+        });
+    }
+
+    fn setup_configure(
+        &mut self,
+        ui: &mut egui::Ui,
+        plugin: &PluginInfo,
+        setup: &halod_shared::types::IntegrationSetupStatus,
+        cmd: &CommandTx,
+        time: f32,
+    ) {
+        step_heading(ui, &t!("integrations.setup_manual_title"));
+        step_subtext(ui, &t!("integrations.setup_manual_sub"));
+        ui.add_space(theme::SPACE_5);
+        seed_config_edit_if_needed(&mut self.config_edit, &plugin.id, &plugin.config_values);
+        let scans = setup.modes.contains(&IntegrationSetupMode::Automatic);
+        if scans {
+            if let Some(message) = &setup.message {
+                scanning_card(ui, &t!(message.as_str()), time);
+                ui.add_space(theme::SPACE_5);
+            } else {
+                if let Some(error) = &setup.error {
+                    self.setup_error_bar(ui, plugin, error);
+                    ui.add_space(theme::SPACE_4);
+                }
+                if !setup.candidates.is_empty() {
+                    ui.label(
+                        RichText::new(t!("integrations.setup_found_on_network"))
+                            .font(theme::body_md())
+                            .color(theme::TEXT_DIM),
+                    );
+                    ui.add_space(theme::SPACE_4);
+                    let edits = &mut self.config_edit.as_mut().expect("setup edit seeded").1;
+                    for candidate in &setup.candidates {
+                        let selected =
+                            self.setup_candidate.as_deref() == Some(candidate.id.as_str());
+                        if device_row(ui, &candidate.name, &candidate.id, selected) {
+                            self.setup_candidate = Some(candidate.id.clone());
+                            edits.extend(candidate.values.clone());
+                        }
+                        ui.add_space(theme::SPACE_4);
+                    }
+                    ui.add_space(theme::SPACE_4);
+                }
+            }
+        }
+        let edits = &mut self.config_edit.as_mut().expect("setup edit seeded").1;
+        config_fields_editor(ui, plugin, edits, &self.serial_ports);
+        action_row(ui, |ui| {
+            if setup_primary(
+                ui,
+                &t!("integrations.setup_continue"),
+                setup.message.is_none(),
+            ) {
+                ipc::send(
+                    cmd,
+                    DaemonCommand::Integration {
+                        plugin_id: plugin.id.clone(),
+                        op: IntegrationOp::SubmitSetup {
+                            candidate_id: None,
+                            values: config_values_to_send(edits, &plugin.config_fields),
+                        },
+                    },
+                );
+            }
+            if scans
+                && setup.message.is_none()
+                && widgets::button(
+                    ui,
+                    &t!("integrations.setup_refresh"),
+                    ButtonKind::Ghost,
+                    egui::vec2(80.0, 30.0),
+                )
+                .clicked()
+            {
+                send_setup_mode(cmd, &plugin.id, IntegrationSetupMode::Automatic);
             }
         });
     }
@@ -592,9 +684,9 @@ impl IntegrationPanel {
                 if let Some(candidate_id) = self.setup_candidate.clone() {
                     crate::runtime::ipc::send(
                         cmd,
-                        halod_shared::commands::DaemonCommand::Device {
-                            device_id: plugin.id.clone(),
-                            op: DeviceOp::SubmitIntegrationSetup {
+                        halod_shared::commands::DaemonCommand::Integration {
+                            plugin_id: plugin.id.clone(),
+                            op: IntegrationOp::SubmitSetup {
                                 candidate_id: Some(candidate_id),
                                 values: HashMap::new(),
                             },
@@ -639,7 +731,7 @@ impl IntegrationPanel {
             ui.vertical_centered(|ui| {
                 let (rect, _) = ui.allocate_exact_size(Vec2::splat(96.0), Sense::hover());
                 theme::glow(ui.painter(), rect.center(), 44.0, theme::CYAN, 0.28);
-                widgets::paint_spinner(ui.painter(), rect.center(), 46.0, time);
+                widgets::paint_spinner(ui.painter(), rect.center(), 46.0, time, theme::CYAN);
                 ui.add_space(theme::SPACE_9);
                 let key = setup
                     .message
@@ -706,9 +798,9 @@ impl IntegrationPanel {
             {
                 crate::runtime::ipc::send(
                     cmd,
-                    halod_shared::commands::DaemonCommand::Device {
-                        device_id: plugin.id.clone(),
-                        op: DeviceOp::RetryIntegrationPairing,
+                    halod_shared::commands::DaemonCommand::Integration {
+                        plugin_id: plugin.id.clone(),
+                        op: IntegrationOp::RetryPairing,
                     },
                 );
             }
@@ -761,16 +853,24 @@ impl IntegrationPanel {
     }
 }
 
-fn rail_labels() -> Vec<String> {
-    [
-        "integrations.setup_step_discover",
-        "integrations.setup_step_prepare",
-        "integrations.setup_step_pair",
-        "integrations.setup_step_done",
-    ]
-    .into_iter()
-    .map(|key| t!(key).to_string())
-    .collect()
+fn rail_labels(setup: &halod_shared::types::IntegrationSetupStatus) -> Vec<String> {
+    let keys: &[&str] = if setup.auth == IntegrationAuthKind::None {
+        &[
+            "integrations.setup_step_configure",
+            "integrations.setup_step_done",
+        ]
+    } else {
+        &[
+            "integrations.setup_step_discover",
+            "integrations.setup_step_prepare",
+            "integrations.setup_step_pair",
+            "integrations.setup_step_done",
+        ]
+    };
+    keys.iter()
+        .copied()
+        .map(|key| t!(key).to_string())
+        .collect()
 }
 
 /// A device the integration exposes, with an Open action into its page.
@@ -835,6 +935,9 @@ fn sensor_row(ui: &mut egui::Ui, sensor: &SensorView) {
 }
 
 fn rail_step(setup: &halod_shared::types::IntegrationSetupStatus) -> usize {
+    if setup.auth == IntegrationAuthKind::None {
+        return usize::from(setup.phase == IntegrationSetupPhase::Done);
+    }
     match setup.phase {
         IntegrationSetupPhase::Init | IntegrationSetupPhase::Discovering => 0,
         IntegrationSetupPhase::Pairing
@@ -1025,7 +1128,7 @@ fn scanning_card(ui: &mut egui::Ui, message: &str, time: f32) {
         ui.set_width(ui.available_width());
         ui.horizontal(|ui| {
             let (rect, _) = ui.allocate_exact_size(Vec2::splat(24.0), Sense::hover());
-            widgets::paint_spinner(ui.painter(), rect.center(), 22.0, time);
+            widgets::paint_spinner(ui.painter(), rect.center(), 22.0, time, theme::CYAN);
             ui.add_space(theme::SPACE_6);
             ui.label(
                 RichText::new(message)
@@ -1177,40 +1280,34 @@ fn can_reset_setup(plugin: &PluginInfo) -> bool {
     plugin.integration_configured && plugin.integration_requires_setup
 }
 
-fn send_setup_mode(cmd: &CommandTx, id: &str, mode: IntegrationSetupMode) {
+fn send_setup_mode(cmd: &CommandTx, id: &PluginId, mode: IntegrationSetupMode) {
     crate::runtime::ipc::send(
         cmd,
-        halod_shared::commands::DaemonCommand::Device {
-            device_id: id.to_owned(),
-            op: DeviceOp::SelectIntegrationSetupMode { mode },
+        halod_shared::commands::DaemonCommand::Integration {
+            plugin_id: id.clone(),
+            op: IntegrationOp::SelectSetupMode { mode },
         },
     );
 }
 
-/// Runtime/connection failure attached to one integration card. The short bar
-/// keeps the page scannable; Details exposes the complete transport/Lua error.
-fn integration_issue_bar(ui: &mut egui::Ui, issue: &PluginIssue) -> bool {
-    let label = match issue.kind {
-        PluginIssueKind::ConnectFailed => t!("integrations.issue_connect_failed"),
-        PluginIssueKind::InitFailed => t!("plugins.issue_init_failed"),
-        PluginIssueKind::RuntimeError => t!("integrations.issue_runtime_error"),
-        PluginIssueKind::LoadWarning => t!("plugins.issue_load_warning"),
-        PluginIssueKind::LoadFailed => t!("plugins.issue_load_failed"),
-    };
-    let details = t!("integrations.issue_details");
-    widgets::Banner::danger(label.as_ref())
-        .action(widgets::BannerAction::new(
-            &details,
-            ButtonKind::Secondary,
-            Vec2::new(90.0, 28.0),
-        ))
-        .show(ui)
+#[derive(Debug, PartialEq)]
+enum RunningBanner {
+    Connected,
+    NotConnected,
+}
+
+fn running_banner(state: IntegrationState, has_issue: bool) -> Option<RunningBanner> {
+    match state {
+        IntegrationState::Active => Some(RunningBanner::Connected),
+        _ if has_issue => None,
+        _ => Some(RunningBanner::NotConnected),
+    }
 }
 
 /// Drop landed (or vanished) in-flight toggles, unlocking them. Pure/testable.
-fn reconcile_in_flight(in_flight: &mut HashMap<String, bool>, plugins: &[PluginInfo]) {
-    crate::domain::state::retain_in_flight(in_flight, plugins, |p, target| {
-        p.integration_enabled == target
+fn reconcile_in_flight(in_flight: &mut HashMap<PluginId, bool>, plugins: &[PluginInfo]) {
+    crate::domain::state::drain_landed(in_flight, plugins, |p, target| {
+        p.integration_enabled == *target
     });
 }
 
@@ -1219,9 +1316,22 @@ mod tests {
     use super::*;
     use halod_shared::types::PluginKind;
 
+    #[test]
+    fn a_failing_integration_leaves_the_explanation_to_its_issue_banner() {
+        assert_eq!(running_banner(IntegrationState::Configured, true), None);
+        assert_eq!(
+            running_banner(IntegrationState::Configured, false),
+            Some(RunningBanner::NotConnected)
+        );
+        assert_eq!(
+            running_banner(IntegrationState::Active, true),
+            Some(RunningBanner::Connected)
+        );
+    }
+
     fn plugin(id: &str, enabled: bool, integration_enabled: bool) -> PluginInfo {
         PluginInfo {
-            id: id.into(),
+            id: id.parse().unwrap(),
             name: format!("{id} integration"),
             translations: Default::default(),
             path: String::new(),
@@ -1242,7 +1352,8 @@ mod tests {
             effect_thumbnails: vec![],
             repo: String::new(),
             provenance: Default::default(),
-            access: Default::default(),
+            uses: Default::default(),
+            matches: Default::default(),
             provides: vec![],
             consumes: vec![],
             data_records: vec![],
@@ -1267,9 +1378,9 @@ mod tests {
 
     fn device(id: &str, integration_id: Option<&str>, connected: bool) -> WireDevice {
         WireDevice {
-            id: id.into(),
+            id: id.parse().unwrap(),
             connected,
-            integration_id: integration_id.map(str::to_owned),
+            integration_id: integration_id.map(|id| id.parse().unwrap()),
             ..Default::default()
         }
     }
@@ -1280,7 +1391,7 @@ mod tests {
             devices: vec![device("other", None, true)],
             ..Default::default()
         };
-        let status = integration_status(&state, "openrgb");
+        let status = integration_status(&state, &"openrgb".parse().unwrap());
         assert!(!status.connected);
         assert_eq!(status.device_count, 0);
     }
@@ -1299,7 +1410,7 @@ mod tests {
             ],
             ..Default::default()
         };
-        let status = integration_status(&state, "openrgb");
+        let status = integration_status(&state, &"openrgb".parse().unwrap());
         assert!(status.connected);
         assert_eq!(status.device_count, 2);
     }
@@ -1310,9 +1421,9 @@ mod tests {
         // "disabling": target false, now disabled → landed, unlock.
         // "gone": plugin no longer present → unlock.
         let mut in_flight = std::collections::HashMap::from([
-            ("enabling".to_string(), true),
-            ("disabling".to_string(), false),
-            ("gone".to_string(), true),
+            ("enabling".parse().unwrap(), true),
+            ("disabling".parse().unwrap(), false),
+            ("gone".parse().unwrap(), true),
         ]);
         let plugins = vec![
             plugin("enabling", true, false),
@@ -1394,12 +1505,15 @@ mod tests {
             ],
             ..Default::default()
         };
-        let ids: Vec<String> = exposed_sensors(&state, "hw")
+        let ids: Vec<String> = exposed_sensors(&state, &"hw".parse().unwrap())
             .into_iter()
             .map(|s| s.id)
             .collect();
         assert_eq!(ids, vec!["cpu", "gpu"]);
-        assert_eq!(integration_status(&state, "hw").sensor_count, 2);
+        assert_eq!(
+            integration_status(&state, &"hw".parse().unwrap()).sensor_count,
+            2
+        );
     }
 
     #[test]
@@ -1412,37 +1526,70 @@ mod tests {
             ],
             ..Default::default()
         };
-        let ids: Vec<&str> = exposed_devices(&state, "openrgb")
+        let ids: Vec<&str> = exposed_devices(&state, &"openrgb".parse().unwrap())
             .map(|d| d.id.as_str())
             .collect();
         assert_eq!(ids, vec!["openrgb-root_ctrl_0"]);
     }
 
-    #[test]
-    fn rail_labels_match_the_rail_steps() {
-        for phase in [
-            IntegrationSetupPhase::Init,
-            IntegrationSetupPhase::Discovering,
-            IntegrationSetupPhase::Pairing,
-            IntegrationSetupPhase::Done,
-        ] {
-            let setup = halod_shared::types::IntegrationSetupStatus {
-                phase,
-                ..Default::default()
-            };
-            assert!(rail_step(&setup) < rail_labels().len());
+    const PHASES: [IntegrationSetupPhase; 4] = [
+        IntegrationSetupPhase::Init,
+        IntegrationSetupPhase::Discovering,
+        IntegrationSetupPhase::Pairing,
+        IntegrationSetupPhase::Done,
+    ];
+
+    fn status(
+        auth: IntegrationAuthKind,
+        phase: IntegrationSetupPhase,
+    ) -> halod_shared::types::IntegrationSetupStatus {
+        halod_shared::types::IntegrationSetupStatus {
+            auth,
+            phase,
+            ..Default::default()
         }
     }
 
     #[test]
+    fn every_phase_lands_on_the_rail_and_done_is_its_last_step() {
+        for auth in [
+            IntegrationAuthKind::None,
+            IntegrationAuthKind::Button,
+            IntegrationAuthKind::Oauth2Pkce,
+        ] {
+            for phase in PHASES {
+                let setup = status(auth, phase);
+                let last = rail_labels(&setup).len() - 1;
+                assert!(rail_step(&setup) <= last, "{auth:?} {phase:?}");
+                assert_eq!(
+                    rail_step(&setup) == last,
+                    phase == IntegrationSetupPhase::Done,
+                    "{auth:?} {phase:?}"
+                );
+            }
+        }
+    }
+
+    #[test]
+    fn a_setup_without_pairing_has_only_configure_and_done() {
+        let steps: Vec<usize> = PHASES
+            .into_iter()
+            .map(|phase| rail_step(&status(IntegrationAuthKind::None, phase)))
+            .collect();
+        assert_eq!(steps, [0, 0, 0, 1]);
+        assert_eq!(
+            rail_labels(&status(
+                IntegrationAuthKind::None,
+                IntegrationSetupPhase::Init
+            ))
+            .len(),
+            2
+        );
+    }
+
+    #[test]
     fn rail_advances_from_prepare_to_pair_when_the_handshake_starts() {
-        // "Press the link button" sits on Prepare; once the daemon posts a
-        // pairing message (and it isn't the OAuth browser step), the rail
-        // advances to Pair — but an OAuth handshake stays on Prepare/authorize.
-        let mut setup = halod_shared::types::IntegrationSetupStatus {
-            phase: IntegrationSetupPhase::Pairing,
-            ..Default::default()
-        };
+        let mut setup = status(IntegrationAuthKind::Button, IntegrationSetupPhase::Pairing);
         assert_eq!(rail_step(&setup), 1);
         setup.message = Some("Pairing…".into());
         assert_eq!(rail_step(&setup), 2);
@@ -1451,13 +1598,8 @@ mod tests {
     }
 
     #[test]
-    fn rail_covers_discover_through_done() {
-        let step = |phase| {
-            rail_step(&halod_shared::types::IntegrationSetupStatus {
-                phase,
-                ..Default::default()
-            })
-        };
+    fn a_paired_setup_walks_discover_prepare_done() {
+        let step = |phase| rail_step(&status(IntegrationAuthKind::Button, phase));
         assert_eq!(step(IntegrationSetupPhase::Init), 0);
         assert_eq!(step(IntegrationSetupPhase::Discovering), 0);
         assert_eq!(step(IntegrationSetupPhase::Done), 3);

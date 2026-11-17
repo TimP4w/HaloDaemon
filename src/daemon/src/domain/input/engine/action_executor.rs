@@ -11,6 +11,7 @@ use std::sync::atomic::{AtomicU64, Ordering};
 use std::sync::Arc;
 
 use crate::application::state::AppState;
+use halod_shared::ids::DeviceId;
 use halod_shared::types::{ButtonAction, CycleDir, DpiMode, MacroAtom, MacroStep, MouseBtn};
 
 fn cycle_index(dir: &CycleDir, current: usize, len: usize) -> usize {
@@ -26,7 +27,7 @@ fn cycle_index(dir: &CycleDir, current: usize, len: usize) -> usize {
     }
 }
 
-async fn dpi_cycle(direction: &CycleDir, device_id: &str, app: Arc<AppState>) {
+async fn dpi_cycle(direction: &CycleDir, device_id: &DeviceId, app: Arc<AppState>) {
     let Some(device) = app.find_device_by_id(device_id).await else {
         return;
     };
@@ -43,7 +44,7 @@ async fn dpi_cycle(direction: &CycleDir, device_id: &str, app: Arc<AppState>) {
     }
 }
 
-async fn profile_cycle(direction: &CycleDir, device_id: &str, app: Arc<AppState>) {
+async fn profile_cycle(direction: &CycleDir, device_id: &DeviceId, app: Arc<AppState>) {
     let Some(device) = app.find_device_by_id(device_id).await else {
         return;
     };
@@ -699,7 +700,7 @@ impl ActionExecutor {
         &self,
         action: &ButtonAction,
         pressed: bool,
-        device_id: &str,
+        device_id: &DeviceId,
         app: Arc<AppState>,
     ) {
         match action {
@@ -772,7 +773,7 @@ mod tests {
         let dev = Arc::new(MockDevice::new("dev1").with_dpi_initial(800));
         let app = app_with(vec![dev.clone()]);
 
-        dpi_cycle(&CycleDir::Up, "dev1", Arc::clone(&app)).await;
+        dpi_cycle(&CycleDir::Up, &"dev1".parse().unwrap(), Arc::clone(&app)).await;
 
         assert_eq!(
             *dev.dpi_direct_last.as_ref().unwrap().lock(),

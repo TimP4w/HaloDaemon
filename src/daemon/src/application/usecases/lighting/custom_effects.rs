@@ -111,9 +111,7 @@ mod tests {
     #[tokio::test]
     #[allow(clippy::await_holding_lock)]
     async fn save_list_delete_cycle() {
-        let _guard = crate::test_support::HALOD_CONFIG_DIR_LOCK.lock();
-        let dir = tempfile::tempdir().unwrap();
-        unsafe { std::env::set_var("HALOD_CONFIG_DIR", dir.path()) };
+        let _dir = crate::test_support::tmp_config_dir();
 
         let app = Arc::new(AppState::new(crate::config::Config::default()));
         save_custom_effect("My Effect".into(), HashMap::new(), app.clone())
@@ -127,31 +125,23 @@ mod tests {
 
         delete_custom_effect("My Effect".into(), app).await.unwrap();
         assert!(list_custom_effects().is_empty());
-
-        unsafe { std::env::remove_var("HALOD_CONFIG_DIR") };
     }
 
     #[tokio::test]
     #[allow(clippy::await_holding_lock)]
     async fn delete_missing_effect_is_a_noop() {
-        let _guard = crate::test_support::HALOD_CONFIG_DIR_LOCK.lock();
-        let dir = tempfile::tempdir().unwrap();
-        unsafe { std::env::set_var("HALOD_CONFIG_DIR", dir.path()) };
+        let _dir = crate::test_support::tmp_config_dir();
 
         let app = Arc::new(AppState::new(crate::config::Config::default()));
         delete_custom_effect("nonexistent".into(), app)
             .await
             .unwrap();
-
-        unsafe { std::env::remove_var("HALOD_CONFIG_DIR") };
     }
 
     #[tokio::test]
     #[allow(clippy::await_holding_lock)]
     async fn save_clamps_out_of_range_params_before_writing_to_disk() {
-        let _guard = crate::test_support::HALOD_CONFIG_DIR_LOCK.lock();
-        let dir = tempfile::tempdir().unwrap();
-        unsafe { std::env::set_var("HALOD_CONFIG_DIR", dir.path()) };
+        let _dir = crate::test_support::tmp_config_dir();
 
         let app = Arc::new(AppState::new(crate::config::Config::default()));
         let mut params = HashMap::new();
@@ -163,8 +153,6 @@ mod tests {
         let listed = list_custom_effects();
         let saved = DesignerParams::from_params(&listed[0].params);
         assert_eq!(saved.speed, 100.0);
-
-        unsafe { std::env::remove_var("HALOD_CONFIG_DIR") };
     }
 
     #[test]

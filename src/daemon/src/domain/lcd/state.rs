@@ -9,6 +9,7 @@ use halod_shared::types::EffectParamValue;
 use crate::domain::lcd::engine::custom::EditorSession;
 use crate::domain::lcd::engine::{video::VideoEngine, LcdEngine};
 use crate::domain::plugin::Registry;
+use halod_shared::ids::DeviceId;
 
 struct Engine {
     handle: Arc<LcdEngine>,
@@ -72,8 +73,8 @@ impl LcdEngineState {
     pub async fn snapshot(
         &self,
         registry: &Registry,
-        device_templates: HashMap<String, String>,
-        device_template_params: HashMap<String, HashMap<String, EffectParamValue>>,
+        device_templates: HashMap<DeviceId, String>,
+        device_template_params: HashMap<DeviceId, HashMap<String, EffectParamValue>>,
     ) -> halod_shared::types::LcdState {
         halod_shared::types::LcdState {
             engine: LcdEngine::wire_state(registry, device_templates, device_template_params),
@@ -94,7 +95,7 @@ mod tests {
         *state.templates.write().await = vec!["saved_template".to_string()];
 
         let mut device_templates = HashMap::new();
-        device_templates.insert("dev1".to_string(), "tmpl_a".to_string());
+        device_templates.insert("dev1".parse().unwrap(), "tmpl_a".to_string());
 
         let registry = crate::domain::plugin::Registry::default();
         let wire = state

@@ -4,11 +4,11 @@ shell:
   nav_cooling: Cooling
   nav_plugins: Plugins
   nav_settings: Settings
-  daemon_not_running: "halod isn’t running"
-  daemon_unreachable: "The app can’t reach the halod service, so your devices can’t be controlled. Lighting, fan curves and profiles keep their last state until it’s back."
+  daemon_not_running: "HaloDaemon isn’t running"
+  daemon_unreachable: "The app can’t reach the HaloDaemon service, so your devices can’t be controlled. Lighting, fan curves and profiles keep their last state until it’s back."
   daemon_reconnecting: "Trying to reconnect…"
   open_log: "Open log"
-  start_daemon: "Start halod"
+  start_daemon: "Start HaloDaemon"
   notifications: "Notifications"
   mark_all_read: "Mark all read"
   clear: "Clear"

@@ -67,6 +67,12 @@ pub async fn update(
     Ok(())
 }
 
+pub async fn list_running_apps(client: crate::application::ipc::ClientHandle) -> Result<()> {
+    let apps = crate::domain::profiles::observers::running_apps::scan().await?;
+    client.send(&halod_shared::messages::DaemonMessage::RunningAppsList { apps });
+    Ok(())
+}
+
 pub async fn remove(index: usize, app: Arc<AppState>) -> Result<()> {
     {
         let mut cfg = app.config.write().await;

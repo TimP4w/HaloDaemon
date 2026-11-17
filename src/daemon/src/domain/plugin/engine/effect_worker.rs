@@ -23,6 +23,7 @@ use super::lua_worker::LuaWorker;
 use crate::application::bus::data_bus;
 use crate::domain::plugin::ResolvedConfig;
 use crate::infrastructure::audio::SpectrumFrame;
+use halod_shared::ids::DeviceId;
 
 pub const CANVAS_W: u32 = 400;
 pub const CANVAS_H: u32 = 300;
@@ -52,7 +53,7 @@ pub struct EffectZoneInput {
     pub id: String,
     pub topology: String,
     pub led_count: usize,
-    pub device_id: String,
+    pub device_id: DeviceId,
 }
 
 impl EffectZoneInput {
@@ -61,7 +62,7 @@ impl EffectZoneInput {
             id: "canvas".into(),
             topology: "canvas".into(),
             led_count: 0,
-            device_id: String::new(),
+            device_id: Default::default(),
         }
     }
 }
@@ -693,7 +694,7 @@ mod tests {
             id: id.to_owned(),
             topology: "linear".to_owned(),
             led_count,
-            device_id: "device".to_owned(),
+            device_id: "device".parse().unwrap(),
         }
     }
 

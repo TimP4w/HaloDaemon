@@ -42,8 +42,8 @@ peer other than the vetted destination.
 - Unicast to a single connected destination only, no broadcast or multicast.
 - UDP provides no delivery guarantee, ordering, encryption, or peer
   authentication; the plugin's protocol owns any reliability it needs.
-- Service discovery via mDNS/SSDP is a separate integration-setup mechanism, not
-  part of this transport.
+- Service discovery via mDNS, SSDP or a TCP probe is a separate integration-setup
+  mechanism, not part of this transport.
 
 See the plugin repository's manifest reference (`transports.udp`) and Lua API
 (`halod.udp`) for the full authoring contract.

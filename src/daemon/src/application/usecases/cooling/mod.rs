@@ -2,3 +2,4 @@
 pub mod failsafe;
 pub mod fan_curve;
 pub mod runtime;
+pub mod tuning;

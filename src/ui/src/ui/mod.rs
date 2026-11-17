@@ -9,6 +9,7 @@ pub mod screens;
 pub mod shell;
 pub mod theme;
 pub mod tour;
+pub mod undo;
 
 /// Run one headless frame. egui asserts that every frame's texture delta is
 /// consumed, and tests have no painter to hand it to.

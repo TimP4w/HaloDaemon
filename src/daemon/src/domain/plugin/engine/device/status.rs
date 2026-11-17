@@ -87,12 +87,9 @@ impl StatusCache {
     }
 }
 
-fn replace_if_changed<T: serde::Serialize>(cache: &Mutex<T>, next: T) -> bool {
+fn replace_if_changed<T: PartialEq>(cache: &Mutex<T>, next: T) -> bool {
     let mut current = cache.lock();
-    let changed = match (serde_json::to_value(&*current), serde_json::to_value(&next)) {
-        (Ok(current), Ok(next)) => current != next,
-        _ => true,
-    };
+    let changed = *current != next;
     if changed {
         *current = next;
     }

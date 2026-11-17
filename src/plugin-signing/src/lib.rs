@@ -1,11 +1,14 @@
 // SPDX-License-Identifier: GPL-3.0-or-later
 mod api;
 pub mod catalog;
+pub mod declarations;
 pub mod fetch;
 pub mod package;
 
 pub use api::{PluginApi, HOST_PLUGIN_API};
-pub use catalog::{open_catalog, Catalog, CatalogError, CatalogPackage, RepositorySigningKey};
+pub use catalog::{
+    open_catalog, Catalog, CatalogError, CatalogPackage, RepositorySigningKey, SignatureAlgorithm,
+};
 
 use sha2::{Digest, Sha256};
 

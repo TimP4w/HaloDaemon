@@ -43,6 +43,13 @@ lcd:
   accent: Accent
   font: Font
   center: Center
+  layer_bring_forward: Bring forward
+  layer_send_backward: Send backward
+  layer_bring_to_front: Bring to front
+  layer_send_to_back: Send to back
+  layer_duplicate: Duplicate
+  layer_center_horizontally: Center horizontally
+  layer_center_vertically: Center vertically
   background: Background
   dim: Dim
   bg_flow: Flow

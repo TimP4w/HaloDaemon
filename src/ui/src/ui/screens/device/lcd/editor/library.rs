@@ -15,8 +15,9 @@ use crate::domain::tour::AnchorId;
 use crate::runtime::ipc;
 use crate::ui::components as widgets;
 use crate::ui::theme;
+use halod_shared::ids::DeviceId;
 
-pub(super) fn library_card(ui: &mut egui::Ui, ctx: &TabCtx, st: &mut DeviceUi, id: &str) {
+pub(super) fn library_card(ui: &mut egui::Ui, ctx: &TabCtx, st: &mut DeviceUi, id: &DeviceId) {
     tour::anchor(ui.ctx(), AnchorId::LcdEditorPalette, ui.max_rect());
     ui.set_width(ui.available_width());
     ui.spacing_mut().item_spacing.y = theme::SPACE_5;
@@ -294,7 +295,7 @@ pub(super) fn spawn_plugin_widget(
 
 /// Preset widget arrangements (sensor left unbound — the user picks it in the
 /// inspector), matching the design's `lcdPresets` chips.
-fn next_widget_id(widgets: &[WidgetDef]) -> String {
+pub(super) fn next_widget_id(widgets: &[WidgetDef]) -> String {
     let max = widgets
         .iter()
         .filter_map(|w| w.id.strip_prefix('w')?.parse::<u32>().ok())
@@ -310,7 +311,7 @@ mod tests {
     fn descriptor(uses_color: bool) -> halod_shared::types::LcdWidgetDescriptor {
         halod_shared::types::LcdWidgetDescriptor {
             id: "halo_lcd:text".to_owned(),
-            plugin_id: "halo_lcd".to_owned(),
+            plugin_id: "halo_lcd".parse().unwrap(),
             name: "Text".to_owned(),
             name_key: None,
             translations: Default::default(),
@@ -334,7 +335,7 @@ mod tests {
 
     #[test]
     fn new_text_widgets_start_white_without_changing_screen_accent() {
-        let mut state = DeviceUi::new("lcd".to_owned());
+        let mut state = DeviceUi::new("lcd".parse().unwrap());
         state.lcd.editor.def.widgets.clear();
         let accent = state.lcd.editor.def.style.accent;
 
@@ -353,7 +354,7 @@ mod tests {
 
     #[test]
     fn non_text_widgets_do_not_gain_a_widget_color() {
-        let mut state = DeviceUi::new("lcd".to_owned());
+        let mut state = DeviceUi::new("lcd".parse().unwrap());
         state.lcd.editor.def.widgets.clear();
 
         spawn_plugin_widget(&mut state, &descriptor(false), 0.5, 0.5);

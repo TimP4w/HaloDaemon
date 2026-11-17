@@ -39,8 +39,8 @@ disable certificate verification.
 
 - Only request/response is exposed: no streaming, websockets, or server push.
 - The plugin cannot reach any origin outside its approved allowlist.
-- Service discovery via mDNS/SSDP is a separate integration-setup mechanism, not
-  part of this transport.
+- Service discovery via mDNS, SSDP or a TCP probe is a separate integration-setup
+  mechanism, not part of this transport.
 
 See the plugin repository's manifest reference (`transports.http`) and Lua API
 (`halod.http:request`) for the full authoring contract.

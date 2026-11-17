@@ -16,6 +16,7 @@ use crate::domain::events::Change;
 use crate::domain::profiles::device_state::persist_device_state;
 use crate::domain::registry::require_device_owned_id;
 use crate::util::image::compress_for_storage;
+use halod_shared::ids::DeviceId;
 use halod_shared::types::{
     validate_image_filename, LcdHealth, LcdUploadProgress, LcdUploadStage, LightingState,
 };
@@ -38,7 +39,7 @@ fn invalidate_editor_image_cache(app: &Arc<AppState>) {
 /// to another mode so a stale video subprocess can't keep driving the panel.
 /// Also asks glibc to return freed pages to the OS, since stopping a video
 /// stream drops its ~230 KB+ frame buffer (the allocator retains those pages).
-async fn stop_video_for_device(app: &Arc<AppState>, lcd: &dyn LcdCapability, device_id: &str) {
+async fn stop_video_for_device(app: &Arc<AppState>, lcd: &dyn LcdCapability, device_id: &DeviceId) {
     if let Some(video) = app.lcd.video() {
         video.stop(device_id).await;
         #[cfg(target_os = "linux")]
@@ -59,7 +60,7 @@ async fn stop_video_for_device(app: &Arc<AppState>, lcd: &dyn LcdCapability, dev
 async fn deactivate_engine_for_device(
     app: &Arc<AppState>,
     lcd: &dyn LcdCapability,
-    device_id: &str,
+    device_id: &DeviceId,
 ) {
     app.lcd.invalidate_editor_session();
     // Drop the editor session immediately (engine-driven or not) — its
@@ -105,13 +106,13 @@ async fn restore_rgb(device: &dyn Device, lcd: &dyn LcdCapability) {
 
 fn send_upload_progress(
     client: &ClientHandle,
-    device_id: &str,
+    device_id: &DeviceId,
     stage: LcdUploadStage,
     percent: Option<u8>,
 ) {
     client.send(&DaemonMessage::LcdUploadProgress {
         data: LcdUploadProgress {
-            device_id: device_id.to_string(),
+            device_id: device_id.into(),
             stage,
             percent,
         },
@@ -121,9 +122,9 @@ fn send_upload_progress(
 /// A callback for `compress_for_storage` that pushes Processing progress to
 /// the uploading client, deduplicated per percent step. Safe to call from the
 /// blocking compression thread (`send` is a non-blocking `try_send`).
-fn upload_progress_reporter(client: &ClientHandle, device_id: &str) -> impl FnMut(u8) {
+fn upload_progress_reporter(client: &ClientHandle, device_id: &DeviceId) -> impl FnMut(u8) {
     let client = client.clone();
-    let device_id = device_id.to_string();
+    let device_id = device_id.clone();
     let mut last = None;
     move |percent| {
         if last != Some(percent) {
@@ -142,7 +143,7 @@ fn upload_progress_reporter(client: &ClientHandle, device_id: &str) -> impl FnMu
 /// error) that the GUI spinner gates on, then pass the result through unchanged.
 /// `device_id` is the request's own id so a `Failed` still fires even when the
 /// device could not be resolved — the GUI armed its spinner with that same id.
-fn finish_upload(client: &ClientHandle, device_id: &str, result: Result<()>) -> Result<()> {
+fn finish_upload(client: &ClientHandle, device_id: &DeviceId, result: Result<()>) -> Result<()> {
     let stage = if result.is_ok() {
         LcdUploadStage::Done
     } else {
@@ -155,7 +156,7 @@ fn finish_upload(client: &ClientHandle, device_id: &str, result: Result<()>) -> 
 /// Upload a new image (binary data arrives as base64 in `data_b64`).
 /// Saves the file to lcd_images_dir and applies it to the device.
 pub async fn set_screen_image(
-    id: String,
+    id: DeviceId,
     data_b64: String,
     app: Arc<AppState>,
     client: ClientHandle,
@@ -166,7 +167,7 @@ pub async fn set_screen_image(
 }
 
 async fn set_screen_image_inner(
-    id: &str,
+    id: &DeviceId,
     data_b64: String,
     app: &Arc<AppState>,
     client: &ClientHandle,
@@ -234,7 +235,7 @@ async fn set_screen_image_inner(
 
 /// Apply an image already present in the library by filename.
 pub async fn set_screen_image_from_library(
-    id: String,
+    id: DeviceId,
     filename: String,
     app: Arc<AppState>,
     client: ClientHandle,
@@ -245,7 +246,7 @@ pub async fn set_screen_image_from_library(
 }
 
 async fn set_screen_image_from_library_inner(
-    id: &str,
+    id: &DeviceId,
     filename: String,
     app: &Arc<AppState>,
     client: &ClientHandle,
@@ -320,7 +321,7 @@ async fn reapply_static_image(device: &dyn Device, lcd: &dyn LcdCapability) -> R
 }
 
 pub async fn set_screen_rotation(
-    id: String,
+    id: DeviceId,
     rotation: halod_shared::types::ScreenRotation,
     app: Arc<AppState>,
 ) -> Result<()> {
@@ -346,7 +347,7 @@ pub async fn set_screen_rotation(
     Ok(())
 }
 
-pub async fn set_screen_brightness(id: String, brightness: u8, app: Arc<AppState>) -> Result<()> {
+pub async fn set_screen_brightness(id: DeviceId, brightness: u8, app: Arc<AppState>) -> Result<()> {
     let device = require_device_owned_id(&id, &app).await?;
     let lcd = device
         .as_lcd()
@@ -367,7 +368,7 @@ pub async fn set_screen_brightness(id: String, brightness: u8, app: Arc<AppState
     Ok(())
 }
 
-pub async fn set_screen_default(id: String, app: Arc<AppState>) -> Result<()> {
+pub async fn set_screen_default(id: DeviceId, app: Arc<AppState>) -> Result<()> {
     let device = require_device_owned_id(&id, &app).await?;
     let lcd = device
         .as_lcd()
@@ -389,7 +390,11 @@ pub async fn set_screen_default(id: String, app: Arc<AppState>) -> Result<()> {
 }
 
 /// Toggle the raw (uncompressed, 24-bit) LCD streaming path for a device.
-pub async fn set_screen_raw_streaming(id: String, enabled: bool, app: Arc<AppState>) -> Result<()> {
+pub async fn set_screen_raw_streaming(
+    id: DeviceId,
+    enabled: bool,
+    app: Arc<AppState>,
+) -> Result<()> {
     let device = require_device_owned_id(&id, &app).await?;
     let lcd = device
         .as_lcd()
@@ -417,7 +422,7 @@ fn resolve_video_path(path: &str) -> Result<String> {
 }
 
 /// Play a looped local video file on the panel via the video engine.
-pub async fn set_screen_video(id: String, path: String, app: Arc<AppState>) -> Result<()> {
+pub async fn set_screen_video(id: DeviceId, path: String, app: Arc<AppState>) -> Result<()> {
     let device = require_device_owned_id(&id, &app).await?;
     let lcd = device
         .as_lcd()
@@ -551,7 +556,7 @@ mod tests {
             tx,
             subs: std::sync::Arc::default(),
         };
-        let mut report = upload_progress_reporter(&client, "lcd_dev");
+        let mut report = upload_progress_reporter(&client, &"lcd_dev".parse().unwrap());
         report(50);
         report(50); // deduplicated
         report(100);
@@ -613,7 +618,7 @@ mod tests {
             ScreenRotation::R270,
         ] {
             let (app, _) = make_app_with_lcd_device("lcd_dev");
-            set_screen_rotation("lcd_dev".into(), rotation, app)
+            set_screen_rotation("lcd_dev".parse().unwrap(), rotation, app)
                 .await
                 .unwrap();
         }
@@ -628,8 +633,10 @@ mod tests {
     async fn mode_switch_drops_editor_session_for_device() {
         use crate::domain::lcd::engine::custom::EditorSession;
         let (app, _) = make_app_with_lcd_device("lcd_dev");
-        *app.lcd.editor_session.lock() = Some(EditorSession::new_idle_for_test("lcd_dev"));
-        set_screen_default("lcd_dev".into(), app.clone())
+        *app.lcd.editor_session.lock() = Some(EditorSession::new_idle_for_test(
+            &"lcd_dev".parse().unwrap(),
+        ));
+        set_screen_default("lcd_dev".parse().unwrap(), app.clone())
             .await
             .unwrap();
         assert!(app.lcd.editor_session.lock().is_none());
@@ -639,8 +646,10 @@ mod tests {
     async fn mode_switch_keeps_other_devices_editor_session() {
         use crate::domain::lcd::engine::custom::EditorSession;
         let (app, _) = make_app_with_lcd_device("lcd_dev");
-        *app.lcd.editor_session.lock() = Some(EditorSession::new_idle_for_test("other_dev"));
-        set_screen_default("lcd_dev".into(), app.clone())
+        *app.lcd.editor_session.lock() = Some(EditorSession::new_idle_for_test(
+            &"other_dev".parse().unwrap(),
+        ));
+        set_screen_default("lcd_dev".parse().unwrap(), app.clone())
             .await
             .unwrap();
         assert!(app.lcd.editor_session.lock().is_some());
@@ -656,7 +665,7 @@ mod tests {
         slot.set_active_image(Some("pic.png".into()));
         slot.set_mode(LcdMode::Image);
 
-        set_screen_default("lcd_dev".into(), app.clone())
+        set_screen_default("lcd_dev".parse().unwrap(), app.clone())
             .await
             .unwrap();
 
@@ -681,7 +690,7 @@ mod tests {
         let file = tempfile::NamedTempFile::new().unwrap();
 
         let err = set_screen_video(
-            "lcd_dev".into(),
+            "lcd_dev".parse().unwrap(),
             file.path().to_str().unwrap().to_string(),
             app,
         )
@@ -712,12 +721,12 @@ mod tests {
             .push(dev as std::sync::Arc<dyn crate::domain::device::Device>);
 
         assert!(!dev_ref.lcd.as_ref().unwrap().raw_streaming());
-        set_screen_raw_streaming("lcd_dev".into(), true, app.clone())
+        set_screen_raw_streaming("lcd_dev".parse().unwrap(), true, app.clone())
             .await
             .unwrap();
         assert!(dev_ref.lcd.as_ref().unwrap().raw_streaming());
 
-        set_screen_raw_streaming("lcd_dev".into(), false, app)
+        set_screen_raw_streaming("lcd_dev".parse().unwrap(), false, app)
             .await
             .unwrap();
         assert!(!dev_ref.lcd.as_ref().unwrap().raw_streaming());
@@ -728,7 +737,7 @@ mod tests {
         let app = std::sync::Arc::new(crate::application::state::AppState::new(
             crate::config::Config::default(),
         ));
-        let err = set_screen_raw_streaming("ghost".into(), true, app)
+        let err = set_screen_raw_streaming("ghost".parse().unwrap(), true, app)
             .await
             .unwrap_err();
         assert!(err.to_string().contains("not found"));
@@ -739,9 +748,7 @@ mod tests {
     #[tokio::test]
     #[allow(clippy::await_holding_lock)]
     async fn delete_lcd_image_removes_existing_file() {
-        let _guard = crate::test_support::HALOD_CONFIG_DIR_LOCK.lock();
-        let dir = tempfile::tempdir().unwrap();
-        unsafe { std::env::set_var("HALOD_CONFIG_DIR", dir.path()) };
+        let _dir = crate::test_support::tmp_config_dir();
         let lcd_dir = crate::config::lcd_images_dir();
         std::fs::create_dir_all(&lcd_dir).unwrap();
         let filename = "test_image.png";
@@ -750,22 +757,18 @@ mod tests {
         let app = Arc::new(AppState::new(crate::config::Config::default()));
         delete_lcd_image(filename.to_string(), app).await.unwrap();
         assert!(!path.exists());
-        unsafe { std::env::remove_var("HALOD_CONFIG_DIR") };
     }
 
     #[tokio::test]
     #[allow(clippy::await_holding_lock)]
     async fn delete_lcd_image_noop_when_file_does_not_exist() {
-        let _guard = crate::test_support::HALOD_CONFIG_DIR_LOCK.lock();
-        let dir = tempfile::tempdir().unwrap();
-        unsafe { std::env::set_var("HALOD_CONFIG_DIR", dir.path()) };
+        let _dir = crate::test_support::tmp_config_dir();
         std::fs::create_dir_all(crate::config::lcd_images_dir()).unwrap();
         // This should return Ok even though the file doesn't exist.
         let app = Arc::new(AppState::new(crate::config::Config::default()));
         delete_lcd_image("nonexistent.png".to_string(), app)
             .await
             .unwrap();
-        unsafe { std::env::remove_var("HALOD_CONFIG_DIR") };
     }
 
     // ── terminal upload frames (spinner gate) ────────────────────────────
@@ -801,19 +804,16 @@ mod tests {
     #[tokio::test]
     #[allow(clippy::await_holding_lock)]
     async fn set_screen_image_from_library_emits_done_after_image_uploaded() {
-        let _guard = crate::test_support::HALOD_CONFIG_DIR_LOCK.lock();
-        let dir = tempfile::tempdir().unwrap();
-        unsafe { std::env::set_var("HALOD_CONFIG_DIR", dir.path()) };
+        let _dir = crate::test_support::tmp_config_dir();
         let lcd_dir = crate::config::lcd_images_dir();
         std::fs::create_dir_all(&lcd_dir).unwrap();
         std::fs::write(lcd_dir.join("pic.png"), b"fake png data").unwrap();
 
         let (app, _dev) = make_app_with_lcd_device("lcd_dev");
         let (client, mut rx) = client_and_drain();
-        set_screen_image_from_library("lcd_dev".into(), "pic.png".into(), app, client)
+        set_screen_image_from_library("lcd_dev".parse().unwrap(), "pic.png".into(), app, client)
             .await
             .unwrap();
-        unsafe { std::env::remove_var("HALOD_CONFIG_DIR") };
 
         let frames = drain_frames(&mut rx);
         let uploaded = frames.iter().position(|(t, _)| t == "image_uploaded");
@@ -836,18 +836,20 @@ mod tests {
     #[tokio::test]
     #[allow(clippy::await_holding_lock)]
     async fn set_screen_image_from_library_emits_failed_on_missing_file() {
-        let _guard = crate::test_support::HALOD_CONFIG_DIR_LOCK.lock();
-        let dir = tempfile::tempdir().unwrap();
-        unsafe { std::env::set_var("HALOD_CONFIG_DIR", dir.path()) };
+        let _dir = crate::test_support::tmp_config_dir();
         std::fs::create_dir_all(crate::config::lcd_images_dir()).unwrap();
 
         let (app, _dev) = make_app_with_lcd_device("lcd_dev");
         let (client, mut rx) = client_and_drain();
         // Valid filename (passes validation) but the file does not exist.
-        let err = set_screen_image_from_library("lcd_dev".into(), "gone.png".into(), app, client)
-            .await
-            .unwrap_err();
-        unsafe { std::env::remove_var("HALOD_CONFIG_DIR") };
+        let err = set_screen_image_from_library(
+            "lcd_dev".parse().unwrap(),
+            "gone.png".into(),
+            app,
+            client,
+        )
+        .await
+        .unwrap_err();
         assert!(err.to_string().contains("image not found"));
 
         let frames = drain_frames(&mut rx);
@@ -869,9 +871,14 @@ mod tests {
     async fn set_screen_image_emits_failed_on_invalid_base64() {
         let (app, _dev) = make_app_with_lcd_device("lcd_dev");
         let (client, mut rx) = client_and_drain();
-        let err = set_screen_image("lcd_dev".into(), "not base64!!!".into(), app, client)
-            .await
-            .unwrap_err();
+        let err = set_screen_image(
+            "lcd_dev".parse().unwrap(),
+            "not base64!!!".into(),
+            app,
+            client,
+        )
+        .await
+        .unwrap_err();
         assert!(!err.to_string().is_empty());
 
         let frames = drain_frames(&mut rx);
@@ -892,15 +899,12 @@ mod tests {
     #[tokio::test]
     #[allow(clippy::await_holding_lock)]
     async fn delete_lcd_image_rejects_path_traversal() {
-        let _guard = crate::test_support::HALOD_CONFIG_DIR_LOCK.lock();
-        let dir = tempfile::tempdir().unwrap();
-        unsafe { std::env::set_var("HALOD_CONFIG_DIR", dir.path()) };
+        let _dir = crate::test_support::tmp_config_dir();
         std::fs::create_dir_all(crate::config::lcd_images_dir()).unwrap();
         let app = Arc::new(AppState::new(crate::config::Config::default()));
         let err = delete_lcd_image("../escape.png".to_string(), app)
             .await
             .unwrap_err();
-        unsafe { std::env::remove_var("HALOD_CONFIG_DIR") };
         assert!(err.to_string().contains("invalid filename"));
     }
 }

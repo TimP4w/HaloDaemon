@@ -44,11 +44,14 @@ fn available(catalogs: &HashMap<String, RepoCatalog>) -> Vec<AvailablePlugin> {
                 .select(HOST_PLUGIN_API)
                 .into_values()
                 .map(move |entry| AvailablePlugin {
+                    matches: entry.matches.clone(),
                     repo: slug.clone(),
                     id: entry.id.clone(),
+                    name: entry.name.clone(),
                     version: entry.version.to_string(),
                     api: entry.api.to_string(),
                     compatible: entry.api.is_compatible_with(HOST_PLUGIN_API),
+                    uses: entry.uses.clone(),
                 })
         })
         .collect();
@@ -108,19 +111,22 @@ mod tests {
 
     fn entry(id: &str, version: &str, api: &str) -> CatalogPackage {
         CatalogPackage {
-            id: id.into(),
+            id: id.parse().unwrap(),
+            name: id.into(),
             version: version.parse().unwrap(),
             api: api.parse().unwrap(),
             path: format!("packages/{id}-{version}.tar.gz"),
             sha256: "a".repeat(64),
             size: 1,
+            matches: Default::default(),
+            uses: Default::default(),
         }
     }
 
     fn repo(packages: Vec<CatalogPackage>) -> RepoCatalog {
         RepoCatalog {
             catalog: Catalog {
-                schema: 1,
+                schema: halod_plugin_signing::catalog::CATALOG_SCHEMA,
                 name: "Test".into(),
                 commit: Some("abc".into()),
                 published: 1,

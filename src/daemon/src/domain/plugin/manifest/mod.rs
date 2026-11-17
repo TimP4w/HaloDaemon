@@ -10,17 +10,18 @@ use anyhow::{anyhow, bail, Context, Result};
 use halod_shared::types::{
     Animation, CategoryLayout, ChoiceDisplay, ChoiceOption, DeviceType, EffectParamDescriptor,
     EffectParamValue, LcdPresetDescriptor, LcdWidgetDescriptor, LcdWidgetResize, LcdWidgetUpdates,
-    LightingChannel, LightingDescriptor, ParamKind, Permission, PluginConfigFieldKind,
-    PluginConfigVisibility, PluginKind, RangeDisplay, ZoneTopology,
+    LightingChannel, LightingDescriptor, ParamKind, PluginConfigFieldKind, PluginConfigVisibility,
+    PluginKind, RangeDisplay, ZoneTopology,
 };
 use serde::{Deserialize, Serialize};
 use std::collections::{HashMap, HashSet};
 use std::path::{Path, PathBuf};
 
-use super::engine::transport::{descriptor_for, known_kinds};
+use super::engine::transport::{descriptor_for, known_kinds, PluginTransportDescriptor};
 use crate::domain::device::lighting_segment::ring_led_positions;
 use crate::domain::registry::observers::discovery::DiscoveryHandle;
 use crate::infrastructure::drivers::transports::smbus::{PciMatch, SmbusBusKind};
+use halod_shared::ids::PluginId;
 
 fn default_report_size() -> usize {
     64
@@ -282,6 +283,8 @@ pub struct IntegrationDiscoveryConfig {
     pub mdns: Vec<String>,
     #[serde(default)]
     pub ssdp: Vec<String>,
+    #[serde(default)]
+    pub tcp: Vec<std::net::SocketAddr>,
 }
 
 #[derive(Debug, Clone, Default, Serialize, Deserialize)]
@@ -779,11 +782,11 @@ pub struct EffectManifest {
 
 impl EffectManifest {
     /// The catalog id an effect is registered/built under.
-    pub fn catalog_id(&self, plugin_id: &str) -> String {
+    pub fn catalog_id(&self, plugin_id: &PluginId) -> String {
         format!("{plugin_id}:{}", self.id)
     }
 
-    pub fn descriptor(&self, plugin_id: &str) -> Animation {
+    pub fn descriptor(&self, plugin_id: &PluginId) -> Animation {
         Animation {
             id: self.catalog_id(plugin_id),
             name: self.name.clone(),
@@ -832,13 +835,13 @@ pub struct WidgetManifest {
 }
 
 impl WidgetManifest {
-    pub fn catalog_id(&self, plugin_id: &str) -> String {
+    pub fn catalog_id(&self, plugin_id: &PluginId) -> String {
         format!("{plugin_id}:{}", self.id)
     }
 
     pub fn descriptor(
         &self,
-        plugin_id: &str,
+        plugin_id: &PluginId,
         translations: &std::collections::BTreeMap<
             String,
             std::collections::BTreeMap<String, String>,
@@ -846,7 +849,7 @@ impl WidgetManifest {
     ) -> LcdWidgetDescriptor {
         LcdWidgetDescriptor {
             id: self.catalog_id(plugin_id),
-            plugin_id: plugin_id.to_owned(),
+            plugin_id: plugin_id.into(),
             name: self.name.clone(),
             name_key: self.name_key.clone(),
             translations: translations.clone(),
@@ -894,10 +897,10 @@ pub struct PresetManifest {
 }
 
 impl PresetManifest {
-    pub fn descriptor(&self, plugin_id: &str) -> LcdPresetDescriptor {
+    pub fn descriptor(&self, plugin_id: &PluginId) -> LcdPresetDescriptor {
         LcdPresetDescriptor {
             id: format!("{plugin_id}:{}", self.id),
-            plugin_id: plugin_id.to_owned(),
+            plugin_id: plugin_id.into(),
             name: self.name.clone(),
             file: self.file.clone(),
         }
@@ -1170,7 +1173,7 @@ impl DeviceSpec {
     /// Delegates to `self.transport`'s registered backend (unknown kind → never).
     pub fn matches(&self, handle: &DiscoveryHandle<'_>) -> bool {
         descriptor_for(self.transport.kind())
-            .and_then(|d| d.discovery.as_ref())
+            .and_then(|d| d.discovery())
             .is_some_and(|discovery| (discovery.matches)(self, handle))
     }
 
@@ -1261,7 +1264,7 @@ pub struct Identity {
 #[derive(Debug, Clone)]
 pub struct PluginManifest {
     /// Unique package id, equal to its directory name for external packages.
-    pub plugin_id: String,
+    pub plugin_id: PluginId,
     pub source_path: PathBuf,
     /// Full entry-script text, re-executed by the worker to build its own VM.
     pub script_source: String,
@@ -1309,6 +1312,7 @@ pub struct PluginManifest {
     pub capabilities: Vec<String>,
     pub config: Option<ConfigManifest>,
     pub setup: Option<IntegrationSetupConfig>,
+    pub declarations: halod_plugin_signing::declarations::PackageDeclarations,
 }
 
 /// Package-only fields from `plugin.yaml`. All declarative device, capability,
@@ -1320,7 +1324,7 @@ pub struct PluginManifest {
 #[serde(deny_unknown_fields)]
 pub struct PluginMeta {
     /// Required; must equal the plugin's directory name.
-    pub id: String,
+    pub id: PluginId,
     #[serde(rename = "type", default)]
     pub plugin_type: PluginKind,
     #[serde(default)]
@@ -1485,10 +1489,7 @@ impl PluginManifest {
 
     /// Plugin display name (`identity.name`, falling back to the plugin id).
     pub fn display_name(&self) -> String {
-        self.identity
-            .name
-            .clone()
-            .unwrap_or_else(|| self.plugin_id.clone())
+        self.declarations.name.clone()
     }
 
     /// Declared plugin author (empty when unset).
@@ -1533,11 +1534,9 @@ impl PluginManifest {
     /// Whether this package may execute on the current host. Unsupported
     /// packages remain catalog-visible but discovery must leave them inert.
     pub fn supports_current_platform(&self) -> bool {
-        self.platforms.is_empty()
-            || self
-                .platforms
-                .iter()
-                .any(|platform| platform == std::env::consts::OS)
+        self.declarations
+            .matches
+            .supports_platform(std::env::consts::OS)
     }
 
     /// Human-readable capability labels for the management UI.
@@ -1546,16 +1545,7 @@ impl PluginManifest {
     }
 
     pub fn needs_setup(&self) -> bool {
-        self.setup.as_ref().is_some_and(|setup| {
-            setup.auth.kind() != halod_shared::types::IntegrationAuthKind::None
-                || !setup
-                    .modes
-                    .contains(&halod_shared::types::IntegrationSetupMode::Manual)
-                || self
-                    .config_fields()
-                    .iter()
-                    .any(|field| field.secure || field.default.is_empty())
-        })
+        self.setup.is_some()
     }
 
     /// Every user-editable config field this plugin declares (empty if none).
@@ -1749,63 +1739,6 @@ fn declares_only_platform(platforms: &[String], os: &str) -> bool {
     !platforms.is_empty() && platforms.iter().all(|platform| platform == os)
 }
 
-fn transport_permission(kind: &str) -> Option<Permission> {
-    Some(match kind {
-        "hid" => Permission::Hid,
-        "usb" => Permission::Usb,
-        "smbus" => Permission::Smbus,
-        "command" => Permission::Command,
-        "amd_smn" => Permission::AmdSmn,
-        "lpcio" => Permission::Lpcio,
-        "tcp" => Permission::Network,
-        "hwmon" => Permission::Hwmon,
-        "serial" => Permission::Serial,
-        _ => return None,
-    })
-}
-
-impl PluginManifest {
-    pub fn permissions(&self) -> Vec<Permission> {
-        let t = &self.transports;
-        let setup_network = self.setup.as_ref().is_some_and(|setup| {
-            !setup.discovery.mdns.is_empty()
-                || !setup.discovery.ssdp.is_empty()
-                || matches!(setup.auth, IntegrationAuthConfig::Oauth2Pkce { .. })
-        });
-        let oauth = self
-            .setup
-            .as_ref()
-            .is_some_and(|setup| matches!(setup.auth, IntegrationAuthConfig::Oauth2Pkce { .. }));
-        let declared = [
-            (t.hid.is_some(), Permission::Hid),
-            (t.usb.is_some(), Permission::Usb),
-            (t.command.is_some(), Permission::Command),
-            (t.hwmon.is_some(), Permission::Hwmon),
-            (t.serial.is_some(), Permission::Serial),
-            (t.amd_smn.is_some(), Permission::AmdSmn),
-            (t.lpcio.is_some(), Permission::Lpcio),
-            (
-                t.tcp.is_some() || t.http.is_some() || t.udp.is_some() || setup_network,
-                Permission::Network,
-            ),
-            (t.audio_routing.is_some(), Permission::AudioRouting),
-            (
-                oauth || self.config_fields().iter().any(|field| field.secure),
-                Permission::SecureStorage,
-            ),
-        ];
-        let mut permissions: Vec<Permission> = self
-            .devices
-            .iter()
-            .filter_map(|device| transport_permission(device.transport.kind()))
-            .chain(declared.into_iter().filter_map(|(on, p)| on.then_some(p)))
-            .collect();
-        permissions.sort_unstable();
-        permissions.dedup();
-        permissions
-    }
-}
-
 /// Cross-field validation, gated by `plugin_type`.
 pub(super) fn validate_manifest(manifest: &PluginManifest) -> Result<()> {
     check_count("devices", manifest.devices.len(), MAX_PLUGIN_DEVICES)?;
@@ -1841,10 +1774,11 @@ pub(super) fn validate_manifest(manifest: &PluginManifest) -> Result<()> {
                 }
                 validate_control_layout(spec)?;
                 match descriptor_for(spec.transport.kind()) {
-                    Some(desc) => {
-                        if let Some(discovery) = &desc.discovery {
-                            (discovery.validate)(spec)?;
-                        }
+                    Some(PluginTransportDescriptor::Discovered { discovery, .. }) => {
+                        (discovery.validate)(spec)?;
+                    }
+                    Some(PluginTransportDescriptor::Configured { kind, .. }) => {
+                        bail!("transport '{kind}' is configured by the integration, not matched by a device")
                     }
                     None => bail!(
                         "unsupported device transport '{}' (known: {})",
@@ -1935,7 +1869,7 @@ pub(super) fn validate_manifest(manifest: &PluginManifest) -> Result<()> {
     }
     validate_http_transport(manifest)?;
     validate_udp_transport(manifest)?;
-    validate_component("plugin id", &manifest.plugin_id)?;
+    validate_short_text("name", &manifest.declarations.name)?;
     Ok(())
 }
 
@@ -1956,8 +1890,9 @@ fn validate_integration_setup(manifest: &PluginManifest) -> Result<()> {
     if unique.contains(&halod_shared::types::IntegrationSetupMode::Automatic)
         && setup.discovery.mdns.is_empty()
         && setup.discovery.ssdp.is_empty()
+        && setup.discovery.tcp.is_empty()
     {
-        bail!("automatic integration setup requires an mdns or ssdp declaration");
+        bail!("automatic integration setup requires an mdns, ssdp or tcp declaration");
     }
     if unique.contains(&halod_shared::types::IntegrationSetupMode::Manual)
         && manifest.config_fields().iter().all(|field| field.secure)
@@ -2492,16 +2427,16 @@ fn validate_requirements(manifest: &PluginManifest) -> Result<()> {
 }
 
 pub(super) fn validate_short_text(what: &str, value: &str) -> Result<()> {
-    if value.is_empty() || value.len() > MAX_TEXT_BYTES || value.contains('\0') {
-        bail!("{what} must be non-empty, contain no NUL, and be at most {MAX_TEXT_BYTES} bytes");
+    if value.is_empty() || value.len() > MAX_TEXT_BYTES || value.chars().any(char::is_control) {
+        bail!("{what} must be non-empty, contain no control characters, and be at most {MAX_TEXT_BYTES} bytes");
     }
     Ok(())
 }
 
 fn validate_optional_text(what: &str, value: &Option<String>, max: usize) -> Result<()> {
     if let Some(value) = value {
-        if value.len() > max || value.contains('\0') {
-            bail!("{what} must contain no NUL and be at most {max} bytes");
+        if value.len() > max || value.chars().any(char::is_control) {
+            bail!("{what} must contain no control characters and be at most {max} bytes");
         }
     }
     Ok(())
@@ -3363,6 +3298,8 @@ pub(super) fn build_manifest_from_dir(dir: &Path) -> Result<PluginManifest> {
         std::fs::read(&meta_path).with_context(|| format!("reading {}", meta_path.display()))?;
     let meta: PluginMeta = serde_yaml::from_slice(&manifest_bytes)
         .with_context(|| format!("parsing {}", meta_path.display()))?;
+    let declarations = halod_plugin_signing::declarations::read_declarations(&manifest_bytes)
+        .with_context(|| format!("parsing {}", meta_path.display()))?;
 
     if meta.id.is_empty() {
         bail!("{} declares an empty id", meta_path.display());
@@ -3407,7 +3344,7 @@ pub(super) fn build_manifest_from_dir(dir: &Path) -> Result<PluginManifest> {
             .collect::<Result<_>>()?,
         identity: Identity {
             name: meta.name.or(meta.identity.name),
-            id: meta.identity.id.or(Some(meta.id)),
+            id: meta.identity.id.or_else(|| Some(meta.id.to_string())),
             author: meta.author.or(meta.identity.author),
             version: Some(meta.version),
             license: meta.license.or(meta.identity.license),
@@ -3433,6 +3370,7 @@ pub(super) fn build_manifest_from_dir(dir: &Path) -> Result<PluginManifest> {
         capabilities: meta.capabilities,
         config: meta.config,
         setup: meta.setup,
+        declarations,
     };
 
     Ok(manifest)
@@ -3441,6 +3379,7 @@ pub(super) fn build_manifest_from_dir(dir: &Path) -> Result<PluginManifest> {
 #[cfg(test)]
 mod tests {
     use super::*;
+    use halod_shared::types::Permission;
 
     #[test]
     fn command_transport_uses_a_narrow_case_insensitive_allowlist() {
@@ -3709,7 +3648,7 @@ mod tests {
         assert_eq!(manifest.widgets[0].assets, ["sun.svg", "cloud.svg"]);
         assert_eq!(
             manifest.widgets[0]
-                .descriptor("lcd_assets", &manifest.translations)
+                .descriptor(&"lcd_assets".parse().unwrap(), &manifest.translations)
                 .assets,
             ["sun.svg", "cloud.svg"]
         );
@@ -3954,7 +3893,10 @@ mod tests {
         );
         let manifest = parse_manifest_from_dir(&dir).unwrap();
         assert!(manifest.transports.command.is_none());
-        assert_eq!(manifest.permissions(), [Permission::Network]);
+        assert_eq!(
+            manifest.declarations.uses.permissions,
+            [Permission::Network]
+        );
         assert_eq!(manifest.requirements[0].name, "openrgb");
     }
 
@@ -4180,7 +4122,20 @@ mod tests {
     }
 
     #[test]
-    fn only_a_setup_that_asks_for_something_needs_setup() {
+    fn a_name_with_a_line_break_cannot_reach_the_udev_rules() {
+        let tmp = tempfile::tempdir().unwrap();
+        let dir = write_plugin_dir(
+            tmp.path(),
+            "injected",
+            "name: \"x\\nACTION==\\\"add\\\", RUN+=\\\"/bin/sh\\\"\"\ncapabilities: [lighting]\ndevices:\n  - vendor: Acme\n    model: K1\n    type: keyboard\n    match:\n      hid: { vid: 0x1234, pid: 0x0001 }\ntransports:\n  hid: {}\n",
+            ENTRY_LUA,
+        );
+        let error = parse_manifest_from_dir(&dir).unwrap_err().to_string();
+        assert!(error.contains("control characters"), "{error}");
+    }
+
+    #[test]
+    fn a_declared_setup_needs_setup_even_when_every_field_has_a_default() {
         let tmp = tempfile::tempdir().unwrap();
         let manifest = |id: &str, fields: &str| {
             let dir = write_plugin_dir(
@@ -4193,7 +4148,7 @@ mod tests {
         };
         let defaults = "    - { key: host, label: Host, kind: host, default: 127.0.0.1 }\n    - { key: port, label: Port, kind: port, default: '6742' }\n";
         let missing = "    - { key: host, label: Host, kind: host }\n    - { key: port, label: Port, kind: port, default: '6742' }\n";
-        assert!(!manifest("all_defaults", defaults).needs_setup());
+        assert!(manifest("all_defaults", defaults).needs_setup());
         assert!(manifest("needs_host", missing).needs_setup());
     }
 
@@ -4209,7 +4164,30 @@ mod tests {
         assert!(parse_manifest_from_dir(&dir)
             .unwrap_err()
             .to_string()
-            .contains("requires an mdns or ssdp"));
+            .contains("requires an mdns, ssdp or tcp"));
+    }
+
+    #[test]
+    fn tcp_discovery_takes_socket_addresses_only() {
+        let tmp = tempfile::tempdir().unwrap();
+        let manifest = |id: &str, endpoint: &str| {
+            let dir = write_plugin_dir(
+                tmp.path(),
+                id,
+                &format!("type: integration\ntransports:\n  tcp:\n    host_key: host\n    port_key: port\nsetup:\n  modes: [automatic]\n  discovery:\n    tcp: [\"{endpoint}\"]\nconfig:\n  fields:\n    - {{ key: host, label: Host, kind: host }}\n    - {{ key: port, label: Port, kind: port }}\n"),
+                ENTRY_LUA,
+            );
+            parse_manifest_from_dir(&dir)
+        };
+        let setup = manifest("tcp_probe", "127.0.0.1:6742")
+            .unwrap()
+            .setup
+            .unwrap();
+        assert_eq!(
+            setup.discovery.tcp,
+            ["127.0.0.1:6742".parse::<std::net::SocketAddr>().unwrap()]
+        );
+        assert!(manifest("tcp_hostname", "localhost:6742").is_err());
     }
 
     #[test]
@@ -4666,7 +4644,7 @@ mod tests {
             "id: demo\nversion: 1.0.0\napi: \"3.0\"\ntype: lcd\ntranslations:\n  it:\n    widgets.date.name: Data\nwidgets:\n  - id: date\n    name: Date\n    name_key: widgets.date.name\n    icon: date.svg\n",
         )
         .unwrap();
-        let descriptor = meta.widgets[0].descriptor("demo", &meta.translations);
+        let descriptor = meta.widgets[0].descriptor(&"demo".parse().unwrap(), &meta.translations);
         assert_eq!(descriptor.localized_name("it-CH"), "Data");
         assert_eq!(descriptor.localized_name("de"), "Date");
     }
@@ -4761,7 +4739,11 @@ mod tests {
         for (id, yaml, expected) in cases {
             let dir = write_plugin_dir(tmp.path(), id, yaml, ENTRY_LUA);
             assert_eq!(
-                build_manifest_from_dir(&dir).unwrap().permissions(),
+                build_manifest_from_dir(&dir)
+                    .unwrap()
+                    .declarations
+                    .uses
+                    .permissions,
                 expected,
                 "{id}"
             );

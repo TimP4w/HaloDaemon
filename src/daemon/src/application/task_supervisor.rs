@@ -3,7 +3,8 @@ use parking_lot::Mutex;
 use std::future::Future;
 use std::pin::Pin;
 use std::sync::Arc;
-use std::time::{Duration, Instant};
+use std::time::Duration;
+use tokio::time::Instant;
 
 use tokio::sync::watch;
 
@@ -213,6 +214,33 @@ mod tests {
         assert!(starts.load(Ordering::SeqCst) >= 2);
         supervisor.shutdown().await;
         assert!(matches!(*state.lock(), TaskState::Stopped));
+    }
+
+    #[tokio::test(start_paused = true)]
+    async fn a_task_that_keeps_failing_is_given_up_after_the_failure_cap() {
+        let app = Arc::new(AppState::new(crate::config::Config::default()));
+        let mut supervisor = TaskSupervisor::new(app);
+        let starts = Arc::new(AtomicUsize::new(0));
+        let starts_for_task = Arc::clone(&starts);
+        let state = supervisor.register(
+            "failing test",
+            "",
+            move || {
+                let starts = Arc::clone(&starts_for_task);
+                Box::pin(async move {
+                    starts.fetch_add(1, Ordering::SeqCst);
+                    TaskHandle(tokio::spawn(async {}))
+                })
+            },
+            || {},
+        );
+        for _ in 0..200 {
+            tokio::time::advance(Duration::from_secs(1)).await;
+            tokio::task::yield_now().await;
+        }
+        assert_eq!(starts.load(Ordering::SeqCst), MAX_FAILURES as usize);
+        assert!(matches!(*state.lock(), TaskState::Failed(_)));
+        supervisor.shutdown().await;
     }
 
     #[tokio::test]

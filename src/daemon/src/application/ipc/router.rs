@@ -1,5 +1,5 @@
 // SPDX-License-Identifier: GPL-3.0-or-later
-use halod_shared::commands::{DaemonCommand, DeviceOp, Request};
+use halod_shared::commands::{DaemonCommand, DeviceOp, IntegrationOp, Request};
 use halod_shared::messages::{DaemonMessage, IpcError};
 use serde::Deserialize;
 use serde_json::Value;
@@ -9,9 +9,10 @@ use tokio::sync::broadcast::error::RecvError;
 
 use super::{ClientHandle, LeaseState};
 use crate::application::notifications;
-use crate::application::state::AppState;
+use crate::application::state::{AppState, CommandTarget};
 use crate::application::usecases::cooling::failsafe;
 use crate::application::usecases::cooling::fan_curve;
+use crate::application::usecases::cooling::tuning;
 use crate::application::usecases::device::capability;
 use crate::application::usecases::device::capability::CapabilityParam;
 use crate::application::usecases::device::keyboard_layout;
@@ -36,7 +37,7 @@ use crate::application::usecases::registry::debug;
 use crate::application::usecases::registry::receiver;
 use crate::application::usecases::registry::settings;
 use crate::domain::plugin::SurfacedPluginError;
-use crate::domain::profiles;
+use halod_shared::ids::DeviceId;
 
 const LCD_PREVIEW_LEASE: Duration =
     Duration::from_secs(halod_shared::types::LCD_PREVIEW_LEASE_SECS);
@@ -157,27 +158,25 @@ pub async fn handle_message(msg: Value, client: ClientHandle, app: Arc<AppState>
     // (e.g. an unreachable wireless controller) from stalling every other
     // command. Global commands run inline in read order.
     match command_target(&command) {
-        Some(id) => {
+        Some(target) => {
             let writes_device = command_writes_device(&command);
-            let id = id.to_string();
             tokio::spawn(async move {
-                let lock = app.device_lock(&id).await;
+                let lock = app.device_lock(target.clone()).await;
                 let _guard = lock.lock().await;
                 if let Err(e) = dispatch(command, client.clone(), Arc::clone(&app)).await {
                     log::warn!("command '{cmd}' failed: {e:#}");
                     let mut error = ipc_error(&e, request_id);
-                    if writes_device && !error.handled {
-                        let device = {
-                            let devices = app.device_registry.read().await;
-                            devices
-                                .iter()
-                                .find(|device| device.id() == id)
-                                .map(|device| device.name().to_string())
-                                .unwrap_or_else(|| id.clone())
-                        };
+                    if let (true, false, CommandTarget::Device(device_id)) =
+                        (writes_device, error.handled, &target)
+                    {
+                        let device = app.device_registry.find(device_id).await.map_or_else(
+                            || device_id.to_string(),
+                            |device| device.name().to_string(),
+                        );
                         notifications::send(
                             &app,
                             halod_shared::types::NotificationCode::DeviceWriteFailed {
+                                device_id: device_id.clone(),
                                 device,
                                 detail: format!("{e:#}"),
                             },
@@ -205,7 +204,7 @@ fn catalog_error_code(
     match error {
         E::Malformed(_) => C::Malformed,
         E::Unsigned => C::Unsigned,
-        E::UnknownKey(_) => C::UntrustedKey,
+        E::UntrustedKey(_) => C::UntrustedKey,
         E::SignatureMismatch => C::SignatureMismatch,
         E::Stale { .. } => C::Stale,
         E::HashMismatch { .. } => C::HashMismatch,
@@ -234,9 +233,12 @@ fn command_writes_device(cmd: &DaemonCommand) -> bool {
 }
 
 /// Serializes device-scoped work under [`AppState::device_lock`].
-fn command_target(cmd: &DaemonCommand) -> Option<&str> {
+fn command_target(cmd: &DaemonCommand) -> Option<CommandTarget> {
     match cmd {
-        DaemonCommand::Device { device_id, .. } => Some(device_id),
+        DaemonCommand::Device { device_id, .. } => Some(CommandTarget::Device(device_id.clone())),
+        DaemonCommand::Integration { plugin_id, .. } => {
+            Some(CommandTarget::Plugin(plugin_id.clone()))
+        }
         _ => None,
     }
 }
@@ -251,6 +253,25 @@ async fn dispatch(
         DaemonCommand::Device { device_id, op } => {
             dispatch_device(device_id, op, client, app).await
         }
+        DaemonCommand::Integration { plugin_id, op } => match op {
+            IntegrationOp::SetEnabled { enabled } => {
+                integrations::set_integration_enabled(plugin_id, enabled, app).await
+            }
+            IntegrationOp::SetConfig { values } => {
+                integrations::set_integration_config(plugin_id, values, app).await
+            }
+            IntegrationOp::BeginSetup => integrations::begin_setup(plugin_id, app).await,
+            IntegrationOp::CancelSetup => integrations::cancel_setup(plugin_id, app).await,
+            IntegrationOp::ResetSetup => integrations::reset_setup(plugin_id, app).await,
+            IntegrationOp::RetryPairing => integrations::retry_pairing(plugin_id, app).await,
+            IntegrationOp::SelectSetupMode { mode } => {
+                integrations::select_setup_mode(plugin_id, mode, app).await
+            }
+            IntegrationOp::SubmitSetup {
+                candidate_id,
+                values,
+            } => integrations::submit_setup(plugin_id, candidate_id, values, app).await,
+        },
         DaemonCommand::AddProfile { name } => lifecycle::add_profile(name, app).await,
         DaemonCommand::RenameProfile { old_name, new_name } => {
             lifecycle::rename_profile(old_name, new_name, app).await
@@ -285,15 +306,13 @@ async fn dispatch(
         DaemonCommand::AddPluginRepo { source } => repos::add_repo(source, app).await,
         DaemonCommand::RemovePluginRepo { slug } => repos::remove_repo(slug, app).await,
         DaemonCommand::RefreshPluginRepos => repos::refresh_repos(app).await,
-        DaemonCommand::InstallPlugin { repo, id } => repos::install_plugin(repo, id, app).await,
+        DaemonCommand::InstallPlugin {
+            repo,
+            id,
+            permissions_confirmed,
+        } => repos::install_plugin(repo, id, permissions_confirmed, app).await,
         DaemonCommand::UninstallPlugin { id } => repos::uninstall_plugin(id, app).await,
         DaemonCommand::UpdateAllPlugins => repos::update_all_plugins(app).await,
-        DaemonCommand::SetIntegrationEnabled { id, enabled } => {
-            integrations::set_integration_enabled(id, enabled, app).await
-        }
-        DaemonCommand::SetIntegrationConfig { id, values } => {
-            integrations::set_integration_config(id, values, app).await
-        }
         DaemonCommand::SetLogLevel { level } => settings::set_log_level(level, app).await,
         DaemonCommand::SetLanguage { lang } => settings::set_language(lang, app).await,
         DaemonCommand::SetHomeWidgets { widgets } => settings::set_home_widgets(widgets, app).await,
@@ -319,6 +338,25 @@ async fn dispatch(
         DaemonCommand::ResetToursSeen => settings::reset_tours_seen(app).await,
         DaemonCommand::SetFanFailsafeDuty { duty } => {
             failsafe::set_fan_failsafe_duty(duty, app).await
+        }
+        DaemonCommand::SetCoolingTuning {
+            ramp_up_pct_per_s,
+            ramp_down_pct_per_s,
+            hysteresis_c,
+            smoothing_secs,
+            sensor_stale_secs,
+        } => {
+            tuning::set_cooling_tuning(
+                tuning::CoolingTuning {
+                    ramp_up_pct_per_s,
+                    ramp_down_pct_per_s,
+                    hysteresis_c,
+                    smoothing_secs,
+                    sensor_stale_secs,
+                },
+                app,
+            )
+            .await
         }
         DaemonCommand::SetChannelVisibility {
             device_id,
@@ -386,7 +424,7 @@ async fn dispatch(
             custom_effects::delete_custom_effect(name, app).await
         }
 
-        DaemonCommand::ListRunningApps => profiles::observers::running_apps::list(client).await,
+        DaemonCommand::ListRunningApps => app_rules::list_running_apps(client).await,
         DaemonCommand::GetDebugInfo => debug::get_debug_info(client, app).await,
         DaemonCommand::SetEngineConfig {
             engine,
@@ -408,7 +446,7 @@ async fn dispatch(
 }
 
 async fn dispatch_device(
-    device_id: String,
+    device_id: DeviceId,
     op: DeviceOp,
     client: ClientHandle,
     app: Arc<AppState>,
@@ -437,17 +475,6 @@ async fn dispatch_device(
         DeviceOp::TriggerAction { key } => {
             capability::set_capability_param(device_id, CapabilityParam::Action { key }, app).await
         }
-        DeviceOp::BeginIntegrationSetup => integrations::begin_setup(device_id, app).await,
-        DeviceOp::ResetIntegrationSetup => integrations::reset_setup(device_id, app).await,
-        DeviceOp::SelectIntegrationSetupMode { mode } => {
-            integrations::select_setup_mode(device_id, mode, app).await
-        }
-        DeviceOp::SubmitIntegrationSetup {
-            candidate_id,
-            values,
-        } => integrations::submit_setup(device_id, candidate_id, values, app).await,
-        DeviceOp::RetryIntegrationPairing => integrations::retry_pairing(device_id, app).await,
-        DeviceOp::CancelIntegrationSetup => integrations::cancel_setup(device_id, app).await,
         DeviceOp::ResetAllButtonMappings => {
             key_remap::reset_all_button_mappings(device_id, app).await
         }
@@ -772,7 +799,7 @@ mod tests {
         let halod_shared::bus::BusEventPayload::Notification(notification) = &notification.payload;
         assert!(matches!(
             &notification.code,
-            halod_shared::types::NotificationCode::DeviceWriteFailed { device, detail }
+            halod_shared::types::NotificationCode::DeviceWriteFailed { device, detail, .. }
                 if device == "missing-device" && detail.contains("missing-device")
         ));
     }
@@ -781,7 +808,7 @@ mod tests {
     fn only_hardware_commands_are_classified_as_device_writes() {
         use halod_shared::types::{LightingState, RgbColor};
         assert!(command_writes_device(&DaemonCommand::Device {
-            device_id: "kbd".into(),
+            device_id: "kbd".parse().unwrap(),
             op: DeviceOp::LightingApply {
                 state: LightingState::Static {
                     color: RgbColor { r: 1, g: 2, b: 3 },
@@ -789,7 +816,7 @@ mod tests {
             }
         }));
         assert!(!command_writes_device(&DaemonCommand::Device {
-            device_id: "kbd".into(),
+            device_id: "kbd".parse().unwrap(),
             op: DeviceOp::SetDeviceName {
                 name: "Desk keyboard".into()
             }
@@ -801,27 +828,27 @@ mod tests {
         use halod_shared::types::{LightingState, RgbColor};
         assert_eq!(
             command_target(&DaemonCommand::Device {
-                device_id: "kbd".into(),
+                device_id: "kbd".parse().unwrap(),
                 op: DeviceOp::LightingApply {
                     state: LightingState::Static {
                         color: RgbColor { r: 0, g: 0, b: 0 }
                     }
                 }
             }),
-            Some("kbd")
+            Some(CommandTarget::Device("kbd".parse().unwrap()))
         );
         assert_eq!(
             command_target(&DaemonCommand::Device {
-                device_id: "fan0".into(),
+                device_id: "fan0".parse().unwrap(),
                 op: DeviceOp::RemoveCoolingCurve {
                     channel_id: "fan".into()
                 }
             }),
-            Some("fan0")
+            Some(CommandTarget::Device("fan0".parse().unwrap()))
         );
         assert_eq!(
             command_target(&DaemonCommand::Device {
-                device_id: "ram".into(),
+                device_id: "ram".parse().unwrap(),
                 op: DeviceOp::CanvasMoveZone {
                     channel_id: "leds".into(),
                     x: 0.0,
@@ -833,14 +860,14 @@ mod tests {
                     sampling_mode: None
                 }
             }),
-            Some("ram")
+            Some(CommandTarget::Device("ram".parse().unwrap()))
         );
         assert_eq!(
-            command_target(&DaemonCommand::Device {
-                device_id: "hue".into(),
-                op: DeviceOp::RetryIntegrationPairing
+            command_target(&DaemonCommand::Integration {
+                plugin_id: "hue".parse().unwrap(),
+                op: IntegrationOp::RetryPairing
             }),
-            Some("hue")
+            Some(CommandTarget::Plugin("hue".parse().unwrap()))
         );
         // Global commands run inline (no device lock) so a stuck device can't
         // stall them.
@@ -991,8 +1018,8 @@ mod tests {
             tokio::task::yield_now().await;
         }
 
-        let frame =
-            crate::domain::lcd::engine::encode_wire_frame("lcd0", 1, "").expect("wire encode");
+        let frame = crate::domain::lcd::engine::encode_wire_frame(&"lcd0".parse().unwrap(), 1, "")
+            .expect("wire encode");
         let _ = engine.frame_sender().send(frame);
 
         tokio::time::timeout(Duration::from_secs(2), preview_rx.changed())

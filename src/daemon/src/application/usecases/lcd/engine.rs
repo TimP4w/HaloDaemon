@@ -11,11 +11,12 @@ use crate::domain::events::Change;
 use crate::domain::profiles::device_state::persist_device_state;
 use crate::domain::registry::require_device_owned_id;
 use crate::{application::state::AppState, lcd::engine::LcdEngine};
+use halod_shared::ids::DeviceId;
 use halod_shared::lcd_custom::{CustomTemplateDef, WIDGETS_JSON_PARAM};
 use halod_shared::types::{EffectParamValue, LcdHealth};
 
 pub async fn set_template(
-    device_id: String,
+    device_id: DeviceId,
     template_id: String,
     params: HashMap<String, EffectParamValue>,
     app: Arc<AppState>,
@@ -61,7 +62,7 @@ pub async fn set_template(
     Ok(())
 }
 
-pub async fn deactivate(device_id: String, app: Arc<AppState>) -> Result<()> {
+pub async fn deactivate(device_id: DeviceId, app: Arc<AppState>) -> Result<()> {
     let device = require_device_owned_id(&device_id, &app).await?;
     let slot = device
         .as_lcd()
@@ -98,7 +99,7 @@ mod tests {
     async fn set_template_errors_on_unknown_template() {
         let (_, app) = setup();
         let err = set_template(
-            "dev0".into(),
+            "dev0".parse().unwrap(),
             "not_a_real_template".into(),
             HashMap::new(),
             app,
@@ -111,18 +112,28 @@ mod tests {
     #[tokio::test]
     async fn set_template_errors_on_missing_device() {
         let app = app_with(vec![]);
-        let err = set_template("ghost".into(), "custom".into(), HashMap::new(), app)
-            .await
-            .unwrap_err();
+        let err = set_template(
+            "ghost".parse().unwrap(),
+            "custom".into(),
+            HashMap::new(),
+            app,
+        )
+        .await
+        .unwrap_err();
         assert!(err.to_string().contains("ghost"));
     }
 
     #[tokio::test]
     async fn set_template_stores_template_id_in_slot() {
         let (dev, app) = setup();
-        set_template("dev0".into(), "custom".into(), HashMap::new(), app)
-            .await
-            .unwrap();
+        set_template(
+            "dev0".parse().unwrap(),
+            "custom".into(),
+            HashMap::new(),
+            app,
+        )
+        .await
+        .unwrap();
         assert_eq!(dev.lcd_state().lcd_template_id().as_deref(), Some("custom"));
     }
 
@@ -131,13 +142,18 @@ mod tests {
         let (dev, app) = setup();
         let engine = install_lcd_engine(&app);
 
-        set_template("dev0".into(), "custom".into(), HashMap::new(), app)
-            .await
-            .unwrap();
+        set_template(
+            "dev0".parse().unwrap(),
+            "custom".into(),
+            HashMap::new(),
+            app,
+        )
+        .await
+        .unwrap();
 
         assert_eq!(dev.lcd_state().mode(), LcdMode::Engine);
         assert_eq!(dev.lcd_state().lcd_template_id().as_deref(), Some("custom"));
-        assert!(engine.has_slot("dev0").await);
+        assert!(engine.has_slot(&"dev0".parse().unwrap()).await);
     }
 
     #[tokio::test]
@@ -145,14 +161,14 @@ mod tests {
         let (dev, app) = setup();
         dev.lcd_state()
             .set_lcd_template_id(Some("system_stats".to_string()));
-        deactivate("dev0".into(), app).await.unwrap();
+        deactivate("dev0".parse().unwrap(), app).await.unwrap();
         assert!(dev.lcd_state().lcd_template_id().is_none());
     }
 
     #[tokio::test]
     async fn deactivate_errors_on_missing_device() {
         let app = app_with(vec![]);
-        let err = deactivate("ghost".into(), app).await.unwrap_err();
+        let err = deactivate("ghost".parse().unwrap(), app).await.unwrap_err();
         assert!(err.to_string().contains("ghost"));
     }
 }

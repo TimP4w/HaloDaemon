@@ -23,6 +23,7 @@ use crate::domain::plugin;
 use crate::domain::registry::identity::{DeviceIdentity, DeviceOrigin};
 use anyhow::Result;
 use async_trait::async_trait;
+use halod_shared::ids::{DeviceId, PluginId};
 use halod_shared::types::{
     Boolean, ButtonDescriptor, ButtonMapping, ConnectionType, CoolingChannel, CoolingChannelKind,
     DpiMode, DpiStatus, EqBand, Equalizer, KeyRemapStatus, LcdDescriptor, LightingDescriptor,
@@ -54,16 +55,16 @@ pub fn install_lcd_engine(app: &Arc<AppState>) -> Arc<LcdEngine> {
     engine
 }
 
-type ScriptedResync = Result<(Vec<Arc<dyn Device>>, Vec<String>)>;
+type ScriptedResync = Result<(Vec<Arc<dyn Device>>, Vec<DeviceId>)>;
 
 struct MockChainAdapter {
-    parent_id: String,
+    parent_id: DeviceId,
     channels: Vec<ChannelDescriptor>,
 }
 
 #[async_trait]
 impl LightingDivisionAdapter for MockChainAdapter {
-    fn parent_id(&self) -> String {
+    fn parent_id(&self) -> DeviceId {
         self.parent_id.clone()
     }
     fn channels(&self) -> Vec<ChannelDescriptor> {
@@ -98,8 +99,14 @@ where
 /// shared lock and restores it on drop, so a `request_config_save()` inside the
 /// test never touches the real `~/.config/halod`. Bind it for the whole test.
 pub struct TmpConfigDir {
-    _dir: tempfile::TempDir,
+    dir: tempfile::TempDir,
     _guard: parking_lot::MutexGuard<'static, ()>,
+}
+
+impl TmpConfigDir {
+    pub fn path(&self) -> &Path {
+        self.dir.path()
+    }
 }
 
 pub fn write_plugin_package(root: &Path, id: &str, version: &str, api: &str) -> PathBuf {
@@ -118,10 +125,7 @@ pub fn tmp_config_dir() -> TmpConfigDir {
     let guard = HALOD_CONFIG_DIR_LOCK.lock();
     let dir = tempfile::tempdir().unwrap();
     unsafe { std::env::set_var("HALOD_CONFIG_DIR", dir.path()) };
-    TmpConfigDir {
-        _dir: dir,
-        _guard: guard,
-    }
+    TmpConfigDir { dir, _guard: guard }
 }
 
 impl Drop for TmpConfigDir {
@@ -140,7 +144,7 @@ pub enum InitBehavior {
 }
 
 pub struct MockDevice {
-    pub id: String,
+    pub id: DeviceId,
     pub name: String,
     pub vendor: String,
     pub model: String,
@@ -161,10 +165,10 @@ pub struct MockDevice {
     pub live: Arc<AtomicBool>,
     /// Owning plugin id when this device stands in for an integration root
     /// (see `Device::integration_id`). `None` for a normal device.
-    pub integration_id: Option<String>,
+    pub integration_id: Option<PluginId>,
     /// Owning plugin id for scoped teardown (see `Device::owning_plugin_id`).
     /// `None` for a normal built-in host device.
-    pub owning_plugin_id: Option<String>,
+    pub owning_plugin_id: Option<PluginId>,
     pub identity: Option<(DeviceIdentity, DeviceOrigin)>,
     /// Remaining capability writes to refuse; see `refusing_writes`.
     pub refusals: Arc<AtomicUsize>,
@@ -226,7 +230,7 @@ impl MockDevice {
     /// string defaults fill the rest.
     pub fn new(id: &str) -> Self {
         Self {
-            id: id.to_string(),
+            id: id.parse().unwrap(),
             name: "mock".to_string(),
             vendor: "mock".to_string(),
             model: "mock".to_string(),
@@ -398,14 +402,14 @@ impl MockDevice {
     /// Stand in for an integration root owned by plugin `id` (see
     /// `Device::integration_id`).
     pub fn with_integration_id(mut self, id: &str) -> Self {
-        self.integration_id = Some(id.to_string());
+        self.integration_id = Some(id.parse().unwrap());
         self
     }
 
     /// Stand in for a device owned by plugin `id` for scoped teardown
     /// (see `Device::owning_plugin_id`).
     pub fn with_owning_plugin_id(mut self, id: &str) -> Self {
-        self.owning_plugin_id = Some(id.to_string());
+        self.owning_plugin_id = Some(id.parse().unwrap());
         self
     }
 
@@ -535,7 +539,7 @@ impl MockDevice {
 
 #[async_trait]
 impl Device for MockDevice {
-    fn id(&self) -> &str {
+    fn id(&self) -> &DeviceId {
         &self.id
     }
     fn name(&self) -> &str {
@@ -560,11 +564,11 @@ impl Device for MockDevice {
         self.closed.store(true, Ordering::SeqCst);
     }
 
-    fn integration_id(&self) -> Option<String> {
+    fn integration_id(&self) -> Option<PluginId> {
         self.integration_id.clone()
     }
 
-    fn owning_plugin_id(&self) -> Option<String> {
+    fn owning_plugin_id(&self) -> Option<PluginId> {
         self.owning_plugin_id.clone()
     }
 
@@ -908,8 +912,8 @@ impl PairingCapability for MockDevice {
 impl Controller for MockDevice {
     async fn resync_children(
         &self,
-        _existing: &std::collections::HashSet<String>,
-    ) -> Result<(Vec<Arc<dyn Device>>, Vec<String>)> {
+        _existing: &std::collections::HashSet<DeviceId>,
+    ) -> Result<(Vec<Arc<dyn Device>>, Vec<DeviceId>)> {
         match self.resync.lock().take() {
             Some(Ok(v)) => Ok(v),
             Some(Err(e)) => {

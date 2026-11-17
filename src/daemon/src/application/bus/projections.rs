@@ -6,11 +6,12 @@ use crate::config::Config;
 use crate::domain::device::projection::DevicesSnapshot;
 use crate::domain::lcd::engine::video;
 use halod_shared::bus::{topic, BusValue};
+use halod_shared::ids::DeviceId;
 
 #[derive(Debug, Clone, PartialEq, Eq)]
 pub enum Topic {
     Discovery,
-    Device(String),
+    Device(DeviceId),
     Devices,
     Profiles,
     Cooling,
@@ -44,7 +45,7 @@ pub async fn produce(app: &AppState, cfg: &Config, requested: &[Topic]) -> Vec<(
             Topic::Devices | Topic::Cooling | Topic::Lighting | Topic::Lcd | Topic::Plugins
         )
     });
-    let selected_ids: std::collections::HashSet<String> = requested
+    let selected_ids: std::collections::HashSet<DeviceId> = requested
         .iter()
         .filter_map(|topic| match topic {
             Topic::Device(id) => Some(id.clone()),
@@ -75,7 +76,7 @@ pub async fn produce(app: &AppState, cfg: &Config, requested: &[Topic]) -> Vec<(
             Topic::Device(id) => records.extend(
                 devices
                     .iter()
-                    .filter(|device| &device.id == id)
+                    .filter(|device| device.id == id)
                     .cloned()
                     .map(|device| (topic::device(&device.id), BusValue::Device(device))),
             ),
@@ -164,7 +165,7 @@ mod tests {
         let records = produce(
             &app,
             &app.config.read().await.clone(),
-            &[Topic::Device("second".into())],
+            &[Topic::Device("second".parse().unwrap())],
         )
         .await;
         assert_eq!(records.len(), 1);

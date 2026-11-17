@@ -31,7 +31,10 @@ the user what each plugin uses and enforces those limits at runtime.
 ## Repositories and catalogs
 
 A repository is either a catalog URL or a local folder. HaloDaemon installs,
-updates and uninstalls plugins one at a time, and installs a plugin enabled.
+updates and uninstalls plugins one at a time. A newly installed plugin stays
+off until the user confirms what it uses; an update that would use more than
+the installed version is installed disabled and the user is told, unless the
+GUI already asked and the install carried that confirmation.
 
 A remote repository publishes static files, for example on GitHub Pages:
 
@@ -41,12 +44,20 @@ licenses.txt
 packages/<id>-<version>.tar.gz   one immutable archive per package version
 ```
 
-`catalog.yaml` lists every package version with its plugin `api`, archive path,
-size and SHA-256. HaloDaemon picks the newest version whose API it supports.
+`catalog.yaml` (schema 2) lists every package version with its plugin `api`,
+archive path, size and SHA-256, plus its display `name`, the hardware it
+`matches` (concrete HID and USB ids, a `hid_any` flag for plugins that match
+every HID device, GPU SMBus PCI ids, and command executables) and what it
+`uses`, all derived from `plugin.yaml` by the same code the daemon loads
+manifests with. These let a fresh install recommend plugins for connected
+hardware and let the GUI show what an update would use before installing it.
+HaloDaemon picks the newest version whose API it supports.
 The catalog keeps the newest version for each API it has published, so an
 older HaloDaemon still finds a compatible build. Archives are downloaded over
 HTTPS without redirects, checked against the catalog, and swapped into place
-atomically; a plugin that fails to load after an update is rolled back.
+atomically; a package whose `plugin.yaml` declares a different name, hardware
+or uses than its catalog entry is refused, and a plugin that fails to load
+after an update is rolled back.
 
 The official repository is authenticated with keys built into HaloDaemon. A
 third-party catalog may be signed: HaloDaemon pins its key the first time the

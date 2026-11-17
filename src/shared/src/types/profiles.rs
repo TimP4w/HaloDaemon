@@ -26,9 +26,9 @@ fn bool_true() -> bool {
 #[derive(Debug, Clone, Default, PartialEq, Serialize, Deserialize)]
 pub struct LightingTargets {
     #[serde(default)]
-    pub device_ids: Vec<String>,
+    pub device_ids: Vec<crate::ids::DeviceId>,
     #[serde(default)]
-    pub channels: HashMap<String, Vec<String>>,
+    pub channels: HashMap<crate::ids::DeviceId, Vec<String>>,
 }
 
 /// `Null` when the default profile has no value.
@@ -43,8 +43,10 @@ pub struct OverrideDiff {
 pub struct ProfileOverrides {
     /// `BTreeMap` for deterministic serialization order, which UI change-detection hashes.
     #[serde(default)]
-    pub device_capabilities:
-        std::collections::BTreeMap<String, std::collections::BTreeMap<String, OverrideDiff>>,
+    pub device_capabilities: std::collections::BTreeMap<
+        crate::ids::DeviceId,
+        std::collections::BTreeMap<String, OverrideDiff>,
+    >,
     #[serde(default)]
     pub canvas: bool,
 }

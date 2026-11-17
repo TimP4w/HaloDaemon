@@ -16,6 +16,7 @@ use crate::domain::topic_store::TopicStore;
 use halod_shared::bus::{BusEvent, BusEventPayload, BusSubscribe, ClientHello};
 use halod_shared::commands::DaemonCommand;
 use halod_shared::frames::{decode_header, encode_json_frame, payload_exceeds_max, FRAME_JSON};
+use halod_shared::ids::{DeviceId, PluginId};
 use halod_shared::lcd_custom::{CustomTemplateDef, LcdEditorRender, WidgetRenderState};
 use halod_shared::messages::DaemonMessage;
 use halod_shared::socket::socket_path;
@@ -59,7 +60,7 @@ pub struct DecodedSprite {
 /// widget.
 #[derive(Clone)]
 pub struct DecodedEditorRender {
-    pub device_id: String,
+    pub device_id: DeviceId,
     pub canvas_w: u32,
     pub canvas_h: u32,
     pub sprites: Vec<DecodedSprite>,
@@ -76,7 +77,7 @@ pub struct UiRx {
     pub connected: watch::Receiver<bool>,
     pub debug: Synced<Option<halod_shared::debug_info::DebugInfo>>,
     pub lcd_images: Synced<Vec<String>>,
-    pub lcd_frames: watch::Receiver<HashMap<String, DecodedFrame>>,
+    pub lcd_frames: watch::Receiver<HashMap<DeviceId, DecodedFrame>>,
     pub canvas_frame: Synced<Option<CanvasFrame>>,
     pub running_apps: Synced<Vec<RunningApp>>,
     /// Decoded plugin display assets, keyed by `plugin_asset_cache_key`.
@@ -101,7 +102,7 @@ pub(crate) struct UiTx {
     connected: watch::Sender<bool>,
     debug: watch::Sender<Option<halod_shared::debug_info::DebugInfo>>,
     lcd_images: watch::Sender<Vec<String>>,
-    lcd_frames: watch::Sender<HashMap<String, DecodedFrame>>,
+    lcd_frames: watch::Sender<HashMap<DeviceId, DecodedFrame>>,
     canvas_frame: watch::Sender<Option<CanvasFrame>>,
     running_apps: watch::Sender<Vec<RunningApp>>,
     plugin_assets: watch::Sender<HashMap<String, Vec<u8>>>,
@@ -118,7 +119,7 @@ pub(crate) struct UiTx {
 
 #[derive(Clone)]
 pub struct FrameSinks {
-    lcd_frames: watch::Sender<HashMap<String, DecodedFrame>>,
+    lcd_frames: watch::Sender<HashMap<DeviceId, DecodedFrame>>,
     canvas_frame: watch::Sender<Option<CanvasFrame>>,
     plugin_assets: watch::Sender<HashMap<String, Vec<u8>>>,
     lcd_editor_render: watch::Sender<Option<DecodedEditorRender>>,
@@ -490,7 +491,7 @@ fn handle_bus_event(tx: &UiTx, event: BusEvent, repaint: &impl Fn()) {
 }
 
 /// Key an asset is stored/looked up under in `UiRx::plugin_assets`.
-pub fn plugin_asset_cache_key(plugin_id: &str, name: &str) -> String {
+pub fn plugin_asset_cache_key(plugin_id: &PluginId, name: &str) -> String {
     format!("{plugin_id}/{name}")
 }
 
@@ -503,7 +504,7 @@ fn handle_json(payload: &[u8], tx: &UiTx, repaint: &impl Fn()) -> Reaction {
     let message = match serde_json::from_slice::<DaemonMessage>(payload) {
         Ok(message) => message,
         Err(e) => {
-            log::debug!("IPC: dropping undecodable daemon frame ({e})");
+            log::debug!("dropping undecodable daemon frame ({e})");
             return Reaction::default();
         }
     };
@@ -772,10 +773,13 @@ mod tests {
 
     #[test]
     fn plugin_asset_cache_key_is_scoped_per_plugin() {
-        assert_eq!(plugin_asset_cache_key("acme", "logo.png"), "acme/logo.png");
+        assert_eq!(
+            plugin_asset_cache_key(&"acme".parse().unwrap(), "logo.png"),
+            "acme/logo.png"
+        );
         assert_ne!(
-            plugin_asset_cache_key("acme", "logo.png"),
-            plugin_asset_cache_key("other", "logo.png"),
+            plugin_asset_cache_key(&"acme".parse().unwrap(), "logo.png"),
+            plugin_asset_cache_key(&"other".parse().unwrap(), "logo.png"),
         );
     }
 
@@ -836,7 +840,7 @@ mod tests {
     fn image_uploaded_clears_progress_and_requests_refresh() {
         let (tx, rx) = test_tx();
         tx.lcd_upload.send_replace(Some(LcdUploadProgress {
-            device_id: "lcd".into(),
+            device_id: "lcd".parse().unwrap(),
             stage: halod_shared::types::LcdUploadStage::Applying,
             percent: None,
         }));

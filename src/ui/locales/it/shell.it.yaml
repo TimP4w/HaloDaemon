@@ -4,11 +4,11 @@ shell:
   nav_cooling: Raffreddamento
   nav_plugins: Plugin
   nav_settings: Impostazioni
-  daemon_not_running: "halod non è in esecuzione"
-  daemon_unreachable: "L’app non riesce a raggiungere il servizio halod, quindi i dispositivi non possono essere controllati. Illuminazione, curve delle ventole e profili mantengono l’ultimo stato finché non torna disponibile."
+  daemon_not_running: "HaloDaemon non è in esecuzione"
+  daemon_unreachable: "L’app non riesce a raggiungere il servizio HaloDaemon, quindi i dispositivi non possono essere controllati. Illuminazione, curve delle ventole e profili mantengono l’ultimo stato finché non torna disponibile."
   daemon_reconnecting: "Tentativo di riconnessione…"
   open_log: "Apri log"
-  start_daemon: "Avvia halod"
+  start_daemon: "Avvia HaloDaemon"
   notifications: "Notifiche"
   mark_all_read: "Segna tutte come lette"
   clear: "Cancella"

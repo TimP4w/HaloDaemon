@@ -13,10 +13,11 @@ use crate::application::state::AppState;
 use crate::domain::device::Device;
 use crate::domain::events::Change;
 use crate::domain::registry::model::ensure_record;
+use halod_shared::ids::DeviceId;
 
 const MAX_NAME_LEN: usize = 64;
 
-pub async fn set_device_name(device_id: String, name: String, app: Arc<AppState>) -> Result<()> {
+pub async fn set_device_name(device_id: DeviceId, name: String, app: Arc<AppState>) -> Result<()> {
     let raw = name.trim();
     let trimmed: Option<String> = if raw.is_empty() {
         None
@@ -47,7 +48,7 @@ pub async fn set_device_name(device_id: String, name: String, app: Arc<AppState>
 /// broadcast piggy-back on the existing chain-layout machinery.
 async fn rename_chain_link(
     app: &Arc<AppState>,
-    child_id: &str,
+    child_id: &DeviceId,
     new_name: Option<String>,
 ) -> Result<()> {
     let new_name = new_name.ok_or_else(|| anyhow!("chain link name cannot be empty"))?;
@@ -83,7 +84,7 @@ async fn rename_chain_link(
     chain.rename_link(&channel_id, child_id, &new_name)?;
 
     crate::application::usecases::registry::chain::persist_layout(app, parent.as_ref()).await?;
-    app.record_change(Change::LightingDevice(child_id.to_owned()))
+    app.record_change(Change::LightingDevice(child_id.into()))
         .await;
     Ok(())
 }
@@ -95,7 +96,7 @@ async fn rename_chain_link(
 async fn rename_normal_device(
     app: &Arc<AppState>,
     device: Option<&dyn Device>,
-    device_id: &str,
+    device_id: &DeviceId,
     new_name: Option<String>,
 ) -> Result<()> {
     let resolved = match (new_name, device) {
@@ -112,8 +113,7 @@ async fn rename_normal_device(
         app.request_config_save();
     }
 
-    app.record_change(Change::Device(device_id.to_owned()))
-        .await;
+    app.record_change(Change::Device(device_id.into())).await;
     Ok(())
 }
 
@@ -129,7 +129,7 @@ mod tests {
     #[tokio::test]
     async fn writes_name_to_device_record() {
         let app = Arc::new(AppState::new(Config::default()));
-        set_device_name("dev_a".into(), "My Fan".into(), app.clone())
+        set_device_name("dev_a".parse().unwrap(), "My Fan".into(), app.clone())
             .await
             .unwrap();
         let cfg = app.config.read().await;
@@ -142,7 +142,7 @@ mod tests {
     #[tokio::test]
     async fn trims_whitespace() {
         let app = Arc::new(AppState::new(Config::default()));
-        set_device_name("dev_a".into(), "  CPU Fan  ".into(), app.clone())
+        set_device_name("dev_a".parse().unwrap(), "  CPU Fan  ".into(), app.clone())
             .await
             .unwrap();
         let cfg = app.config.read().await;
@@ -155,7 +155,7 @@ mod tests {
     #[tokio::test]
     async fn caps_length_at_64_chars() {
         let app = Arc::new(AppState::new(Config::default()));
-        set_device_name("dev_a".into(), "a".repeat(100), app.clone())
+        set_device_name("dev_a".parse().unwrap(), "a".repeat(100), app.clone())
             .await
             .unwrap();
         let cfg = app.config.read().await;
@@ -170,10 +170,10 @@ mod tests {
     #[tokio::test]
     async fn blank_name_clears_to_empty_for_unknown_device() {
         let app = Arc::new(AppState::new(Config::default()));
-        set_device_name("dev_a".into(), "First".into(), app.clone())
+        set_device_name("dev_a".parse().unwrap(), "First".into(), app.clone())
             .await
             .unwrap();
-        set_device_name("dev_a".into(), "   ".into(), app.clone())
+        set_device_name("dev_a".parse().unwrap(), "   ".into(), app.clone())
             .await
             .unwrap();
         let cfg = app.config.read().await;
@@ -190,10 +190,10 @@ mod tests {
         )]);
 
         // First override, then clear.
-        set_device_name("dev_a".into(), "Custom".into(), app.clone())
+        set_device_name("dev_a".parse().unwrap(), "Custom".into(), app.clone())
             .await
             .unwrap();
-        set_device_name("dev_a".into(), "".into(), app.clone())
+        set_device_name("dev_a".parse().unwrap(), "".into(), app.clone())
             .await
             .unwrap();
 
@@ -204,7 +204,7 @@ mod tests {
         );
     }
 
-    async fn setup_chain_parent_with_one_link(app: &Arc<AppState>) -> String {
+    async fn setup_chain_parent_with_one_link(app: &Arc<AppState>) -> DeviceId {
         let parent = MockDevice::new("parent_x").with_chain(vec![ChannelDescriptor {
             channel_id: "ch0".into(),
             display_name: "Channel".into(),

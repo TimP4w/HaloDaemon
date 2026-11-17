@@ -6,12 +6,11 @@ integrations:
   status_connecting: Non connessa
   status_configured: Configurata
   status_active: Attiva
-  issue_connect_failed: Connessione non riuscita
-  issue_runtime_error: Errore di esecuzione
   issue_details: Dettagli
   issue_modal_title: "Problema dell'integrazione: %{integration}"
   # finestra di associazione / configurazione
   setup_connect: "Connetti %{name}"
+  setup_step_configure: Configura
   setup_step_discover: Cerca
   setup_step_prepare: Configura
   setup_step_pair: Associa
@@ -61,6 +60,6 @@ integrations:
   devices_title: Dispositivi da questa integrazione
   open_device: Apri
   save_reconnect: Salva e riconnetti
-  connected_to: "Connessa a %{address}. %{count} dispositivi sono nella Home."
-  connected: "Connessa. %{count} dispositivi sono nella Home."
+  connected_to: "Connessa a %{address}. %{count} dispositivi e %{sensors} sensori aggiunti."
+  connected: "Connessa. %{count} dispositivi e %{sensors} sensori aggiunti."
   setup_step_of: "Passo %{current} di %{total}"

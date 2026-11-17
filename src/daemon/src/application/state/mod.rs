@@ -19,6 +19,7 @@ use halod_shared::types::DiscoveryStatus;
 
 mod config_repository;
 mod device_registry;
+pub use device_registry::CommandTarget;
 mod persistence;
 mod workers;
 
@@ -123,8 +124,8 @@ impl AppState {
     /// The serialization lock for one device id, created on first use. Held for
     /// the duration of a device-scoped command so concurrent commands to the
     /// same device don't interleave; different devices get different locks.
-    pub async fn device_lock(&self, id: &str) -> Arc<Mutex<()>> {
-        self.device_registry.command_lock(id).await
+    pub async fn device_lock(&self, target: CommandTarget) -> Arc<Mutex<()>> {
+        self.device_registry.command_lock(target).await
     }
 
     /// Signal that the config is dirty. The save worker debounces and snapshots
@@ -177,6 +178,7 @@ mod tests {
     use super::*;
     use crate::config::Config;
     use crate::test_support::app_with;
+    use halod_shared::ids::DeviceId;
 
     #[test]
     fn retained_record_commits_are_scoped_to_usecases() {
@@ -235,7 +237,7 @@ mod tests {
     async fn sensor_bus_excludes_disabled_devices() {
         let mut cfg = Config::default();
         cfg.known_devices.insert(
-            "disabled_dev".into(),
+            "disabled_dev".parse().unwrap(),
             crate::domain::registry::model::DeviceRecord {
                 name: String::new(),
                 vendor: String::new(),
@@ -323,14 +325,14 @@ mod tests {
         {
             let mut cfg = app.config.write().await;
             cfg.known_devices.insert(
-                "visible_dev".into(),
+                "visible_dev".parse().unwrap(),
                 crate::domain::registry::model::DeviceRecord {
                     active_state: halod_shared::types::VisibilityState::Visible,
                     ..Default::default()
                 },
             );
             cfg.known_devices.insert(
-                "hidden_dev".into(),
+                "hidden_dev".parse().unwrap(),
                 crate::domain::registry::model::DeviceRecord {
                     active_state: halod_shared::types::VisibilityState::Hidden,
                     ..Default::default()
@@ -339,17 +341,17 @@ mod tests {
         }
 
         let active = app.get_active_devices().await;
-        let ids: Vec<String> = active.iter().map(|d| d.id().to_owned()).collect();
+        let ids: Vec<DeviceId> = active.iter().map(|d| d.id().to_owned()).collect();
         assert!(
-            ids.contains(&"visible_dev".to_string()),
+            ids.contains(&"visible_dev".parse().unwrap()),
             "visible device must be active"
         );
         assert!(
-            ids.contains(&"unknown_dev".to_string()),
+            ids.contains(&"unknown_dev".parse().unwrap()),
             "unknown device defaults to active"
         );
         assert!(
-            !ids.contains(&"hidden_dev".to_string()),
+            !ids.contains(&"hidden_dev".parse().unwrap()),
             "hidden device must not be active"
         );
     }
@@ -386,9 +388,7 @@ mod tests {
     #[tokio::test]
     #[allow(clippy::await_holding_lock)]
     async fn save_worker_eventually_writes_config_to_disk() {
-        let _guard = crate::test_support::HALOD_CONFIG_DIR_LOCK.lock();
-        let dir = tempfile::tempdir().expect("tempdir");
-        unsafe { std::env::set_var("HALOD_CONFIG_DIR", dir.path()) };
+        let dir = crate::test_support::tmp_config_dir();
 
         let app = Arc::new(AppState::new(Config::default()));
         let _worker = start_config_save_worker(Arc::clone(&app));
@@ -405,16 +405,12 @@ mod tests {
             yaml_path.exists(),
             "config.yaml must be written after a save signal"
         );
-
-        unsafe { std::env::remove_var("HALOD_CONFIG_DIR") };
     }
 
     #[tokio::test]
     #[allow(clippy::await_holding_lock)]
     async fn save_worker_debounces_rapid_signals_into_single_save() {
-        let _guard = crate::test_support::HALOD_CONFIG_DIR_LOCK.lock();
-        let dir = tempfile::tempdir().expect("tempdir");
-        unsafe { std::env::set_var("HALOD_CONFIG_DIR", dir.path()) };
+        let dir = crate::test_support::tmp_config_dir();
 
         let app = Arc::new(AppState::new(Config::default()));
         let _worker = start_config_save_worker(Arc::clone(&app));
@@ -443,8 +439,6 @@ mod tests {
             std::fs::metadata(&yaml_path).unwrap().len() > 0,
             "config.yaml must be non-empty"
         );
-
-        unsafe { std::env::remove_var("HALOD_CONFIG_DIR") };
     }
 
     #[tokio::test]
@@ -481,7 +475,7 @@ mod tests {
             ),
         };
         app.set_discovery_scope(DiscoveryScope::PluginSet {
-            plugin_ids: ["p".to_string()].into_iter().collect(),
+            plugin_ids: ["p".parse().unwrap()].into_iter().collect(),
             filter: Arc::new(DiscoveryFilter { specs: vec![spec] }),
         })
         .await;

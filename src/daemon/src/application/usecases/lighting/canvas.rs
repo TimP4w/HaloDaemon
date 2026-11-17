@@ -12,6 +12,7 @@ use crate::domain::profiles::device_state::persist_device_state;
 use crate::domain::registry::require_device_owned_id;
 use crate::{application::state::AppState, config};
 use halod_shared::commands::EngineKind;
+use halod_shared::ids::DeviceId;
 use halod_shared::types::{
     EffectDef, EffectParamValue, LightingState, PlacedZone, RgbColor, SamplingMode, ZoneTopology,
 };
@@ -110,7 +111,7 @@ fn default_zone_size(topology: Option<ZoneTopology>) -> (f64, f64) {
 /// Topology of a device's RGB zone, erroring if the device/zone is unknown so a
 /// bogus `channel_id` is never persisted.
 async fn require_zone(
-    device_id: &str,
+    device_id: &DeviceId,
     channel_id: &str,
     app: &Arc<AppState>,
 ) -> Result<ZoneTopology> {
@@ -193,7 +194,7 @@ pub async fn set_default_effect(instance_id: Option<String>, app: Arc<AppState>)
 /// callers can do extra work (e.g. mark it engine-controlled). Errors for an
 /// unknown / non-canvas device; callers treating offline as a no-op discard it.
 async fn modify_canvas_zones(
-    device_id: &str,
+    device_id: &DeviceId,
     app: &Arc<AppState>,
     mutate: impl FnOnce(&mut Vec<config::PlacedZone>),
 ) -> Result<Arc<dyn Device>> {
@@ -228,7 +229,7 @@ async fn modify_canvas_zones(
 /// Add (or replace) a zone placement on the canvas.
 #[allow(clippy::too_many_arguments)]
 pub async fn place_zone(
-    device_id: String,
+    device_id: DeviceId,
     channel_id: String,
     x: Option<f64>,
     y: Option<f64>,
@@ -291,7 +292,11 @@ pub async fn place_zone(
 }
 
 /// Remove a zone from the canvas.
-pub async fn remove_zone(device_id: String, channel_id: String, app: Arc<AppState>) -> Result<()> {
+pub async fn remove_zone(
+    device_id: DeviceId,
+    channel_id: String,
+    app: Arc<AppState>,
+) -> Result<()> {
     let mut removed = false;
     modify_canvas_zones(&device_id, &app, |channels| {
         let old_len = channels.len();
@@ -311,7 +316,7 @@ pub async fn remove_zone(device_id: String, channel_id: String, app: Arc<AppStat
 /// Update the canvas position (and optionally size/rotation) of an existing zone.
 #[allow(clippy::too_many_arguments)]
 pub async fn move_zone(
-    device_id: String,
+    device_id: DeviceId,
     channel_id: String,
     x: f64,
     y: f64,
@@ -403,7 +408,7 @@ mod tests {
         let dev = Arc::new(MockDevice::new("dev0").with_rgb());
         let app = app_with(vec![dev.clone()]);
         let err = place_zone(
-            "dev0".into(),
+            "dev0".parse().unwrap(),
             "nope".into(),
             None,
             None,
@@ -445,7 +450,7 @@ mod tests {
             .await
             .unwrap();
         place_zone(
-            "dev0".into(),
+            "dev0".parse().unwrap(),
             "ring".into(),
             Some(0.1),
             Some(0.2),
@@ -475,7 +480,7 @@ mod tests {
         let dev = Arc::new(MockDevice::new("dev0").with_rgb());
         let app = app_with(vec![dev.clone()]);
         place_zone(
-            "dev0".into(),
+            "dev0".parse().unwrap(),
             "ring".into(),
             Some(0.1),
             Some(0.1),
@@ -489,7 +494,7 @@ mod tests {
         .await
         .unwrap();
         place_zone(
-            "dev0".into(),
+            "dev0".parse().unwrap(),
             "ring".into(),
             Some(0.9),
             Some(0.9),
@@ -515,7 +520,7 @@ mod tests {
     async fn place_zone_errors_on_missing_device() {
         let app = Arc::new(AppState::new(Config::default()));
         let err = place_zone(
-            "ghost".into(),
+            "ghost".parse().unwrap(),
             "ring".into(),
             None,
             None,
@@ -536,7 +541,7 @@ mod tests {
         let dev = Arc::new(MockDevice::new("dev0").with_rgb());
         let app = app_with(vec![dev.clone()]);
         place_zone(
-            "dev0".into(),
+            "dev0".parse().unwrap(),
             "ring".into(),
             Some(0.0),
             Some(0.0),
@@ -550,7 +555,7 @@ mod tests {
         .await
         .unwrap();
         assert_eq!(placed_channels(&dev).len(), 1);
-        remove_zone("dev0".into(), "ring".into(), app)
+        remove_zone("dev0".parse().unwrap(), "ring".into(), app)
             .await
             .unwrap();
         assert!(placed_channels(&dev).is_empty());
@@ -564,7 +569,7 @@ mod tests {
             .await
             .unwrap();
         place_zone(
-            "dev0".into(),
+            "dev0".parse().unwrap(),
             "ring".into(),
             Some(0.1),
             Some(0.1),
@@ -578,7 +583,7 @@ mod tests {
         .await
         .unwrap();
         move_zone(
-            "dev0".into(),
+            "dev0".parse().unwrap(),
             "ring".into(),
             0.5,
             0.6,
@@ -600,7 +605,7 @@ mod tests {
     #[tokio::test]
     async fn remove_zone_errors_for_unknown_device() {
         let app = Arc::new(AppState::new(Config::default()));
-        let err = remove_zone("offline".into(), "ring".into(), app)
+        let err = remove_zone("offline".parse().unwrap(), "ring".into(), app)
             .await
             .unwrap_err();
         assert!(err.to_string().contains("offline"));
@@ -610,7 +615,7 @@ mod tests {
     async fn move_zone_errors_for_unknown_device() {
         let app = Arc::new(AppState::new(Config::default()));
         let err = move_zone(
-            "offline".into(),
+            "offline".parse().unwrap(),
             "ring".into(),
             0.5,
             0.6,
@@ -632,7 +637,7 @@ mod tests {
         let app = app_with(vec![dev]);
 
         let move_err = move_zone(
-            "dev0".into(),
+            "dev0".parse().unwrap(),
             "ring".into(),
             0.5,
             0.6,
@@ -647,7 +652,7 @@ mod tests {
         .unwrap_err();
         assert!(move_err.to_string().contains("not placed"));
 
-        let remove_err = remove_zone("dev0".into(), "ring".into(), app)
+        let remove_err = remove_zone("dev0".parse().unwrap(), "ring".into(), app)
             .await
             .unwrap_err();
         assert!(remove_err.to_string().contains("not placed"));
@@ -659,7 +664,7 @@ mod tests {
         let app = app_with(vec![dev.clone()]);
         // Placing a zone puts the device into Engine mode.
         place_zone(
-            "dev0".into(),
+            "dev0".parse().unwrap(),
             "ring".into(),
             Some(0.0),
             Some(0.0),
@@ -784,7 +789,7 @@ mod tests {
         let dev = Arc::new(MockDevice::new("dev0").with_rgb());
         let app = app_with(vec![dev]);
         assert!(place_zone(
-            "dev0".into(),
+            "dev0".parse().unwrap(),
             "ring".into(),
             None,
             None,

@@ -17,8 +17,11 @@ home:
   devices_count_attention: "%{total} dispositivi · %{attention} richiedono attenzione"
   search_devices: Cerca dispositivi
   offline: Offline
-  conflict_confirmed: Dispositivo duplicato
-  conflict_possible: Possibile duplicato
+  disabled: Disattivato
+  conflict_duplicate_of: "Duplicato di %{name}"
+  conflict_possibly: "Forse anche %{name}"
+  conflict_review: Rivedi
+  conflict_check: Verifica
   conflict_recommended: Proprietario consigliato
   conflict_owner: "Proprietario consigliato: %{name}"
   conflict_with: "Potrebbe controllare anche: %{name}. Fai clic per scegliere quale dispositivo mantenere."
@@ -38,7 +41,7 @@ home:
   no_matching: Nessun dispositivo trovato
   no_matching_sub: Nessun dispositivo connesso corrisponde alla ricerca
   no_devices: Nessun dispositivo connesso
-  no_devices_sub: Collega una periferica o verifica che halod sia in esecuzione
+  no_devices_sub: Collega una periferica o verifica che HaloDaemon sia in esecuzione
   customize: Personalizza
   customize_done: Fatto
   widget_add: Aggiungi widget
@@ -53,6 +56,7 @@ home:
   widget_meter_desc: Barra segmentata su un intervallo a scelta
   widget_gauge_desc: Quadrante radiale su un intervallo a tua scelta
   widget_battery: Batteria
+  widget_battery_unavailable: Non disponibile
   widget_battery_desc: Livello di carica per un massimo di tre batterie
   widget_sensor: Sensore
   widget_batteries: "Batterie (fino a %{max})"

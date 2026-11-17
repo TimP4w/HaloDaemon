@@ -6,6 +6,7 @@ pub mod curve;
 pub mod debug_info;
 pub mod effect_designer;
 pub mod frames;
+pub mod ids;
 pub mod keyboard;
 pub mod keycodes;
 pub mod lcd_custom;

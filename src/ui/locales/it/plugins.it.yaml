@@ -1,5 +1,6 @@
 plugins:
   not_set_up: Non configurato
+  paused: In pausa
   repo_signed: Firmato
   repo_unsigned: Non firmato
   repo_synced: "sincronizzato %{age}"
@@ -143,6 +144,10 @@ plugins:
   enable_prompt_nothing: "Questo plugin non usa dispositivi, programmi né accesso alla rete."
   enable_prompt_confirm: "Attiva"
   enable_prompt_decline: "Non attivare"
+  update_prompt_title: "Aggiornare %{name}? La nuova versione richiede più permessi"
+  update_prompt_intro: "Dopo l'aggiornamento, questo plugin userà…"
+  update_prompt_confirm: "Aggiorna"
+  update_prompt_decline: "Salta questo aggiornamento"
   uses: "Utilizza"
   uses_commands: "Esegue programmi"
   not_installed_version: "Non installato · %{version}"

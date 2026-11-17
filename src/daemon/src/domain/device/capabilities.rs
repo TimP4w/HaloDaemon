@@ -8,6 +8,7 @@ use crate::config::PlacedZone;
 use crate::domain::cooling::model::FanCurveRecord;
 use anyhow::Result;
 use async_trait::async_trait;
+use halod_shared::ids::DeviceId;
 use halod_shared::keyboard::{
     is_iso_language, KeyVariant, KeyboardLayoutSelection, KeyboardLayoutStatus,
 };
@@ -36,8 +37,8 @@ pub trait Controller: Send + Sync {
     /// `(added, gone)`. `Err` means the backing connection dropped. Default no-op.
     async fn resync_children(
         &self,
-        _existing: &std::collections::HashSet<String>,
-    ) -> Result<(Vec<Arc<dyn Device>>, Vec<String>)> {
+        _existing: &std::collections::HashSet<DeviceId>,
+    ) -> Result<(Vec<Arc<dyn Device>>, Vec<DeviceId>)> {
         Ok((vec![], vec![]))
     }
 

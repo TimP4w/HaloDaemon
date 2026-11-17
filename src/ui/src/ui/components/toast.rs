@@ -43,6 +43,7 @@ fn details_extra_height(note: &Notification) -> f32 {
 #[derive(Debug, Clone)]
 pub enum ToastEvent {
     Details(Notification),
+    Open(Notification),
 }
 
 /// Accent color for a toast's severity indicator and title.
@@ -87,9 +88,15 @@ pub struct Toasts {
     history: std::collections::VecDeque<Logged>,
     /// Whether the bell's history panel is open.
     pub panel_open: bool,
+    opened: Option<Notification>,
 }
 
 impl Toasts {
+    pub fn open(&mut self, note: Notification) {
+        self.panel_open = false;
+        self.opened = Some(note);
+    }
+
     /// Queue freshly-received notifications, stamping each with `now`.
     pub fn ingest(&mut self, incoming: impl IntoIterator<Item = Notification>, now: f64) {
         for note in incoming {
@@ -138,6 +145,9 @@ impl Toasts {
     /// modal. Call once per frame after the page content so toasts overlay it.
     pub fn show(&mut self, ctx: &egui::Context) -> Option<ToastEvent> {
         let now = ctx.input(|i| i.time);
+        if let Some(note) = self.opened.take() {
+            return Some(ToastEvent::Open(note));
+        }
         if !self.prune(now) {
             return None;
         }
@@ -167,6 +177,10 @@ impl Toasts {
                     let action = toast_card(ui, rect, &toast.note, i, left);
                     if action.dismiss {
                         dismiss = Some(i);
+                    }
+                    if action.open {
+                        dismiss = Some(i);
+                        event = Some(ToastEvent::Open(toast.note.clone()));
                     }
                     if action.details {
                         event = Some(ToastEvent::Details(toast.note.clone()));
@@ -207,6 +221,7 @@ fn toast_height(ui: &egui::Ui, note: &Notification, w: f32) -> f32 {
 struct ToastAction {
     dismiss: bool,
     details: bool,
+    open: bool,
 }
 
 /// Severity tile: a tinted square with the severity glyph, shared by toasts
@@ -253,6 +268,11 @@ fn toast_card(
 ) -> ToastAction {
     let (title, _) = notification_text(&note.code);
     let severity = note.code.severity();
+    let body = ui.interact(
+        rect,
+        ui.scope_id().with(("toast_body", idx, note.timestamp_ms)),
+        egui::Sense::click(),
+    );
     let p = ui.painter();
     theme::halo(p, rect, theme::RADIUS_MD, a(Color32::BLACK, 0.4), 24.0);
     theme::paint_surface(
@@ -302,6 +322,7 @@ fn toast_card(
 
     let mut action = ToastAction {
         dismiss: resp.clicked(),
+        open: body.clicked() && !resp.clicked(),
         ..Default::default()
     };
     if shows_details(&note.code) {
@@ -357,7 +378,7 @@ mod tests {
         use halod_shared::types::NotificationCode;
         Notification {
             code: NotificationCode::PluginRuntimeError {
-                plugin: "wled".into(),
+                plugin: "wled".parse().unwrap(),
                 detail: "boom".into(),
             },
             show_native: false,
@@ -368,6 +389,7 @@ mod tests {
     fn device_write_error() -> Notification {
         Notification {
             code: NotificationCode::DeviceWriteFailed {
+                device_id: "kb-1".parse().unwrap(),
                 device: "keyboard".into(),
                 detail: "HID++ rejected write".into(),
             },
@@ -420,6 +442,28 @@ mod tests {
             spawned: 0.0,
         };
         assert!(!t.expired(1e9));
+    }
+
+    #[test]
+    fn opening_a_notification_emits_open_once_and_closes_the_panel() {
+        let ctx = egui::Context::default();
+        let mut toasts = Toasts {
+            panel_open: true,
+            ..Default::default()
+        };
+        toasts.open(note(NotificationSeverity::Info));
+        assert!(!toasts.panel_open);
+        let mut events = Vec::new();
+        for _ in 0..2 {
+            crate::ui::run_headless(&ctx, egui::RawInput::default(), |ui| {
+                events.push(
+                    toasts
+                        .show(ui.ctx())
+                        .map(|event| matches!(event, ToastEvent::Open(_))),
+                );
+            });
+        }
+        assert_eq!(events, [Some(true), None]);
     }
 
     #[test]

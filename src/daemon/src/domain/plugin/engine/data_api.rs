@@ -9,11 +9,12 @@ use mlua::{Lua, Table, Value};
 use crate::application::bus::data_bus::{self, DataBus, DataPolicy, DataValue};
 use crate::domain::plugin::manifest::DataProvideDef;
 use crate::infrastructure::media::MediaHandle;
+use halod_shared::ids::PluginId;
 
 #[derive(Clone, Default)]
 pub struct DataRuntime {
     pub bus: Arc<DataBus>,
-    pub plugin_id: String,
+    pub plugin_id: PluginId,
     pub provides: HashMap<String, DataPolicy>,
     pub consumes: Vec<String>,
     _media: Option<Arc<MediaHandle>>,
@@ -22,7 +23,7 @@ pub struct DataRuntime {
 impl DataRuntime {
     pub fn new(
         bus: Arc<DataBus>,
-        plugin_id: String,
+        plugin_id: PluginId,
         provides: &[DataProvideDef],
         consumes: Vec<String>,
     ) -> Self {
@@ -134,7 +135,7 @@ mod tests {
         lua.globals().set("halod", halod).unwrap();
         let runtime = DataRuntime::new(
             Arc::new(DataBus::default()),
-            "telemetry".into(),
+            "telemetry".parse().unwrap(),
             &[DataProvideDef {
                 key: "telemetry.current".into(),
                 stale_after_ms: 60_000,

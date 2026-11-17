@@ -7,6 +7,7 @@ use std::sync::Arc;
 
 use crate::application::state::AppState;
 use crate::domain::events::Change;
+use halod_shared::ids::DeviceId;
 
 pub async fn status_changed(app: &Arc<AppState>) {
     app.record_change(Change::Cooling).await;
@@ -14,13 +15,12 @@ pub async fn status_changed(app: &Arc<AppState>) {
 
 /// Record a duty command only after the device accepted it, then publish the
 /// affected device projection immediately instead of waiting for telemetry.
-pub async fn duty_applied(app: &Arc<AppState>, device_id: &str, channel_id: &str, duty: u8) {
+pub async fn duty_applied(app: &Arc<AppState>, device_id: &DeviceId, channel_id: &str, duty: u8) {
     if app
         .cooling
         .record_applied_duty(device_id, channel_id, duty)
         .await
     {
-        app.record_change(Change::Device(device_id.to_owned()))
-            .await;
+        app.record_change(Change::Device(device_id.into())).await;
     }
 }

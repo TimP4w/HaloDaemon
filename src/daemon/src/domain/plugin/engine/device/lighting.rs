@@ -38,19 +38,19 @@ impl LightingFacet {
     ) {
         let keyboard = self.keyboard.get();
         let ansi_keys = keyboard.map(|descriptor| visual_keys(&descriptor.ansi));
-        let _ = self.descriptor.set(build_dynamic_descriptor(
-            channels.clone(),
-            effects.clone(),
-            ansi_keys.as_deref(),
-        ));
         if let Some(iso) = keyboard.and_then(|descriptor| descriptor.iso.as_ref()) {
             let iso_keys = visual_keys(iso);
             let _ = self.iso_descriptor.set(build_dynamic_descriptor(
-                channels,
-                effects,
+                channels.clone(),
+                effects.clone(),
                 Some(&iso_keys),
             ));
         }
+        let _ = self.descriptor.set(build_dynamic_descriptor(
+            channels,
+            effects,
+            ansi_keys.as_deref(),
+        ));
     }
 
     /// The descriptor for the layout the user selected.
@@ -128,9 +128,9 @@ fn visual_keys(variant: &InitKeyboardVariant) -> Vec<VisualKey> {
             led_id: mapping.led_id,
             remap_cid: mapping.remap_cid,
             cell: halod_shared::keyboard::KeyCell {
-                id: mapping
-                    .key
-                    .unwrap_or(KeyId::Custom(mapping.led_id.min(u16::MAX as u32) as u16)),
+                id: mapping.key.unwrap_or(KeyId::Custom(
+                    u16::try_from(mapping.led_id).unwrap_or(u16::MAX),
+                )),
                 col: geometry.col,
                 row: geometry.row,
                 w: geometry.w,
@@ -227,11 +227,11 @@ pub(super) fn build_dynamic_descriptor(
                     division: Default::default(),
                     visibility: Default::default(),
                 }
-            } else if matches!(topology, ZoneTopology::Keyboard { .. })
-                && keyboard_keys.is_some_and(|keys| !keys.is_empty())
+            } else if let (ZoneTopology::Keyboard { .. }, Some(keys)) =
+                (&topology, keyboard_keys.filter(|keys| !keys.is_empty()))
             {
                 LightingChannel {
-                    leds: keyboard_led_positions(keyboard_keys.unwrap(), &z.led_ids),
+                    leds: keyboard_led_positions(keys, &z.led_ids),
                     id: z.id,
                     name: z.name,
                     topology,

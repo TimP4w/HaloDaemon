@@ -7,25 +7,32 @@ use std::path::Path;
 use anyhow::{bail, Context, Result};
 use base64::{engine::general_purpose::STANDARD as B64, Engine as _};
 use ed25519_dalek::{Signature, Signer, SigningKey, Verifier, VerifyingKey};
+use halod_shared::types::{PackageMatches, PackageUses};
 use serde::{Deserialize, Serialize};
 
+use crate::declarations::read_declarations;
 use crate::package::{
-    discover_packages, extract_archive, normalized_relative_path, package_hash,
-    validate_identifier, write_archive, MAX_ARCHIVE_BYTES,
+    discover_packages, extract_archive, normalized_relative_path, package_hash, write_archive,
+    MAX_ARCHIVE_BYTES,
 };
 use crate::{sha256_hex, PluginApi};
+use halod_shared::ids::PluginId;
 
 pub const CATALOG_FILE: &str = "catalog.yaml";
-pub const CATALOG_SCHEMA: u32 = 1;
+pub const CATALOG_SCHEMA: u32 = 2;
 pub const MAX_CATALOG_BYTES: u64 = 2 * 1024 * 1024;
-pub const SIGNATURE_ALGORITHM: &str = "ed25519";
+#[derive(Debug, Clone, Copy, PartialEq, Eq, Serialize, Deserialize)]
+#[serde(rename_all = "lowercase")]
+pub enum SignatureAlgorithm {
+    Ed25519,
+}
 const SIGNATURE_PREFIX: &str = "# halod-sig: ";
 
 #[derive(Debug, Clone, PartialEq, Eq, Serialize, Deserialize)]
 #[serde(deny_unknown_fields)]
 pub struct RepositorySigningKey {
     pub id: String,
-    pub algorithm: String,
+    pub algorithm: SignatureAlgorithm,
     pub public_key: String,
 }
 
@@ -45,26 +52,29 @@ pub struct Catalog {
 #[derive(Debug, Clone, PartialEq, Eq, Serialize, Deserialize)]
 #[serde(deny_unknown_fields)]
 pub struct CatalogPackage {
-    pub id: String,
+    pub id: PluginId,
+    pub name: String,
     pub version: semver::Version,
     pub api: PluginApi,
     pub path: String,
     pub sha256: String,
     pub size: u64,
+    pub matches: PackageMatches,
+    pub uses: PackageUses,
 }
 
 #[derive(Debug, Clone, PartialEq, Eq)]
 pub enum CatalogError {
     Malformed(String),
     Unsigned,
-    UnknownKey(String),
+    UntrustedKey(String),
     SignatureMismatch,
     Stale {
         cached: u64,
         fetched: u64,
     },
     HashMismatch {
-        package: String,
+        package: PluginId,
     },
     ApiIncompatible {
         required: PluginApi,
@@ -79,7 +89,7 @@ impl fmt::Display for CatalogError {
             Self::Unsigned => {
                 f.write_str("catalog is unsigned but this repository requires a signature")
             }
-            Self::UnknownKey(id) => write!(f, "catalog is signed by untrusted key '{id}'"),
+            Self::UntrustedKey(id) => write!(f, "catalog is signed by untrusted key '{id}'"),
             Self::SignatureMismatch => f.write_str("catalog signature does not match its contents"),
             Self::Stale { cached, fetched } => write!(
                 f,
@@ -120,18 +130,20 @@ impl Catalog {
             return Err(malformed("name is empty"));
         }
         if let Some(key) = &self.signing_key {
-            validate_identifier("signing key id", &key.id).map_err(malformed)?;
-            if key.algorithm != SIGNATURE_ALGORITHM {
+            if !halod_shared::ids::is_identifier(&key.id) {
                 return Err(malformed(format!(
-                    "unsupported algorithm '{}'",
-                    key.algorithm
+                    "signing key id '{}' {}",
+                    key.id,
+                    halod_shared::ids::IDENTIFIER_RULE
                 )));
             }
             decode_array::<32>(&key.public_key).map_err(malformed)?;
         }
         let mut seen = HashSet::new();
         for package in &self.packages {
-            validate_identifier("package id", &package.id).map_err(malformed)?;
+            if package.name.trim().is_empty() {
+                return Err(malformed(format!("package '{}' has no name", package.id)));
+            }
             if normalized_relative_path(Path::new(&package.path))
                 .ok()
                 .as_deref()
@@ -166,12 +178,15 @@ impl Catalog {
         Ok(())
     }
 
+    #[must_use]
     pub fn select(&self, host: PluginApi) -> BTreeMap<&str, &CatalogPackage> {
+        fn rank(package: &CatalogPackage, host: PluginApi) -> (bool, &semver::Version) {
+            (package.api.is_compatible_with(host), &package.version)
+        }
         let mut best: BTreeMap<&str, &CatalogPackage> = BTreeMap::new();
         for package in &self.packages {
-            let rank = |p: &CatalogPackage| (p.api.is_compatible_with(host), p.version.clone());
             match best.get(package.id.as_str()) {
-                Some(current) if rank(current) >= rank(package) => {}
+                Some(current) if rank(current, host) >= rank(package, host) => {}
                 _ => {
                     best.insert(&package.id, package);
                 }
@@ -222,7 +237,7 @@ pub fn open_catalog(
             .find(|(id, _)| *id == key_id)
             .map(|(_, key)| *key)
             .filter(|key| *key == advertised.public_key)
-            .ok_or_else(|| CatalogError::UnknownKey(key_id.to_owned()))?,
+            .ok_or_else(|| CatalogError::UntrustedKey(key_id.to_owned()))?,
         None => advertised.public_key.as_str(),
     };
     let key = verifying_key(public_key)?;
@@ -239,7 +254,7 @@ pub fn verifying_key(public_key: &str) -> Result<VerifyingKey, CatalogError> {
 pub fn sign_catalog(catalog: &mut Catalog, key_id: &str, key: &SigningKey) -> Vec<u8> {
     catalog.signing_key = Some(RepositorySigningKey {
         id: key_id.to_owned(),
-        algorithm: SIGNATURE_ALGORITHM.to_owned(),
+        algorithm: SignatureAlgorithm::Ed25519,
         public_key: B64.encode(key.verifying_key().to_bytes()),
     });
     let body = catalog.to_bytes();
@@ -302,6 +317,7 @@ pub fn build_catalog(
     let scratch = tempfile::tempdir()?;
     let mut packages = Vec::new();
     for (dir, meta) in discover_packages(input.repo_dir)? {
+        let declared = read_declarations(&fs::read(dir.join("plugin.yaml"))?)?;
         let history: Vec<&CatalogPackage> = previous.iter().filter(|p| p.id == meta.id).collect();
         if let Some(newest) = history.iter().map(|p| &p.version).max() {
             if meta.version < *newest {
@@ -325,7 +341,15 @@ pub fn build_catalog(
                         meta.version
                     );
                 }
-                ((*published).clone(), bytes)
+                (
+                    CatalogPackage {
+                        name: declared.name,
+                        matches: declared.matches,
+                        uses: declared.uses,
+                        ..(*published).clone()
+                    },
+                    bytes,
+                )
             }
             None => {
                 let bytes = write_archive(&dir)?;
@@ -334,8 +358,11 @@ pub fn build_catalog(
                     sha256: sha256_hex(&bytes),
                     size: bytes.len() as u64,
                     id: meta.id.clone(),
+                    name: declared.name,
                     version: meta.version.clone(),
                     api: meta.api,
+                    matches: declared.matches,
+                    uses: declared.uses,
                 };
                 (package, bytes)
             }
@@ -408,12 +435,15 @@ mod tests {
 
     fn entry(id: &str, version: &str, api_value: &str) -> CatalogPackage {
         CatalogPackage {
-            id: id.into(),
+            id: id.parse().unwrap(),
+            name: id.to_uppercase(),
             version: version.parse().unwrap(),
             api: api(api_value),
             path: format!("packages/{id}-{version}.tar.gz"),
             sha256: "a".repeat(64),
             size: 1,
+            matches: PackageMatches::default(),
+            uses: PackageUses::default(),
         }
     }
 
@@ -470,6 +500,67 @@ mod tests {
     }
 
     #[test]
+    fn matches_and_uses_round_trip_through_a_signed_catalog() {
+        let mut demo = entry("demo", "1.0.0", "3.0");
+        demo.matches = PackageMatches {
+            platforms: vec!["linux".into()],
+            hid_any: false,
+            hid: vec![halod_shared::types::HidIdentity {
+                vid: 0x1e71,
+                pids: vec![0x2007, 0x2008],
+                usage_page: Some(0xff00),
+                usage: None,
+                interface: Some(1),
+            }],
+            usb: vec![halod_shared::types::UsbIdentity {
+                vid: 1,
+                pids: vec![2],
+                interface: 3,
+            }],
+            smbus_gpu: vec![halod_shared::types::PciIdentity {
+                vendor: Some(0x10de),
+                ..Default::default()
+            }],
+            commands: vec!["nvidia-smi".into()],
+        };
+        demo.uses = PackageUses {
+            permissions: vec![
+                halod_shared::types::Permission::Hid,
+                halod_shared::types::Permission::Network,
+            ],
+            commands: vec!["nvidia-smi".into()],
+            data_reads: vec!["host.sensors.*".into()],
+        };
+        let original = catalog(vec![demo]);
+        let (bytes, public) = signed(original.clone());
+        let opened = open_catalog(&bytes, Some(&[("test-key", public.as_str())])).unwrap();
+        assert_eq!(opened.packages, original.packages);
+    }
+
+    #[test]
+    fn a_package_without_name_matches_or_uses_is_malformed() {
+        let full: serde_yaml::Value =
+            serde_yaml::from_slice(&catalog(vec![entry("demo", "1.0.0", "3.0")]).to_bytes())
+                .unwrap();
+        for field in ["name", "matches", "uses"] {
+            let mut stripped = full.clone();
+            stripped["packages"][0]
+                .as_mapping_mut()
+                .unwrap()
+                .remove(field)
+                .unwrap();
+            let bytes = serde_yaml::to_string(&stripped).unwrap();
+            assert!(
+                matches!(
+                    open_catalog(bytes.as_bytes(), None),
+                    Err(CatalogError::Malformed(_))
+                ),
+                "{field}"
+            );
+        }
+    }
+
+    #[test]
     fn pinned_repositories_reject_unsigned_and_other_keys() {
         let unsigned = catalog(vec![]).to_bytes();
         let (bytes, public) = signed(catalog(vec![]));
@@ -480,11 +571,11 @@ mod tests {
         );
         assert_eq!(
             open_catalog(&bytes, Some(&[("test-key", other.as_str())])),
-            Err(CatalogError::UnknownKey("test-key".into()))
+            Err(CatalogError::UntrustedKey("test-key".into()))
         );
         assert_eq!(
             open_catalog(&bytes, Some(&[("other-id", public.as_str())])),
-            Err(CatalogError::UnknownKey("test-key".into()))
+            Err(CatalogError::UntrustedKey("test-key".into()))
         );
         assert!(open_catalog(&unsigned, None).is_ok());
     }

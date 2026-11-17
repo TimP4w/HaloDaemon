@@ -20,10 +20,10 @@ pub struct WireLcdEngineState {
     #[serde(default)]
     pub available_presets: Vec<LcdPresetDescriptor>,
     /// device_id → template_id
-    pub device_templates: HashMap<String, String>,
+    pub device_templates: HashMap<crate::ids::DeviceId, String>,
     /// device_id → (param id → value) for the active template.
     #[serde(default)]
-    pub device_template_params: HashMap<String, HashMap<String, EffectParamValue>>,
+    pub device_template_params: HashMap<crate::ids::DeviceId, HashMap<String, EffectParamValue>>,
 }
 
 #[derive(Debug, Clone, Copy, Default, PartialEq, Eq, Serialize, Deserialize)]
@@ -52,7 +52,7 @@ pub struct LcdWidgetUpdates {
 pub struct LcdWidgetDescriptor {
     /// Namespaced `<plugin_id>:<widget_id>` catalog id.
     pub id: String,
-    pub plugin_id: String,
+    pub plugin_id: crate::ids::PluginId,
     pub name: String,
     /// `name` remains the mandatory fallback.
     #[serde(default, skip_serializing_if = "Option::is_none")]
@@ -135,7 +135,7 @@ pub struct LcdParamVisibility {
 pub struct LcdPresetDescriptor {
     /// Namespaced `<plugin_id>:<preset_id>` catalog id.
     pub id: String,
-    pub plugin_id: String,
+    pub plugin_id: crate::ids::PluginId,
     pub name: String,
     pub file: String,
 }
@@ -143,7 +143,7 @@ pub struct LcdPresetDescriptor {
 /// Pushed only to the uploading client.
 #[derive(Debug, Clone, PartialEq, Serialize, Deserialize)]
 pub struct LcdUploadProgress {
-    pub device_id: String,
+    pub device_id: crate::ids::DeviceId,
     pub stage: LcdUploadStage,
     /// 0–100 within the stage; `None` when the stage has no measurable extent.
     #[serde(default)]
@@ -164,7 +164,7 @@ pub enum LcdUploadStage {
 
 #[derive(Debug, Clone, Serialize, Deserialize)]
 pub struct LcdEngineFrame {
-    pub device_id: String,
+    pub device_id: crate::ids::DeviceId,
     pub frame_id: u64,
     /// Base64-encoded PNG preview image.
     pub preview_b64: String,

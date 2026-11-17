@@ -23,6 +23,7 @@ use super::keys::Layer;
 use super::{DeviceUi, TabCtx};
 use crate::runtime::ipc;
 use crate::ui::theme::{self, a};
+use halod_shared::ids::DeviceId;
 
 /// Smallest representable wait; also the recording gap threshold.
 pub const DELAY_MIN_MS: u32 = 10;
@@ -280,7 +281,7 @@ fn record_frame(
 fn commit(
     ctx: &TabCtx,
     st: &mut DeviceUi,
-    id: &str,
+    id: &DeviceId,
     cid: u16,
     layer: Layer,
     steps: Vec<MacroStep>,
@@ -300,7 +301,7 @@ fn commit(
 fn commit_action(
     ctx: &TabCtx,
     st: &mut DeviceUi,
-    id: &str,
+    id: &DeviceId,
     cid: u16,
     layer: Layer,
     action: ButtonAction,
@@ -309,7 +310,7 @@ fn commit_action(
     let (base, shifted) = layer.pair(st, action.clone());
     layer.set(st, action);
     let cmd = DaemonCommand::Device {
-        device_id: id.to_string(),
+        device_id: id.clone(),
         op: DeviceOp::SetButtonMapping {
             mapping: ButtonMapping { cid, base, shifted },
         },
@@ -333,7 +334,7 @@ fn commit_action(
 }
 
 /// Stop and commit the active recording, whatever button/layer owns it.
-fn stop_recording(ctx: &TabCtx, st: &mut DeviceUi, id: &str) {
+fn stop_recording(ctx: &TabCtx, st: &mut DeviceUi, id: &DeviceId) {
     if let Some(rec) = st.keys.macro_rec.take() {
         let layer = Layer::from_shifted(rec.shifted);
         if let Some(ButtonAction::Macro { steps }) = layer.get(st) {
@@ -346,7 +347,7 @@ fn stop_recording(ctx: &TabCtx, st: &mut DeviceUi, id: &str) {
 /// recording is committed to its owning button (its buffer is still intact —
 /// recording keeps the edit window open, which blocks re-seeding), everything
 /// else is dropped. Called from `keys::show` before the buffers re-seed.
-pub(super) fn sync_selection(ctx: &TabCtx, st: &mut DeviceUi, id: &str) {
+pub(super) fn sync_selection(ctx: &TabCtx, st: &mut DeviceUi, id: &DeviceId) {
     let sel = st.keys.keys_sel_cid;
     if st
         .keys
@@ -385,7 +386,7 @@ pub(super) fn show(
     ui: &mut egui::Ui,
     ctx: &TabCtx,
     st: &mut DeviceUi,
-    id: &str,
+    id: &DeviceId,
     cid: u16,
     layer: Layer,
     steps: Vec<MacroStep>,
@@ -501,7 +502,7 @@ fn header_row(
     ui: &mut egui::Ui,
     ctx: &TabCtx,
     st: &mut DeviceUi,
-    id: &str,
+    id: &DeviceId,
     cid: u16,
     layer: Layer,
     steps: &[MacroStep],
@@ -711,16 +712,16 @@ fn chip(
             .interact_pointer_pos()
             .is_some_and(|hp| close.contains(hp));
     if resp.drag_started() {
-        let start = resp.interact_pointer_pos();
+        let origin = ui.input(|input| input.pointer.press_origin());
         let state = DragState {
             cid,
             shifted,
             from: i,
         };
-        if in_handle(start) {
-            st.keys.macro_resize = Some(state);
-        } else if !start.is_some_and(|hp| close.contains(hp)) {
-            st.keys.macro_drag = Some(state);
+        match chip_drag(origin, is_delay, handle, close) {
+            Some(ChipDrag::Resize) => st.keys.macro_resize = Some(state),
+            Some(ChipDrag::Reorder) => st.keys.macro_drag = Some(state),
+            None => {}
         }
     }
     let mut resized = None;
@@ -738,6 +739,23 @@ fn chip(
         }
     }
     (rect, removed, resized)
+}
+
+#[derive(Debug, PartialEq)]
+enum ChipDrag {
+    Resize,
+    Reorder,
+}
+
+fn chip_drag(origin: Option<Pos2>, is_delay: bool, handle: Rect, close: Rect) -> Option<ChipDrag> {
+    let origin = origin?;
+    if is_delay && handle.contains(origin) {
+        Some(ChipDrag::Resize)
+    } else if close.contains(origin) {
+        None
+    } else {
+        Some(ChipDrag::Reorder)
+    }
 }
 
 /// End points of the insertion caret for `drop_index` result `idx`.
@@ -760,7 +778,7 @@ fn record_ui(
     ui: &mut egui::Ui,
     ctx: &TabCtx,
     st: &mut DeviceUi,
-    id: &str,
+    id: &DeviceId,
     cid: u16,
     layer: Layer,
     strip: Rect,
@@ -800,7 +818,7 @@ fn insert_row(
     ui: &mut egui::Ui,
     ctx: &TabCtx,
     st: &mut DeviceUi,
-    id: &str,
+    id: &DeviceId,
     cid: u16,
     layer: Layer,
     steps: &[MacroStep],
@@ -1236,6 +1254,31 @@ mod tests {
     }
 
     #[test]
+    fn a_drag_is_classified_by_where_it_was_pressed() {
+        let pill = Rect::from_min_size(Pos2::ZERO, Vec2::new(100.0, CHIP_H));
+        let handle = Rect::from_min_max(Pos2::new(100.0 - RESIZE_W, 0.0), pill.max);
+        let close = Rect::from_min_max(
+            Pos2::new(handle.min.x - CLOSE_W, 0.0),
+            Pos2::new(handle.min.x, CHIP_H),
+        );
+        let in_handle = Some(handle.center());
+        assert_eq!(
+            chip_drag(in_handle, true, handle, close),
+            Some(ChipDrag::Resize)
+        );
+        assert_eq!(
+            chip_drag(in_handle, false, handle, close),
+            Some(ChipDrag::Reorder)
+        );
+        assert_eq!(chip_drag(Some(close.center()), true, handle, close), None);
+        assert_eq!(
+            chip_drag(Some(Pos2::new(10.0, 10.0)), true, handle, close),
+            Some(ChipDrag::Reorder)
+        );
+        assert_eq!(chip_drag(None, true, handle, close), None);
+    }
+
+    #[test]
     fn resize_delay_clamps_to_bounds() {
         assert_eq!(resize_delay(100, -10_000.0), DELAY_MIN_MS);
         assert_eq!(resize_delay(100, 10_000_000.0), MACRO_MAX_DELAY_MS);
@@ -1277,12 +1320,20 @@ mod tests {
         let dev = WireDevice::default();
         let (tx, mut rx) = tokio::sync::mpsc::unbounded_channel();
         let ctx = test_ctx(&state, &dev, &tx);
-        let mut st = DeviceUi::new("dev1".into());
+        let mut st = DeviceUi::new("dev1".parse().unwrap());
         st.keys.keys_action = Some(ButtonAction::Native);
         st.keys.keys_shifted_action = Some(ButtonAction::Disable);
 
         let steps = vec![key_step(30, true), key_step(30, false)];
-        commit(&ctx, &mut st, "dev1", 7, Layer::Base, steps.clone(), true);
+        commit(
+            &ctx,
+            &mut st,
+            &"dev1".parse().unwrap(),
+            7,
+            Layer::Base,
+            steps.clone(),
+            true,
+        );
 
         assert_eq!(st.last_edit, 100.0);
         assert_eq!(
@@ -1311,12 +1362,12 @@ mod tests {
         let dev = WireDevice::default();
         let (tx, mut rx) = tokio::sync::mpsc::unbounded_channel();
         let ctx = test_ctx(&state, &dev, &tx);
-        let mut st = DeviceUi::new("dev1".into());
+        let mut st = DeviceUi::new("dev1".parse().unwrap());
 
         commit(
             &ctx,
             &mut st,
-            "dev1",
+            &"dev1".parse().unwrap(),
             7,
             Layer::Shifted,
             vec![delay_step(500)],
@@ -1332,7 +1383,7 @@ mod tests {
         let dev = WireDevice::default();
         let (tx, mut rx) = tokio::sync::mpsc::unbounded_channel();
         let ctx = test_ctx(&state, &dev, &tx);
-        let mut st = DeviceUi::new("dev1".into());
+        let mut st = DeviceUi::new("dev1".parse().unwrap());
         st.keys.keys_action = Some(ButtonAction::Macro {
             steps: vec![key_step(30, true), key_step(30, false)],
         });
@@ -1341,7 +1392,7 @@ mod tests {
         commit_action(
             &ctx,
             &mut st,
-            "dev1",
+            &"dev1".parse().unwrap(),
             7,
             Layer::Base,
             ButtonAction::Native,
@@ -1367,7 +1418,7 @@ mod tests {
         let dev = WireDevice::default();
         let (tx, mut rx) = tokio::sync::mpsc::unbounded_channel();
         let ctx = test_ctx(&state, &dev, &tx);
-        let mut st = DeviceUi::new("dev1".into());
+        let mut st = DeviceUi::new("dev1".parse().unwrap());
         let steps = vec![key_step(30, true)];
         st.keys.keys_action = Some(ButtonAction::Macro {
             steps: steps.clone(),
@@ -1379,7 +1430,7 @@ mod tests {
         });
         st.keys.keys_sel_cid = Some(2); // selection moved away mid-recording
 
-        sync_selection(&ctx, &mut st, "dev1");
+        sync_selection(&ctx, &mut st, &"dev1".parse().unwrap());
 
         assert!(st.keys.macro_rec.is_none());
         match rx.try_recv().unwrap() {
@@ -1402,7 +1453,7 @@ mod tests {
         let dev = WireDevice::default();
         let (tx, _rx) = tokio::sync::mpsc::unbounded_channel();
         let ctx = test_ctx(&state, &dev, &tx);
-        let mut st = DeviceUi::new("dev1".into());
+        let mut st = DeviceUi::new("dev1".parse().unwrap());
         st.keys.keys_sel_cid = Some(2);
         st.keys.macro_drag = Some(DragState {
             cid: 1,
@@ -1418,7 +1469,7 @@ mod tests {
             shifted: true,
         });
 
-        sync_selection(&ctx, &mut st, "dev1");
+        sync_selection(&ctx, &mut st, &"dev1".parse().unwrap());
 
         assert!(st.keys.macro_drag.is_none());
         assert!(st.keys.macro_capture.is_none());

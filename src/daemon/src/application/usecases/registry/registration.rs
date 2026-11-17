@@ -7,6 +7,7 @@ use crate::application::state::AppState;
 use crate::domain::device::Device;
 use crate::domain::plugin;
 use crate::domain::registry::identity::MatchEvidence;
+use halod_shared::ids::DeviceId;
 use halod_shared::types::{ConnectionType, VisibilityState, DEFAULT_PROFILE_NAME};
 
 /// Close a device after releasing any global input state it owns. Every
@@ -179,6 +180,7 @@ pub async fn init_device(app: &Arc<AppState>, device: &Arc<dyn Device>) -> Resul
                 notifications::send(
                     app,
                     halod_shared::types::NotificationCode::DeviceInitFailed {
+                        device_id: device.id().clone(),
                         device: device.name().to_string(),
                         detail: e.to_string(),
                     },
@@ -330,7 +332,7 @@ async fn prefer_wired_transport(app: &Arc<AppState>, device: &Arc<dyn Device>) -
 }
 
 async fn displace_devices(app: &Arc<AppState>, devices: Vec<Arc<dyn Device>>) {
-    let displaced_ids: std::collections::HashSet<String> =
+    let displaced_ids: std::collections::HashSet<DeviceId> =
         devices.iter().map(|d| d.id().to_owned()).collect();
     app.device_registry
         .write()
@@ -350,7 +352,7 @@ async fn displace_devices(app: &Arc<AppState>, devices: Vec<Arc<dyn Device>>) {
 /// A device keeps one id on every transport so its saved state follows it, so
 /// its receiver child must leave the registry before the wired instance claims
 /// that id.
-pub(crate) async fn release_wireless_twin(app: &Arc<AppState>, id: &str) {
+pub(crate) async fn release_wireless_twin(app: &Arc<AppState>, id: &DeviceId) {
     let Some(twin) = app.find_device_by_id(id).await else {
         return;
     };
@@ -401,7 +403,7 @@ async fn log_registration_conflicts(app: &Arc<AppState>, device: &Arc<dyn Device
 /// Atomically reserve a device id across the asynchronous initialization
 /// window. The reservation lock is held while consulting `devices`, closing
 /// the check/insert race between concurrent transport scanners.
-async fn claim_registration(app: &Arc<AppState>, id: &str) -> bool {
+async fn claim_registration(app: &Arc<AppState>, id: &DeviceId) -> bool {
     let mut active = app.device_registry.registrations.lock().await;
     if active.contains(id)
         || app
@@ -413,11 +415,11 @@ async fn claim_registration(app: &Arc<AppState>, id: &str) -> bool {
     {
         return false;
     }
-    active.insert(id.to_owned());
+    active.insert(id.clone());
     true
 }
 
-async fn finish_registration(app: &Arc<AppState>, id: &str) {
+async fn finish_registration(app: &Arc<AppState>, id: &DeviceId) {
     app.device_registry.registrations.lock().await.remove(id);
 }
 
@@ -458,8 +460,8 @@ pub async fn register_device_and_children(app: &Arc<AppState>, device: Arc<dyn D
 /// (integration controllers), `_acc_` (chain accessories), or `_chain_` (chain
 /// links). Matching the markers rather than a bare `{root_id}_` prefix stops two
 /// roots differing only by a trailing `_<suffix>` from tearing each other down.
-fn is_registered_child(id: &str, root_id: &str) -> bool {
-    id.strip_prefix(root_id)
+fn is_registered_child(id: &DeviceId, root_id: &DeviceId) -> bool {
+    id.strip_prefix(root_id.as_str())
         .and_then(|rest| rest.strip_prefix('_'))
         .is_some_and(|marker| {
             marker.starts_with("ctrl_")
@@ -473,7 +475,10 @@ fn is_registered_child(id: &str, root_id: &str) -> bool {
 /// every child registered alongside it (see [`is_registered_child`]). Used for a
 /// scoped reload of one integration or plugin. Returns the removed ids so the
 /// caller can prune their (shared) HID-tracking entry.
-pub async fn unregister_device_and_children(app: &Arc<AppState>, root_id: &str) -> Vec<String> {
+pub async fn unregister_device_and_children(
+    app: &Arc<AppState>,
+    root_id: &DeviceId,
+) -> Vec<DeviceId> {
     let explicit_children = {
         let mut owners = app.device_registry.children.lock().await;
         let owned = owners.remove(root_id).unwrap_or_default();
@@ -527,7 +532,7 @@ mod tests {
                 .with_owning_plugin_id("acme_wireless")
                 .with_identity(
                     DeviceIdentity::serial(Some("AABB1122".into())),
-                    DeviceOrigin::Plugin("acme_wireless".into()),
+                    DeviceOrigin::Plugin("acme_wireless".parse().unwrap()),
                 )
                 .with_connection_type(connection_type),
         )
@@ -542,7 +547,7 @@ mod tests {
             .children
             .lock()
             .await
-            .entry("acme_wireless-receiver".into())
+            .entry("acme_wireless-receiver".parse().unwrap())
             .or_default()
             .insert(wireless.id().into());
 
@@ -588,7 +593,7 @@ mod tests {
             .children
             .lock()
             .await
-            .entry("acme_wireless-receiver".into())
+            .entry("acme_wireless-receiver".parse().unwrap())
             .or_default()
             .insert(wireless.id().into());
 
@@ -644,7 +649,7 @@ mod tests {
             .as_ref()
             .unwrap()
             .set_canvas_zones(vec![crate::config::PlacedZone {
-                device_id: "dev-1".into(),
+                device_id: "dev-1".parse().unwrap(),
                 channel_id: "ring".into(),
                 x: 0.0,
                 y: 0.0,
@@ -691,14 +696,15 @@ mod tests {
     #[tokio::test]
     async fn concurrent_registration_claims_allow_only_one_owner() {
         let app = app_with(vec![]);
+        let headset: DeviceId = "headset-1".parse().unwrap();
         let (a, b) = tokio::join!(
-            claim_registration(&app, "headset-1"),
-            claim_registration(&app, "headset-1")
+            claim_registration(&app, &headset),
+            claim_registration(&app, &headset)
         );
 
         assert_ne!(a, b, "exactly one concurrent scanner must own the id");
         assert_eq!(app.device_registry.registrations.lock().await.len(), 1);
-        finish_registration(&app, "headset-1").await;
+        finish_registration(&app, &"headset-1".parse().unwrap()).await;
     }
 
     #[tokio::test]
@@ -707,7 +713,7 @@ mod tests {
         {
             let mut cfg = app.config.write().await;
             cfg.known_devices.insert(
-                "dev-1".to_string(),
+                "dev-1".parse().unwrap(),
                 DeviceRecord {
                     name: String::new(),
                     vendor: String::new(),
@@ -716,7 +722,7 @@ mod tests {
                 },
             );
             cfg.active_profile_data_mut().device_states.insert(
-                "dev-1".into(),
+                "dev-1".parse().unwrap(),
                 serde_json::json!({
                     "rgb": {
                         "state": {
@@ -782,7 +788,7 @@ mod tests {
             let mut cfg = app.config.write().await;
             cfg.active_profile_data_mut()
                 .device_states
-                .insert("dev-1".to_string(), serde_json::json!({"x": 1}));
+                .insert("dev-1".parse().unwrap(), serde_json::json!({"x": 1}));
         }
         let mock = Arc::new(MockDevice::new("dev-1"));
         let load = Arc::clone(&mock.load_called);
@@ -802,7 +808,7 @@ mod tests {
         use halod_shared::types::KeyboardLayout;
         let app = app_with(vec![]);
         app.config.write().await.keyboard_layouts.insert(
-            "kbd".into(),
+            "kbd".parse().unwrap(),
             KeyboardLayoutSelection {
                 variant: Some(KeyVariant::Iso),
                 language: Some(KeyboardLayout::CH),
@@ -855,7 +861,10 @@ mod tests {
                 .get_mut(DEFAULT_PROFILE_NAME)
                 .unwrap()
                 .device_states
-                .insert("dev-1".into(), serde_json::json!({ "choice": {"mode": 9} }));
+                .insert(
+                    "dev-1".parse().unwrap(),
+                    serde_json::json!({ "choice": {"mode": 9} }),
+                );
         }
         let mock = MockDevice::new("dev-1").with_choice();
         mock.choice.as_ref().unwrap().record("mode", 1);
@@ -880,9 +889,10 @@ mod tests {
         {
             let mut cfg = app.config.write().await;
             let mut gaming = crate::domain::profiles::model::Profile::default();
-            gaming
-                .device_states
-                .insert("dev-1".into(), serde_json::json!({ "choice": {"mode": 7} }));
+            gaming.device_states.insert(
+                "dev-1".parse().unwrap(),
+                serde_json::json!({ "choice": {"mode": 7} }),
+            );
             cfg.profiles.insert("Gaming".into(), gaming);
             cfg.active_profile = "Gaming".into();
         }
@@ -908,7 +918,7 @@ mod tests {
         {
             let mut cfg = app.config.write().await;
             cfg.known_devices.insert(
-                "dev-1".to_string(),
+                "dev-1".parse().unwrap(),
                 DeviceRecord {
                     name: String::new(),
                     vendor: String::new(),
@@ -919,7 +929,7 @@ mod tests {
             // Saved state from when the device was last Visible (persist is
             // skipped on the Visible→Disabled transition).
             cfg.active_profile_data_mut().device_states.insert(
-                "dev-1".to_string(),
+                "dev-1".parse().unwrap(),
                 serde_json::json!({
                     "fan_curve": {
                         "sensor_id": "cpu",
@@ -945,7 +955,7 @@ mod tests {
         {
             let mut cfg = app.config.write().await;
             cfg.known_devices.insert(
-                "dev-1".to_string(),
+                "dev-1".parse().unwrap(),
                 DeviceRecord {
                     name: String::new(),
                     vendor: String::new(),
@@ -954,7 +964,7 @@ mod tests {
                 },
             );
             cfg.active_profile_data_mut().device_states.insert(
-                "dev-1".to_string(),
+                "dev-1".parse().unwrap(),
                 serde_json::json!({
                     "rgb": {
                         "placed_channels": [{
@@ -983,7 +993,7 @@ mod tests {
         {
             let mut cfg = app.config.write().await;
             cfg.known_devices.insert(
-                "dev-1".to_string(),
+                "dev-1".parse().unwrap(),
                 DeviceRecord {
                     name: String::new(),
                     vendor: String::new(),
@@ -992,7 +1002,7 @@ mod tests {
                 },
             );
             cfg.active_profile_data_mut().device_states.insert(
-                "dev-1".to_string(),
+                "dev-1".parse().unwrap(),
                 serde_json::json!({
                     "lcd": {
                         "template_id": "clock",
@@ -1029,7 +1039,7 @@ mod tests {
             unrelated.clone(),
         ]);
 
-        unregister_device_and_children(&app, "openrgb-127_0_0_1_6742").await;
+        unregister_device_and_children(&app, &"openrgb-127_0_0_1_6742".parse().unwrap()).await;
 
         let remaining = app.device_registry.read().await;
         assert_eq!(remaining.len(), 1);
@@ -1060,7 +1070,7 @@ mod tests {
             sibling.clone(),
         ]);
 
-        unregister_device_and_children(&app, "hub-0").await;
+        unregister_device_and_children(&app, &"hub-0".parse().unwrap()).await;
 
         let remaining = app.device_registry.read().await;
         assert_eq!(remaining.len(), 1);
@@ -1088,7 +1098,7 @@ mod tests {
             .active_profile_data_mut()
             .device_states
             .insert(
-                "mouse".into(),
+                "mouse".parse().unwrap(),
                 serde_json::json!({ "choice": { "dpi": 3 } }),
             );
         app.device_registry
@@ -1114,7 +1124,7 @@ mod tests {
             .active_profile_data_mut()
             .device_states
             .insert(
-                "mouse".into(),
+                "mouse".parse().unwrap(),
                 serde_json::json!({ "choice": { "dpi": 3 } }),
             );
         app.device_registry
@@ -1152,7 +1162,7 @@ mod tests {
             .active_profile_data_mut()
             .device_states
             .insert(
-                "mouse".into(),
+                "mouse".parse().unwrap(),
                 serde_json::json!({ "choice": { "dpi": 3 } }),
             );
         app.device_registry
@@ -1186,7 +1196,7 @@ mod tests {
             .active_profile_data_mut()
             .device_states
             .insert(
-                "mouse".into(),
+                "mouse".parse().unwrap(),
                 serde_json::json!({ "choice": { "dpi": 3 } }),
             );
         app.device_registry
@@ -1210,17 +1220,32 @@ mod tests {
 
     #[test]
     fn is_registered_child_matches_only_known_markers() {
-        let root = "openrgb-a_1";
-        assert!(is_registered_child("openrgb-a_1_ctrl_0", root));
-        assert!(is_registered_child("openrgb-a_1_acc_0_19", root));
-        assert!(is_registered_child("openrgb-a_1_chain_0_uuid", root));
+        let root = &"openrgb-a_1".parse::<DeviceId>().unwrap();
+        assert!(is_registered_child(
+            &"openrgb-a_1_ctrl_0".parse().unwrap(),
+            root
+        ));
+        assert!(is_registered_child(
+            &"openrgb-a_1_acc_0_19".parse().unwrap(),
+            root
+        ));
+        assert!(is_registered_child(
+            &"openrgb-a_1_chain_0_uuid".parse().unwrap(),
+            root
+        ));
         assert!(
-            is_registered_child("openrgb-a_1_ctrl_0_acc_0_19", root),
+            is_registered_child(&"openrgb-a_1_ctrl_0_acc_0_19".parse().unwrap(), root),
             "nested"
         );
         // Another root that differs only by a trailing `_<suffix>` is NOT a child.
-        assert!(!is_registered_child("openrgb-a_1_2", root));
-        assert!(!is_registered_child("openrgb-a_1", root), "the root itself");
-        assert!(!is_registered_child("openrgb-a_1b", root));
+        assert!(!is_registered_child(
+            &"openrgb-a_1_2".parse().unwrap(),
+            root
+        ));
+        assert!(
+            !is_registered_child(&"openrgb-a_1".parse().unwrap(), root),
+            "the root itself"
+        );
+        assert!(!is_registered_child(&"openrgb-a_1b".parse().unwrap(), root));
     }
 }

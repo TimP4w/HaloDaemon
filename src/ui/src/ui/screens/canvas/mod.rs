@@ -4,6 +4,7 @@
 
 mod chrome;
 mod geometry;
+mod history;
 mod modals;
 mod params;
 mod rack;
@@ -24,6 +25,7 @@ use crate::runtime::ipc::CommandTx;
 use crate::ui::components;
 use crate::ui::screens::effect_designer::DesignerUi;
 pub(crate) use chrome::chrome;
+use halod_shared::ids::DeviceId;
 pub(crate) use modals::fps_modal;
 use modals::{new_instance_modal, zones_assign_modal};
 use rack::right_panel;
@@ -74,7 +76,7 @@ struct MarqueeState {
     /// True when a modifier was held at start → union with `base`.
     additive: bool,
     /// Selection present when the marquee began (kept for additive drags).
-    base: HashSet<(String, String)>,
+    base: HashSet<(DeviceId, String)>,
 }
 
 /// Rolling 1-second FPS estimate driven by per-frame `timestamp_ms` deltas.
@@ -156,7 +158,7 @@ fn flush_moves(pending: &mut Debouncer, cmd: &CommandTx, time: f64) {
 
 // ── CanvasUi ──────────────────────────────────────────────────────────────────
 pub struct CanvasUi {
-    pub selected: HashSet<(String, String)>,
+    pub selected: HashSet<(DeviceId, String)>,
     texture: Option<egui::TextureHandle>,
     texture_frame_id: u64,
     fps: FpsCounter,
@@ -176,11 +178,9 @@ pub struct CanvasUi {
     /// The instance whose assign-channels modal is open.
     pub(crate) zones_modal: Option<String>,
     /// The zones modal's staged selection, applied on confirm.
-    zones_draft: Option<HashSet<(String, String)>>,
+    zones_draft: Option<HashSet<(DeviceId, String)>>,
     /// Whether the "new instance" picker modal is open.
     new_instance_modal: bool,
-    /// Aspect ratio (w/h) of the daemon canvas, for letterboxing the view.
-    canvas_aspect: f32,
     canvas_size: (u32, u32),
     /// Which colour param the layer-parameters picker edits.
     color_slot: usize,
@@ -197,7 +197,8 @@ pub struct CanvasUi {
     /// Cached formatted FPS string; recomputed only when `fps.display` changes.
     fps_label: String,
     /// Target of a right-click context menu, cleared after showing.
-    context_menu_target: Option<(String, String)>,
+    context_menu_target: Option<(DeviceId, String)>,
+    history: crate::domain::state::undo::UndoStack<history::CanvasSnapshot>,
 }
 
 impl Default for CanvasUi {
@@ -219,7 +220,6 @@ impl Default for CanvasUi {
             zones_modal: None,
             zones_draft: None,
             new_instance_modal: false,
-            canvas_aspect: 4.0 / 3.0,
             canvas_size: (0, 0),
             color_slot: 0,
             led_mode: LedMode::Frame,
@@ -232,6 +232,7 @@ impl Default for CanvasUi {
             sample_edit_at: 0.0,
             fps_label: "0 fps".to_string(),
             context_menu_target: None,
+            history: Default::default(),
         }
     }
 }
@@ -239,7 +240,7 @@ impl Default for CanvasUi {
 // ── Frame ingestion ───────────────────────────────────────────────────────────
 
 /// Latest per-LED colors keyed by (device id, zone id) → led id → color.
-pub type LedColorMap = HashMap<(String, String), HashMap<u32, RgbColor>>;
+pub type LedColorMap = HashMap<(DeviceId, String), HashMap<u32, RgbColor>>;
 
 impl CanvasUi {
     /// Live per-LED colors from the latest ingested canvas frame, for consumers
@@ -306,7 +307,6 @@ pub fn ingest_frame(ctx: &egui::Context, ui: &mut CanvasUi, frame: &CanvasFrame)
         return;
     }
     if w > 0 && h > 0 {
-        ui.canvas_aspect = w as f32 / h as f32;
         ui.canvas_size = (frame.canvas_w, frame.canvas_h);
     }
     ui.texture = Some(components::rgba_texture(ctx, "canvas_frame", &bytes, w, h));
@@ -332,6 +332,12 @@ pub(crate) fn body(
     }
     canvas_ui.pending.flush(cmd, time);
     prune_drag_zones(canvas_ui, state);
+    let snapshot = history::CanvasSnapshot::of(&state.lighting.canvas);
+    if crate::ui::undo::settled(ui.ctx()) {
+        if let Some(action) = ui.input_mut(crate::ui::undo::undo_action) {
+            apply_history(canvas_ui, cmd, action, &snapshot);
+        }
+    }
 
     if ui.input(|i| i.key_pressed(egui::Key::Delete) || i.key_pressed(egui::Key::Backspace)) {
         let to_remove: Vec<_> = canvas_ui.selected.drain().collect();
@@ -365,6 +371,24 @@ pub(crate) fn body(
     }
     if canvas_ui.new_instance_modal {
         new_instance_modal(&ui.ctx().clone(), state, canvas_ui, cmd);
+    }
+    let settled = crate::ui::undo::settled(ui.ctx())
+        && canvas_ui.drag.is_none()
+        && canvas_ui.pending.is_empty();
+    canvas_ui.history.observe(&snapshot, settled);
+}
+
+fn apply_history(
+    canvas_ui: &mut CanvasUi,
+    cmd: &CommandTx,
+    action: crate::domain::state::undo::UndoAction,
+    current: &history::CanvasSnapshot,
+) {
+    if let Some(target) = canvas_ui.history.apply(action, current) {
+        canvas_ui.selected.clear();
+        for command in history::restore_commands(current, &target) {
+            ipc::send(cmd, command);
+        }
     }
 }
 
@@ -419,7 +443,7 @@ mod test_fixtures {
 
     pub fn z(x: f32, y: f32, w: f32, h: f32) -> PlacedZone {
         PlacedZone {
-            device_id: "d".into(),
+            device_id: "d".parse().unwrap(),
             channel_id: "z".into(),
             x,
             y,
@@ -450,7 +474,7 @@ mod test_fixtures {
 
     pub fn led(dev: &str, zone: &str, id: u32, v: u8) -> halod_shared::types::LedFrameEntry {
         halod_shared::types::LedFrameEntry {
-            device_id: dev.into(),
+            device_id: dev.parse().unwrap(),
             channel_id: zone.into(),
             led_id: id,
             color: RgbColor { r: v, g: v, b: v },
@@ -474,6 +498,34 @@ mod test_fixtures {
 mod tests {
     use super::test_fixtures::{frame, led};
     use super::*;
+
+    #[test]
+    fn the_undo_shortcut_restores_the_previous_canvas() {
+        use halod_shared::commands::DaemonCommand;
+        let (cmd, mut rx) = tokio::sync::mpsc::unbounded_channel();
+        let mut canvas_ui = CanvasUi::default();
+        let before = history::CanvasSnapshot::of(&Default::default());
+        let after = history::CanvasSnapshot::of(&halod_shared::types::CanvasState {
+            placed_zones: vec![super::test_fixtures::zone_with("a", None)],
+            ..Default::default()
+        });
+        canvas_ui.history.observe(&before, true);
+        canvas_ui.history.observe(&after, true);
+        apply_history(
+            &mut canvas_ui,
+            &cmd,
+            crate::domain::state::undo::UndoAction::Undo,
+            &after,
+        );
+        assert!(matches!(
+            rx.try_recv(),
+            Ok(DaemonCommand::Device {
+                op: DeviceOp::CanvasRemoveZone { .. },
+                ..
+            })
+        ));
+        assert!(canvas_ui.history.can_redo());
+    }
 
     #[test]
     fn stage_and_sidebar_partition_the_area() {
@@ -512,7 +564,7 @@ mod tests {
         let (tx, mut rx) = tokio::sync::mpsc::unbounded_channel();
         let mut pending = Debouncer::default();
         let zone = PlacedZone {
-            device_id: "d".into(),
+            device_id: "d".parse().unwrap(),
             channel_id: "c".into(),
             ..Default::default()
         };
@@ -556,9 +608,9 @@ mod tests {
         ];
         regroup_led_colors(&mut dst, &entries);
         assert_eq!(dst.len(), 3);
-        assert_eq!(dst[&("d1".into(), "z1".into())].len(), 2);
-        assert_eq!(dst[&("d1".into(), "z1".into())][&1].r, 20);
-        assert_eq!(dst[&("d2".into(), "z1".into())][&5].r, 40);
+        assert_eq!(dst[&("d1".parse().unwrap(), "z1".into())].len(), 2);
+        assert_eq!(dst[&("d1".parse().unwrap(), "z1".into())][&1].r, 20);
+        assert_eq!(dst[&("d2".parse().unwrap(), "z1".into())][&5].r, 40);
     }
 
     #[test]
@@ -576,12 +628,12 @@ mod tests {
         ];
         regroup_led_colors(&mut dst, &entries);
         assert_eq!(dst.len(), 3);
-        assert_eq!(dst[&("d1".into(), "z1".into())].len(), 2);
-        assert_eq!(dst[&("d1".into(), "z1".into())][&0].r, 10);
-        assert_eq!(dst[&("d1".into(), "z1".into())][&1].r, 20);
-        assert_eq!(dst[&("d1".into(), "z2".into())].len(), 2);
-        assert_eq!(dst[&("d1".into(), "z2".into())][&1].r, 31);
-        assert_eq!(dst[&("d2".into(), "z1".into())][&5].r, 40);
+        assert_eq!(dst[&("d1".parse().unwrap(), "z1".into())].len(), 2);
+        assert_eq!(dst[&("d1".parse().unwrap(), "z1".into())][&0].r, 10);
+        assert_eq!(dst[&("d1".parse().unwrap(), "z1".into())][&1].r, 20);
+        assert_eq!(dst[&("d1".parse().unwrap(), "z2".into())].len(), 2);
+        assert_eq!(dst[&("d1".parse().unwrap(), "z2".into())][&1].r, 31);
+        assert_eq!(dst[&("d2".parse().unwrap(), "z1".into())][&5].r, 40);
     }
 
     #[test]
@@ -592,7 +644,7 @@ mod tests {
         // Next frame only mentions z1 → z2 must be dropped, not stale.
         regroup_led_colors(&mut dst, &[led("d1", "z1", 0, 99)]);
         assert_eq!(dst.len(), 1);
-        assert_eq!(dst[&("d1".into(), "z1".into())][&0].r, 99);
+        assert_eq!(dst[&("d1".parse().unwrap(), "z1".into())][&0].r, 99);
     }
 
     #[test]
@@ -601,17 +653,26 @@ mod tests {
         let mut f = frame(1, 0, 0, &[]);
         f.led_colors = vec![led("d1", "z1", 0, 10)];
         ingest_led_colors(&mut ui, &f);
-        assert_eq!(ui.led_colors[&("d1".into(), "z1".into())][&0].r, 10);
+        assert_eq!(
+            ui.led_colors[&("d1".parse().unwrap(), "z1".into())][&0].r,
+            10
+        );
 
         // Same frame_id → no re-regroup, even if the entry list differs.
         f.led_colors = vec![led("d1", "z1", 0, 99)];
         ingest_led_colors(&mut ui, &f);
-        assert_eq!(ui.led_colors[&("d1".into(), "z1".into())][&0].r, 10);
+        assert_eq!(
+            ui.led_colors[&("d1".parse().unwrap(), "z1".into())][&0].r,
+            10
+        );
 
         // New frame_id → colors update.
         f.frame_id = 2;
         ingest_led_colors(&mut ui, &f);
-        assert_eq!(ui.led_colors[&("d1".into(), "z1".into())][&0].r, 99);
+        assert_eq!(
+            ui.led_colors[&("d1".parse().unwrap(), "z1".into())][&0].r,
+            99
+        );
     }
 
     #[test]
@@ -619,22 +680,22 @@ mod tests {
         let ctx = egui::Context::default();
         let mut ui = CanvasUi::default();
         // A frame whose decoded length != w*h*4 must be rejected: texture
-        // tracking stays at its sentinel and aspect is not corrupted.
+        // tracking stays at its sentinel and the canvas size is not corrupted.
         let bad = frame(7, 4, 4, &[0u8; 4 * 4 * 4 - 1]);
-        let aspect_before = ui.canvas_aspect;
+        let size_before = ui.canvas_size;
         ingest_frame(&ctx, &mut ui, &bad);
         assert_eq!(ui.texture_frame_id, u64::MAX);
-        assert!((ui.canvas_aspect - aspect_before).abs() < 1e-6);
+        assert_eq!(ui.canvas_size, size_before);
     }
 
     #[test]
-    fn well_formed_frame_updates_texture_and_aspect() {
+    fn well_formed_frame_updates_texture_and_size() {
         let ctx = egui::Context::default();
         let mut ui = CanvasUi::default();
         let good = frame(3, 4, 2, &[0u8; 4 * 2 * 4]);
         ingest_frame(&ctx, &mut ui, &good);
         assert_eq!(ui.texture_frame_id, 3);
-        assert!((ui.canvas_aspect - 2.0).abs() < 1e-6); // 4/2
+        assert_eq!(ui.canvas_size, (4, 2));
     }
 
     #[test]

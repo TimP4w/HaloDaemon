@@ -3,7 +3,8 @@ use anyhow::{Context, Result};
 use parking_lot::Mutex;
 use std::collections::VecDeque;
 use std::sync::{Arc, Weak};
-use std::time::{Duration, Instant};
+use std::time::Duration;
+use tokio::time::Instant;
 
 use crate::infrastructure::drivers::transports::{
     HidTransport as HidTransportTrait, Transport, TransportEvent,

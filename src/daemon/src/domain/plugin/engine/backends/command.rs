@@ -39,12 +39,12 @@ fn open(
     )))
 }
 
-pub(super) const DESCRIPTOR: PluginTransportDescriptor = PluginTransportDescriptor {
+pub(super) const DESCRIPTOR: PluginTransportDescriptor = PluginTransportDescriptor::Discovered {
     kind: "command",
     open,
-    discovery: Some(Discovery {
+    discovery: Discovery {
         matches,
         id_suffix: single_instance,
         validate: accept_spec,
-    }),
+    },
 };

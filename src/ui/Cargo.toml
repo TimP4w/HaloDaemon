@@ -19,6 +19,7 @@ halod-shared = { path = "../shared" }
 # event loop (egui_glow) and works without Vulkan.
 eframe = { version = "0.37.0", default-features = false, features = [
     "accesskit",
+    "clipboard",
     "default_fonts",
     "glow",
     "wayland",
@@ -54,7 +55,7 @@ winit = { version = "0.30.13", default-features = false, features = ["wayland", 
 glutin = "0.32.3"
 glutin-winit = "0.5.0"
 glow = "0.18.0"
-egui_glow = { version = "0.37.0", default-features = false, features = ["winit", "wayland"] }
+egui_glow = { version = "0.37.0", default-features = false, features = ["clipboard", "winit", "wayland"] }
 zbus = "5.18.0"
 # Headless egui harness for the screenshot generators (ui/src/screenshots.rs);
 # `wgpu` renders frames to PNG without a window.

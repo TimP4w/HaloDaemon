@@ -771,6 +771,7 @@ mod pipe_security_tests {
 #[cfg(test)]
 mod handle_tests {
     use super::*;
+    use halod_shared::ids::DeviceId;
     use serde_json::json;
 
     struct SlowSnapshotDevice {
@@ -781,8 +782,10 @@ mod handle_tests {
 
     #[async_trait::async_trait]
     impl crate::domain::device::Device for SlowSnapshotDevice {
-        fn id(&self) -> &str {
-            "slow-snapshot"
+        fn id(&self) -> &DeviceId {
+            static ID: std::sync::LazyLock<DeviceId> =
+                std::sync::LazyLock::new(|| "slow-snapshot".parse().unwrap());
+            &ID
         }
 
         fn name(&self) -> &str {
@@ -808,7 +811,7 @@ mod handle_tests {
             self.entered.notify_one();
             self.release.notified().await;
             halod_shared::types::WireDevice {
-                id: self.id().to_owned(),
+                id: self.id().into(),
                 name: self.name().to_owned(),
                 vendor: self.vendor().to_owned(),
                 model: self.model().to_owned(),

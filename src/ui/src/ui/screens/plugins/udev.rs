@@ -27,6 +27,10 @@ pub(super) enum UdevBannerAction {
     Info,
 }
 
+pub(super) fn udev_copied_visible(copied_at: Option<f64>, now: f64) -> bool {
+    crate::ui::screens::settings::copied_feedback_visible(copied_at, now)
+}
+
 pub(super) fn udev_rules_banner(
     ui: &mut egui::Ui,
     status: &halod_shared::types::UdevRulesStatus,
@@ -86,8 +90,13 @@ pub(super) fn udev_info_modal(
     ctx: &egui::Context,
     status: &halod_shared::types::UdevRulesStatus,
     rechecking: bool,
-    copied: &mut bool,
+    copied_at: &mut Option<f64>,
 ) -> (bool, bool) {
+    let now = ctx.input(|i| i.time);
+    let copied = udev_copied_visible(*copied_at, now);
+    if copied {
+        ctx.request_repaint();
+    }
     let mut close = false;
     let mut recheck = false;
     let dismissed = widgets::dialog_with_subtitle(
@@ -134,7 +143,7 @@ pub(super) fn udev_info_modal(
                         );
                     },
                     |ui| {
-                        let label = if *copied {
+                        let label = if copied {
                             t!("plugins.udev_command_copied")
                         } else {
                             t!("plugins.udev_copy_command")
@@ -148,7 +157,7 @@ pub(super) fn udev_info_modal(
                         .clicked()
                         {
                             ui.ctx().copy_text(udev_install_commands());
-                            *copied = true;
+                            *copied_at = Some(now);
                         }
                     },
                 );

@@ -22,6 +22,7 @@ use crate::domain::state::Page;
 use crate::domain::tour;
 use crate::domain::tour::AnchorId;
 use crate::ui::screens::effect_designer::DesignerUi;
+use halod_shared::ids::DeviceId;
 
 const PANEL_PAD: egui::Margin = egui::Margin::same(16);
 
@@ -52,7 +53,7 @@ pub(super) fn right_panel(
         cmd,
     );
     ui.add_space(theme::SPACE_6);
-    let rack = ui.scope(|ui| layers_card(ui, state, canvas_ui, &ids));
+    let rack = ui.scope(|ui| layers_card(ui, state, canvas_ui, cmd, &ids));
     tour::anchor(ui.ctx(), AnchorId::CanvasInstanceRack, rack.response.rect);
     ui.add_space(theme::SPACE_6);
     sampling_card(ui, state, canvas_ui, time);
@@ -176,7 +177,7 @@ pub(super) fn zone_name<'a>(
 /// Lookup an `LightingChannel` descriptor by device and zone id.
 pub(super) fn rgb_zone_descriptor<'a>(
     state: &'a TopicStore,
-    device_id: &str,
+    device_id: &DeviceId,
     channel_id: &str,
 ) -> Option<&'a halod_shared::types::LightingChannel> {
     state
@@ -315,7 +316,13 @@ fn default_effect_card(
 
 /// The layer list: one row per instance with its targets and the two drill-in
 /// actions (zones modal, parameters view).
-fn layers_card(ui: &mut egui::Ui, state: &TopicStore, canvas_ui: &mut CanvasUi, ids: &[String]) {
+fn layers_card(
+    ui: &mut egui::Ui,
+    state: &TopicStore,
+    canvas_ui: &mut CanvasUi,
+    cmd: &CommandTx,
+    ids: &[String],
+) {
     widgets::card_with_margin(ui, PANEL_PAD, |ui| {
         ui.spacing_mut().item_spacing.y = theme::SPACE_5;
         egui::Sides::new().show(
@@ -389,6 +396,20 @@ fn layers_card(ui: &mut egui::Ui, state: &TopicStore, canvas_ui: &mut CanvasUi, 
                     if widgets::button(ui, &t!("canvas.parameters"), kind, size).clicked() {
                         canvas_ui.selected_instance = Some(id.clone());
                     }
+                    ui.with_layout(egui::Layout::right_to_left(egui::Align::Center), |ui| {
+                        let (rect, _) =
+                            ui.allocate_exact_size(egui::Vec2::splat(30.0), egui::Sense::hover());
+                        let delete = widgets::glyph_button_at(
+                            ui,
+                            rect,
+                            ui.scope_id().with(("delete_instance", id)),
+                            widgets::paint_trash_glyph,
+                        )
+                        .on_hover_text(t!("canvas.delete_instance"));
+                        if delete.clicked() {
+                            delete_instance(canvas_ui, cmd, id);
+                        }
+                    });
                 });
             });
         }
@@ -577,22 +598,26 @@ fn layer_params(
                 )
                 .clicked()
                 {
-                    canvas_ui.selected_instance = None;
-                    canvas_ui.param_edits.remove(id);
-                    canvas_ui.rename_instance = None;
-                    if canvas_ui.zones_modal.as_deref() == Some(id) {
-                        canvas_ui.zones_modal = None;
-                    }
-                    crate::runtime::ipc::send(
-                        cmd,
-                        DaemonCommand::CanvasRemoveEffect {
-                            instance_id: id.to_string(),
-                        },
-                    );
+                    delete_instance(canvas_ui, cmd, id);
                 }
             });
         });
     });
+}
+
+fn delete_instance(canvas_ui: &mut CanvasUi, cmd: &CommandTx, id: &str) {
+    canvas_ui.selected_instance = None;
+    canvas_ui.param_edits.remove(id);
+    canvas_ui.rename_instance = None;
+    if canvas_ui.zones_modal.as_deref() == Some(id) {
+        canvas_ui.zones_modal = None;
+    }
+    crate::runtime::ipc::send(
+        cmd,
+        DaemonCommand::CanvasRemoveEffect {
+            instance_id: id.to_string(),
+        },
+    );
 }
 
 #[cfg(test)]
@@ -619,6 +644,29 @@ mod tests {
         assert_eq!(ids("x", &s), ["a", "b"]);
         assert_eq!(ids("y", &s), ["c"]);
         assert_eq!(target_devices(&s, &layer_zones(&s, "x")), "d");
+    }
+
+    #[test]
+    fn deleting_an_instance_clears_its_ui_state_and_removes_it() {
+        let (cmd, mut rx) = tokio::sync::mpsc::unbounded_channel();
+        let mut canvas_ui = CanvasUi {
+            selected_instance: Some("effect-1".into()),
+            zones_modal: Some("effect-1".into()),
+            rename_instance: Some("effect-1".into()),
+            ..Default::default()
+        };
+        canvas_ui
+            .param_edits
+            .insert("effect-1".into(), Default::default());
+        delete_instance(&mut canvas_ui, &cmd, "effect-1");
+        assert_eq!(canvas_ui.selected_instance, None);
+        assert_eq!(canvas_ui.zones_modal, None);
+        assert_eq!(canvas_ui.rename_instance, None);
+        assert!(!canvas_ui.param_edits.contains_key("effect-1"));
+        assert!(matches!(
+            rx.try_recv(),
+            Ok(DaemonCommand::CanvasRemoveEffect { instance_id }) if instance_id == "effect-1"
+        ));
     }
 
     #[test]

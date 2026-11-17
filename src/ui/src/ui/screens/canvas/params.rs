@@ -15,6 +15,7 @@ use halod_shared::{
 use crate::runtime::ipc::CommandTx;
 use crate::ui::components as widgets;
 use crate::ui::theme;
+use halod_shared::ids::DeviceId;
 
 use super::CanvasUi;
 
@@ -83,7 +84,7 @@ pub(super) fn unroll_cmd(cmd: &CommandTx, zone: &PlacedZone, currently_unrolled:
 
 /// Toggle a zone's membership in an instance (`None` = follow the canvas default).
 pub(super) fn assign_zone_cmd(
-    device_id: &str,
+    device_id: &DeviceId,
     channel_id: &str,
     assign: Option<&str>,
     on: bool,
@@ -92,7 +93,7 @@ pub(super) fn assign_zone_cmd(
     let effect = assign.map(str::to_string);
     if on {
         DaemonCommand::Device {
-            device_id: device_id.to_string(),
+            device_id: device_id.clone(),
             op: DeviceOp::CanvasRemoveZone {
                 channel_id: channel_id.to_string(),
             },
@@ -101,7 +102,7 @@ pub(super) fn assign_zone_cmd(
         // MoveZone treats `effect: None` as "leave unchanged"; clearing needs PlaceZone.
         match effect {
             Some(_) => DaemonCommand::Device {
-                device_id: device_id.to_string(),
+                device_id: device_id.clone(),
                 op: DeviceOp::CanvasMoveZone {
                     channel_id: channel_id.to_string(),
                     x: p.x as f64,
@@ -114,7 +115,7 @@ pub(super) fn assign_zone_cmd(
                 },
             },
             None => DaemonCommand::Device {
-                device_id: device_id.to_string(),
+                device_id: device_id.clone(),
                 op: DeviceOp::CanvasPlaceZone {
                     channel_id: channel_id.to_string(),
                     x: Some(p.x as f64),
@@ -129,7 +130,7 @@ pub(super) fn assign_zone_cmd(
         }
     } else {
         DaemonCommand::Device {
-            device_id: device_id.to_string(),
+            device_id: device_id.clone(),
             op: DeviceOp::CanvasPlaceZone {
                 channel_id: channel_id.to_string(),
                 x: None,

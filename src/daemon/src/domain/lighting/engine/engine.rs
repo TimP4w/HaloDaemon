@@ -5,7 +5,6 @@ use halod_shared::bus::{topic, BusValue};
 use std::{
     collections::{HashMap, HashSet},
     sync::{Arc, LazyLock},
-    time::Instant,
 };
 
 use base64::Engine as _;
@@ -32,6 +31,7 @@ use crate::{
     config::{CanvasState, PlacedZone},
     domain::device::Device,
 };
+use halod_shared::ids::DeviceId;
 
 const CANVAS_W: u32 = 400;
 const CANVAS_H: u32 = 300;
@@ -42,19 +42,102 @@ const DEFAULT_KEY: &str = "__default__";
 const IDLE_GRACE: Duration = Duration::from_secs(20);
 const IDLE_POLL_MS: u64 = 1000;
 
-fn idle_interval_ms(idle_since: Option<Instant>, now: Instant, base_ms: u64) -> u64 {
-    match idle_since {
-        Some(since) if now.duration_since(since) >= IDLE_GRACE => IDLE_POLL_MS,
-        _ => base_ms,
+struct CanvasFrameClock {
+    time: f32,
+    dt: f32,
+    id: u64,
+}
+
+struct CanvasPacing {
+    start: tokio::time::Instant,
+    last: tokio::time::Instant,
+    frame_id: u64,
+    idle_since: Option<tokio::time::Instant>,
+    probe_pending: bool,
+}
+
+impl CanvasPacing {
+    fn new(now: tokio::time::Instant) -> Self {
+        Self {
+            start: now,
+            last: now,
+            frame_id: 0,
+            idle_since: None,
+            probe_pending: false,
+        }
+    }
+
+    fn next_frame(&mut self, now: tokio::time::Instant) -> CanvasFrameClock {
+        let frame = CanvasFrameClock {
+            time: now.duration_since(self.start).as_secs_f32(),
+            dt: now.duration_since(self.last).as_secs_f32(),
+            id: self.frame_id,
+        };
+        self.last = now;
+        self.frame_id += 1;
+        frame
+    }
+
+    fn record(&mut self, had_work: bool, now: tokio::time::Instant) {
+        if had_work {
+            self.idle_since = None;
+        } else if self.idle_since.is_none() {
+            self.idle_since = Some(now);
+        }
+    }
+
+    fn woken(&mut self) {
+        self.probe_pending = true;
+    }
+
+    fn probe(&mut self) {
+        self.probe_pending = true;
+    }
+
+    fn has_work(&mut self, now: tokio::time::Instant) -> bool {
+        let within_grace = self
+            .idle_since
+            .is_none_or(|since| now.duration_since(since) < IDLE_GRACE);
+        within_grace || std::mem::take(&mut self.probe_pending)
     }
 }
 
-type RgbDeviceMap = HashMap<String, Arc<dyn Device>>;
+struct CanvasLoop {
+    engine: Arc<RgbEngine>,
+    pacing: CanvasPacing,
+}
+
+impl crate::application::run_loop::IdleEngine for CanvasLoop {
+    type Config = RgbConfig;
+
+    async fn tick(&mut self, _cfg: RgbConfig) {
+        let frame = self.pacing.next_frame(tokio::time::Instant::now());
+        let had_work = self.engine.tick(frame.time, frame.dt, frame.id).await;
+        self.pacing.record(had_work, tokio::time::Instant::now());
+    }
+
+    async fn wait_for_work(&mut self) {
+        tokio::select! {
+            () = self.engine.wake.notified() => self.pacing.woken(),
+            () = tokio::time::sleep(Duration::from_millis(IDLE_POLL_MS)) => self.pacing.probe(),
+        }
+    }
+
+    async fn has_work(&mut self) -> bool {
+        self.pacing.has_work(tokio::time::Instant::now())
+    }
+
+    async fn on_disabled(&mut self) {
+        self.engine.forget_engine_mode_intent().await;
+    }
+}
+
+type RgbDeviceMap = HashMap<DeviceId, Arc<dyn Device>>;
 type FrameTx = tokio::sync::broadcast::Sender<Arc<CanvasFrame>>;
 /// Per device: the transformed frames to write this tick, one entry per zone.
 type DeviceWrite = (Arc<dyn Device>, WriteGuard, Vec<(String, Vec<RgbColor>)>);
-type PendingWrites = HashMap<String, DeviceWrite>;
-type WriteGroups = HashMap<WriteSlotKey, Vec<(String, DeviceWrite)>>;
+type PendingWrites = HashMap<DeviceId, DeviceWrite>;
+type WriteGroups = HashMap<WriteSlotKey, Vec<(DeviceId, DeviceWrite)>>;
 type DirectDevice = (
     Arc<dyn Device>,
     String,
@@ -89,9 +172,9 @@ enum DirectRuntime {
 pub struct RgbEngine {
     app_state: Arc<AppState>,
     live_pixmap: Mutex<HashMap<String, LivePixmap>>,
-    live_direct: Mutex<HashMap<String, LiveDirect>>,
+    live_direct: Mutex<HashMap<DeviceId, LiveDirect>>,
     frame_tx: FrameTx,
-    engine_mode_intent: Mutex<HashMap<String, bool>>,
+    engine_mode_intent: Mutex<HashMap<DeviceId, bool>>,
     /// Reusable srgb preview buffer, cleared and repopulated each tick.
     preview_srgb_buf: Mutex<Vec<u8>>,
     /// One in-flight write task per device. A device whose previous write is
@@ -124,7 +207,7 @@ enum WriteGuard {
 
 #[derive(Clone, Debug, Hash, PartialEq, Eq)]
 enum WriteSlotKey {
-    Device(String),
+    Device(DeviceId),
     Shared(usize),
 }
 
@@ -153,7 +236,7 @@ fn effect_rebuild_due(
         Option<&crate::util::backoff::FailureStreak>,
     )>,
     want: &EffectSignature,
-    now: std::time::Instant,
+    now: tokio::time::Instant,
 ) -> bool {
     match existing {
         None => true,
@@ -293,7 +376,7 @@ fn prepare_zone(
         .iter()
         .zip(colors.iter())
         .map(|(led, color)| LedFrameEntry {
-            device_id: dev.id().to_string(),
+            device_id: dev.id().into(),
             channel_id: channel_id.to_string(),
             led_id: led.id,
             color: *color,
@@ -360,59 +443,16 @@ impl RgbEngine {
         cfg_rx: EngineConfigReceiver<RgbConfig>,
     ) -> tokio::task::JoinHandle<()> {
         tokio::spawn(async move {
-            let engine_start = Instant::now();
-            let mut last = Instant::now();
-            let mut frame_id = 0u64;
-            let mut cfg_rx = cfg_rx;
-            let mut idle_since: Option<Instant> = None;
-
-            log::info!("Starting RGB engine");
-            loop {
-                let cfg = cfg_rx.current();
-                if !cfg.enabled() {
-                    log::info!("Engine disabled, waiting for re-enable");
-                    self.forget_engine_mode_intent().await;
-                    if !cfg_rx.changed().await {
-                        break;
-                    }
-                    continue;
-                }
-                let mut interval_ms = idle_interval_ms(idle_since, Instant::now(), cfg.tick_ms());
-                let mut interval = tokio::time::interval(Duration::from_millis(interval_ms));
-                interval.set_missed_tick_behavior(tokio::time::MissedTickBehavior::Skip);
-                loop {
-                    tokio::select! {
-                        _ = interval.tick() => {
-                            let now = Instant::now();
-                            let t = now.duration_since(engine_start).as_secs_f32();
-                            let dt = now.duration_since(last).as_secs_f32();
-                            last = now;
-                            let had_work = self.tick(t, dt, frame_id).await;
-                            frame_id += 1;
-                            if had_work {
-                                idle_since = None;
-                            } else if idle_since.is_none() {
-                                idle_since = Some(now);
-                            }
-
-                            let want_ms = idle_interval_ms(idle_since, now, cfg.tick_ms());
-                            if want_ms != interval_ms {
-                                interval_ms = want_ms;
-                                interval = tokio::time::interval(Duration::from_millis(interval_ms));
-                                interval.set_missed_tick_behavior(tokio::time::MissedTickBehavior::Skip);
-                            }
-                        }
-                        r = cfg_rx.changed() => {
-                            if !r { return; }
-                            break;
-                        }
-                        _ = self.wake.notified() => {
-                            idle_since = None;
-                            break;
-                        }
-                    }
-                }
-            }
+            crate::application::run_loop::engine_run_loop_idle(
+                "RGB",
+                cfg_rx,
+                tokio::time::MissedTickBehavior::Skip,
+                CanvasLoop {
+                    pacing: CanvasPacing::new(tokio::time::Instant::now()),
+                    engine: self,
+                },
+            )
+            .await;
         })
     }
 
@@ -503,7 +543,7 @@ impl RgbEngine {
         let mut live = self.live_pixmap.lock().await;
         live.retain(|k, _| pixmap_keys.contains(k));
         let mut built: Vec<String> = Vec::with_capacity(pixmap_keys.len());
-        let now = std::time::Instant::now();
+        let now = tokio::time::Instant::now();
         for key in &pixmap_keys {
             let def = &defs[key];
             let want = effect_signature(def.as_ref());
@@ -554,7 +594,7 @@ impl RgbEngine {
                         );
                             crate::util::backoff::FailureStreak::record_in(
                                 &mut lp.respawn,
-                                std::time::Instant::now(),
+                                tokio::time::Instant::now(),
                             );
                             true
                         }
@@ -635,15 +675,15 @@ impl RgbEngine {
         led_colors: &mut Vec<LedFrameEntry>,
     ) {
         let mut live = self.live_direct.lock().await;
-        let active: HashSet<&str> = direct_devices.iter().map(|(d, _, _)| d.id()).collect();
-        live.retain(|k, _| active.contains(k.as_str()));
+        let active: HashSet<&DeviceId> = direct_devices.iter().map(|(d, _, _)| d.id()).collect();
+        live.retain(|k, _| active.contains(k));
 
         for (dev, id, params) in direct_devices {
             let want = EffectSignature {
                 effect_id: id.clone(),
                 params: params.clone(),
             };
-            let now = std::time::Instant::now();
+            let now = tokio::time::Instant::now();
             let existing = live
                 .get(dev.id())
                 .map(|ld| (&ld.signature, ld.respawn.as_ref()));
@@ -668,7 +708,7 @@ impl RgbEngine {
                     .and_then(|ld| (ld.signature == want).then_some(ld.respawn))
                     .flatten();
                 live.insert(
-                    dev.id().to_string(),
+                    dev.id().clone(),
                     LiveDirect {
                         signature: want.clone(),
                         runtime,
@@ -701,7 +741,7 @@ impl RgbEngine {
                         id: rgb_zone.id.clone(),
                         topology: zone_topology_name(&rgb_zone.topology).into(),
                         led_count: rgb_zone.leds.len(),
-                        device_id: dev.id().to_string(),
+                        device_id: dev.id().clone(),
                     };
                     let colors = match handle.led_colors(leds, effect_frame.clone(), zone).await {
                         Ok(out) if out.len() == coords.len() => out
@@ -729,7 +769,7 @@ impl RgbEngine {
                             );
                             crate::util::backoff::FailureStreak::record_in(
                                 &mut ld.respawn,
-                                std::time::Instant::now(),
+                                tokio::time::Instant::now(),
                             );
                             ld.runtime = DirectRuntime::Off;
                             break;
@@ -746,7 +786,7 @@ impl RgbEngine {
                     if let Some((colors, entries)) = prepare_zone(dev, &rgb_zone.id, colors) {
                         led_colors.extend(entries);
                         pending
-                            .entry(dev.id().to_string())
+                            .entry(dev.id().clone())
                             .or_insert_with(|| {
                                 (
                                     Arc::clone(dev),
@@ -770,7 +810,7 @@ impl RgbEngine {
                     if let Some((colors, entries)) = prepare_zone(dev, &rgb_zone.id, colors) {
                         led_colors.extend(entries);
                         pending
-                            .entry(dev.id().to_string())
+                            .entry(dev.id().clone())
                             .or_insert_with(|| {
                                 (
                                     Arc::clone(dev),
@@ -794,7 +834,7 @@ impl RgbEngine {
                 if let Some((colors, entries)) = prepare_zone(dev, &rgb_zone.id, colors) {
                     led_colors.extend(entries);
                     pending
-                        .entry(dev.id().to_string())
+                        .entry(dev.id().clone())
                         .or_insert_with(|| {
                             (
                                 Arc::clone(dev),
@@ -853,7 +893,7 @@ impl RgbEngine {
             let available: RgbDeviceMap = devices_guard
                 .iter()
                 .filter(|device| device.is_live() && device.as_lighting().is_some())
-                .map(|device| (device.id().to_owned(), Arc::clone(device)))
+                .map(|device| (device.id().clone(), Arc::clone(device)))
                 .collect();
             let devices = placed_zones
                 .iter()
@@ -906,7 +946,7 @@ impl RgbEngine {
     }
 
     async fn reconcile_engine_mode(&self, canvas_state: &CanvasState) {
-        let engine_ids: HashSet<String> = canvas_state
+        let engine_ids: HashSet<DeviceId> = canvas_state
             .placed_zones
             .iter()
             .map(|z| z.device_id.clone())
@@ -966,7 +1006,7 @@ impl RgbEngine {
                 }
             }
 
-            intent.insert(device.id().to_string(), should_engine);
+            intent.insert(device.id().clone(), should_engine);
         }
     }
 
@@ -1095,7 +1135,7 @@ mod tests {
     use std::sync::atomic::{AtomicBool, AtomicUsize, Ordering};
 
     struct MockRgbDevice {
-        device_id: String,
+        device_id: DeviceId,
         descriptor: LightingDescriptor,
         fail_write: bool,
         write_count: AtomicUsize,
@@ -1122,7 +1162,7 @@ mod tests {
                 })
                 .collect();
             Arc::new(Self {
-                device_id: device_id.to_string(),
+                device_id: device_id.parse().unwrap(),
                 descriptor: LightingDescriptor {
                     channels: vec![LightingChannel {
                         id: channel_id.to_string(),
@@ -1173,7 +1213,7 @@ mod tests {
 
     #[async_trait]
     impl Device for MockRgbDevice {
-        fn id(&self) -> &str {
+        fn id(&self) -> &DeviceId {
             &self.device_id
         }
         fn name(&self) -> &str {
@@ -1260,7 +1300,7 @@ mod tests {
 
     fn make_zone(device_id: &str, channel_id: &str) -> PlacedZone {
         PlacedZone {
-            device_id: device_id.to_string(),
+            device_id: device_id.parse().unwrap(),
             channel_id: channel_id.to_string(),
             x: 0.0,
             y: 0.0,
@@ -1306,7 +1346,7 @@ mod tests {
     #[test]
     fn effect_rebuild_waits_out_the_respawn_backoff() {
         use crate::util::backoff::FailureStreak;
-        let now = std::time::Instant::now();
+        let now = tokio::time::Instant::now();
         let want = EffectSignature {
             effect_id: "plugin_fx".into(),
             params: HashMap::new(),
@@ -1616,7 +1656,7 @@ mod tests {
         let dev_arc: Arc<dyn Device> = dev.clone();
         let mut pending: PendingWrites = HashMap::new();
         pending.insert(
-            "dev0".to_string(),
+            "dev0".parse().unwrap(),
             (
                 dev_arc,
                 WriteGuard::Engine,
@@ -1750,7 +1790,7 @@ mod tests {
         .unwrap();
         app.registry.load_dir(tmp.path());
         app.registry.replace_policy(&crate::config::PluginPolicy {
-            enabled: vec!["engine_sensor_fx".into()],
+            enabled: vec!["engine_sensor_fx".parse().unwrap()],
             ..Default::default()
         });
         tmp
@@ -1958,7 +1998,7 @@ mod tests {
         let dev = MockRgbDevice::new_engine_mode("dev0", "ring", false);
         let mut pending: PendingWrites = HashMap::new();
         pending.insert(
-            "dev0".into(),
+            "dev0".parse().unwrap(),
             (
                 dev.clone() as Arc<dyn Device>,
                 WriteGuard::Engine,
@@ -1978,7 +2018,7 @@ mod tests {
         let dev = MockRgbDevice::new_engine_mode("dev0", "ring", false);
         let mut pending: PendingWrites = HashMap::new();
         pending.insert(
-            "dev0".into(),
+            "dev0".parse().unwrap(),
             (
                 dev.clone() as Arc<dyn Device>,
                 WriteGuard::Engine,
@@ -2011,7 +2051,7 @@ mod tests {
         });
         let mut pending: PendingWrites = HashMap::new();
         pending.insert(
-            "dev0".into(),
+            "dev0".parse().unwrap(),
             (
                 dev.clone() as Arc<dyn Device>,
                 WriteGuard::Direct(original),
@@ -2043,11 +2083,11 @@ mod tests {
         engine
             .write_slots
             .lock()
-            .insert(WriteSlotKey::Device("dev0".into()), handle);
+            .insert(WriteSlotKey::Device("dev0".parse().unwrap()), handle);
 
         let mut pending: PendingWrites = HashMap::new();
         pending.insert(
-            "dev0".into(),
+            "dev0".parse().unwrap(),
             (
                 dev.clone() as Arc<dyn Device>,
                 WriteGuard::Engine,
@@ -2112,26 +2152,54 @@ mod tests {
     }
 
     #[test]
-    fn idle_interval_ms_stays_at_base_with_work_or_before_grace() {
-        let now = Instant::now();
-        assert_eq!(idle_interval_ms(None, now, 50), 50);
-        assert_eq!(
-            idle_interval_ms(Some(now - Duration::from_secs(5)), now, 50),
-            50
-        );
+    fn pacing_keeps_working_until_the_idle_grace_runs_out() {
+        let start = tokio::time::Instant::now();
+        let mut pacing = CanvasPacing::new(start);
+        pacing.record(false, start);
+        assert!(pacing.has_work(start + Duration::from_secs(5)));
+        assert!(!pacing.has_work(start + IDLE_GRACE));
+        pacing.record(true, start + IDLE_GRACE);
+        assert!(pacing.has_work(start + IDLE_GRACE * 3));
     }
 
     #[test]
-    fn idle_interval_ms_drops_to_idle_poll_after_grace() {
-        let now = Instant::now();
-        assert_eq!(
-            idle_interval_ms(Some(now - IDLE_GRACE), now, 50),
-            IDLE_POLL_MS
-        );
-        assert_eq!(
-            idle_interval_ms(Some(now - Duration::from_secs(60)), now, 50),
-            IDLE_POLL_MS
-        );
+    fn an_idle_probe_grants_exactly_one_tick_and_a_wake_resumes_work() {
+        let start = tokio::time::Instant::now();
+        let idle = start + IDLE_GRACE * 2;
+        let mut pacing = CanvasPacing::new(start);
+        pacing.record(false, start);
+        pacing.probe();
+        assert!(pacing.has_work(idle));
+        assert!(!pacing.has_work(idle));
+        pacing.woken();
+        assert!(pacing.has_work(idle));
+        assert!(!pacing.has_work(idle));
+    }
+
+    #[test]
+    fn a_stale_wake_permit_buys_one_probe_not_a_new_grace() {
+        let start = tokio::time::Instant::now();
+        let mut pacing = CanvasPacing::new(start);
+        pacing.record(false, start);
+        let idle = start + IDLE_GRACE * 2;
+        pacing.woken();
+        assert!(pacing.has_work(idle));
+        pacing.record(false, idle);
+        assert!(!pacing.has_work(idle + Duration::from_millis(1)));
+        pacing.woken();
+        pacing.record(true, idle);
+        assert!(pacing.has_work(idle + IDLE_GRACE / 2));
+    }
+
+    #[test]
+    fn frames_count_up_with_the_elapsed_time_between_them() {
+        let start = tokio::time::Instant::now();
+        let mut pacing = CanvasPacing::new(start);
+        let first = pacing.next_frame(start + Duration::from_millis(16));
+        let second = pacing.next_frame(start + Duration::from_millis(48));
+        assert_eq!((first.id, second.id), (0, 1));
+        assert!((second.dt - 0.032).abs() < 1e-6);
+        assert!((second.time - 0.048).abs() < 1e-6);
     }
 
     #[tokio::test(start_paused = true)]
@@ -2235,7 +2303,7 @@ mod tests {
         .unwrap();
         app.registry.load_dir(tmp.path());
         app.registry.replace_policy(&crate::config::PluginPolicy {
-            enabled: vec!["engine_test_fx".into()],
+            enabled: vec!["engine_test_fx".parse().unwrap()],
             ..Default::default()
         });
         tmp

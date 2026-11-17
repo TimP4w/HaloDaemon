@@ -7,12 +7,16 @@
 
 use std::collections::HashSet;
 
+use crate::infrastructure::drivers::transports::smbus::PciMatch;
+use halod_plugin_signing::{CatalogPackage, HOST_PLUGIN_API};
 use halod_shared::debug_info::HidEntryDebugInfo;
-use halod_shared::types::{PluginRecommendation, PluginRecommendationMatch};
+use halod_shared::types::{
+    HidIdentity, PackageMatches, PluginRecommendation, PluginRecommendationMatch,
+};
 
-use super::manifest::{HidMatch, PluginManifest};
+use super::manifest::PluginManifest;
 use crate::infrastructure::drivers::transports::smbus::BusInfo;
-use crate::infrastructure::drivers::transports::smbus::SmbusBusKind;
+use halod_shared::ids::PluginId;
 
 /// The USB identity fields needed for recommendation matching. Enumeration is
 /// descriptor-only and never claims an interface or opens an endpoint.
@@ -60,142 +64,127 @@ pub fn enumerate_usb() -> Vec<UsbEntry> {
         .unwrap_or_default()
 }
 
-/// Whether a HID device matches a manifest's HID declaration *concretely* — a
-/// real VID and PID, honoring any declared usage/interface constraint. A
-/// wildcard (`any`) or a VID without a PID never recommends: it would match far
-/// too broadly to suggest a specific plugin.
-fn hid_match_concrete(m: &HidMatch, e: &HidEntryDebugInfo) -> bool {
-    if m.any {
-        return false;
-    }
-    let Some(vid) = m.vid else {
-        return false;
-    };
-    if vid != e.vid {
-        return false;
-    }
-    if !m.pids.contains(&e.pid) {
-        return false;
-    }
-    if m.usage_page.is_some_and(|up| up != e.usage_page) {
-        return false;
-    }
-    if m.usage.is_some_and(|u| u != e.usage) {
-        return false;
-    }
-    if m.interface.is_some_and(|iface| iface != e.interface) {
-        return false;
-    }
-    true
+fn hid_identity_accepts(identity: &HidIdentity, e: &HidEntryDebugInfo) -> bool {
+    identity.vid == e.vid
+        && identity.pids.contains(&e.pid)
+        && identity.usage_page.is_none_or(|up| up == e.usage_page)
+        && identity.usage.is_none_or(|u| u == e.usage)
+        && identity.interface.is_none_or(|iface| iface == e.interface)
 }
 
-/// Recommendations for disabled plugins that are host defaults or whose
-/// command, HID, USB, or passively identifiable GPU-SMBus declaration matches.
-/// `is_enabled` excludes plugins the user already enabled.
+#[derive(Debug, Clone, Copy)]
+pub struct Candidate<'a> {
+    pub plugin_id: &'a PluginId,
+    pub plugin_name: &'a str,
+    pub matches: &'a PackageMatches,
+    pub install_from: Option<&'a str>,
+}
+
+pub fn candidates<'a>(
+    manifests: &'a [PluginManifest],
+    is_enabled: &dyn Fn(&PluginId) -> bool,
+    catalog: impl IntoIterator<Item = (&'a str, &'a CatalogPackage)>,
+) -> Vec<Candidate<'a>> {
+    let mut out: Vec<Candidate<'a>> = manifests
+        .iter()
+        .filter(|m| !is_enabled(&m.plugin_id))
+        .map(|m| Candidate {
+            plugin_id: &m.plugin_id,
+            plugin_name: &m.declarations.name,
+            matches: &m.declarations.matches,
+            install_from: None,
+        })
+        .collect();
+    for (repo, entry) in catalog {
+        if entry.api.is_compatible_with(HOST_PLUGIN_API)
+            && !manifests.iter().any(|m| m.plugin_id == entry.id)
+            && !out.iter().any(|c| c.plugin_id == entry.id)
+        {
+            out.push(Candidate {
+                plugin_id: &entry.id,
+                plugin_name: &entry.name,
+                matches: &entry.matches,
+                install_from: Some(repo),
+            });
+        }
+    }
+    out
+}
+
 pub fn recommendations(
-    manifests: &[PluginManifest],
-    is_enabled: &dyn Fn(&str) -> bool,
+    candidates: &[Candidate<'_>],
     hid: &[HidEntryDebugInfo],
     usb: &[UsbEntry],
     gpu_smbus: &[BusInfo],
     command_available: &dyn Fn(&str) -> bool,
 ) -> Vec<PluginRecommendation> {
     let mut out = Vec::new();
-    let mut seen: HashSet<(String, PluginRecommendationMatch)> = HashSet::new();
-    for m in manifests {
-        if !m.supports_current_platform() || is_enabled(&m.plugin_id) {
-            continue;
+    let mut seen: HashSet<(&PluginId, PluginRecommendationMatch)> = HashSet::new();
+    for candidate in candidates
+        .iter()
+        .filter(|c| c.matches.supports_platform(std::env::consts::OS))
+    {
+        let mut hits = Vec::new();
+        if candidate.plugin_id == "halo_effects" || candidate.plugin_id == "halo_lcd" {
+            hits.push(PluginRecommendationMatch::Always);
         }
-        if m.plugin_id == "halo_effects" || m.plugin_id == "halo_lcd" {
-            let hardware = PluginRecommendationMatch::Always;
-            seen.insert((m.plugin_id.clone(), hardware.clone()));
-            out.push(PluginRecommendation {
-                plugin_id: m.plugin_id.clone(),
-                plugin_name: m.display_name().to_owned(),
-                hardware,
-                accessible: true,
-            });
-        }
-        for spec in &m.devices {
-            if let Some(command) = spec.command() {
-                let executable = command.command();
-                let hardware = PluginRecommendationMatch::Command {
-                    executable: executable.to_owned(),
-                };
-                if command_available(executable)
-                    && seen.insert((m.plugin_id.clone(), hardware.clone()))
-                {
-                    out.push(PluginRecommendation {
-                        plugin_id: m.plugin_id.clone(),
-                        plugin_name: m.display_name().to_owned(),
-                        hardware,
-                        accessible: true,
-                    });
-                }
-            }
-            if let Some(hm) = spec.hid() {
-                for e in hid {
-                    let hardware = PluginRecommendationMatch::Hid {
+        let m = candidate.matches;
+        hits.extend(
+            m.commands
+                .iter()
+                .filter(|executable| command_available(executable))
+                .map(|executable| PluginRecommendationMatch::Command {
+                    executable: executable.clone(),
+                }),
+        );
+        for identity in &m.hid {
+            hits.extend(
+                hid.iter()
+                    .filter(|e| hid_identity_accepts(identity, e))
+                    .map(|e| PluginRecommendationMatch::Hid {
                         vid: e.vid,
                         pid: e.pid,
-                    };
-                    if hid_match_concrete(hm, e)
-                        && seen.insert((m.plugin_id.clone(), hardware.clone()))
-                    {
-                        out.push(PluginRecommendation {
-                            plugin_id: m.plugin_id.clone(),
-                            plugin_name: m.display_name().to_owned(),
-                            hardware,
-                            accessible: true,
-                        });
-                    }
-                }
-            }
-
-            if let Some(wanted) = spec.usb() {
-                for entry in usb.iter().filter(|entry| {
-                    entry.vid == wanted.vid
-                        && wanted.pids.contains(&entry.pid)
-                        && entry.interfaces.contains(&wanted.interface)
-                }) {
-                    let hardware = PluginRecommendationMatch::Usb {
+                    }),
+            );
+        }
+        for identity in &m.usb {
+            hits.extend(
+                usb.iter()
+                    .filter(|entry| {
+                        entry.vid == identity.vid
+                            && identity.pids.contains(&entry.pid)
+                            && entry.interfaces.contains(&identity.interface)
+                    })
+                    .map(|entry| PluginRecommendationMatch::Usb {
                         vid: entry.vid,
                         pid: entry.pid,
-                    };
-                    if seen.insert((m.plugin_id.clone(), hardware.clone())) {
-                        out.push(PluginRecommendation {
-                            plugin_id: m.plugin_id.clone(),
-                            plugin_name: m.display_name().to_owned(),
-                            hardware,
-                            accessible: true,
-                        });
-                    }
-                }
-            }
-
-            // SMBus device addresses cannot be probed before the user grants
-            // that permission. A GPU declaration has a mandatory PCI allowlist,
-            // however, so controller identity alone is a safe passive match.
-            if spec.bus_kind() == Some(SmbusBusKind::Gpu) {
-                for bus in gpu_smbus.iter().filter(|bus| {
-                    spec.smbus()
-                        .is_some_and(|smbus| smbus.pci_match.iter().any(|pci| pci.accepts(bus)))
-                }) {
-                    let hardware = PluginRecommendationMatch::SmbusGpu {
-                        pci_vendor: bus.pci_vendor,
-                        pci_device: bus.pci_device,
-                        pci_sub_vendor: bus.pci_sub_vendor,
-                        pci_sub_device: bus.pci_sub_device,
-                    };
-                    if seen.insert((m.plugin_id.clone(), hardware.clone())) {
-                        out.push(PluginRecommendation {
-                            plugin_id: m.plugin_id.clone(),
-                            plugin_name: m.display_name().to_owned(),
-                            hardware,
-                            accessible: true,
-                        });
-                    }
-                }
+                    }),
+            );
+        }
+        hits.extend(
+            gpu_smbus
+                .iter()
+                .filter(|bus| {
+                    m.smbus_gpu
+                        .iter()
+                        .any(|identity| PciMatch::from(identity).accepts(bus))
+                })
+                .map(|bus| PluginRecommendationMatch::SmbusGpu {
+                    pci_vendor: bus.pci_vendor,
+                    pci_device: bus.pci_device,
+                    pci_sub_vendor: bus.pci_sub_vendor,
+                    pci_sub_device: bus.pci_sub_device,
+                }),
+        );
+        for hardware in hits {
+            if seen.insert((candidate.plugin_id, hardware.clone())) {
+                out.push(PluginRecommendation {
+                    plugin_id: candidate.plugin_id.clone(),
+                    plugin_name: candidate.plugin_name.to_owned(),
+                    hardware,
+                    install_from: candidate.install_from.map(str::to_owned),
+                    accessible: true,
+                });
             }
         }
     }
@@ -206,6 +195,85 @@ pub fn recommendations(
 mod tests {
     use super::*;
     use std::path::{Path, PathBuf};
+
+    fn recommendations(
+        manifests: &[PluginManifest],
+        is_enabled: &dyn Fn(&PluginId) -> bool,
+        hid: &[HidEntryDebugInfo],
+        usb: &[UsbEntry],
+        gpu_smbus: &[BusInfo],
+        command_available: &dyn Fn(&str) -> bool,
+    ) -> Vec<PluginRecommendation> {
+        super::recommendations(
+            &candidates(manifests, is_enabled, []),
+            hid,
+            usb,
+            gpu_smbus,
+            command_available,
+        )
+    }
+
+    fn catalog_entry(id: &str, api: &str, hid: Vec<HidIdentity>) -> CatalogPackage {
+        CatalogPackage {
+            id: id.parse().unwrap(),
+            name: format!("{id} name"),
+            version: "1.0.0".parse().unwrap(),
+            api: api.parse().unwrap(),
+            path: format!("packages/{id}.tar.gz"),
+            sha256: "a".repeat(64),
+            size: 1,
+            matches: PackageMatches {
+                hid,
+                ..Default::default()
+            },
+            uses: Default::default(),
+        }
+    }
+
+    fn cooler_identity() -> HidIdentity {
+        HidIdentity {
+            vid: 0x1e71,
+            pids: vec![0x2007],
+            usage_page: None,
+            usage: None,
+            interface: None,
+        }
+    }
+
+    #[test]
+    fn a_catalog_only_package_is_recommended_with_its_repo() {
+        let entry = catalog_entry("acme_cooler", "3.0", vec![cooler_identity()]);
+        let found = super::recommendations(
+            &candidates(&[], &|_| false, [("official", &entry)]),
+            &[hid_entry(0x1e71, 0x2007)],
+            &[],
+            &[],
+            &|_| false,
+        );
+        assert_eq!(found.len(), 1);
+        assert_eq!(found[0].plugin_name, "acme_cooler name");
+        assert_eq!(found[0].install_from.as_deref(), Some("official"));
+    }
+
+    #[test]
+    fn an_installed_or_incompatible_package_is_not_recommended_from_the_catalog() {
+        let installed = manifest("acme_cooler", COOLER);
+        let entry = catalog_entry("acme_cooler", "3.0", vec![cooler_identity()]);
+        let future = catalog_entry("future_cooler", "9.0", vec![cooler_identity()]);
+        let listed = candidates(
+            std::slice::from_ref(&installed),
+            &|_| true,
+            [("official", &entry), ("official", &future)],
+        );
+        assert!(listed.is_empty());
+        let disabled = candidates(
+            std::slice::from_ref(&installed),
+            &|_| false,
+            [("official", &entry)],
+        );
+        assert_eq!(disabled.len(), 1);
+        assert_eq!(disabled[0].install_from, None);
+    }
 
     fn manifest(id: &str, yaml_extra: &str) -> PluginManifest {
         let tmp = tempfile::tempdir().unwrap();

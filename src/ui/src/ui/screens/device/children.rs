@@ -3,10 +3,10 @@
 
 use crate::ui::components as widgets;
 use egui::{Align2, Pos2, Rect, Sense, Stroke, Vec2};
-use halod_shared::commands::DeviceOp;
+use halod_shared::commands::{DaemonCommand, DeviceOp};
 use halod_shared::types::{DeviceCapability, PairingSlot, PairingState, PairingStatus, WireDevice};
 
-use super::TabCtx;
+use super::{DeviceUi, TabCtx};
 use crate::domain::models::device as model;
 use crate::domain::state::Page;
 use crate::domain::tour;
@@ -14,6 +14,7 @@ use crate::domain::tour::AnchorId;
 use crate::runtime::ipc;
 use crate::ui::icons;
 use crate::ui::theme;
+use halod_shared::ids::DeviceId;
 
 pub fn show(ui: &mut egui::Ui, ctx: &TabCtx, page: &mut Page) {
     let children: Vec<WireDevice> = ctx
@@ -102,7 +103,7 @@ fn child_row(ui: &mut egui::Ui, d: &WireDevice) -> bool {
     resp.clicked()
 }
 
-pub fn pairing(ui: &mut egui::Ui, ctx: &TabCtx) {
+pub fn pairing(ui: &mut egui::Ui, ctx: &TabCtx, st: &mut DeviceUi) {
     let Some(ps) = ctx.dev.capabilities.iter().find_map(|c| match c {
         DeviceCapability::Pairing(p) => Some(p.clone()),
         _ => None,
@@ -115,15 +116,52 @@ pub fn pairing(ui: &mut egui::Ui, ctx: &TabCtx) {
     let cols_resp = ui.scope(|ui| {
         ui.columns(2, |cols| {
             receiver_panel(&mut cols[0], &id, ctx, &ps, listening);
-            slots_panel(&mut cols[1], &id, ctx, &ps);
+            slots_panel(&mut cols[1], &id, &ps, &mut st.pending_unpair);
         });
     });
     tour::anchor(ui.ctx(), AnchorId::TabPairing, cols_resp.response.rect);
+    if let Some((slot, _)) = widgets::confirm_delete_dialog(
+        ui.ctx(),
+        "unpair_confirm",
+        &t!(
+            "device.children_unpair_title",
+            name = st
+                .pending_unpair
+                .as_ref()
+                .map(|(_, name)| name.as_str())
+                .unwrap_or_default()
+        ),
+        &t!(
+            "device.children_unpair_confirm",
+            name = st
+                .pending_unpair
+                .as_ref()
+                .map(|(_, name)| name.as_str())
+                .unwrap_or_default()
+        ),
+        &t!("device.children_unpair"),
+        &mut st.pending_unpair,
+    ) {
+        ipc::send(ctx.cmd, unpair_command(&id, slot));
+    }
+}
+
+fn unpair_command(id: &DeviceId, slot: u8) -> DaemonCommand {
+    DaemonCommand::Device {
+        device_id: id.clone(),
+        op: DeviceOp::ReceiverUnpair { slot },
+    }
 }
 
 const PAIR_TIMEOUT_SECS: u8 = 30;
 
-fn receiver_panel(ui: &mut egui::Ui, id: &str, ctx: &TabCtx, ps: &PairingStatus, listening: bool) {
+fn receiver_panel(
+    ui: &mut egui::Ui,
+    id: &DeviceId,
+    ctx: &TabCtx,
+    ps: &PairingStatus,
+    listening: bool,
+) {
     let state_key = egui::Id::unique(("pair_started", id));
     let cancel_key = egui::Id::unique(("pair_cancelled", id));
     let now = ui.ctx().input(|i| i.time);
@@ -216,7 +254,7 @@ fn receiver_panel(ui: &mut egui::Ui, id: &str, ctx: &TabCtx, ps: &PairingStatus,
                     ipc::send(
                         ctx.cmd,
                         halod_shared::commands::DaemonCommand::Device {
-                            device_id: id.to_string(),
+                            device_id: id.clone(),
                             op: DeviceOp::ReceiverStopPairing,
                         },
                     );
@@ -240,7 +278,7 @@ fn receiver_panel(ui: &mut egui::Ui, id: &str, ctx: &TabCtx, ps: &PairingStatus,
                     ipc::send(
                         ctx.cmd,
                         halod_shared::commands::DaemonCommand::Device {
-                            device_id: id.to_string(),
+                            device_id: id.clone(),
                             op: DeviceOp::ReceiverStartPairing {
                                 timeout_secs: PAIR_TIMEOUT_SECS,
                             },
@@ -252,25 +290,31 @@ fn receiver_panel(ui: &mut egui::Ui, id: &str, ctx: &TabCtx, ps: &PairingStatus,
     });
 }
 
-fn slots_panel(ui: &mut egui::Ui, id: &str, ctx: &TabCtx, ps: &PairingStatus) {
+fn slots_panel(
+    ui: &mut egui::Ui,
+    id: &DeviceId,
+    ps: &PairingStatus,
+    pending_unpair: &mut Option<(u8, String)>,
+) {
     titled_list_card(ui, &t!("device.children_paired_slots"), |ui| {
         let max = ps
             .max_slots
             .max(ps.slots.iter().map(|s| s.slot).max().unwrap_or(0));
         for i in 1..=max {
             let slot = ps.slots.iter().find(|s| s.slot == i);
-            pair_slot_row(ui, id, ctx, i, slot);
+            if let Some(name) = pair_slot_row(ui, id, i, slot) {
+                *pending_unpair = Some((i, name));
+            }
         }
     });
 }
 
 fn pair_slot_row(
     ui: &mut egui::Ui,
-    id: &str,
-    ctx: &TabCtx,
+    id: &DeviceId,
     slot_idx: u8,
     slot: Option<&PairingSlot>,
-) {
+) -> Option<String> {
     let (row, _) = ui.allocate_exact_size(Vec2::new(ui.available_width(), 52.0), Sense::hover());
     let p = ui.painter();
     p.line_segment(
@@ -298,7 +342,7 @@ fn pair_slot_row(
             theme::body_sm(),
             theme::TEXT_MUT,
         );
-        return;
+        return None;
     };
     p.circle_filled(dot, 4.0, theme::ONLINE);
     p.text(
@@ -328,12 +372,36 @@ fn pair_slot_row(
     )
     .clicked()
     {
-        ipc::send(
-            ctx.cmd,
-            halod_shared::commands::DaemonCommand::Device {
-                device_id: id.to_string(),
-                op: DeviceOp::ReceiverUnpair { slot: slot_idx },
-            },
+        return Some(slot.name.clone());
+    }
+    None
+}
+
+#[cfg(test)]
+mod tests {
+    use super::*;
+
+    #[test]
+    fn confirming_an_unpair_targets_the_receiver_slot() {
+        let command = unpair_command(&"rx-1".parse().unwrap(), 2);
+        assert!(matches!(
+            command,
+            DaemonCommand::Device { device_id, op: DeviceOp::ReceiverUnpair { slot: 2 } } if device_id == "rx-1"
+        ));
+    }
+
+    #[test]
+    fn a_click_alone_sends_nothing_until_the_dialog_confirms() {
+        let mut pending = Some((1u8, "Mouse".to_string()));
+        assert_eq!(
+            widgets::resolve_delete_confirm(&mut pending, false, false),
+            None
         );
+        assert!(pending.is_some());
+        assert_eq!(
+            widgets::resolve_delete_confirm(&mut pending, false, true),
+            None
+        );
+        assert!(pending.is_none());
     }
 }

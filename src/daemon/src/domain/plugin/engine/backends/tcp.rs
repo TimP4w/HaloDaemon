@@ -69,11 +69,8 @@ fn open(
     })
 }
 
-pub(super) const DESCRIPTOR: PluginTransportDescriptor = PluginTransportDescriptor {
-    kind: "tcp",
-    open,
-    discovery: None,
-};
+pub(super) const DESCRIPTOR: PluginTransportDescriptor =
+    PluginTransportDescriptor::Configured { kind: "tcp", open };
 
 #[cfg(test)]
 mod tests {

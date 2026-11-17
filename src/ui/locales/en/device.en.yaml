@@ -103,4 +103,6 @@ device:
   children_pair_new_device: Pair new device
   children_paired_slots: Paired slots
   children_unpair: Unpair
+  children_unpair_title: "Unpair %{name}?"
+  children_unpair_confirm: "%{name} will be removed from the receiver. You will need to pair it again to use it."
   children_available: Available

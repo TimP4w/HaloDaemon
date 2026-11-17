@@ -331,9 +331,7 @@ mod tests {
     #[tokio::test]
     #[allow(clippy::await_holding_lock)]
     async fn save_list_load_delete_cycle() {
-        let _guard = crate::test_support::HALOD_CONFIG_DIR_LOCK.lock();
-        let dir = tempfile::tempdir().unwrap();
-        unsafe { std::env::set_var("HALOD_CONFIG_DIR", dir.path()) };
+        let _dir = crate::test_support::tmp_config_dir();
 
         let app = Arc::new(AppState::new(crate::config::Config::default()));
         let def = CustomTemplateDef::default();
@@ -358,20 +356,14 @@ mod tests {
 
         delete_template("My Preset".into(), app).await.unwrap();
         assert!(list_templates().is_empty());
-
-        unsafe { std::env::remove_var("HALOD_CONFIG_DIR") };
     }
 
     #[tokio::test]
     #[allow(clippy::await_holding_lock)]
     async fn delete_template_noop_when_missing() {
-        let _guard = crate::test_support::HALOD_CONFIG_DIR_LOCK.lock();
-        let dir = tempfile::tempdir().unwrap();
-        unsafe { std::env::set_var("HALOD_CONFIG_DIR", dir.path()) };
+        let _dir = crate::test_support::tmp_config_dir();
 
         let app = Arc::new(AppState::new(crate::config::Config::default()));
         delete_template("nonexistent".into(), app).await.unwrap();
-
-        unsafe { std::env::remove_var("HALOD_CONFIG_DIR") };
     }
 }

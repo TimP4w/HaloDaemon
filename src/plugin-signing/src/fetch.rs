@@ -2,7 +2,7 @@
 use std::io::Read as _;
 use std::time::Duration;
 
-use anyhow::{anyhow, bail, Context, Result};
+use anyhow::{bail, Context, Result};
 use ureq::RequestExt as _;
 
 use crate::package::normalized_relative_path;
@@ -46,16 +46,18 @@ pub fn https_get(url: &url::Url, limit: u64) -> Result<Vec<u8>> {
         .method("GET")
         .uri(url.as_str())
         .header("User-Agent", "HaloDaemon-plugins")
-        .body(())?
+        .body(())
+        .with_context(|| format!("building the request for {url}"))?
         .with_agent(&agent)
         .run()
-        .map_err(|error| anyhow!("downloading {url}: {error}"))?;
+        .with_context(|| format!("downloading {url}"))?;
     let mut bytes = Vec::new();
     response
         .body_mut()
         .as_reader()
         .take(limit + 1)
-        .read_to_end(&mut bytes)?;
+        .read_to_end(&mut bytes)
+        .with_context(|| format!("reading {url}"))?;
     if bytes.len() as u64 > limit {
         bail!("download from {url} exceeds {limit} bytes");
     }

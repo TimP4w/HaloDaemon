@@ -137,14 +137,14 @@ fn id_suffix(handle: &DiscoveryHandle<'_>) -> String {
     }
 }
 
-pub(super) const DESCRIPTOR: PluginTransportDescriptor = PluginTransportDescriptor {
+pub(super) const DESCRIPTOR: PluginTransportDescriptor = PluginTransportDescriptor::Discovered {
     kind: "hid",
     open,
-    discovery: Some(Discovery {
+    discovery: Discovery {
         matches,
         id_suffix,
         validate: accept_spec,
-    }),
+    },
 };
 
 #[cfg(test)]

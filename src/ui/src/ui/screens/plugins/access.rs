@@ -2,6 +2,7 @@
 use super::*;
 use crate::domain::tour;
 use crate::domain::tour::AnchorId;
+use halod_shared::ids::PluginId;
 
 pub(super) fn permission_label(
     perm: halod_shared::types::Permission,
@@ -50,7 +51,7 @@ pub(super) fn data_reads_detail(keys: &[String]) -> String {
 }
 
 /// One `(title, detail)` row per thing the manifest declares it uses.
-pub(super) fn access_rows(access: &halod_shared::types::PluginAccess) -> Vec<(String, String)> {
+pub(super) fn access_rows(access: &halod_shared::types::PackageUses) -> Vec<(String, String)> {
     let mut rows: Vec<(String, String)> = access
         .permissions
         .iter()
@@ -114,7 +115,7 @@ pub(super) fn capabilities_targets_row(ui: &mut egui::Ui, p: &PluginInfo) {
 }
 
 pub(super) fn uses_section(ui: &mut egui::Ui, p: &PluginInfo) {
-    let rows = access_rows(&p.access);
+    let rows = access_rows(&p.uses);
     if rows.is_empty() {
         return;
     }
@@ -151,31 +152,31 @@ fn access_list(ui: &mut egui::Ui, rows: &[(String, String)]) {
 /// Plugins waiting for the user to confirm enabling them.
 #[derive(Default)]
 pub(crate) struct EnablePrompt {
-    queue: Vec<String>,
+    queue: Vec<PluginId>,
 }
 
 impl EnablePrompt {
-    pub(crate) fn request(&mut self, id: &str) {
+    pub(crate) fn request(&mut self, id: &PluginId) {
         if !self.queue.iter().any(|queued| queued == id) {
-            self.queue.push(id.to_owned());
+            self.queue.push(id.into());
         }
     }
 
     pub(super) fn current<'a>(&mut self, plugins: &'a [PluginInfo]) -> Option<&'a PluginInfo> {
         self.queue
-            .retain(|id| !plugins.iter().any(|p| &p.id == id && p.enabled));
+            .retain(|id| !plugins.iter().any(|p| p.id == id && p.enabled));
         self.queue
             .iter()
-            .find_map(|id| plugins.iter().find(|p| &p.id == id))
+            .find_map(|id| plugins.iter().find(|p| p.id == id))
     }
 
-    pub(super) fn resolve(&mut self, cmd: &CommandTx, id: &str, enable: bool) -> bool {
+    pub(super) fn resolve(&mut self, cmd: &CommandTx, id: &PluginId, enable: bool) -> bool {
         self.queue.retain(|queued| queued != id);
         if enable {
             ipc::send(
                 cmd,
                 DaemonCommand::SetPluginEnabled {
-                    id: id.to_owned(),
+                    id: id.clone(),
                     enabled: true,
                 },
             );
@@ -189,67 +190,189 @@ impl EnablePrompt {
         ctx: &egui::Context,
         plugins: &[PluginInfo],
         cmd: &CommandTx,
-    ) -> Option<String> {
+    ) -> Option<PluginId> {
         let plugin = self.current(plugins)?;
-        let rows = access_rows(&plugin.access);
-        let mut choice = None;
-        let dismissed = widgets::dialog(
+        let enable = access_prompt(
             ctx,
             "plugin_enable_prompt",
-            &t!("plugins.enable_prompt_title", name = plugin_name(plugin)),
-            460.0,
-            |ui| {
-                let intro = if rows.is_empty() {
-                    t!("plugins.enable_prompt_nothing")
-                } else {
-                    t!("plugins.enable_prompt_intro")
-                };
-                ui.label(
-                    egui::RichText::new(intro)
-                        .font(theme::body_md())
-                        .color(theme::TEXT_SOFT),
-                );
-                ui.add_space(theme::SPACE_6);
-                access_list(ui, &rows);
+            AccessPromptText {
+                title: t!("plugins.enable_prompt_title", name = plugin_name(plugin)).into_owned(),
+                intro: t!("plugins.enable_prompt_intro").into_owned(),
+                confirm: t!("plugins.enable_prompt_confirm").into_owned(),
+                decline: t!("plugins.enable_prompt_decline").into_owned(),
             },
-            |ui| {
-                if widgets::button(
-                    ui,
-                    &t!("plugins.enable_prompt_confirm"),
-                    ButtonKind::Primary,
-                    Vec2::new(0.0, 36.0),
-                )
-                .clicked()
-                {
-                    choice = Some(true);
-                }
-                if widgets::button(
-                    ui,
-                    &t!("plugins.enable_prompt_decline"),
-                    ButtonKind::Secondary,
-                    Vec2::new(0.0, 36.0),
-                )
-                .clicked()
-                {
-                    choice = Some(false);
-                }
-            },
-        );
-        let enable = choice.or(dismissed.then_some(false))?;
+            &access_rows(&plugin.uses),
+        )?;
         let id = plugin.id.clone();
         self.resolve(cmd, &id, enable).then_some(id)
+    }
+}
+
+struct AccessPromptText {
+    title: String,
+    intro: String,
+    confirm: String,
+    decline: String,
+}
+
+fn access_prompt(
+    ctx: &egui::Context,
+    id: &str,
+    text: AccessPromptText,
+    rows: &[(String, String)],
+) -> Option<bool> {
+    let mut choice = None;
+    let dismissed = widgets::dialog(
+        ctx,
+        id,
+        &text.title,
+        460.0,
+        |ui| {
+            let intro = if rows.is_empty() {
+                t!("plugins.enable_prompt_nothing").into_owned()
+            } else {
+                text.intro.clone()
+            };
+            ui.label(
+                egui::RichText::new(intro)
+                    .font(theme::body_md())
+                    .color(theme::TEXT_SOFT),
+            );
+            ui.add_space(theme::SPACE_6);
+            access_list(ui, rows);
+        },
+        |ui| {
+            if widgets::button(ui, &text.confirm, ButtonKind::Primary, Vec2::new(0.0, 36.0))
+                .clicked()
+            {
+                choice = Some(true);
+            }
+            if widgets::button(
+                ui,
+                &text.decline,
+                ButtonKind::Secondary,
+                Vec2::new(0.0, 36.0),
+            )
+            .clicked()
+            {
+                choice = Some(false);
+            }
+        },
+    );
+    choice.or(dismissed.then_some(false))
+}
+
+#[derive(Debug, Clone, PartialEq, Eq)]
+pub(super) struct PlannedUpdate {
+    pub(super) repo: String,
+    pub(super) id: PluginId,
+    pub(super) needs_permissions: bool,
+    pub(super) confirmed: Option<bool>,
+}
+
+impl PlannedUpdate {
+    pub(super) fn permissions_confirmed(&self) -> bool {
+        self.needs_permissions && self.confirmed == Some(true)
+    }
+}
+
+pub(super) fn plan_updates(state: &PluginsState, ids: &[&PluginId]) -> Vec<PlannedUpdate> {
+    ids.iter()
+        .filter_map(|id| {
+            let plugin = state.plugins.iter().find(|p| p.id == **id)?;
+            let update = update_for(plugin, &state.available)?;
+            Some(PlannedUpdate {
+                repo: update.repo.clone(),
+                id: plugin.id.clone(),
+                needs_permissions: update.uses.widens(&plugin.uses)
+                    || update.matches.widens(&plugin.matches),
+                confirmed: None,
+            })
+        })
+        .collect()
+}
+
+#[derive(Default)]
+pub(super) struct UpdatePrompt {
+    batch: Vec<PlannedUpdate>,
+}
+
+impl UpdatePrompt {
+    pub(super) fn request(&mut self, planned: Vec<PlannedUpdate>) {
+        for update in planned {
+            if !self.batch.iter().any(|queued| queued.id == update.id) {
+                self.batch.push(update);
+            }
+        }
+    }
+
+    pub(super) fn is_pending(&self) -> bool {
+        !self.batch.is_empty()
+    }
+
+    pub(super) fn current(&self) -> Option<&PlannedUpdate> {
+        self.batch
+            .iter()
+            .find(|update| update.needs_permissions && update.confirmed.is_none())
+    }
+
+    pub(super) fn resolve(&mut self, id: &PluginId, confirm: bool) {
+        if let Some(update) = self.batch.iter_mut().find(|update| update.id == *id) {
+            update.confirmed = Some(confirm);
+        }
+    }
+
+    pub(super) fn take_ready(&mut self) -> Vec<PlannedUpdate> {
+        if self.current().is_some() {
+            return Vec::new();
+        }
+        std::mem::take(&mut self.batch)
+            .into_iter()
+            .filter(|update| !update.needs_permissions || update.confirmed == Some(true))
+            .collect()
+    }
+
+    pub(super) fn show(&mut self, ctx: &egui::Context, state: &PluginsState) {
+        let Some(update) = self.current() else {
+            return;
+        };
+        let Some(plugin) = state.plugins.iter().find(|p| p.id == update.id) else {
+            let id = update.id.clone();
+            self.resolve(&id, false);
+            return;
+        };
+        let rows = state
+            .available
+            .iter()
+            .find(|a| a.repo == update.repo && a.id == update.id)
+            .map(|a| access_rows(&a.uses))
+            .unwrap_or_default();
+        let id = update.id.clone();
+        if let Some(confirm) = access_prompt(
+            ctx,
+            "plugin_update_prompt",
+            AccessPromptText {
+                title: t!("plugins.update_prompt_title", name = plugin_name(plugin)).into_owned(),
+                intro: t!("plugins.update_prompt_intro").into_owned(),
+                confirm: t!("plugins.update_prompt_confirm").into_owned(),
+                decline: t!("plugins.update_prompt_decline").into_owned(),
+            },
+            &rows,
+        ) {
+            self.resolve(&id, confirm);
+        }
     }
 }
 
 #[cfg(test)]
 mod tests {
     use super::*;
-    use halod_shared::types::{Permission, PluginAccess};
+    use halod_shared::types::{PackageUses, Permission};
 
     #[test]
     fn every_declared_use_gets_one_row() {
-        assert!(access_rows(&PluginAccess::default()).is_empty());
-        let rows = access_rows(&PluginAccess {
+        assert!(access_rows(&PackageUses::default()).is_empty());
+        let rows = access_rows(&PackageUses {
             permissions: vec![Permission::Hid, Permission::Network],
             commands: vec!["nvidia-smi".into(), "liquidctl".into()],
             data_reads: vec!["host.sensors.*".into()],

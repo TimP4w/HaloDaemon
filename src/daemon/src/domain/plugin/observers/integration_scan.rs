@@ -30,6 +30,7 @@ use crate::domain::plugin::engine::worker::DevMatch;
 use crate::domain::plugin::manifest::PluginManifest;
 use crate::domain::plugin::ResolvedConfig;
 use crate::domain::plugin::ResolvedConfigValue;
+use halod_shared::ids::{DeviceId, PluginId};
 
 #[derive(Debug, Clone, Copy, PartialEq, Eq)]
 pub(crate) enum DiscoveryOutcome {
@@ -49,7 +50,7 @@ fn sanitize(value: &str) -> String {
 
 /// Stable device id for an integration root. TCP roots include their endpoint;
 /// local host integrations use a fixed headless root id.
-fn root_device_id(manifest: &PluginManifest, config: &ResolvedConfig) -> String {
+fn root_device_id(manifest: &PluginManifest, config: &ResolvedConfig) -> DeviceId {
     // A serial root's stable identity is the configured port (ideally a
     // replug-stable /dev/serial/by-id path), sanitized into the device id.
     if let Some(serial) = &manifest.transports.serial {
@@ -57,10 +58,10 @@ fn root_device_id(manifest: &PluginManifest, config: &ResolvedConfig) -> String 
             .get(&serial.port_key)
             .map(ResolvedConfigValue::to_config_string)
             .unwrap_or_default();
-        return format!("{}-{}", manifest.id_prefix(), sanitize(&port));
+        return DeviceId::sanitized(&format!("{}-{}", manifest.id_prefix(), sanitize(&port)));
     }
     if manifest.transports.tcp.is_none() {
-        return format!("{}-integration", manifest.id_prefix());
+        return DeviceId::sanitized(&format!("{}-integration", manifest.id_prefix()));
     }
     let tcp = manifest.transports.tcp.clone().unwrap_or_default();
     let host = config
@@ -71,12 +72,12 @@ fn root_device_id(manifest: &PluginManifest, config: &ResolvedConfig) -> String 
         .get(&tcp.port_key)
         .map(ResolvedConfigValue::to_config_string)
         .unwrap_or_default();
-    format!(
+    DeviceId::sanitized(&format!(
         "{}-{}_{}",
         manifest.id_prefix(),
         sanitize(&host),
         sanitize(&port)
-    )
+    ))
 }
 
 /// A harmless placeholder handle: the `tcp` transport backend's `open` never
@@ -113,7 +114,7 @@ pub(super) fn open_probe(
         return Ok(PluginIo::None);
     }
     match crate::domain::plugin::engine::transport::descriptor_for(kind) {
-        Some(d) => (d.open)(manifest, &placeholder_handle(), config, granted, None),
+        Some(d) => (d.open())(manifest, &placeholder_handle(), config, granted, None),
         None => anyhow::bail!("integration plugin: no '{kind}' transport backend registered"),
     }
 }
@@ -138,7 +139,7 @@ async fn build_and_register(app: &Arc<AppState>, manifest: PluginManifest) -> Di
         .read()
         .await
         .iter()
-        .any(|d| d.id() == id)
+        .any(|d| *d.id() == id)
     {
         return DiscoveryOutcome::Registered;
     }
@@ -261,7 +262,7 @@ async fn build_and_register(app: &Arc<AppState>, manifest: PluginManifest) -> Di
 /// then push a fresh state frame so the plugin page reflects it immediately.
 async fn report_connect_failure(app: &Arc<AppState>, manifest: &PluginManifest, detail: String) {
     app.registry
-        .report_connect_error(app, &manifest.plugin_id, &manifest.display_name(), detail)
+        .report_connect_error(app, &manifest.plugin_id, detail)
         .await;
     crate::application::usecases::plugin::runtime::topology_changed(app).await;
 }
@@ -276,7 +277,7 @@ async fn discover(app: Arc<AppState>) {
 /// reconnect (enable toggle, config change) that must not touch any other
 /// device. No-op if `plugin_id` isn't currently an enabled, permission-
 /// satisfied integration.
-pub(crate) async fn discover_one(app: &Arc<AppState>, plugin_id: &str) -> DiscoveryOutcome {
+pub(crate) async fn discover_one(app: &Arc<AppState>, plugin_id: &PluginId) -> DiscoveryOutcome {
     if let Some(manifest) = app.registry.integration_manifest(plugin_id) {
         build_and_register(app, manifest).await
     } else {

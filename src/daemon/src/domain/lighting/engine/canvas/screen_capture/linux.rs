@@ -414,7 +414,7 @@ fn run_pipewire(
     let frame_w = Arc::new(AtomicU32::new(width));
     let frame_h = Arc::new(AtomicU32::new(height));
     let (frame_w_pc, frame_h_pc) = (Arc::clone(&frame_w), Arc::clone(&frame_h));
-    let mut last_copied_frame = None::<std::time::Instant>;
+    let mut last_copied_frame = None::<tokio::time::Instant>;
 
     let _listener = match stream
         .add_local_listener_with_user_data(())
@@ -457,7 +457,7 @@ fn run_pipewire(
             let Some(mut buf) = std::iter::from_fn(|| s.dequeue_buffer()).last() else {
                 return;
             };
-            let now = std::time::Instant::now();
+            let now = tokio::time::Instant::now();
             if last_copied_frame
                 .is_some_and(|last| now.duration_since(last) < std::time::Duration::from_millis(33))
             {

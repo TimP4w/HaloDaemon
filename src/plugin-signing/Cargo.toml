@@ -11,6 +11,7 @@ description = "HaloDaemon plugin catalog builder, signer and verifier"
 workspace = true
 
 [dependencies]
+halod-shared = { path = "../shared" }
 anyhow = { workspace = true }
 serde = { workspace = true }
 semver = { workspace = true, features = ["serde"] }

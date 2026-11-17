@@ -29,7 +29,7 @@ pub enum EngineKind {
 #[serde(tag = "kind", rename_all = "snake_case")]
 pub enum OverrideTarget {
     DeviceCapability {
-        device_id: String,
+        device_id: crate::ids::DeviceId,
         state_key: String,
     },
     Canvas,
@@ -72,8 +72,12 @@ impl ScreenRotation {
 pub enum DaemonCommand {
     /// A command scoped to one device; it runs under that device's lock.
     Device {
-        device_id: String,
+        device_id: crate::ids::DeviceId,
         op: DeviceOp,
+    },
+    Integration {
+        plugin_id: crate::ids::PluginId,
+        op: IntegrationOp,
     },
     /// No-op keepalive
     Ping,
@@ -100,9 +104,9 @@ pub enum DaemonCommand {
     },
     /// Persist the RGB Lighting view's device/zone selection in the active profile.
     SetLightingTargets {
-        device_ids: Vec<String>,
+        device_ids: Vec<crate::ids::DeviceId>,
         #[serde(default)]
-        channels: HashMap<String, Vec<String>>,
+        channels: HashMap<crate::ids::DeviceId, Vec<String>>,
     },
 
     // App rules
@@ -129,7 +133,7 @@ pub enum DaemonCommand {
     /// Enable or disable a device plugin by id. Applies immediately and only
     /// reconciles devices owned by that plugin.
     SetPluginEnabled {
-        id: String,
+        id: crate::ids::PluginId,
         enabled: bool,
     },
     /// Replace a plugin's user-editable config values (see `ConfigFieldDef`).
@@ -138,7 +142,7 @@ pub enum DaemonCommand {
     /// unchanged, so secrets are never round-tripped through the GUI or
     /// cleared by accident. Applies immediately.
     SetPluginConfig {
-        id: String,
+        id: crate::ids::PluginId,
         values: HashMap<String, String>,
     },
     AddPluginRepo {
@@ -153,10 +157,11 @@ pub enum DaemonCommand {
     /// Install or update one plugin from a repository's catalog.
     InstallPlugin {
         repo: String,
-        id: String,
+        id: crate::ids::PluginId,
+        permissions_confirmed: bool,
     },
     UninstallPlugin {
-        id: String,
+        id: crate::ids::PluginId,
     },
     /// Update every installed plugin whose catalog has a newer compatible version.
     UpdateAllPlugins,
@@ -164,16 +169,6 @@ pub enum DaemonCommand {
     /// plugin toggle (which only governs whether its Lua may run at all —
     /// see `SetPluginEnabled`). Applies immediately, scoped to just this
     /// integration's root device and the devices it exposes.
-    SetIntegrationEnabled {
-        id: String,
-        enabled: bool,
-    },
-    /// Replace a single integration's user-editable config values and
-    /// reconnect just that integration. Applies immediately.
-    SetIntegrationConfig {
-        id: String,
-        values: HashMap<String, String>,
-    },
     SetLogLevel {
         level: String,
     },
@@ -203,10 +198,23 @@ pub enum DaemonCommand {
     SetFanFailsafeDuty {
         duty: u8,
     },
+    /// Fan-curve response tuning; absent fields are left unchanged.
+    SetCoolingTuning {
+        #[serde(default, skip_serializing_if = "Option::is_none")]
+        ramp_up_pct_per_s: Option<f32>,
+        #[serde(default, skip_serializing_if = "Option::is_none")]
+        ramp_down_pct_per_s: Option<f32>,
+        #[serde(default, skip_serializing_if = "Option::is_none")]
+        hysteresis_c: Option<f32>,
+        #[serde(default, skip_serializing_if = "Option::is_none")]
+        smoothing_secs: Option<f32>,
+        #[serde(default, skip_serializing_if = "Option::is_none")]
+        sensor_stale_secs: Option<f32>,
+    },
     /// Hide or disable one of a device's lighting or cooling channels. Channel
     /// ids are only unique per capability, hence `kind`.
     SetChannelVisibility {
-        device_id: String,
+        device_id: crate::ids::DeviceId,
         kind: ChannelKind,
         channel_id: String,
         state: VisibilityState,
@@ -229,7 +237,7 @@ pub enum DaemonCommand {
     },
     /// Fetch a plugin's display-only asset; the daemon replies with a `plugin_asset` frame of base64 bytes.
     GetPluginAsset {
-        plugin_id: String,
+        plugin_id: crate::ids::PluginId,
         name: String,
     },
     /// Fetch a declared LCD widget SVG after daemon-side validation and rasterization.
@@ -313,14 +321,39 @@ pub struct Request {
     pub command: DaemonCommand,
 }
 
+#[derive(Debug, Clone, Serialize, Deserialize)]
+#[serde(tag = "type", rename_all = "snake_case")]
+pub enum IntegrationOp {
+    SetEnabled {
+        enabled: bool,
+    },
+    /// Replace the user-editable config values and reconnect. Applies immediately.
+    SetConfig {
+        values: HashMap<String, String>,
+    },
+    /// Open the daemon-owned setup flow.
+    BeginSetup,
+    /// Close and discard transient setup progress. Persisted credentials are untouched.
+    CancelSetup,
+    /// Delete the persisted setup data and start the setup flow again.
+    ResetSetup,
+    /// Retry the manifest-declared button-pairing hook.
+    RetryPairing,
+    /// Choose automatic discovery or manual configuration.
+    SelectSetupMode {
+        mode: IntegrationSetupMode,
+    },
+    /// Select an automatic candidate or submit manual/configuration values.
+    SubmitSetup {
+        candidate_id: Option<String>,
+        values: HashMap<String, String>,
+    },
+}
+
 /// Device-scoped operations, carried by [`DaemonCommand::Device`].
 #[derive(Debug, Clone, Serialize, Deserialize)]
 #[serde(tag = "type", rename_all = "snake_case")]
 pub enum DeviceOp {
-    /// Open the daemon-owned setup flow for an integration.
-    BeginIntegrationSetup,
-    /// Close and discard transient setup progress. Persisted credentials are untouched.
-    CancelIntegrationSetup,
     CanvasMoveZone {
         channel_id: String,
         x: f64,
@@ -375,11 +408,11 @@ pub enum DeviceOp {
     },
     LightingRemoveSegment {
         channel_id: String,
-        segment_id: String,
+        segment_id: crate::ids::DeviceId,
     },
     LightingReorderSegment {
         channel_id: String,
-        segment_id: String,
+        segment_id: crate::ids::DeviceId,
         new_index: usize,
     },
     LightingSetChannelTransform {
@@ -418,14 +451,6 @@ pub enum DeviceOp {
     ResetAllButtonMappings,
     ResetButtonMapping {
         cid: u16,
-    },
-    /// Delete an integration's persisted setup data and start its setup flow again.
-    ResetIntegrationSetup,
-    /// Retry the manifest-declared button-pairing hook.
-    RetryIntegrationPairing,
-    /// Choose automatic discovery or manual configuration.
-    SelectIntegrationSetupMode {
-        mode: IntegrationSetupMode,
     },
     SetBoolean {
         key: String,
@@ -497,11 +522,6 @@ pub enum DeviceOp {
     SetSoftwareDpiSteps {
         steps: Vec<u32>,
     },
-    /// Select an automatic candidate or submit manual/configuration values.
-    SubmitIntegrationSetup {
-        candidate_id: Option<String>,
-        values: HashMap<String, String>,
-    },
     TriggerAction {
         key: String,
     },
@@ -539,9 +559,7 @@ impl DeviceOp {
             | Self::SetScreenVideo { .. }
             | Self::SetSoftwareDpiSteps { .. }
             | Self::TriggerAction { .. } => true,
-            Self::BeginIntegrationSetup
-            | Self::CancelIntegrationSetup
-            | Self::CanvasMoveZone { .. }
+            Self::CanvasMoveZone { .. }
             | Self::CanvasPlaceZone { .. }
             | Self::CanvasRemoveZone { .. }
             | Self::LcdEngineDeactivate
@@ -552,14 +570,10 @@ impl DeviceOp {
             | Self::LightingSetChannelTransform { .. }
             | Self::RemoveCoolingCurve { .. }
             | Self::RenderLcdEditor { .. }
-            | Self::ResetIntegrationSetup
-            | Self::RetryIntegrationPairing
-            | Self::SelectIntegrationSetupMode { .. }
             | Self::SetCoolingCurvePoints { .. }
             | Self::SetCoolingCurvePreset { .. }
             | Self::SetDeviceName { .. }
-            | Self::SetDeviceVisibility { .. }
-            | Self::SubmitIntegrationSetup { .. } => false,
+            | Self::SetDeviceVisibility { .. } => false,
         }
     }
 }
@@ -667,7 +681,7 @@ mod tests {
             ),
             (
                 DaemonCommand::Device {
-                    device_id: "dev1".into(),
+                    device_id: "dev1".parse().unwrap(),
                     op: DeviceOp::SetChoice {
                         key: "profile".into(),
                         selected: 2,
@@ -677,7 +691,7 @@ mod tests {
             ),
             (
                 DaemonCommand::Device {
-                    device_id: "dev2".into(),
+                    device_id: "dev2".parse().unwrap(),
                     op: DeviceOp::SetRange {
                         key: "brightness".into(),
                         value: 75,
@@ -687,7 +701,7 @@ mod tests {
             ),
             (
                 DaemonCommand::Device {
-                    device_id: "dev3".into(),
+                    device_id: "dev3".parse().unwrap(),
                     op: DeviceOp::SetBoolean {
                         key: "enabled".into(),
                         value: true,
@@ -697,7 +711,7 @@ mod tests {
             ),
             (
                 DaemonCommand::Device {
-                    device_id: "dev4".into(),
+                    device_id: "dev4".parse().unwrap(),
                     op: DeviceOp::TriggerAction {
                         key: "reboot".into(),
                     },
@@ -711,14 +725,14 @@ mod tests {
             ),
             (
                 DaemonCommand::SetPluginEnabled {
-                    id: "nzxt_kraken".into(),
+                    id: "nzxt_kraken".parse().unwrap(),
                     enabled: false,
                 },
                 json!({"type": "set_plugin_enabled", "id": "nzxt_kraken", "enabled": false}),
             ),
             (
                 DaemonCommand::GetPluginAsset {
-                    plugin_id: "my_driver".into(),
+                    plugin_id: "my_driver".parse().unwrap(),
                     name: "logo.png".into(),
                 },
                 json!({"type": "get_plugin_asset", "plugin_id": "my_driver", "name": "logo.png"}),
@@ -734,9 +748,10 @@ mod tests {
             (
                 DaemonCommand::InstallPlugin {
                     repo: "official".into(),
-                    id: "nzxt_kraken".into(),
+                    id: "nzxt_kraken".parse().unwrap(),
+                    permissions_confirmed: false,
                 },
-                json!({"type": "install_plugin", "repo": "official", "id": "nzxt_kraken"}),
+                json!({"type": "install_plugin", "repo": "official", "id": "nzxt_kraken", "permissions_confirmed": false}),
             ),
             (
                 DaemonCommand::RemovePluginRepo { slug: "foo".into() },
@@ -752,57 +767,57 @@ mod tests {
             ),
             (
                 DaemonCommand::SetPluginConfig {
-                    id: "openrgb".into(),
+                    id: "openrgb".parse().unwrap(),
                     values: host.clone(),
                 },
                 json!({"type": "set_plugin_config", "id": "openrgb", "values": {"host": "127.0.0.1"}}),
             ),
             (
-                DaemonCommand::SetIntegrationEnabled {
-                    id: "openrgb".into(),
-                    enabled: false,
+                DaemonCommand::Integration {
+                    plugin_id: "openrgb".parse().unwrap(),
+                    op: IntegrationOp::SetEnabled { enabled: false },
                 },
-                json!({"type": "set_integration_enabled", "id": "openrgb", "enabled": false}),
+                json!({"type": "integration", "plugin_id": "openrgb", "op": {"type": "set_enabled", "enabled": false}}),
             ),
             (
-                DaemonCommand::SetIntegrationConfig {
-                    id: "openrgb".into(),
-                    values: host,
+                DaemonCommand::Integration {
+                    plugin_id: "openrgb".parse().unwrap(),
+                    op: IntegrationOp::SetConfig { values: host },
                 },
-                json!({"type": "set_integration_config", "id": "openrgb", "values": {"host": "127.0.0.1"}}),
+                json!({"type": "integration", "plugin_id": "openrgb", "op": {"type": "set_config", "values": {"host": "127.0.0.1"}}}),
             ),
             (
-                DaemonCommand::Device {
-                    device_id: "nanoleaf".into(),
-                    op: DeviceOp::BeginIntegrationSetup,
+                DaemonCommand::Integration {
+                    plugin_id: "nanoleaf".parse().unwrap(),
+                    op: IntegrationOp::BeginSetup,
                 },
-                json!({"type": "device", "device_id": "nanoleaf", "op": {"type": "begin_integration_setup"}}),
+                json!({"type": "integration", "plugin_id": "nanoleaf", "op": {"type": "begin_setup"}}),
             ),
             (
-                DaemonCommand::Device {
-                    device_id: "nanoleaf".into(),
-                    op: DeviceOp::ResetIntegrationSetup,
+                DaemonCommand::Integration {
+                    plugin_id: "nanoleaf".parse().unwrap(),
+                    op: IntegrationOp::ResetSetup,
                 },
-                json!({"type": "device", "device_id": "nanoleaf", "op": {"type": "reset_integration_setup"}}),
+                json!({"type": "integration", "plugin_id": "nanoleaf", "op": {"type": "reset_setup"}}),
             ),
             (
-                DaemonCommand::Device {
-                    device_id: "nanoleaf".into(),
-                    op: DeviceOp::SelectIntegrationSetupMode {
+                DaemonCommand::Integration {
+                    plugin_id: "nanoleaf".parse().unwrap(),
+                    op: IntegrationOp::SelectSetupMode {
                         mode: crate::types::IntegrationSetupMode::Automatic,
                     },
                 },
-                json!({"type": "device", "device_id": "nanoleaf", "op": {"type": "select_integration_setup_mode", "mode": "automatic"}}),
+                json!({"type": "integration", "plugin_id": "nanoleaf", "op": {"type": "select_setup_mode", "mode": "automatic"}}),
             ),
             (
-                DaemonCommand::Device {
-                    device_id: "nanoleaf".into(),
-                    op: DeviceOp::SubmitIntegrationSetup {
+                DaemonCommand::Integration {
+                    plugin_id: "nanoleaf".parse().unwrap(),
+                    op: IntegrationOp::SubmitSetup {
                         candidate_id: Some("device-1".into()),
                         values: HashMap::new(),
                     },
                 },
-                json!({"type": "device", "device_id": "nanoleaf", "op": {"type": "submit_integration_setup", "candidate_id": "device-1", "values": {}}}),
+                json!({"type": "integration", "plugin_id": "nanoleaf", "op": {"type": "submit_setup", "candidate_id": "device-1", "values": {}}}),
             ),
             (
                 DaemonCommand::LoadLcdTemplate {
@@ -838,8 +853,8 @@ mod tests {
             ),
             (
                 DaemonCommand::SetLightingTargets {
-                    device_ids: vec!["dev1".into()],
-                    channels: HashMap::from([("dev1".to_string(), vec!["z0".to_string()])]),
+                    device_ids: vec!["dev1".parse().unwrap()],
+                    channels: HashMap::from([("dev1".parse().unwrap(), vec!["z0".to_string()])]),
                 },
                 json!({"type": "set_lighting_targets", "device_ids": ["dev1"], "channels": {"dev1": ["z0"]}}),
             ),
@@ -852,7 +867,7 @@ mod tests {
             ),
             (
                 DaemonCommand::Device {
-                    device_id: "kraken".into(),
+                    device_id: "kraken".parse().unwrap(),
                     op: DeviceOp::SetCoolingCurvePoints {
                         channel_id: "pump".into(),
                         points: vec![[30.0, 20.0], [80.0, 100.0]],
@@ -863,7 +878,7 @@ mod tests {
             ),
             (
                 DaemonCommand::Device {
-                    device_id: "d".into(),
+                    device_id: "d".parse().unwrap(),
                     op: DeviceOp::LightingApply {
                         state: LightingState::Static {
                             color: RgbColor { r: 1, g: 2, b: 3 },
@@ -874,7 +889,7 @@ mod tests {
             ),
             (
                 DaemonCommand::Device {
-                    device_id: "d".into(),
+                    device_id: "d".parse().unwrap(),
                     op: DeviceOp::LightingApply {
                         state: LightingState::DirectEffect {
                             id: "rainbow".into(),
@@ -886,28 +901,28 @@ mod tests {
             ),
             (
                 DaemonCommand::Device {
-                    device_id: "rcv".into(),
+                    device_id: "rcv".parse().unwrap(),
                     op: DeviceOp::ReceiverStartPairing { timeout_secs: 30 },
                 },
                 json!({"type": "device", "device_id": "rcv", "op": {"type": "receiver_start_pairing", "timeout_secs": 30}}),
             ),
             (
                 DaemonCommand::Device {
-                    device_id: "rcv".into(),
+                    device_id: "rcv".parse().unwrap(),
                     op: DeviceOp::ReceiverStopPairing,
                 },
                 json!({"type": "device", "device_id": "rcv", "op": {"type": "receiver_stop_pairing"}}),
             ),
             (
                 DaemonCommand::Device {
-                    device_id: "rcv".into(),
+                    device_id: "rcv".parse().unwrap(),
                     op: DeviceOp::ReceiverUnpair { slot: 2 },
                 },
                 json!({"type": "device", "device_id": "rcv", "op": {"type": "receiver_unpair", "slot": 2}}),
             ),
             (
                 DaemonCommand::Device {
-                    device_id: "kbd".into(),
+                    device_id: "kbd".parse().unwrap(),
                     op: DeviceOp::SetKeyboardLayout {
                         selection: crate::keyboard::KeyboardLayoutSelection {
                             variant: Some(crate::keyboard::KeyVariant::Iso),
@@ -919,7 +934,7 @@ mod tests {
             ),
             (
                 DaemonCommand::Device {
-                    device_id: "kbd".into(),
+                    device_id: "kbd".parse().unwrap(),
                     op: DeviceOp::SetKeyboardLayout {
                         selection: Default::default(),
                     },

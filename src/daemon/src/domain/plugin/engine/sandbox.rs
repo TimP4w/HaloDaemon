@@ -6,7 +6,8 @@
 
 use std::cell::Cell;
 use std::rc::Rc;
-use std::time::{Duration, Instant};
+use std::time::Duration;
+use tokio::time::Instant;
 
 use mlua::debug::DebugEvent;
 use mlua::{HookTriggers, Lua, LuaOptions, StdLib, Table, VmState};
@@ -225,10 +226,10 @@ fn register_sleep(lua: &Lua) -> mlua::Result<()> {
     // A duration-only clock is safe to expose to every package: unlike wall
     // time it conveys no host date/time information and is useful for polling
     // coalescing without requesting the `os` permission.
-    let origin = std::sync::OnceLock::<std::time::Instant>::new();
+    let origin = std::sync::OnceLock::<tokio::time::Instant>::new();
     let monotonic_ms = lua.create_function(move |_, ()| {
         Ok(origin
-            .get_or_init(std::time::Instant::now)
+            .get_or_init(tokio::time::Instant::now)
             .elapsed()
             .as_millis() as u64)
     })?;

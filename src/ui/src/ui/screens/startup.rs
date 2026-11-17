@@ -177,7 +177,7 @@ pub(crate) fn discovery_status(ui: &mut egui::Ui, state: &TopicStore) {
             ui.set_width(ui.available_width());
             ui.horizontal(|ui| {
                 let (icon, _) = ui.allocate_exact_size(Vec2::splat(16.0), Sense::hover());
-                widgets::paint_spinner(ui.painter(), icon.center(), 16.0, time);
+                widgets::paint_spinner(ui.painter(), icon.center(), 16.0, time, theme::CYAN);
                 ui.add_space(theme::SPACE_2);
                 ui.label(
                     egui::RichText::new(t!("misc.discovery_looking"))
@@ -227,7 +227,7 @@ fn step_row(p: &egui::Painter, row: Rect, label: &str, step_state: StepState, ti
                 Stroke::new(1.6, theme::TEXT),
             ));
         }
-        StepState::Running => widgets::paint_spinner(p, icon, 16.0, time),
+        StepState::Running => widgets::paint_spinner(p, icon, 16.0, time, theme::CYAN),
         StepState::Pending => {}
     }
     p.text(

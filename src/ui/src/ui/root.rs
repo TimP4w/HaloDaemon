@@ -5,6 +5,7 @@
 
 use crate::app::App;
 use crate::domain;
+use crate::domain::models::notifications::NotificationTarget;
 use crate::domain::native_notification;
 use crate::domain::state::Page;
 use crate::runtime::ipc;
@@ -64,6 +65,7 @@ impl App {
         // Close handling (hide-to-tray vs quit) is decided by `close_action` and
         // applied by each backend after `draw` — not here, so it isn't run twice.
         if self.ui.debug.poll() {
+            self.settings_ui.debug_info_arrived();
             let failing: Vec<_> = self
                 .ui
                 .debug
@@ -94,7 +96,7 @@ impl App {
                 .lcd_editor_render
                 .get()
                 .clone()
-                .filter(|r| &r.device_id == id)
+                .filter(|r| r.device_id == id)
         } else {
             None
         };
@@ -272,7 +274,7 @@ impl App {
             });
 
         if let Page::Device(id) = &self.page {
-            if !state.devices.iter().any(|d| &d.id == id) {
+            if !state.devices.iter().any(|d| d.id == id) {
                 self.page = Page::Home;
             }
         }
@@ -502,6 +504,19 @@ impl App {
         // Toasts overlay everything, including the daemon-down scrim.
         if let Some(event) = self.toasts.show(ctx) {
             match event {
+                ToastEvent::Open(note) => {
+                    match crate::domain::models::notifications::notification_target(
+                        &note.code,
+                        &state.devices,
+                    ) {
+                        Some(NotificationTarget::Page(page)) => self.page = page,
+                        Some(NotificationTarget::Plugin(id)) => {
+                            self.plugins_ui.select_plugin(&id);
+                            self.page = Page::Plugins;
+                        }
+                        None => {}
+                    }
+                }
                 ToastEvent::Details(note) => {
                     if let Some(detail) = note.code.detail() {
                         let (title, _) =

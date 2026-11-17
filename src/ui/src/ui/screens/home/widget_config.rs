@@ -335,13 +335,17 @@ fn battery_picker(ui: &mut egui::Ui, draft: &mut Draft, row: &RowCtx) {
         );
         return;
     }
-    for (reference, name) in options {
+    let entries = picker_entries(
+        options,
+        &draft.batteries,
+        &t!("home.widget_battery_unavailable"),
+    );
+    for (reference, name) in entries {
         let mut on = draft.batteries.contains(&reference);
         let full = draft.batteries.len() >= MAX_BATTERY_WIDGET_ENTRIES;
-        let toggled = ui
-            .add_enabled(on || !full, egui::Checkbox::new(&mut on, name))
-            .changed();
-        if toggled {
+        let toggled = widgets::check_row(ui, &name, None, None, on).clicked();
+        if toggled && (on || !full) {
+            on = !on;
             if on {
                 draft.batteries.push(reference);
             } else {
@@ -349,6 +353,20 @@ fn battery_picker(ui: &mut egui::Ui, draft: &mut Draft, row: &RowCtx) {
             }
         }
     }
+}
+
+fn picker_entries(
+    options: Vec<(String, String)>,
+    chosen: &[String],
+    unavailable: &str,
+) -> Vec<(String, String)> {
+    let mut entries = options;
+    for reference in chosen {
+        if !entries.iter().any(|(known, _)| known == reference) {
+            entries.push((reference.clone(), format!("{reference} · {unavailable}")));
+        }
+    }
+    entries
 }
 
 #[cfg(test)]
@@ -381,6 +399,25 @@ mod tests {
         draft.sensor_id = "cpu".into();
         draft.label = "  ".into();
         assert!(draft.to_widget("w1".into()).label.is_empty());
+    }
+
+    #[test]
+    fn the_picker_lists_chosen_batteries_that_no_longer_exist() {
+        let options = vec![("mouse/main".to_string(), "Mouse".to_string())];
+        let chosen = [
+            "mouse/main".to_string(),
+            "logitech_1234/battery".to_string(),
+        ];
+        assert_eq!(
+            picker_entries(options, &chosen, "unavailable"),
+            [
+                ("mouse/main".to_string(), "Mouse".to_string()),
+                (
+                    "logitech_1234/battery".to_string(),
+                    "logitech_1234/battery · unavailable".to_string()
+                ),
+            ]
+        );
     }
 
     #[test]

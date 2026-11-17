@@ -170,8 +170,13 @@ fn panel(ctx: &egui::Context, anchor: Rect, toasts: &mut Toasts, just_opened: bo
                                         });
                                         ui.add_space(theme::SPACE_8);
                                     }
-                                    for logged in toasts.history() {
-                                        history_row(ui, logged, now);
+                                    let clicked = toasts
+                                        .history()
+                                        .filter(|logged| history_row(ui, logged, now))
+                                        .last()
+                                        .map(|logged| logged.note.clone());
+                                    if let Some(note) = clicked {
+                                        toasts.open(note);
                                     }
                                 });
                         });
@@ -184,16 +189,16 @@ fn list_height(ctx: &egui::Context, anchor: Rect) -> f32 {
     (ctx.content_rect().bottom() - anchor.bottom() - 80.0).clamp(160.0, LIST_MAX_H)
 }
 
-fn history_row(ui: &mut egui::Ui, logged: &widgets::toast::Logged, now: f64) {
+fn history_row(ui: &mut egui::Ui, logged: &widgets::toast::Logged, now: f64) -> bool {
     let (title, body) = notification_text(&logged.note.code);
     let width = ui.available_width();
     let text_w = width - 20.0 - 40.0;
     let body_galley = ui
         .painter()
         .layout(body, theme::body_md(), theme::TEXT_DIM, text_w);
-    let (rect, _) = ui.allocate_exact_size(
+    let (rect, response) = ui.allocate_exact_size(
         Vec2::new(width, 24.0 + 3.0 + body_galley.size().y + 22.0 - 12.0),
-        Sense::hover(),
+        Sense::click(),
     );
     let p = ui.painter();
     if !logged.read {
@@ -232,6 +237,7 @@ fn history_row(ui: &mut egui::Ui, logged: &widgets::toast::Logged, now: f64) {
         body_galley,
         theme::TEXT_DIM,
     );
+    response.clicked()
 }
 
 #[cfg(test)]

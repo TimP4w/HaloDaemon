@@ -29,6 +29,7 @@ use crate::ui::components::rgb_to_color32;
 use crate::ui::screens::canvas::{self, CanvasUi};
 use crate::ui::screens::effect_designer::{self, DesignerUi};
 use crate::ui::theme;
+use halod_shared::ids::DeviceId;
 
 /// Synthetic grid id prefix for a saved custom effect: `"custom:<name>"`.
 const CUSTOM_PREFIX: &str = "custom:";
@@ -54,9 +55,9 @@ pub struct LightingUi {
     /// Live Steps param values, keyed the same way as `param_values`.
     param_steps: HashMap<String, Vec<ColorStep>>,
     color_slot: usize,
-    sel_ids: Vec<String>,
-    zone_sel: HashMap<String, Vec<String>>,
-    expanded_id: Option<String>,
+    sel_ids: Vec<DeviceId>,
+    zone_sel: HashMap<DeviceId, Vec<String>>,
+    expanded_id: Option<DeviceId>,
     seeded_for: Option<String>,
     /// Name of a custom effect pending delete confirmation.
     confirm_delete: Option<String>,
@@ -769,7 +770,7 @@ fn targets_card(
                 );
             },
             |ui| {
-                let all: Vec<String> = devices.iter().map(|d| d.id.clone()).collect();
+                let all: Vec<DeviceId> = devices.iter().map(|d| d.id.clone()).collect();
                 let everything = !all.is_empty() && all.iter().all(|id| st.sel_ids.contains(id));
                 let label = if everything {
                     t!("lighting.deselect_all")
@@ -853,7 +854,7 @@ fn targets_card(
 
 /// Names of the selected devices that have zones placed on the canvas — a
 /// direct effect takes them off it.
-fn canvas_driven(state: &TopicStore, selected: &[String]) -> Vec<String> {
+fn canvas_driven(state: &TopicStore, selected: &[DeviceId]) -> Vec<String> {
     state
         .devices
         .iter()
@@ -870,11 +871,11 @@ fn canvas_driven(state: &TopicStore, selected: &[String]) -> Vec<String> {
         .collect()
 }
 
-fn toggle_device(st: &mut LightingUi, id: &str) {
+fn toggle_device(st: &mut LightingUi, id: &DeviceId) {
     if let Some(pos) = st.sel_ids.iter().position(|i| i == id) {
         st.sel_ids.remove(pos);
     } else {
-        st.sel_ids.push(id.to_string());
+        st.sel_ids.push(id.into());
     }
 }
 
@@ -1019,11 +1020,11 @@ fn apply_direct_params(
 }
 
 /// Stop driving a device that was just removed from the target selection
-fn release_device(cmd: &CommandTx, id: &str) {
+fn release_device(cmd: &CommandTx, id: &DeviceId) {
     crate::runtime::ipc::send(
         cmd,
         DaemonCommand::Device {
-            device_id: id.to_string(),
+            device_id: id.clone(),
             op: DeviceOp::LightingApply {
                 state: LightingState::Static {
                     color: RgbColor { r: 0, g: 0, b: 0 },
@@ -1789,7 +1790,7 @@ mod tests {
             },
             lighting: halod_shared::types::LightingOverviewState {
                 targets: halod_shared::types::LightingTargets {
-                    device_ids: ids.iter().map(|s| s.to_string()).collect(),
+                    device_ids: ids.iter().map(|s| (*s).parse().unwrap()).collect(),
                     channels: HashMap::new(),
                 },
                 ..Default::default()
@@ -1808,7 +1809,7 @@ mod tests {
 
         // Local edits survive same-profile state refreshes (e.g. the broadcast
         // triggered by our own SetLightingTargets).
-        st.sel_ids.push("b".into());
+        st.sel_ids.push("b".parse().unwrap());
         seed_if_profile_changed(&mut st, &state_with_targets("default", &["a"]));
         assert_eq!(st.sel_ids, vec!["a", "b"]);
 
@@ -1820,18 +1821,18 @@ mod tests {
     #[test]
     fn toggle_device_adds_then_removes() {
         let mut st = LightingUi::default();
-        toggle_device(&mut st, "a");
+        toggle_device(&mut st, &"a".parse().unwrap());
         assert_eq!(st.sel_ids, vec!["a"]);
-        toggle_device(&mut st, "b");
+        toggle_device(&mut st, &"b".parse().unwrap());
         assert_eq!(st.sel_ids, vec!["a", "b"]);
-        toggle_device(&mut st, "a");
+        toggle_device(&mut st, &"a".parse().unwrap());
         assert_eq!(st.sel_ids, vec!["b"]);
     }
 
     #[test]
     fn release_device_sends_black_static_apply() {
         let (tx, mut rx) = tokio::sync::mpsc::unbounded_channel();
-        release_device(&tx, "dev1");
+        release_device(&tx, &"dev1".parse().unwrap());
         let cmd = rx.try_recv().expect("expected a queued command");
         assert!(matches!(
             cmd,
@@ -1861,7 +1862,7 @@ mod tests {
     #[test]
     fn canvas_warning_names_only_selected_devices_placed_on_canvas() {
         let dev = |id: &str| WireDevice {
-            id: id.into(),
+            id: id.parse().unwrap(),
             name: id.to_uppercase(),
             ..Default::default()
         };
@@ -1872,11 +1873,11 @@ mod tests {
         state.lighting.canvas.placed_zones = ["a", "b"]
             .iter()
             .map(|d| halod_shared::types::PlacedZone {
-                device_id: d.to_string(),
+                device_id: (*d).parse().unwrap(),
                 ..Default::default()
             })
             .collect();
-        let sel = vec!["b".to_string(), "c".to_string()];
+        let sel: Vec<DeviceId> = vec!["b".parse().unwrap(), "c".parse().unwrap()];
         assert_eq!(canvas_driven(&state, &sel), ["B"]);
     }
 }

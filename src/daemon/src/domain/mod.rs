@@ -13,7 +13,7 @@ pub mod registry;
 
 #[cfg(test)]
 mod layering_tests {
-    const FROZEN_APPLICATION_IMPORTS: usize = 46;
+    const FROZEN_APPLICATION_IMPORTS: usize = 123;
 
     fn application_imports(dir: &std::path::Path) -> usize {
         std::fs::read_dir(dir)
@@ -27,16 +27,9 @@ mod layering_tests {
                     std::fs::read_to_string(&path)
                         .unwrap()
                         .lines()
-                        .filter(|line| {
-                            let line = line.trim_start();
-                            let line = line
-                                .strip_prefix("pub(crate) ")
-                                .or_else(|| line.strip_prefix("pub(super) "))
-                                .or_else(|| line.strip_prefix("pub "))
-                                .unwrap_or(line);
-                            line.starts_with("use crate::application")
-                        })
-                        .count()
+                        .filter(|line| !line.trim_start().starts_with("//"))
+                        .map(|line| line.matches("crate::application").count())
+                        .sum()
                 } else {
                     0
                 }

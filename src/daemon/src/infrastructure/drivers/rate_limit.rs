@@ -5,7 +5,8 @@ use parking_lot::Mutex;
 use std::collections::VecDeque;
 use std::sync::atomic::{AtomicU32, AtomicU64, AtomicUsize, Ordering};
 use std::sync::Arc;
-use std::time::{Duration, Instant};
+use std::time::Duration;
+use tokio::time::Instant;
 
 use anyhow::{bail, Result};
 use halod_shared::types::{WriteRateLimit, WriteRateStatus};

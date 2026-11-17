@@ -14,6 +14,7 @@ use halod_shared::bus::{
     matches_prefixes, BusEvent, BusEventPayload, BusEventReplay, BusRecord, BusRecordStatus,
     BusSnapshot, BusTransaction, BusValue, EVENT_RING_CAPACITY,
 };
+use halod_shared::ids::DeviceId;
 use halod_shared::types::{Sensor, SensorType, SensorUnit};
 
 pub const MAX_PLUGIN_RECORD_BYTES: usize = 32 * 1024;
@@ -471,8 +472,8 @@ impl DataBus {
 
     pub fn replace_host_sensors(
         &self,
-        mut sensors: Vec<(String, Sensor)>,
-    ) -> std::collections::HashSet<String> {
+        mut sensors: Vec<(DeviceId, Sensor)>,
+    ) -> std::collections::HashSet<DeviceId> {
         let mut changed_devices = std::collections::HashSet::new();
         sensors.sort_by(|(left_owner, left), (right_owner, right)| {
             left.id
@@ -490,8 +491,8 @@ impl DataBus {
                 && !expected.contains(&key)
             {
                 if let Some(DataValue::Map(old)) = self.read(&key).value {
-                    if let Some(device_id) = data_string(&old, "device_id") {
-                        changed_devices.insert(device_id.to_owned());
+                    if let Some(Ok(device_id)) = data_string(&old, "device_id").map(str::parse) {
+                        changed_devices.insert(device_id);
                     }
                 }
                 self.remove("host", &key);
@@ -502,7 +503,7 @@ impl DataBus {
         for (device_id, sensor) in sensors {
             let key = sensor_key(&sensor.id);
             let mut value = BTreeMap::new();
-            value.insert("device_id".into(), DataValue::String(device_id.clone()));
+            value.insert("device_id".into(), DataValue::String(device_id.to_string()));
             value.insert("id".into(), DataValue::String(sensor.id.clone()));
             value.insert("label".into(), DataValue::String(sensor.name.clone()));
             value.insert("value".into(), DataValue::Number(sensor.value));
@@ -521,7 +522,7 @@ impl DataBus {
             let _ = self.publish("host", &key, next, policy);
 
             let mut item = BTreeMap::new();
-            item.insert("device_id".into(), DataValue::String(device_id));
+            item.insert("device_id".into(), DataValue::String(device_id.to_string()));
             item.insert("id".into(), DataValue::String(sensor.id));
             item.insert("key".into(), DataValue::String(key));
             catalog.push(DataValue::Map(item));
@@ -542,10 +543,10 @@ impl DataBus {
             .collect()
     }
 
-    pub fn sensors_for_device(&self, device_id: &str) -> Vec<Sensor> {
+    pub fn sensors_for_device(&self, device_id: &DeviceId) -> Vec<Sensor> {
         self.sensor_entries()
             .into_iter()
-            .filter_map(|(owner, sensor)| (owner == device_id).then_some(sensor))
+            .filter_map(|(owner, sensor)| (owner == *device_id).then_some(sensor))
             .collect()
     }
 
@@ -1257,7 +1258,7 @@ mod tests {
             sensor_type: SensorType::Temperature,
         };
         let key = sensor_key(&sensor.id);
-        bus.replace_host_sensors(vec![("device".into(), sensor)]);
+        bus.replace_host_sensors(vec![("device".parse().unwrap(), sensor)]);
         assert_eq!(bus.read(&key).status, SnapshotStatus::Fresh);
         bus.replace_host_sensors(Vec::new());
         assert_eq!(bus.read(&key).status, SnapshotStatus::Unavailable);
@@ -1281,7 +1282,7 @@ mod tests {
         .unwrap();
         changes.recv().await.unwrap();
         // Keep Tokio's notification timer deterministic while advancing the
-        // std::time::Instant used by the publication rate limit.
+        // tokio::time::Instant used by the publication rate limit.
         tokio::time::pause();
         std::thread::sleep(Duration::from_millis(20));
         bus.publish(

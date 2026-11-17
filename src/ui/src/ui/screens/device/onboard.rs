@@ -11,6 +11,7 @@ use crate::domain::tour;
 use crate::domain::tour::AnchorId;
 use crate::runtime::ipc;
 use crate::ui::theme;
+use halod_shared::ids::DeviceId;
 
 /// Boolean-capability key for the ONBOARD_PROFILES host/onboard mode switch.
 /// Rendered here rather than in the generic Controls tab.
@@ -70,7 +71,7 @@ pub fn show(ui: &mut egui::Ui, ctx: &TabCtx) {
     });
 }
 
-fn host_mode_row(ui: &mut egui::Ui, id: &str, ctx: &TabCtx, b: &Boolean) {
+fn host_mode_row(ui: &mut egui::Ui, id: &DeviceId, ctx: &TabCtx, b: &Boolean) {
     widgets::card(ui, |ui| {
         widgets::setting_row(
             ui,
@@ -81,7 +82,7 @@ fn host_mode_row(ui: &mut egui::Ui, id: &str, ctx: &TabCtx, b: &Boolean) {
                     ipc::send(
                         ctx.cmd,
                         halod_shared::commands::DaemonCommand::Device {
-                            device_id: id.to_string(),
+                            device_id: id.clone(),
                             op: DeviceOp::SetBoolean {
                                 key: b.key.clone(),
                                 value: !b.value,
@@ -96,7 +97,7 @@ fn host_mode_row(ui: &mut egui::Ui, id: &str, ctx: &TabCtx, b: &Boolean) {
 
 fn slot_row(
     ui: &mut egui::Ui,
-    id: &str,
+    id: &DeviceId,
     ctx: &TabCtx,
     op: &OnboardProfiles,
     slot: &OnboardProfileSlot,
@@ -172,7 +173,7 @@ fn slot_row(
                 ipc::send(
                     ctx.cmd,
                     halod_shared::commands::DaemonCommand::Device {
-                        device_id: id.to_string(),
+                        device_id: id.clone(),
                         op: DeviceOp::OnboardProfileSwitch { slot: slot.index },
                     },
                 );
@@ -187,7 +188,7 @@ fn slot_row(
                     ipc::send(
                         ctx.cmd,
                         halod_shared::commands::DaemonCommand::Device {
-                            device_id: id.to_string(),
+                            device_id: id.clone(),
                             op: DeviceOp::OnboardProfileSetEnabled {
                                 slot: slot.index,
                                 enabled: enabled_after,
@@ -208,7 +209,7 @@ fn slot_row(
                 ipc::send(
                     ctx.cmd,
                     halod_shared::commands::DaemonCommand::Device {
-                        device_id: id.to_string(),
+                        device_id: id.clone(),
                         op: DeviceOp::OnboardProfileRestore { slot: slot.index },
                     },
                 );

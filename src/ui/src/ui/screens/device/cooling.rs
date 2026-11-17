@@ -15,6 +15,7 @@ use crate::domain::tour::AnchorId;
 use crate::runtime::ipc;
 use crate::ui::screens::cooling::preset_display_name;
 use crate::ui::theme;
+use halod_shared::ids::DeviceId;
 
 pub fn show(ui: &mut egui::Ui, ctx: &TabCtx, st: &mut DeviceUi) {
     tour::anchor(ui.ctx(), AnchorId::TabCooling, ui.max_rect());
@@ -249,7 +250,7 @@ fn curve_card(
     ui: &mut egui::Ui,
     ctx: &TabCtx,
     st: &mut DeviceUi,
-    fan_id: &str,
+    fan_id: &DeviceId,
     channel_id: &str,
     status: Option<FanCurveStatus>,
     sensor_temp: Option<f32>,
@@ -285,7 +286,7 @@ fn curve_card(
                         st.queue(
                             "curve",
                             curve_preset_command(
-                                fan_id.to_string(),
+                                fan_id.clone(),
                                 channel_id.to_string(),
                                 p.id.clone(),
                                 st.cooling.curve_sensor.clone(),
@@ -354,7 +355,7 @@ fn curve_card(
             |[t, d]| format!("{t:.0} °C · {d:.0}%"),
         ) {
             let cmd = curve_points_command(
-                fan_id.to_string(),
+                fan_id.clone(),
                 channel_id.to_string(),
                 st.cooling.curve.clone(),
                 st.cooling.curve_sensor.clone(),
@@ -365,13 +366,13 @@ fn curve_card(
 }
 
 fn curve_points_command(
-    device_id: String,
+    device_id: DeviceId,
     channel_id: String,
     points: Vec<[f32; 2]>,
     sensor_id: Option<String>,
 ) -> DaemonCommand {
     DaemonCommand::Device {
-        device_id,
+        device_id: device_id.clone(),
         op: DeviceOp::SetCoolingCurvePoints {
             channel_id,
             points,
@@ -381,13 +382,13 @@ fn curve_points_command(
 }
 
 fn curve_preset_command(
-    device_id: String,
+    device_id: DeviceId,
     channel_id: String,
     preset: String,
     sensor_id: Option<String>,
 ) -> DaemonCommand {
     DaemonCommand::Device {
-        device_id,
+        device_id: device_id.clone(),
         op: DeviceOp::SetCoolingCurvePreset {
             channel_id,
             preset,

@@ -116,6 +116,9 @@ child devices (wireless receivers, fan hubs) via `discover_children()`; chainabl
 ARGB hubs expose a chain host so the canvas engine can compose per-zone frames
 (see [domain/device/](../src/daemon/src/domain/device/)).
 
+A device's health is a set of flags, not a single status, because several
+health conditions can hold at the same time.
+
 ### Discovery: how a device gets constructed
 
 Discovery is driven by **transport scanners**, listed in the `SCANNERS` table in
@@ -180,6 +183,15 @@ collisions, so a checkout can shadow an installed copy during development.
 Each package declares the plugin `api` it targets; an incompatible package is
 listed but never loaded. See [plugins.md](plugins.md).
 
+**Enabling and updating.** Every plugin, including one loaded from a local
+folder, lists what it uses and asks for confirmation before it is enabled.
+When an update needs more permissions than the installed version, the GUI asks
+before installing it, and an enabled plugin stays enabled once the new version
+is loaded.
+An update the daemon applies without that confirmation (for example from the
+CLI) disables the plugin and notifies the user, who confirms the new
+permissions by enabling it again.
+
 ## IPC and usecases: the daemon's public API
 
 The daemon and GUI are separate processes talking over a Unix domain socket
@@ -193,11 +205,13 @@ the serde discriminator), and `dispatch()` matches the variant to a usecase unde
 [application/usecases/](../src/daemon/src/application/usecases/) (one directory
 per domain: `lighting/`, `cooling/`, `lcd/`, `registry/`, …) **with
 already-parsed typed arguments**. Usecases never re-parse raw JSON. The usecase
-layer *is* the daemon's public API surface. Before dispatch, `command_target()`
-maps device-scoped commands to the device id whose per-device lock serializes
-them (commands to different devices run concurrently), and
-`command_writes_device()` marks commands whose failure means a hardware write did
-not land.
+layer *is* the daemon's public API surface. Device commands are nested as
+`DaemonCommand::Device { device_id, op: DeviceOp }` and integration commands as
+`DaemonCommand::Integration { plugin_id, op: IntegrationOp }`. Before dispatch,
+`command_target()` maps each of them to a `CommandTarget` (the device id or the
+plugin id) whose lock serializes commands to the same target while commands to
+different targets run concurrently, and `command_writes_device()` marks device
+ops whose failure means a hardware write did not land.
 
 **High-frequency push path:** state that changes constantly (canvas preview, LCD
 frames, sensor readings) is *not* request/response. The router runs
@@ -207,10 +221,11 @@ by recording a `Change` (see [application/bus/](../src/daemon/src/application/bu
 
 So **adding a command is a four-part change**:
 
-1. Add a `DaemonCommand` variant in [shared/src/commands.rs](../src/shared/src/commands.rs).
-2. In the router, add a `dispatch()` arm and, if the command targets a device,
-   list it in `command_target()` (and in `command_writes_device()` if it writes
-   hardware).
+1. Add a `DeviceOp` or `IntegrationOp` variant (or a global `DaemonCommand`
+   variant) in [shared/src/commands.rs](../src/shared/src/commands.rs).
+2. In the router, add a `dispatch()` arm; device and integration ops are locked
+   by their target already, and a device op that writes hardware is listed in
+   `DeviceOp::writes_device()`.
 3. Write/extend the usecase in the owning domain's `application/usecases/` directory (talking to devices through capability accessors).
 4. Call it from the GUI.
 
@@ -242,7 +257,10 @@ The set (full internals in [engines.md](engines.md)):
 
 A usecase reconfigures an engine by updating config and recording a `Change`,
 which republishes the engine-config topic, rather than calling the engine
-directly.
+directly. Retries with backoff anywhere in the daemon go through
+`util::backoff::schedule`.
+
+The daemon shuts down in ordered phases, one step per phase.
 
 ## State and config
 
@@ -319,9 +337,8 @@ new command:
 1. If X is a new *kind* of control, add a `CapabilityRef` variant + trait +
    accessor in [domain/device/](../src/daemon/src/domain/device/) (and classify it
    in `capability_dispatch!`), then implement it on the relevant device(s).
-2. Add the `DaemonCommand` variant, the `dispatch()` arm (plus its
-   `command_target()`/`command_writes_device()` entries), and the usecase
-   (see *IPC and usecases* above).
+2. Add the `DeviceOp` variant, the `dispatch()` arm (plus its
+   `writes_device()` entry), and the usecase (see *IPC and usecases* above).
 3. Register a GUI panel for the capability (capability-driven device page) or wire
    the command into an existing view.
 4. If X needs to evolve over time (effects, curves), it belongs in an engine, fed

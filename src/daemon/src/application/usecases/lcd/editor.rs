@@ -20,10 +20,11 @@ use crate::config;
 use crate::domain::events::Change;
 use crate::domain::lcd::engine::custom;
 use crate::domain::registry::require_device_owned_id;
+use halod_shared::ids::DeviceId;
 use halod_shared::lcd_custom::{CustomTemplateDef, LcdEditorRender};
 
 pub async fn render(
-    device_id: String,
+    device_id: DeviceId,
     def: CustomTemplateDef,
     known: HashMap<String, u64>,
     app: Arc<AppState>,

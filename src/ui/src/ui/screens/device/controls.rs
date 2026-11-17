@@ -16,6 +16,7 @@ use crate::domain::tour;
 use crate::domain::tour::AnchorId;
 use crate::runtime::ipc;
 use crate::ui::theme;
+use halod_shared::ids::DeviceId;
 
 pub fn show(ui: &mut egui::Ui, ctx: &TabCtx, st: &mut DeviceUi) {
     tour::anchor(ui.ctx(), AnchorId::TabControls, ui.max_rect());
@@ -244,7 +245,7 @@ enum Setting<'a> {
     Action(&'a halod_shared::types::Action),
 }
 
-fn setting_row(ui: &mut egui::Ui, id: &str, ctx: &TabCtx, st: &mut DeviceUi, s: Setting) {
+fn setting_row(ui: &mut egui::Ui, id: &DeviceId, ctx: &TabCtx, st: &mut DeviceUi, s: Setting) {
     match s {
         Setting::Choice(c) => {
             let edit_key = format!("choice:{}", c.key);
@@ -276,7 +277,7 @@ fn setting_row(ui: &mut egui::Ui, id: &str, ctx: &TabCtx, st: &mut DeviceUi, s: 
                         ipc::send(
                             ctx.cmd,
                             halod_shared::commands::DaemonCommand::Device {
-                                device_id: id.to_string(),
+                                device_id: id.clone(),
                                 op: DeviceOp::SetChoice {
                                     key: c.key.clone(),
                                     selected: pick,
@@ -307,7 +308,7 @@ fn setting_row(ui: &mut egui::Ui, id: &str, ctx: &TabCtx, st: &mut DeviceUi, s: 
                                 ipc::send(
                                     ctx.cmd,
                                     halod_shared::commands::DaemonCommand::Device {
-                                        device_id: id.to_string(),
+                                        device_id: id.clone(),
                                         op: DeviceOp::SetChoice {
                                             key: c.key.clone(),
                                             selected: idx,
@@ -335,7 +336,7 @@ fn setting_row(ui: &mut egui::Ui, id: &str, ctx: &TabCtx, st: &mut DeviceUi, s: 
                                 ipc::send(
                                     ctx.cmd,
                                     halod_shared::commands::DaemonCommand::Device {
-                                        device_id: id.to_string(),
+                                        device_id: id.clone(),
                                         op: DeviceOp::SetChoice {
                                             key: c.key.clone(),
                                             selected: if on { 0 } else { 1 },
@@ -371,7 +372,7 @@ fn setting_row(ui: &mut egui::Ui, id: &str, ctx: &TabCtx, st: &mut DeviceUi, s: 
                         st.queue(
                             &key,
                             DaemonCommand::Device {
-                                device_id: id.to_string(),
+                                device_id: id.clone(),
                                 op: DeviceOp::SetRange {
                                     key: r.key.clone(),
                                     value: snapped.round() as i32,
@@ -395,7 +396,7 @@ fn setting_row(ui: &mut egui::Ui, id: &str, ctx: &TabCtx, st: &mut DeviceUi, s: 
                         st.queue(
                             &key,
                             DaemonCommand::Device {
-                                device_id: id.to_string(),
+                                device_id: id.clone(),
                                 op: DeviceOp::SetRange {
                                     key: r.key.clone(),
                                     value: snapped.round() as i32,
@@ -426,7 +427,7 @@ fn setting_row(ui: &mut egui::Ui, id: &str, ctx: &TabCtx, st: &mut DeviceUi, s: 
                         ipc::send(
                             ctx.cmd,
                             halod_shared::commands::DaemonCommand::Device {
-                                device_id: id.to_string(),
+                                device_id: id.clone(),
                                 op: DeviceOp::SetBoolean {
                                     key: b.key.clone(),
                                     value: !on,
@@ -450,7 +451,7 @@ fn setting_row(ui: &mut egui::Ui, id: &str, ctx: &TabCtx, st: &mut DeviceUi, s: 
                 ipc::send(
                     ctx.cmd,
                     halod_shared::commands::DaemonCommand::Device {
-                        device_id: id.to_string(),
+                        device_id: id.clone(),
                         op: DeviceOp::TriggerAction { key: a.key.clone() },
                     },
                 );

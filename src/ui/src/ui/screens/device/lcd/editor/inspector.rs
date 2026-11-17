@@ -15,6 +15,7 @@ use crate::domain::tour;
 use crate::domain::tour::AnchorId;
 use crate::ui::components as widgets;
 use crate::ui::theme;
+use halod_shared::ids::DeviceId;
 
 /// Shown in the inspector column instead of [`selected_widget_card`] when no
 /// widget is selected on the stage.
@@ -101,7 +102,7 @@ pub(super) fn selected_widget_card(
     ui: &mut egui::Ui,
     ctx: &TabCtx,
     st: &mut DeviceUi,
-    id: &str,
+    id: &DeviceId,
     sel: &str,
 ) {
     let Some(idx) = st.lcd.editor.def.widgets.iter().position(|w| w.id == sel) else {
@@ -302,6 +303,29 @@ pub(super) fn selected_widget_card(
             send_def(ctx, st, id, true);
         }
     });
+
+    let mut order = None;
+    ui.columns(2, |cols| {
+        for (index, action) in super::layers::LayerAction::ORDER.into_iter().enumerate() {
+            let col = &mut cols[index % 2];
+            let w = col.available_width();
+            if widgets::button(
+                col,
+                &action.label(),
+                widgets::ButtonKind::Secondary,
+                egui::vec2(w, 30.0),
+            )
+            .clicked()
+            {
+                order = Some(action);
+            }
+        }
+    });
+    if let Some(action) = order {
+        if st.lcd.editor.apply_layer(sel, action) {
+            send_def(ctx, st, id, true);
+        }
+    }
 }
 
 // ── Screen style ───────────────────────────────────────────────────────────────
@@ -337,7 +361,7 @@ pub(super) fn screen_style_card(
     ui: &mut egui::Ui,
     ctx: &TabCtx,
     st: &mut DeviceUi,
-    id: &str,
+    id: &DeviceId,
     lcd: &LcdStatus,
 ) {
     ui.label(
@@ -409,7 +433,7 @@ fn background_image_picker(
     ui: &mut egui::Ui,
     ctx: &TabCtx,
     st: &mut DeviceUi,
-    id: &str,
+    id: &DeviceId,
     filename: &str,
     dim: f64,
     changed: &mut bool,

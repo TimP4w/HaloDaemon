@@ -1,6 +1,6 @@
 settings:
   language_sub: "Interface language"
-  credits_sub: "People and projects that made halod possible"
+  credits_sub: "People and projects that made HaloDaemon possible"
   version_sub: "Build %{build} · %{license}"
   version_title: "Version"
   show_hidden_sub: "Include devices you hid from Home"
@@ -17,19 +17,34 @@ settings:
   daemon_disconnected_sub: "Not connected"
   daemon_connected_sub: "Connected · version %{version}"
   fps_value: "%{n} fps"
-  failsafe_sub: "Used when a curve’s sensor is unavailable for more than 10 s"
+  failsafe_sub: "Used when a curve’s sensor is missing for more than 10 s or stuck"
   failsafe_title: "Failsafe fan duty"
+  fan_ramp_up_title: "Fan spin-up rate"
+  fan_ramp_up_sub: "How fast fans may speed up when it gets hotter"
+  fan_ramp_down_title: "Fan spin-down rate"
+  fan_ramp_down_sub: "How fast fans may slow down once it cools off"
+  fan_hysteresis_title: "Fan hysteresis"
+  fan_hysteresis_sub: "How far a temperature must fall before fans slow down"
+  fan_smoothing_title: "Temperature smoothing"
+  fan_smoothing_sub: "Averages readings so short spikes don’t rev the fans"
+  fan_stale_title: "Stuck sensor detection"
+  fan_stale_sub: "Uses the failsafe duty when a sensor stops changing"
+  fan_instant: "Instant"
+  fan_off: "Off"
+  fan_rate_value: "%{n} %/s"
+  fan_celsius_value: "%{n} °C"
+  fan_seconds_value: "%{n} s"
   fan_tick_value: "Every %{secs} s"
   fan_engine_sub: "How often fan curves read sensors and set duty"
   fan_engine_title: "Fan curves"
   canvas_engine_sub: "How often the canvas samples and sends frames"
   canvas_engine_title: "Lighting canvas"
   section_application_sub: "Startup, tray and language"
-  section_engines_sub: "How often halod updates lighting, screens and fans"
-  section_devices_sub: "Discovery and connection to the halod service"
-  section_healthcheck_sub: "System access halod needs for your hardware"
-  section_logging_sub: "Where halod writes its log and how much detail it keeps"
-  section_about_sub: "halod, a daemon for controlling peripherals"
+  section_engines_sub: "How often HaloDaemon updates lighting, screens and fans"
+  section_devices_sub: "Discovery and connection to the HaloDaemon service"
+  section_healthcheck_sub: "System access HaloDaemon needs for your hardware"
+  section_logging_sub: "Where HaloDaemon writes its log and how much detail it keeps"
+  section_about_sub: "HaloDaemon, a daemon for controlling peripherals"
   recheck_title: "Run all checks"
   recheck_sub: "Check system access again"
   title: Settings
@@ -40,7 +55,7 @@ settings:
   section_about: "About"
   section_healthcheck: "Healthcheck"
   start_on_boot_title: Start on boot
-  start_on_boot_sub: "Launch halod in the tray when you sign in"
+  start_on_boot_sub: "Launch HaloDaemon in the tray when you sign in"
   start_on_boot_managed_sub: This option is managed by your system configuration. Change it there.
   start_on_boot_managed_value: Controlled by system
   close_to_tray_title: Close to tray
@@ -55,7 +70,7 @@ settings:
   replay_tutorials_sub: "Show the guided tour again the next time you open each page"
   replay_button: Replay
   lcd_engine_sub: "Frame rate for dynamic LCD content"
-  daemon_title: "halod service"
+  daemon_title: "HaloDaemon service"
   rediscover_title: "Rediscover devices"
   rediscover_sub: "Scan USB, HID, hwmon and SMBus for new devices"
   scan_now_button: Scan now
@@ -75,7 +90,7 @@ settings:
   diagnostics_sub: "Every connected HID device, which ones were recognised, and the current access level"
   open_button: "Open"
   third_party_title: "Third-party licenses"
-  third_party_sub: "Open-source components used by halod"
+  third_party_sub: "Open-source components used by HaloDaemon"
   view_button: "View"
   repository_title: Repository
   licenses_modal_body: Open-source components included or used by HaloDaemon, grouped by license.

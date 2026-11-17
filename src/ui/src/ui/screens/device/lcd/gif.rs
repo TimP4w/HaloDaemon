@@ -10,7 +10,6 @@ use crate::ui::screens::device::{DeviceUi, GifFrame, TabCtx};
 // ── Textures ──────────────────────────────────────────────────────────────────
 
 pub(super) use crate::ui::components::rgba_texture;
-use crate::ui::components::tex_from_bytes as load_tex_from_bytes;
 
 // ── On-disk library ───────────────────────────────────────────────────────────
 
@@ -22,16 +21,38 @@ pub(super) fn lcd_images_dir(ctx: &TabCtx) -> Option<PathBuf> {
     (!dir.is_empty()).then(|| Path::new(dir).join(halod_shared::types::LCD_IMAGES_SUBDIR))
 }
 
-/// Read + decode a library file (PNG/JPEG, or a GIF's first frame) into a
-/// texture, straight off disk. `None` if the dir is unknown or the read/decode
-/// fails.
-pub(super) fn load_tex_from_file(
-    ctx: &TabCtx,
+pub(crate) type DecodedRgba = (Vec<u8>, usize, usize);
+
+pub(crate) const LIBRARY_DECODE_SIDE: u32 = 512;
+
+pub(super) fn decode_image_file(path: &Path, max_side: Option<u32>) -> Option<DecodedRgba> {
+    let len = std::fs::metadata(path).ok()?.len();
+    halod_shared::types::validate_image_upload_size(len).ok()?;
+    let mut image = image::load_from_memory(&std::fs::read(path).ok()?).ok()?;
+    if let Some(side) = max_side.filter(|side| image.width().max(image.height()) > *side) {
+        image = image.thumbnail(side, side);
+    }
+    let image = image.into_rgba8();
+    let (width, height) = (image.width() as usize, image.height() as usize);
+    Some((image.into_raw(), width, height))
+}
+
+pub(super) fn spawn_image_decode(
     egui_ctx: &egui::Context,
-    filename: &str,
-) -> Option<egui::TextureHandle> {
-    let bytes = std::fs::read(lcd_images_dir(ctx)?.join(filename)).ok()?;
-    load_tex_from_bytes(egui_ctx, &bytes, filename)
+    path: PathBuf,
+    max_side: Option<u32>,
+) -> std::sync::mpsc::Receiver<Option<DecodedRgba>> {
+    let (tx, rx) = std::sync::mpsc::channel();
+    let egui_ctx = egui_ctx.clone();
+    std::thread::spawn(move || {
+        let _ = tx.send(decode_image_file(&path, max_side));
+        egui_ctx.request_repaint();
+    });
+    rx
+}
+
+pub(super) fn file_len(path: &Path) -> Option<u64> {
+    std::fs::metadata(path).ok().map(|meta| meta.len())
 }
 
 // ── GIF decoding ────────────────────────────────────────────────────────────
@@ -89,28 +110,34 @@ pub(super) fn spawn_gif_stream(
     rx
 }
 
-/// Decode at most one uncached library file per frame into
-/// `st.lcd.image_cache`, to avoid a lag spike on open. `requested` marks a
-/// filename attempted so a failed decode isn't retried every frame.
 pub(super) fn decode_next_thumb<'a>(
     ui: &egui::Ui,
     ctx: &TabCtx,
     st: &mut DeviceUi,
     filenames: impl Iterator<Item = &'a String>,
 ) {
-    if lcd_images_dir(ctx).is_none() {
-        return;
+    if let Some((filename, rx)) = st.lcd.thumb_rx.take() {
+        match rx.try_recv() {
+            Err(TryRecvError::Empty) => {
+                st.lcd.thumb_rx = Some((filename, rx));
+                return;
+            }
+            Ok(Some((rgba, width, height))) => {
+                let texture = rgba_texture(ui.ctx(), &filename, &rgba, width, height);
+                st.lcd.image_cache.insert(filename, texture);
+            }
+            Ok(None) | Err(TryRecvError::Disconnected) => {}
+        }
     }
-    for filename in filenames {
-        if st.lcd.image_cache.contains_key(filename) || !st.lcd.requested.insert(filename.clone()) {
-            continue;
-        }
-        let tex = load_tex_from_file(ctx, ui.ctx(), filename);
-        if let Some(tex) = tex {
-            st.lcd.image_cache.insert(filename.clone(), tex);
-        }
-        ui.ctx().request_repaint(); // decode the next file next frame
-        break; // one decode per frame
+    let Some(dir) = lcd_images_dir(ctx) else {
+        return;
+    };
+    let next = filenames
+        .filter(|filename| !st.lcd.image_cache.contains_key(*filename))
+        .find(|filename| st.lcd.requested.insert((*filename).clone()));
+    if let Some(filename) = next {
+        let rx = spawn_image_decode(ui.ctx(), dir.join(filename), Some(LIBRARY_DECODE_SIDE));
+        st.lcd.thumb_rx = Some((filename.clone(), rx));
     }
 }
 

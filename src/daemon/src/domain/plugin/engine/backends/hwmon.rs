@@ -32,8 +32,7 @@ fn open(
     }
 }
 
-pub(super) const DESCRIPTOR: PluginTransportDescriptor = PluginTransportDescriptor {
+pub(super) const DESCRIPTOR: PluginTransportDescriptor = PluginTransportDescriptor::Configured {
     kind: "hwmon",
     open,
-    discovery: None,
 };

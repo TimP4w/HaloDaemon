@@ -2,7 +2,7 @@
 //! Shared progress affordances — the ring spinner, the loading bar and the
 //! success badge: one accent over a common [`theme::TRACK`].
 
-use egui::{Pos2, Rect, Sense, Shape, Stroke, Vec2};
+use egui::{Color32, Pos2, Rect, Sense, Shape, Stroke, Vec2};
 
 use crate::ui::icons;
 use crate::ui::theme;
@@ -12,23 +12,24 @@ use crate::ui::theme;
 pub fn spinner(ui: &mut egui::Ui, size: f32) -> egui::Response {
     let (rect, resp) = ui.allocate_exact_size(Vec2::splat(size), Sense::hover());
     let time = ui.input(|i| i.time) as f32;
-    paint_spinner(ui.painter(), rect.center(), size, time);
+    paint_spinner(ui.painter(), rect.center(), size, time, theme::CYAN);
     ui.ctx().request_repaint();
     resp
 }
 
-/// Paint a spinner of diameter `size` centered at `center` for clock `time`.
-pub fn paint_spinner(painter: &egui::Painter, center: Pos2, size: f32, time: f32) {
+/// Paint a spinner of diameter `size` centered at `center` for clock `time`:
+/// a faint track in `color` with a bright arc of the same color sweeping it.
+pub fn paint_spinner(painter: &egui::Painter, center: Pos2, size: f32, time: f32, color: Color32) {
     let stroke_w = (size / 11.0).clamp(2.0, 4.0);
     let radius = size / 2.0 - stroke_w / 2.0;
-    painter.circle_stroke(center, radius, Stroke::new(stroke_w, theme::TRACK));
+    painter.circle_stroke(center, radius, Stroke::new(stroke_w, theme::a(color, 0.25)));
     let start = time * 3.2;
     let sweep = std::f32::consts::PI * 0.62;
     let steps = 24;
     let pts: Vec<Pos2> = (0..=steps)
         .map(|i| center + Vec2::angled(start + sweep * i as f32 / steps as f32) * radius)
         .collect();
-    painter.add(Shape::line(pts, Stroke::new(stroke_w, theme::CYAN)));
+    painter.add(Shape::line(pts, Stroke::new(stroke_w, color)));
 }
 
 /// A loading bar filling `width`. `fraction: Some(f)` draws a

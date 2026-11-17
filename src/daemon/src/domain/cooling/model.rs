@@ -1,5 +1,6 @@
 // SPDX-License-Identifier: GPL-3.0-or-later
 use anyhow::{ensure, Result};
+use halod_shared::ids::DeviceId;
 use serde::{Deserialize, Serialize};
 
 /// A single fan curve assignment: links a fan device to a temperature sensor and curve points.
@@ -96,7 +97,7 @@ impl FanCurveRecord {
 
     pub fn serialize(
         &self,
-        device_id: String,
+        device_id: DeviceId,
         channel_id: String,
         status: halod_shared::types::FanCurveStatus,
     ) -> halod_shared::types::WireFanCurve {

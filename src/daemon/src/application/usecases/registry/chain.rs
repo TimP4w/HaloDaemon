@@ -12,6 +12,7 @@ use crate::domain::device::chain::LightingDivisionHost;
 use crate::domain::device::{ChainLinkSpec, Device};
 use crate::domain::events::Change;
 use crate::domain::registry::model::{ChainLinkRecord, ChannelLayoutRecord, DeviceLayout};
+use halod_shared::ids::DeviceId;
 use halod_shared::types::ZoneTopology;
 
 fn require_chain(device: &Arc<dyn Device>) -> Result<&Arc<LightingDivisionHost>> {
@@ -58,7 +59,7 @@ fn require_chain_ref(device: &dyn Device) -> Result<&Arc<LightingDivisionHost>> 
 }
 
 pub async fn lighting_add_segment(
-    id: String,
+    id: DeviceId,
     channel_id: String,
     name: String,
     led_count: u32,
@@ -88,9 +89,9 @@ pub async fn lighting_add_segment(
 }
 
 pub async fn lighting_remove_segment(
-    id: String,
+    id: DeviceId,
     channel_id: String,
-    child_device_id: String,
+    child_device_id: DeviceId,
     app: Arc<AppState>,
 ) -> Result<()> {
     let device = crate::domain::registry::require_device_owned_id(&id, &app).await?;
@@ -101,7 +102,7 @@ pub async fn lighting_remove_segment(
         app.device_registry
             .write()
             .await
-            .retain(|d| d.id() != removed_id);
+            .retain(|d| *d.id() != removed_id);
     }
 
     persist_layout(&app, device.as_ref()).await?;
@@ -110,9 +111,9 @@ pub async fn lighting_remove_segment(
 }
 
 pub async fn lighting_reorder_segment(
-    id: String,
+    id: DeviceId,
     channel_id: String,
-    child_device_id: String,
+    child_device_id: DeviceId,
     new_index: usize,
     app: Arc<AppState>,
 ) -> Result<()> {
@@ -129,7 +130,7 @@ pub async fn lighting_reorder_segment(
 }
 
 pub async fn lighting_detect_segments(
-    id: String,
+    id: DeviceId,
     channel_id: String,
     app: Arc<AppState>,
 ) -> Result<()> {
@@ -229,7 +230,7 @@ mod tests {
             Arc::new(MockDevice::new("dev1").with_chain(vec![channel("ch0", "Channel 0", 100)]));
         let app = app_with(vec![dev]);
         let err = lighting_add_segment(
-            "dev1".into(),
+            "dev1".parse().unwrap(),
             "ch0".into(),
             "strip".into(),
             0,
@@ -284,7 +285,7 @@ mod tests {
         let app = app_with(vec![dev.clone()]);
         // Pre-seed a stale entry so we can confirm it's removed.
         app.config.write().await.device_layouts.insert(
-            "dev1".into(),
+            "dev1".parse().unwrap(),
             DeviceLayout {
                 channels: Default::default(),
             },
@@ -309,13 +310,13 @@ mod tests {
         {
             let mut cfg = app.config.write().await;
             cfg.device_layouts.insert(
-                "dev1".into(),
+                "dev1".parse().unwrap(),
                 DeviceLayout {
                     channels: std::collections::HashMap::from([(
                         "ch0".into(),
                         ChannelLayoutRecord {
                             chain_links: vec![ChainLinkRecord {
-                                id: "bad-link".into(),
+                                id: "bad-link".parse().unwrap(),
                                 name: "Bad Link".into(),
                                 topology: strip_topology(),
                                 led_count: 1,
@@ -342,13 +343,13 @@ mod tests {
             Arc::new(MockDevice::new("dev1").with_chain(vec![channel("ch0", "Channel 0", 100)]));
         let app = app_with(vec![dev.clone()]);
         app.config.write().await.device_layouts.insert(
-            "dev1".into(),
+            "dev1".parse().unwrap(),
             DeviceLayout {
                 channels: std::collections::HashMap::from([(
                     "ch0".into(),
                     ChannelLayoutRecord {
                         chain_links: vec![ChainLinkRecord {
-                            id: "stable-child-id".into(),
+                            id: "stable-child-id".parse().unwrap(),
                             name: "Restored strip".into(),
                             topology: ZoneTopology::Linear,
                             led_count: 16,

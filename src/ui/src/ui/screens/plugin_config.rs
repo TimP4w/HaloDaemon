@@ -9,6 +9,7 @@ use halod_shared::types::{PluginConfigField, PluginConfigFieldKind, PluginInfo, 
 
 use crate::ui::components::{self as widgets, ButtonKind};
 use crate::ui::theme;
+use halod_shared::ids::PluginId;
 
 #[derive(Debug, Clone, Copy, PartialEq, Eq)]
 enum ConfigEditor {
@@ -51,12 +52,12 @@ fn config_field_visible(field: &PluginConfigField, edits: &HashMap<String, Strin
 /// `config_values` (which never carries a secret's plaintext) — so an
 /// untouched secure field sends nothing and the stored secret is left alone.
 pub fn seed_config_edit_if_needed(
-    edit: &mut Option<(String, HashMap<String, String>)>,
-    plugin_id: &str,
+    edit: &mut Option<(PluginId, HashMap<String, String>)>,
+    plugin_id: &PluginId,
     config_values: &HashMap<String, String>,
 ) {
     if edit.as_ref().map(|(id, _)| id.as_str()) != Some(plugin_id) {
-        *edit = Some((plugin_id.to_owned(), config_values.clone()));
+        *edit = Some((plugin_id.clone(), config_values.clone()));
     }
 }
 
@@ -341,29 +342,29 @@ mod tests {
     #[test]
     fn seed_config_edit_initializes_from_config_values_on_first_use() {
         let mut edit = None;
-        let values = HashMap::from([("host".to_string(), "1.2.3.4".to_string())]);
-        seed_config_edit_if_needed(&mut edit, "openrgb", &values);
-        assert_eq!(edit, Some(("openrgb".to_string(), values)));
+        let values = HashMap::from([("host".into(), "1.2.3.4".into())]);
+        seed_config_edit_if_needed(&mut edit, &"openrgb".parse().unwrap(), &values);
+        assert_eq!(edit, Some(("openrgb".parse().unwrap(), values)));
     }
 
     #[test]
     fn seed_config_edit_resets_on_plugin_change_but_not_same_plugin() {
         let mut edit = Some((
-            "openrgb".to_string(),
+            "openrgb".parse::<PluginId>().unwrap(),
             HashMap::from([("host".to_string(), "typed-value".to_string())]),
         ));
         let stored = HashMap::from([("host".to_string(), "1.2.3.4".to_string())]);
 
         // Same plugin still selected: keep whatever the user is typing.
-        seed_config_edit_if_needed(&mut edit, "openrgb", &stored);
+        seed_config_edit_if_needed(&mut edit, &"openrgb".parse().unwrap(), &stored);
         assert_eq!(
             edit.as_ref().unwrap().1.get("host"),
             Some(&"typed-value".to_string())
         );
 
         // Selection moved to a different plugin: reseed from its own values.
-        seed_config_edit_if_needed(&mut edit, "other", &stored);
-        assert_eq!(edit, Some(("other".to_string(), stored)));
+        seed_config_edit_if_needed(&mut edit, &"other".parse().unwrap(), &stored);
+        assert_eq!(edit, Some(("other".parse().unwrap(), stored)));
     }
 
     #[test]

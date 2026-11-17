@@ -10,14 +10,16 @@ use serde::Deserialize;
 use sha2::{Digest, Sha256};
 
 use crate::{hex_lower, PluginApi};
+use halod_shared::ids::PluginId;
 
 pub const MAX_ARCHIVE_BYTES: u64 = 64 * 1024 * 1024;
 const MAX_EXTRACTED_BYTES: u64 = 256 * 1024 * 1024;
 const MAX_ARCHIVE_ENTRIES: usize = 4096;
+const TAR_SLACK: u64 = 2 * 1024 * 1024;
 
 #[derive(Debug, Clone, PartialEq, Eq, Deserialize)]
 pub struct PackageMeta {
-    pub id: String,
+    pub id: PluginId,
     pub version: semver::Version,
     pub api: PluginApi,
 }
@@ -25,7 +27,7 @@ pub struct PackageMeta {
 pub fn read_package_meta(package_dir: &Path) -> Result<PackageMeta> {
     #[derive(Deserialize)]
     struct Raw {
-        id: String,
+        id: PluginId,
         version: String,
         api: PluginApi,
     }
@@ -33,7 +35,6 @@ pub fn read_package_meta(package_dir: &Path) -> Result<PackageMeta> {
     let bytes = fs::read(&path).with_context(|| format!("reading {}", path.display()))?;
     let raw: Raw =
         serde_yaml::from_slice(&bytes).with_context(|| format!("parsing {}", path.display()))?;
-    validate_identifier("plugin id", &raw.id)?;
     let version = semver::Version::parse(&raw.version)
         .with_context(|| format!("parsing plugin '{}' version", raw.id))?;
     Ok(PackageMeta {
@@ -83,6 +84,10 @@ pub fn package_hash(package_dir: &Path) -> Result<String> {
 }
 
 pub fn write_archive(package_dir: &Path) -> Result<Vec<u8>> {
+    write_archive_within(package_dir, MAX_ARCHIVE_BYTES)
+}
+
+fn write_archive_within(package_dir: &Path, max_bytes: u64) -> Result<Vec<u8>> {
     let mut builder = tar::Builder::new(GzEncoder::new(Vec::new(), Compression::best()));
     for (relative, path) in sorted_files(package_dir)? {
         let bytes = fs::read(&path).with_context(|| format!("reading package file {relative}"))?;
@@ -98,13 +103,17 @@ pub fn write_archive(package_dir: &Path) -> Result<Vec<u8>> {
             .with_context(|| format!("archiving {relative}"))?;
     }
     let bytes = builder.into_inner()?.finish()?;
-    if bytes.len() as u64 > MAX_ARCHIVE_BYTES {
-        bail!("package archive exceeds {MAX_ARCHIVE_BYTES} bytes");
+    if bytes.len() as u64 > max_bytes {
+        bail!("package archive exceeds {max_bytes} bytes");
     }
     Ok(bytes)
 }
 
 pub fn extract_archive(bytes: &[u8], destination: &Path) -> Result<()> {
+    extract_archive_within(bytes, destination, MAX_EXTRACTED_BYTES)
+}
+
+fn extract_archive_within(bytes: &[u8], destination: &Path, max_extracted: u64) -> Result<()> {
     if destination.exists() {
         bail!(
             "extraction target already exists: {}",
@@ -112,7 +121,8 @@ pub fn extract_archive(bytes: &[u8], destination: &Path) -> Result<()> {
         );
     }
     fs::create_dir_all(destination)?;
-    let mut archive = tar::Archive::new(flate2::read::GzDecoder::new(bytes));
+    let stream = flate2::read::GzDecoder::new(bytes).take(max_extracted.saturating_add(TAR_SLACK));
+    let mut archive = tar::Archive::new(stream);
     let mut extracted = 0_u64;
     for (index, entry) in archive
         .entries()
@@ -136,8 +146,8 @@ pub fn extract_archive(bytes: &[u8], destination: &Path) -> Result<()> {
             bail!("package archive contains a link or special file: {relative}");
         }
         extracted = extracted.saturating_add(entry.size());
-        if extracted > MAX_EXTRACTED_BYTES {
-            bail!("package archive expands beyond {MAX_EXTRACTED_BYTES} bytes");
+        if extracted > max_extracted {
+            bail!("package archive expands beyond {max_extracted} bytes");
         }
         if let Some(parent) = target.parent() {
             fs::create_dir_all(parent)?;
@@ -174,17 +184,6 @@ pub fn normalized_relative_path(path: &Path) -> Result<String> {
         bail!("invalid relative path '{}'", path.display());
     }
     Ok(parts.join("/"))
-}
-
-pub fn validate_identifier(label: &str, value: &str) -> Result<()> {
-    if value.is_empty()
-        || !value
-            .bytes()
-            .all(|byte| byte.is_ascii_alphanumeric() || matches!(byte, b'_' | b'-'))
-    {
-        bail!("{label} '{value}' must contain only ASCII letters, digits, '_' or '-'");
-    }
-    Ok(())
 }
 
 fn sorted_files(root: &Path) -> Result<Vec<(String, PathBuf)>> {
@@ -331,6 +330,42 @@ pub(crate) mod tests {
         header.set_cksum();
         builder.append(&header, &b"x"[..]).unwrap();
         builder.into_inner().unwrap().finish().unwrap()
+    }
+
+    #[test]
+    fn a_long_name_entry_cannot_expand_past_the_stream_cap() {
+        let mut builder = tar::Builder::new(GzEncoder::new(Vec::new(), Compression::fast()));
+        let mut header = tar::Header::new_gnu();
+        header.set_entry_type(tar::EntryType::Regular);
+        header.set_mode(0o644);
+        header.set_size(1);
+        let long_name = "a".repeat(8 * 1024 * 1024);
+        builder
+            .append_data(&mut header, &long_name, &b"x"[..])
+            .unwrap();
+        let archive = builder.into_inner().unwrap().finish().unwrap();
+        let out = tempfile::tempdir().unwrap();
+        assert!(extract_archive_within(&archive, &out.path().join("x"), 4096).is_err());
+    }
+
+    #[test]
+    fn an_archive_over_the_byte_cap_is_refused() {
+        let root = tempfile::tempdir().unwrap();
+        let dir = package(root.path(), "demo", "1.0.0", "3.0");
+        let error = write_archive_within(&dir, 16).unwrap_err();
+        assert!(error.to_string().contains("exceeds 16 bytes"), "{error}");
+        assert!(write_archive_within(&dir, MAX_ARCHIVE_BYTES).is_ok());
+    }
+
+    #[cfg(unix)]
+    #[test]
+    fn a_package_directory_with_a_symlink_is_refused() {
+        let root = tempfile::tempdir().unwrap();
+        let dir = package(root.path(), "demo", "1.0.0", "3.0");
+        assert!(reject_symlinks(&dir).is_ok());
+        std::os::unix::fs::symlink(dir.join("plugin.yaml"), dir.join("alias.yaml")).unwrap();
+        assert!(reject_symlinks(&dir).is_err());
+        assert!(write_archive(&dir).is_err());
     }
 
     #[test]

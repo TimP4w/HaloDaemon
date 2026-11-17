@@ -172,11 +172,16 @@ fn axis(
             4 => Align2::RIGHT_TOP,
             _ => Align2::CENTER_TOP,
         };
+        let x = rect.left() + rect.width() * dpi_t(v as f32, lo as f32, hi as f32);
+        p.line_segment(
+            [
+                Pos2::new(x, track.top() - 6.0),
+                Pos2::new(x, track.bottom() + 6.0),
+            ],
+            Stroke::new(1.0, theme::TEXT_FAINT2),
+        );
         p.text(
-            Pos2::new(
-                rect.left() + rect.width() * k as f32 / 4.0,
-                rect.top() + 70.0,
-            ),
+            Pos2::new(x, rect.top() + 70.0),
             align,
             v.to_string(),
             theme::caption(),
@@ -373,6 +378,15 @@ mod tests {
     }
 
     proptest::proptest! {
+        #[test]
+        fn each_tick_label_sits_on_its_own_dpi(lo in 50u32..800, span in 4u32..400) {
+            let hi = lo * span;
+            for (k, v) in tick_labels(lo, hi).into_iter().enumerate() {
+                let t = dpi_t(v as f32, lo as f32, hi as f32);
+                proptest::prop_assert!((t - k as f32 / 4.0).abs() < 1e-2);
+            }
+        }
+
         #[test]
         fn dpi_t_is_monotonic_and_bounded(a in 1.0f32..30000.0, b in 1.0f32..30000.0) {
             let (ta, tb) = (dpi_t(a, 100.0, 25600.0), dpi_t(b, 100.0, 25600.0));

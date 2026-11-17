@@ -13,15 +13,9 @@ notify:
   key_remap_unavailable:
     title: Rimappatura tasti non disponibile
     message: "Impossibile inizializzare il sistema di esecuzione delle azioni: %{detail}"
-  device_reconnect_failed:
-    title: Il dispositivo non si è riconnesso
-    message: "%{device} non è risultato disponibile dopo 6 tentativi di riconnessione."
   profile_switched:
     title: Profilo cambiato
     message: "Ora usi '%{profile}'"
-  chain_link_restore_failed:
-    title: "Impossibile ripristinare il collegamento \"%{name}\" della catena"
-    message: "%{detail}. Il collegamento è stato rimosso dalla disposizione salvata."
   device_init_failed:
     title: "Impossibile inizializzare %{device}"
     message: "%{detail}"
@@ -42,6 +36,9 @@ notify:
   plugin_recommended:
     title: Plugin consigliato disponibile
     message: "%{plugin} è consigliato per questo sistema. Apri Plugin per attivarlo."
+  plugin_update_needs_permissions:
+    title: "%{plugin} è stato aggiornato e richiede più permessi"
+    message: Resta disattivato finché non lo riattivi in Plugin, dove puoi controllarne i permessi.
 
 tray:
   open: Apri HaloDaemon
@@ -59,7 +56,7 @@ onboarding:
   done_sensors: sensori disponibili
   done_plugins: plugin attivi
   done_devices: dispositivi trovati
-  done_sub: halod è in esecuzione e i tuoi dispositivi sono pronti.
+  done_sub: HaloDaemon è in esecuzione e i tuoi dispositivi sono pronti.
   skip: Salta per ora
   recommended: Consigliato
   language_sub: Puoi cambiarla in qualsiasi momento dalle Impostazioni
@@ -72,10 +69,10 @@ onboarding:
   step_prefs: Preferenze
   step_plugins: Plugin
   step_done: Fine
-  welcome_title: Benvenuto in halod
+  welcome_title: Benvenuto in HaloDaemon
   welcome_body: Gestisci luci, ventole, pompe e sensori da un unico posto. La configurazione richiede circa un minuto.
   health_title: Verifica del sistema
-  health_sub: halod verifica gli accessi di sistema di cui ha bisogno il tuo hardware. Gli elementi opzionali mancanti disattivano solo la funzione associata.
+  health_sub: HaloDaemon verifica gli accessi di sistema di cui ha bisogno il tuo hardware. Gli elementi opzionali mancanti disattivano solo la funzione associata.
   health_checking: Controllo del sistema…
   health_ok: Il sistema è pronto.
   prefs_title: Alcune preferenze
@@ -92,5 +89,5 @@ onboarding:
   p_scan: Trova plugin
   p_install: "Installa %{n}"
   p_finish: Completa
-  p_enter: Apri halod
+  p_enter: Apri HaloDaemon
   p_continue: Continua

@@ -54,10 +54,9 @@ fn open(
     })
 }
 
-pub(super) const DESCRIPTOR: PluginTransportDescriptor = PluginTransportDescriptor {
+pub(super) const DESCRIPTOR: PluginTransportDescriptor = PluginTransportDescriptor::Configured {
     kind: "serial",
     open,
-    discovery: None,
 };
 
 #[cfg(test)]

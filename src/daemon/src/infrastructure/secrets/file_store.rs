@@ -20,6 +20,7 @@ use std::sync::OnceLock;
 
 use super::SecretStore;
 use crate::config;
+use halod_shared::ids::PluginId;
 
 const KEY_FILE: &str = "secret.key";
 const SECRETS_FILE: &str = "plugin_secrets.yaml";
@@ -27,7 +28,7 @@ const SECRETS_FILE: &str = "plugin_secrets.yaml";
 #[derive(Debug, Clone, Default, Serialize, Deserialize)]
 struct SecretsFile {
     #[serde(default, skip_serializing_if = "HashMap::is_empty")]
-    secrets: HashMap<String, HashMap<String, String>>,
+    secrets: HashMap<PluginId, HashMap<String, String>>,
 }
 
 pub struct FileKeyStore {
@@ -105,18 +106,18 @@ impl Default for FileKeyStore {
 }
 
 impl SecretStore for FileKeyStore {
-    fn set(&self, plugin_id: &str, key: &str, plaintext: &str) -> Result<()> {
+    fn set(&self, plugin_id: &PluginId, key: &str, plaintext: &str) -> Result<()> {
         let token = self.encrypt(plaintext)?;
         let mut state = self.state.write();
         state
             .secrets
-            .entry(plugin_id.to_owned())
+            .entry(plugin_id.clone())
             .or_default()
             .insert(key.to_owned(), token);
         self.persist(&state)
     }
 
-    fn get(&self, plugin_id: &str, key: &str) -> Result<Option<String>> {
+    fn get(&self, plugin_id: &PluginId, key: &str) -> Result<Option<String>> {
         let token = {
             let state = self.state.read();
             state
@@ -128,7 +129,7 @@ impl SecretStore for FileKeyStore {
         token.map(|t| self.decrypt(&t)).transpose()
     }
 
-    fn delete(&self, plugin_id: &str, key: &str) -> Result<()> {
+    fn delete(&self, plugin_id: &PluginId, key: &str) -> Result<()> {
         let mut state = self.state.write();
         let mut changed = false;
         if let Some(m) = state.secrets.get_mut(plugin_id) {
@@ -195,21 +196,19 @@ mod tests {
     use super::*;
 
     fn with_tmp_config<R>(f: impl FnOnce() -> R) -> R {
-        let dir = tempfile::tempdir().unwrap();
-        let _guard = crate::test_support::HALOD_CONFIG_DIR_LOCK.lock();
-        unsafe { std::env::set_var("HALOD_CONFIG_DIR", dir.path()) };
-        let result = f();
-        unsafe { std::env::remove_var("HALOD_CONFIG_DIR") };
-        result
+        let _dir = crate::test_support::tmp_config_dir();
+        f()
     }
 
     #[test]
     fn round_trips_a_secret() {
         with_tmp_config(|| {
             let store = FileKeyStore::new();
-            store.set("openrgb", "token", "s3cr3t").unwrap();
+            store
+                .set(&"openrgb".parse().unwrap(), "token", "s3cr3t")
+                .unwrap();
             assert_eq!(
-                store.get("openrgb", "token").unwrap(),
+                store.get(&"openrgb".parse().unwrap(), "token").unwrap(),
                 Some("s3cr3t".to_string())
             );
         });
@@ -219,7 +218,10 @@ mod tests {
     fn missing_key_returns_none_not_error() {
         with_tmp_config(|| {
             let store = FileKeyStore::new();
-            assert_eq!(store.get("openrgb", "nope").unwrap(), None);
+            assert_eq!(
+                store.get(&"openrgb".parse().unwrap(), "nope").unwrap(),
+                None
+            );
         });
     }
 
@@ -227,9 +229,14 @@ mod tests {
     fn delete_removes_the_value() {
         with_tmp_config(|| {
             let store = FileKeyStore::new();
-            store.set("openrgb", "token", "s3cr3t").unwrap();
-            store.delete("openrgb", "token").unwrap();
-            assert_eq!(store.get("openrgb", "token").unwrap(), None);
+            store
+                .set(&"openrgb".parse().unwrap(), "token", "s3cr3t")
+                .unwrap();
+            store.delete(&"openrgb".parse().unwrap(), "token").unwrap();
+            assert_eq!(
+                store.get(&"openrgb".parse().unwrap(), "token").unwrap(),
+                None
+            );
         });
     }
 
@@ -237,7 +244,7 @@ mod tests {
     fn delete_of_absent_key_is_not_an_error() {
         with_tmp_config(|| {
             let store = FileKeyStore::new();
-            assert!(store.delete("openrgb", "nope").is_ok());
+            assert!(store.delete(&"openrgb".parse().unwrap(), "nope").is_ok());
         });
     }
 
@@ -245,11 +252,12 @@ mod tests {
     fn key_file_is_created_and_reused_across_instances() {
         with_tmp_config(|| {
             let a = FileKeyStore::new();
-            a.set("openrgb", "token", "s3cr3t").unwrap();
+            a.set(&"openrgb".parse().unwrap(), "token", "s3cr3t")
+                .unwrap();
             // A second store instance must load the same key and decrypt fine.
             let b = FileKeyStore::new();
             assert_eq!(
-                b.get("openrgb", "token").unwrap(),
+                b.get(&"openrgb".parse().unwrap(), "token").unwrap(),
                 Some("s3cr3t".to_string())
             );
         });
@@ -269,7 +277,9 @@ mod tests {
         use std::os::unix::fs::PermissionsExt;
         with_tmp_config(|| {
             let store = FileKeyStore::new();
-            store.set("openrgb", "token", "s3cr3t").unwrap();
+            store
+                .set(&"openrgb".parse().unwrap(), "token", "s3cr3t")
+                .unwrap();
             let meta = std::fs::metadata(key_file_path()).unwrap();
             assert_eq!(meta.permissions().mode() & 0o777, 0o600);
         });
@@ -279,7 +289,9 @@ mod tests {
     fn ciphertext_never_contains_the_plaintext_secret() {
         with_tmp_config(|| {
             let store = FileKeyStore::new();
-            store.set("openrgb", "token", "super-secret-value").unwrap();
+            store
+                .set(&"openrgb".parse().unwrap(), "token", "super-secret-value")
+                .unwrap();
             let raw = std::fs::read_to_string(secrets_file_path()).unwrap();
             assert!(!raw.contains("super-secret-value"));
         });
@@ -291,7 +303,9 @@ mod tests {
             std::fs::create_dir_all(key_file_path().parent().unwrap()).unwrap();
             std::fs::write(key_file_path(), [0u8; 10]).unwrap();
             let store = FileKeyStore::new();
-            assert!(store.set("openrgb", "token", "s3cr3t").is_err());
+            assert!(store
+                .set(&"openrgb".parse().unwrap(), "token", "s3cr3t")
+                .is_err());
             // The malformed key must be preserved, not silently replaced.
             assert_eq!(std::fs::read(key_file_path()).unwrap().len(), 10);
         });

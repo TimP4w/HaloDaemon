@@ -190,7 +190,7 @@ mod tests {
 
     fn device_with_batteries(name: &str, batteries: Vec<Battery>) -> WireDevice {
         WireDevice {
-            id: name.to_string(),
+            id: name.parse().unwrap(),
             name: name.to_string(),
             device_type: DeviceType::Mouse,
             connected: true,

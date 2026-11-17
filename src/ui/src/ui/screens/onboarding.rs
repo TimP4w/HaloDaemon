@@ -14,6 +14,7 @@ use crate::ui::components::{self as widgets, ButtonKind};
 use crate::ui::screens::depcheck;
 use crate::ui::screens::settings;
 use crate::ui::theme;
+use halod_shared::ids::PluginId;
 
 const WELCOME: u8 = 0;
 const HEALTH: u8 = 1;
@@ -35,13 +36,13 @@ pub struct OnboardingUi {
     scan_started: Option<f64>,
     refresh_started: Option<f64>,
     /// Plugin id → selected for installation.
-    selected: HashMap<String, bool>,
+    selected: HashMap<PluginId, bool>,
     start_on_boot: Option<bool>,
-    enable_after_install: Vec<String>,
+    enable_after_install: Vec<PluginId>,
 }
 
 impl OnboardingUi {
-    pub fn take_enable_requests(&mut self) -> Vec<String> {
+    pub fn take_enable_requests(&mut self) -> Vec<PluginId> {
         std::mem::take(&mut self.enable_after_install)
     }
 
@@ -63,21 +64,36 @@ pub enum Outcome {
     Finished,
 }
 
-fn is_selected(st: &OnboardingUi, id: &str) -> bool {
+fn is_selected(st: &OnboardingUi, id: &PluginId) -> bool {
     st.selected.get(id).copied().unwrap_or(false)
+}
+
+fn recommends(rec: &PluginRecommendation, entry: &AvailablePlugin) -> bool {
+    rec.plugin_id == entry.id
+        && rec
+            .install_from
+            .as_deref()
+            .is_none_or(|repo| repo == entry.repo)
 }
 
 /// Official plugins that can be installed on this build and aren't yet.
 fn plugin_candidates(plugins: &PluginsState) -> Vec<&AvailablePlugin> {
-    plugins
-        .available
-        .iter()
-        .filter(|entry| {
-            entry.repo == OFFICIAL_REPO_SLUG
-                && entry.compatible
-                && !plugins.plugins.iter().any(|p| p.id == entry.id)
-        })
-        .collect()
+    let mut candidates: Vec<&AvailablePlugin> = Vec::new();
+    for entry in &plugins.available {
+        let offered = entry.repo == OFFICIAL_REPO_SLUG
+            || plugins.recommendations.iter().any(|rec| {
+                rec.install_from.as_deref() == Some(entry.repo.as_str())
+                    && rec.plugin_id == entry.id
+            });
+        if offered
+            && entry.compatible
+            && !plugins.plugins.iter().any(|p| p.id == entry.id)
+            && !candidates.iter().any(|c| c.id == entry.id)
+        {
+            candidates.push(entry);
+        }
+    }
+    candidates
 }
 
 fn seed_plugin_selection(
@@ -86,7 +102,7 @@ fn seed_plugin_selection(
     plugins: &PluginsState,
 ) {
     for entry in plugin_candidates(plugins) {
-        if recommendations.iter().any(|r| r.plugin_id == entry.id) {
+        if recommendations.iter().any(|r| recommends(r, entry)) {
             // Absent already means off; inserting false now would make the
             // pending recommendation snapshot look like an explicit opt-out.
             st.selected.entry(entry.id.clone()).or_insert(true);
@@ -127,11 +143,10 @@ fn active_dot(step: u8) -> usize {
     }
 }
 
-fn install_targets(st: &OnboardingUi, plugins: &PluginsState) -> Vec<String> {
+fn install_targets<'a>(st: &OnboardingUi, plugins: &'a PluginsState) -> Vec<&'a AvailablePlugin> {
     plugin_candidates(plugins)
         .into_iter()
         .filter(|entry| is_selected(st, &entry.id))
-        .map(|entry| entry.id.clone())
         .collect()
 }
 
@@ -441,7 +456,6 @@ fn step_plugins(
     cmd: &CommandTx,
     time: f64,
 ) {
-    let candidates = plugin_candidates(&state.plugins);
     let catalog_loaded = state
         .plugins
         .available
@@ -496,31 +510,47 @@ fn step_plugins(
         .max_height(LIST_MAX_H)
         .show(ui, |ui| {
             ui.spacing_mut().item_spacing.y = theme::SPACE_4;
-            for entry in candidates {
-                let on = is_selected(st, &entry.id);
-                let note = if state
-                    .plugins
-                    .recommendations
-                    .iter()
-                    .any(|r| r.plugin_id == entry.id)
-                {
+            for row in plugin_rows(st, &state.plugins) {
+                let note = if row.recommended {
                     recommended.as_ref()
                 } else {
                     ""
                 };
                 if widgets::check_row(
                     ui,
-                    &entry.id,
-                    Some(&entry.version),
+                    row.label,
+                    Some(row.version),
                     (!note.is_empty()).then_some((note, theme::TEXT_SOFT)),
-                    on,
+                    row.selected,
                 )
                 .clicked()
                 {
-                    st.selected.insert(entry.id.clone(), !on);
+                    st.selected.insert(row.id.clone(), !row.selected);
                 }
             }
         });
+}
+
+#[derive(Debug, PartialEq, Eq)]
+struct PluginRow<'a> {
+    id: &'a PluginId,
+    label: &'a str,
+    version: &'a str,
+    recommended: bool,
+    selected: bool,
+}
+
+fn plugin_rows<'a>(st: &OnboardingUi, plugins: &'a PluginsState) -> Vec<PluginRow<'a>> {
+    plugin_candidates(plugins)
+        .into_iter()
+        .map(|entry| PluginRow {
+            id: &entry.id,
+            label: &entry.name,
+            version: &entry.version,
+            recommended: plugins.recommendations.iter().any(|r| recommends(r, entry)),
+            selected: is_selected(st, &entry.id),
+        })
+        .collect()
 }
 
 fn step_done(ui: &mut egui::Ui, st: &OnboardingUi, state: &TopicStore) {
@@ -641,12 +671,17 @@ fn advance_primary(
             st.scan_started = None;
         }
         PLUGINS => {
-            for id in install_targets(st, &state.plugins) {
+            let targets: Vec<(String, PluginId)> = install_targets(st, &state.plugins)
+                .into_iter()
+                .map(|entry| (entry.repo.clone(), entry.id.clone()))
+                .collect();
+            for (repo, id) in targets {
                 ipc::send(
                     cmd,
                     DaemonCommand::InstallPlugin {
-                        repo: OFFICIAL_REPO_SLUG.to_owned(),
+                        repo,
                         id: id.clone(),
+                        permissions_confirmed: false,
                     },
                 );
                 st.enable_after_install.push(id);
@@ -677,9 +712,10 @@ mod tests {
 
     fn rec(id: &str) -> PluginRecommendation {
         PluginRecommendation {
-            plugin_id: id.into(),
+            plugin_id: id.parse().unwrap(),
             plugin_name: id.into(),
             hardware: PluginRecommendationMatch::Hid { vid: 1, pid: 2 },
+            install_from: None,
             accessible: true,
         }
     }
@@ -708,11 +744,14 @@ mod tests {
             available: ids
                 .iter()
                 .map(|id| AvailablePlugin {
+                    matches: Default::default(),
                     repo: OFFICIAL_REPO_SLUG.into(),
-                    id: (*id).into(),
+                    id: (*id).parse().unwrap(),
+                    name: id.to_uppercase(),
                     version: "1.0.0".into(),
                     api: "3.0".into(),
                     compatible: true,
+                    uses: Default::default(),
                 })
                 .collect(),
             ..Default::default()
@@ -724,6 +763,7 @@ mod tests {
         let mut plugins = catalog(&["a", "b", "c"]);
         plugins.available[1].compatible = false;
         plugins.available.push(AvailablePlugin {
+            matches: Default::default(),
             repo: "other".into(),
             ..plugins.available[0].clone()
         });
@@ -739,6 +779,58 @@ mod tests {
     }
 
     #[test]
+    fn plugin_rows_show_the_display_name_and_keep_the_id_as_key() {
+        let mut plugins = catalog(&["kraken"]);
+        plugins.recommendations = vec![rec("kraken")];
+        let st = OnboardingUi::default();
+        let kraken: PluginId = "kraken".parse().unwrap();
+        assert_eq!(
+            plugin_rows(&st, &plugins),
+            [PluginRow {
+                id: &kraken,
+                label: "KRAKEN",
+                version: "1.0.0",
+                recommended: true,
+                selected: false,
+            }]
+        );
+    }
+
+    #[test]
+    fn a_catalog_only_recommendation_from_another_repo_installs_from_that_repo() {
+        let (cmd, mut rx) = tokio::sync::mpsc::unbounded_channel();
+        let mut plugins = catalog(&[]);
+        plugins.available.push(AvailablePlugin {
+            matches: Default::default(),
+            repo: "community".into(),
+            id: "fan".parse().unwrap(),
+            name: "Fan".into(),
+            version: "1.0.0".into(),
+            api: "3.0".into(),
+            compatible: true,
+            uses: Default::default(),
+        });
+        let mut recommendation = rec("fan");
+        recommendation.install_from = Some("community".into());
+        plugins.recommendations = vec![recommendation];
+        let state = TopicStore {
+            plugins,
+            ..Default::default()
+        };
+        let mut st = OnboardingUi {
+            step: PLUGINS,
+            ..Default::default()
+        };
+        seed_plugin_selection(&mut st, &state.plugins.recommendations, &state.plugins);
+        let mut outcome = Outcome::Pending;
+        advance_primary(&mut st, &state, &cmd, &mut outcome);
+        assert!(matches!(
+            rx.try_recv(),
+            Ok(DaemonCommand::InstallPlugin { repo, id, .. }) if repo == "community" && id == "fan"
+        ));
+    }
+
+    #[test]
     fn recommendations_preselect_without_overriding_an_opt_out() {
         let mut st = OnboardingUi::default();
         let plugins = catalog(&["a", "b"]);
@@ -749,7 +841,7 @@ mod tests {
         seed_plugin_selection(&mut st, &[rec("a")], &plugins);
         assert_eq!(active_count(&st, &plugins), 1);
 
-        st.selected.insert("a".into(), false);
+        st.selected.insert("a".parse().unwrap(), false);
         seed_plugin_selection(&mut st, &[rec("a")], &plugins);
         assert_eq!(active_count(&st, &plugins), 0);
     }
@@ -763,7 +855,7 @@ mod tests {
         };
         let mut st = OnboardingUi {
             step: PLUGINS,
-            selected: HashMap::from([("a".into(), true)]),
+            selected: HashMap::from([("a".parse().unwrap(), true)]),
             ..Default::default()
         };
         let mut outcome = Outcome::Pending;
@@ -772,7 +864,7 @@ mod tests {
         assert_eq!(st.step, DONE);
         assert!(matches!(
             rx.try_recv(),
-            Ok(DaemonCommand::InstallPlugin { repo, id }) if repo == OFFICIAL_REPO_SLUG && id == "a"
+            Ok(DaemonCommand::InstallPlugin { repo, id, .. }) if repo == OFFICIAL_REPO_SLUG && id == "a"
         ));
         assert!(rx.try_recv().is_err());
         assert_eq!(st.take_enable_requests(), ["a"]);

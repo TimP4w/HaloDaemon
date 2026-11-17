@@ -3,7 +3,7 @@ use super::*;
 
 #[derive(Debug, Clone, Serialize, Deserialize)]
 pub struct LedFrameEntry {
-    pub device_id: String,
+    pub device_id: crate::ids::DeviceId,
     pub channel_id: String,
     pub led_id: u32,
     pub color: RgbColor,
@@ -38,9 +38,9 @@ pub enum SamplingMode {
     Unrolled,
 }
 
-#[derive(Debug, Clone, Serialize, Deserialize, Default)]
+#[derive(Debug, Clone, PartialEq, Serialize, Deserialize, Default)]
 pub struct PlacedZone {
-    pub device_id: String,
+    pub device_id: crate::ids::DeviceId,
     pub channel_id: String,
     pub x: f32,
     pub y: f32,
@@ -386,7 +386,7 @@ pub enum LightingDivision {
 
 #[derive(Debug, Clone, Serialize, Deserialize)]
 pub struct LightingSegmentInfo {
-    pub device_id: String,
+    pub device_id: crate::ids::DeviceId,
     pub channel_id: String,
     pub name: String,
     pub topology: ZoneTopology,

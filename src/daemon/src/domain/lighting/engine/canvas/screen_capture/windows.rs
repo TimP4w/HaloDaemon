@@ -180,12 +180,12 @@ fn run_dxgi_capture(
         let _ = setup_done.send(Ok(()));
 
         let frame_interval = std::time::Duration::from_millis(67); // ~15 fps
-        let mut last = std::time::Instant::now()
+        let mut last = tokio::time::Instant::now()
             .checked_sub(frame_interval)
-            .unwrap_or_else(std::time::Instant::now);
+            .unwrap_or_else(tokio::time::Instant::now);
 
         while !stop.load(Ordering::Relaxed) {
-            let now = std::time::Instant::now();
+            let now = tokio::time::Instant::now();
             if now.duration_since(last) < frame_interval {
                 std::thread::sleep(std::time::Duration::from_millis(10));
                 continue;

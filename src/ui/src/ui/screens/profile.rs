@@ -226,11 +226,14 @@ pub fn title_button(
     );
     x += name_width + 10.0;
     if switching {
-        let spin_rect = Rect::from_center_size(Pos2::new(x + 6.0, cy), Vec2::splat(10.0));
-        egui::Spinner::new()
-            .size(10.0)
-            .color(theme::TEXT_FAINT)
-            .paint_at(ui, spin_rect);
+        crate::ui::components::paint_spinner(
+            p,
+            Pos2::new(x + 6.0, cy),
+            10.0,
+            ui.input(|i| i.time) as f32,
+            theme::TEXT_FAINT,
+        );
+        ui.ctx().request_repaint();
     } else {
         crate::ui::components::paint_chevron(
             p,
@@ -325,11 +328,14 @@ pub fn title_dropdown(
             let dot_x = row_rect.left() + 14.0;
             let dot_y = row_rect.center().y;
             if is_switch_target {
-                let spin_rect = Rect::from_center_size(Pos2::new(dot_x, dot_y), Vec2::splat(10.0));
-                egui::Spinner::new()
-                    .size(10.0)
-                    .color(theme::CYAN)
-                    .paint_at(ui, spin_rect);
+                crate::ui::components::paint_spinner(
+                    ui.painter(),
+                    Pos2::new(dot_x, dot_y),
+                    10.0,
+                    ui.input(|i| i.time) as f32,
+                    theme::CYAN,
+                );
+                ui.ctx().request_repaint();
             } else if is_active {
                 theme::glow(ui.painter(), Pos2::new(dot_x, dot_y), 5.0, theme::CYAN, 0.5);
                 ui.painter()
@@ -1008,7 +1014,7 @@ fn overrides_section(
         let device_name = state
             .devices
             .iter()
-            .find(|d| &d.id == device_id)
+            .find(|d| d.id == device_id)
             .map_or(device_id.as_str(), |d| d.name.as_str());
         for (key, diff) in keys {
             let what = std::iter::once(capability_label(key).into_owned())

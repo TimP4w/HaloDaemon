@@ -2,6 +2,7 @@
 use super::*;
 use crate::domain::tour;
 use crate::domain::tour::AnchorId;
+use halod_shared::ids::PluginId;
 
 impl PluginsUi {
     pub(super) fn repositories(&mut self, ui: &mut egui::Ui, cx: &PluginsCtx) {
@@ -45,9 +46,13 @@ impl PluginsUi {
             let checking = self.checking_repo.is_some();
             match repo_row(ui, repo, selected, checking) {
                 RepoRowAction::Select => self.selection = Selection::Repo(repo.slug.clone()),
-                RepoRowAction::Refresh => {
-                    self.apply_repo_action(now, cx.cmd, repo, RepoAction::Refresh)
-                }
+                RepoRowAction::Refresh => self.apply_repo_action(
+                    now,
+                    cx.cmd,
+                    &cx.state.plugins,
+                    repo,
+                    RepoAction::Refresh,
+                ),
                 RepoRowAction::None => {}
             }
         }
@@ -126,6 +131,14 @@ impl PluginsUi {
         let view = RepoView {
             checking: self.checking_repo.is_some(),
             installing: &self.installing,
+            logos: cx
+                .state
+                .plugins
+                .plugins
+                .iter()
+                .filter(|p| p.repo == r.slug)
+                .filter_map(|p| Some((&p.id, self.logo(p)?)))
+                .collect(),
         };
         if view.checking || !view.installing.is_empty() {
             ui.ctx().request_repaint();
@@ -137,6 +150,7 @@ impl PluginsUi {
         &mut self,
         now: f64,
         cmd: &CommandTx,
+        state: &PluginsState,
         r: &PluginRepoInfo,
         action: RepoAction,
     ) {
@@ -152,9 +166,9 @@ impl PluginsUi {
             }
             RepoAction::Install(id) => {
                 self.enable_prompt.request(&id);
-                self.install(now, cmd, &r.slug, &id);
+                self.install(now, cmd, &r.slug, &id, false);
             }
-            RepoAction::Update(id) => self.install(now, cmd, &r.slug, &id),
+            RepoAction::Update(id) => self.request_updates(now, cmd, state, &[&id]),
             RepoAction::Delete => self.pending_repo_delete = Some(r.slug.clone()),
         }
     }
@@ -520,22 +534,23 @@ pub(super) fn repo_no_drivers_box(ui: &mut egui::Ui) {
 
 #[derive(Debug, Clone, PartialEq, Eq)]
 pub(super) enum RepoAction {
-    SelectPlugin(String),
+    SelectPlugin(PluginId),
     Refresh,
-    Install(String),
-    Update(String),
+    Install(PluginId),
+    Update(PluginId),
     Delete,
 }
 
 pub(super) struct RepoView<'a> {
     checking: bool,
-    installing: &'a HashMap<String, f64>,
+    installing: &'a HashMap<PluginId, f64>,
+    logos: HashMap<&'a PluginId, egui::TextureHandle>,
 }
 
 /// One row of a repository's plugin list: what it offers and what is installed.
 #[derive(Debug, Clone, PartialEq, Eq)]
 pub(super) struct RepoEntry<'a> {
-    pub(super) id: &'a str,
+    pub(super) id: &'a PluginId,
     pub(super) name: &'a str,
     pub(super) installed: Option<&'a str>,
     pub(super) available: Option<&'a AvailablePlugin>,
@@ -579,7 +594,7 @@ pub(super) fn repo_entries<'a>(slug: &str, state: &'a PluginsState) -> Vec<RepoE
         if !entries.iter().any(|e| e.id == available.id) {
             entries.push(RepoEntry {
                 id: &available.id,
-                name: &available.id,
+                name: &available.name,
                 installed: None,
                 available: Some(available),
             });
@@ -687,7 +702,10 @@ pub(super) fn repo_detail_body(
             Pos2::new(rect.left() + 6.0, rect.center().y - 12.0),
             Vec2::splat(24.0),
         );
-        initials_tile_at(ui, tile_rect, entry.name);
+        match view.logos.get(entry.id) {
+            Some(logo) => super::draw_logo_fit(ui.painter(), tile_rect, logo),
+            None => initials_tile_at(ui, tile_rect, entry.name),
+        }
         let text_x = tile_rect.right() + 10.0;
         ui.painter().text(
             Pos2::new(text_x, rect.top() + 6.0),
@@ -735,14 +753,14 @@ pub(super) fn repo_detail_body(
             None => {}
         }
         if let Some(kind) = clicked {
-            let id = entry.id.to_owned();
+            let id = entry.id.clone();
             action = Some(if kind == EntryAction::Install {
                 RepoAction::Install(id)
             } else {
                 RepoAction::Update(id)
             });
         } else if resp.clicked() && entry.installed.is_some() {
-            action = Some(RepoAction::SelectPlugin(entry.id.to_owned()));
+            action = Some(RepoAction::SelectPlugin(entry.id.clone()));
         }
     }
 
@@ -879,7 +897,10 @@ mod tests {
         ];
 
         let entries = repo_entries("official", &state);
-        let summary: Vec<_> = entries.iter().map(|e| (e.id, e.action())).collect();
+        let summary: Vec<_> = entries
+            .iter()
+            .map(|e| (e.id.as_str(), e.action()))
+            .collect();
         assert_eq!(
             summary,
             [
@@ -895,23 +916,30 @@ mod tests {
         let (cmd, mut rx) = tokio::sync::mpsc::unbounded_channel();
         let r = repo("acme");
         let mut ui = PluginsUi::default();
-        ui.apply_repo_action(1.0, &cmd, &r, RepoAction::Refresh);
+        let state = PluginsState::default();
+        ui.apply_repo_action(1.0, &cmd, &state, &r, RepoAction::Refresh);
         assert!(ui.checking_repo.is_some());
         assert!(matches!(
             rx.try_recv(),
             Ok(DaemonCommand::RefreshPluginRepos)
         ));
-        ui.apply_repo_action(2.0, &cmd, &r, RepoAction::Install("p".into()));
+        ui.apply_repo_action(
+            2.0,
+            &cmd,
+            &state,
+            &r,
+            RepoAction::Install("p".parse().unwrap()),
+        );
         assert!(ui.installing.contains_key("p"));
         assert!(matches!(
             rx.try_recv(),
-            Ok(DaemonCommand::InstallPlugin { repo, id }) if repo == "acme" && id == "p"
+            Ok(DaemonCommand::InstallPlugin { repo, id, .. }) if repo == "acme" && id == "p"
         ));
-        ui.apply_repo_action(3.0, &cmd, &r, RepoAction::Delete);
+        ui.apply_repo_action(3.0, &cmd, &state, &r, RepoAction::Delete);
         assert_eq!(ui.pending_repo_delete.as_deref(), Some("acme"));
     }
 
-    fn offered(ui: &mut PluginsUi, plugins: &[PluginInfo]) -> Option<String> {
+    fn offered(ui: &mut PluginsUi, plugins: &[PluginInfo]) -> Option<PluginId> {
         ui.enable_prompt
             .current(plugins)
             .map(|plugin| plugin.id.clone())
@@ -921,7 +949,13 @@ mod tests {
     fn installing_offers_the_enable_prompt_once_the_plugin_arrives_disabled() {
         let (cmd, _rx) = tokio::sync::mpsc::unbounded_channel();
         let mut ui = PluginsUi::default();
-        ui.apply_repo_action(1.0, &cmd, &repo("acme"), RepoAction::Install("p".into()));
+        ui.apply_repo_action(
+            1.0,
+            &cmd,
+            &PluginsState::default(),
+            &repo("acme"),
+            RepoAction::Install("p".parse().unwrap()),
+        );
         assert_eq!(offered(&mut ui, &[]), None);
         let arrived = [info("p", false)];
         assert_eq!(offered(&mut ui, &arrived).as_deref(), Some("p"));
@@ -931,7 +965,21 @@ mod tests {
     fn updating_never_offers_the_enable_prompt() {
         let (cmd, mut rx) = tokio::sync::mpsc::unbounded_channel();
         let mut ui = PluginsUi::default();
-        ui.apply_repo_action(1.0, &cmd, &repo("acme"), RepoAction::Update("p".into()));
+        let mut installed = info("p", false);
+        installed.repo = "acme".into();
+        installed.version = "1.0.0".into();
+        let state = PluginsState {
+            plugins: vec![installed],
+            available: vec![available("acme", "p", "1.1.0", true)],
+            ..Default::default()
+        };
+        ui.apply_repo_action(
+            1.0,
+            &cmd,
+            &state,
+            &repo("acme"),
+            RepoAction::Update("p".parse().unwrap()),
+        );
         assert!(matches!(
             rx.try_recv(),
             Ok(DaemonCommand::InstallPlugin { id, .. }) if id == "p"

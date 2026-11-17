@@ -232,7 +232,7 @@ mod tests {
 
     fn plugin(id: &str, enabled: bool) -> PluginInfo {
         PluginInfo {
-            id: id.into(),
+            id: id.parse().unwrap(),
             name: id.into(),
             translations: Default::default(),
             path: String::new(),
@@ -253,7 +253,8 @@ mod tests {
             effect_thumbnails: vec![],
             repo: "official".into(),
             provenance: Default::default(),
-            access: Default::default(),
+            uses: Default::default(),
+            matches: Default::default(),
             provides: vec![],
             consumes: vec![],
             data_records: vec![],
@@ -285,7 +286,7 @@ mod tests {
 
     #[test]
     fn device_and_profile_pages_highlight_home() {
-        assert!(nav_active(&Page::Device("x".into()), &Page::Home));
+        assert!(nav_active(&Page::Device("x".parse().unwrap()), &Page::Home));
         assert!(nav_active(&Page::EffectDesigner, &Page::Lighting));
         assert!(!nav_active(&Page::Cooling, &Page::Home));
     }
@@ -304,11 +305,14 @@ mod tests {
         outdated.version = "1.0.0".into();
         state.plugins.plugins = vec![plugin("ok", true), failing, outdated];
         state.plugins.available = vec![halod_shared::types::AvailablePlugin {
+            matches: Default::default(),
             repo: "official".into(),
-            id: "outdated".into(),
+            id: "outdated".parse().unwrap(),
+            name: "Outdated".into(),
             version: "1.1.0".into(),
             api: "3.0".into(),
             compatible: true,
+            uses: Default::default(),
         }];
         assert_eq!(plugins_needing_action(&state), 2);
     }
@@ -342,7 +346,7 @@ mod tests {
         waiting.plugin_type = halod_shared::types::PluginKind::Integration;
         waiting.integration_configured = false;
         let mut off = waiting.clone();
-        off.id = "off".into();
+        off.id = "off".parse().unwrap();
         off.enabled = false;
         let mut state = TopicStore::default();
         state.plugins.plugins = vec![waiting, off];
@@ -384,21 +388,21 @@ mod tests {
         let mut state = TopicStore::default();
         state.cooling.fan_curves = vec![
             halod_shared::types::WireFanCurve {
-                device_id: "ok".into(),
+                device_id: "ok".parse().unwrap(),
                 channel_id: "default".into(),
                 sensor_id: Some("temp".into()),
                 points: vec![],
                 status: FanCurveStatus::Ok,
             },
             halod_shared::types::WireFanCurve {
-                device_id: "missing-sensor".into(),
+                device_id: "missing-sensor".parse().unwrap(),
                 channel_id: "default".into(),
                 sensor_id: None,
                 points: vec![],
                 status: FanCurveStatus::NoSensor,
             },
             halod_shared::types::WireFanCurve {
-                device_id: "disabled".into(),
+                device_id: "disabled".parse().unwrap(),
                 channel_id: "default".into(),
                 sensor_id: None,
                 points: vec![],
@@ -406,7 +410,7 @@ mod tests {
             },
         ];
         let disabled = halod_shared::types::WireDevice {
-            id: "disabled".into(),
+            id: "disabled".parse().unwrap(),
             active_state: halod_shared::types::VisibilityState::Disabled,
             ..Default::default()
         };

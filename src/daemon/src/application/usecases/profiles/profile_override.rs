@@ -73,7 +73,7 @@ mod tests {
         let mut cfg = Config::default();
         let mut gaming = Profile::default();
         gaming.device_states.insert(
-            "dev1".into(),
+            "dev1".parse().unwrap(),
             json!({ "fan_curve": {"a": 2}, "rgb": {"m": "x"} }),
         );
         cfg.profiles.insert("Gaming".into(), gaming);
@@ -87,7 +87,7 @@ mod tests {
         remove_profile_override(
             "Gaming".into(),
             OverrideTarget::DeviceCapability {
-                device_id: "dev1".into(),
+                device_id: "dev1".parse().unwrap(),
                 state_key: "fan_curve".into(),
             },
             app.clone(),
@@ -108,7 +108,7 @@ mod tests {
             remove_profile_override(
                 "Gaming".into(),
                 OverrideTarget::DeviceCapability {
-                    device_id: "dev1".into(),
+                    device_id: "dev1".parse().unwrap(),
                     state_key: key.into(),
                 },
                 app.clone(),
@@ -154,7 +154,7 @@ mod tests {
         remove_profile_override(
             "Gaming".into(),
             OverrideTarget::DeviceCapability {
-                device_id: "nonexistent".into(),
+                device_id: "nonexistent".parse().unwrap(),
                 state_key: "fan_curve".into(),
             },
             app.clone(),
@@ -199,7 +199,7 @@ mod tests {
         remove_profile_override(
             "Gaming".into(),
             OverrideTarget::DeviceCapability {
-                device_id: "dev1".into(),
+                device_id: "dev1".parse().unwrap(),
                 state_key: "fan_curve".into(),
             },
             app.clone(),

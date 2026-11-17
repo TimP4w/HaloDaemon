@@ -18,6 +18,7 @@ use crate::domain::tour;
 use crate::domain::tour::AnchorId;
 use crate::runtime::ipc::CommandTx;
 use crate::ui::theme::{self, a};
+use halod_shared::ids::DeviceId;
 
 pub(crate) fn preset_display_name(preset: &WirePresetCurve) -> String {
     t!(format!("cooling.preset_name.{}", preset.id)).to_string()
@@ -39,13 +40,13 @@ pub(crate) fn matching_preset<'a>(
 }
 
 fn curve_points_command(
-    device_id: String,
+    device_id: DeviceId,
     channel_id: String,
     points: Vec<[f32; 2]>,
     sensor_id: Option<String>,
 ) -> halod_shared::commands::DaemonCommand {
     halod_shared::commands::DaemonCommand::Device {
-        device_id,
+        device_id: device_id.clone(),
         op: DeviceOp::SetCoolingCurvePoints {
             channel_id,
             points,
@@ -55,13 +56,13 @@ fn curve_points_command(
 }
 
 fn curve_preset_command(
-    device_id: String,
+    device_id: DeviceId,
     channel_id: String,
     preset: String,
     sensor_id: Option<String>,
 ) -> halod_shared::commands::DaemonCommand {
     halod_shared::commands::DaemonCommand::Device {
-        device_id,
+        device_id: device_id.clone(),
         op: DeviceOp::SetCoolingCurvePreset {
             channel_id,
             preset,

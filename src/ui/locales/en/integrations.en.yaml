@@ -6,12 +6,11 @@ integrations:
   status_connecting: Not connected
   status_configured: Configured
   status_active: Active
-  issue_connect_failed: Connection failed
-  issue_runtime_error: Runtime error
   issue_details: Details
   issue_modal_title: "Integration issue: %{integration}"
   # pairing / setup modal
   setup_connect: "Connect %{name}"
+  setup_step_configure: Configure
   setup_step_discover: Discover
   setup_step_prepare: Prepare
   setup_step_pair: Pair
@@ -61,6 +60,6 @@ integrations:
   devices_title: Devices from this integration
   open_device: Open
   save_reconnect: Save and reconnect
-  connected_to: "Connected to %{address}. %{count} devices are on Home."
-  connected: "Connected. %{count} devices are on Home."
+  connected_to: "Connected to %{address}. %{count} devices and %{sensors} sensors added."
+  connected: "Connected. %{count} devices and %{sensors} sensors added."
   setup_step_of: "Step %{current} of %{total}"

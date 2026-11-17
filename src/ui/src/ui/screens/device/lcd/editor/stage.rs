@@ -3,6 +3,7 @@
 //! live render — see the module doc), widget hit-testing/drag/resize/rotate,
 //! and the rotation-aware painter used to composite widget sprites.
 
+use super::layers::LayerAction;
 use std::collections::HashMap;
 
 use egui::{Color32, Rect, Sense, Stroke, Vec2};
@@ -21,6 +22,7 @@ use crate::ui::components as widgets;
 use crate::ui::screens::device::lcd::gif::decode_next_thumb;
 use crate::ui::screens::device::lcd::preview::{cover_uv, paint_image_circle, panel_size};
 use crate::ui::theme;
+use halod_shared::ids::DeviceId;
 
 /// Screen distance from a selected widget's top edge to its rotation handle.
 #[cfg(test)]
@@ -42,7 +44,13 @@ fn index_widget_ids(ids: impl IntoIterator<Item = String>) -> HashMap<String, us
         .collect()
 }
 
-pub(super) fn stage(ui: &mut egui::Ui, ctx: &TabCtx, st: &mut DeviceUi, id: &str, lcd: &LcdStatus) {
+pub(super) fn stage(
+    ui: &mut egui::Ui,
+    ctx: &TabCtx,
+    st: &mut DeviceUi,
+    id: &DeviceId,
+    lcd: &LcdStatus,
+) {
     let avail = (ui.available_width() - 12.0).clamp(220.0, 380.0);
     let size_vec = panel_size(avail, lcd.descriptor.width, lcd.descriptor.height);
     // Background senses clicks before per-widget interacts below, so a widget
@@ -165,6 +173,7 @@ pub(super) fn stage(ui: &mut egui::Ui, ctx: &TabCtx, st: &mut DeviceUi, id: &str
     let mut resized = false;
     let mut rotated = false;
     let mut deleted = false;
+    let mut layer_choice: Option<(String, LayerAction)> = None;
     let mut edited = false;
     let mut widget_clicked = false;
     let mut widget_double_clicked = false;
@@ -229,6 +238,7 @@ pub(super) fn stage(ui: &mut egui::Ui, ctx: &TabCtx, st: &mut DeviceUi, id: &str
             ui.scope_id().with(("lcd_editor_widget", wid.as_str())),
             Sense::click_and_drag(),
         );
+        layer_menu(&resp, wid, &mut layer_choice);
         if resp.dragged() && !editing && !is_primary {
             let delta = resp.drag_delta();
             // Dragging a widget that's part of a multi-selection moves the whole
@@ -536,6 +546,7 @@ pub(super) fn stage(ui: &mut egui::Ui, ctx: &TabCtx, st: &mut DeviceUi, id: &str
                         .with(("lcd_editor_selected_overlay", selected_id.as_str())),
                     Sense::click_and_drag(),
                 );
+                layer_menu(&selected_resp, &selected_id, &mut layer_choice);
                 if selected_resp.dragged() {
                     let delta = selected_resp.drag_delta();
                     if let Some(widget) = st
@@ -662,41 +673,59 @@ pub(super) fn stage(ui: &mut egui::Ui, ctx: &TabCtx, st: &mut DeviceUi, id: &str
             st.lcd.editor.clear_selection();
         }
         if ui.input(|i| i.key_pressed(egui::Key::Delete)) && !st.lcd.editor.selected.is_empty() {
-            let sel = &st.lcd.editor.selected;
-            st.lcd.editor.def.widgets.retain(|w| !sel.contains(&w.id));
+            let selected: Vec<String> = st.lcd.editor.selected.iter().cloned().collect();
+            for id in selected {
+                deleted |= st.lcd.editor.apply_layer(&id, LayerAction::Delete);
+            }
             st.lcd.editor.clear_selection();
-            deleted = true;
         }
-        // Single-selection axis centering, Figma-style.
+        // Single-selection axis centering, Figma-style: Alt+H snaps to the
+        // horizontal center, Alt+V to the vertical center.
         let sel = st.lcd.editor.primary().cloned();
-        // Center the selected widget on one axis, Figma-style: Alt+H snaps to
-        // the horizontal center, Alt+V to the vertical center.
         let (center_h, center_v) = ui.input(|i| {
             (
                 i.modifiers.alt && i.key_pressed(egui::Key::H),
                 i.modifiers.alt && i.key_pressed(egui::Key::V),
             )
         });
-        if center_h || center_v {
-            if let Some(ref sid) = sel {
-                if let Some(w) = st.lcd.editor.def.widgets.iter_mut().find(|w| &w.id == sid) {
-                    if center_h {
-                        w.x = 0.5;
-                    }
-                    if center_v {
-                        w.y = 0.5;
-                    }
-                    moved = true;
-                }
+        if let Some(sid) = sel {
+            if center_h {
+                moved |= st
+                    .lcd
+                    .editor
+                    .apply_layer(&sid, LayerAction::CenterHorizontally);
+            }
+            if center_v {
+                moved |= st
+                    .lcd
+                    .editor
+                    .apply_layer(&sid, LayerAction::CenterVertically);
             }
         }
     }
 
+    if let Some((layer, action)) = layer_choice {
+        if st.lcd.editor.apply_layer(&layer, action) {
+            send_def(ctx, st, id, true);
+        }
+    }
     if deleted {
         send_def(ctx, st, id, true);
     } else if moved || resized || rotated || edited {
         send_def(ctx, st, id, false);
     }
+}
+
+fn layer_menu(resp: &egui::Response, layer: &str, choice: &mut Option<(String, LayerAction)>) {
+    resp.context_menu(|ui| {
+        ui.set_width(186.0);
+        for action in LayerAction::MENU {
+            if widgets::context_menu_item(ui, &action.label(), theme::TEXT).clicked() {
+                *choice = Some((layer.to_owned(), action));
+                ui.close();
+            }
+        }
+    });
 }
 
 fn cycle_widget_at(

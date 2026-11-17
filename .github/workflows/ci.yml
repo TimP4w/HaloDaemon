@@ -107,3 +107,18 @@ jobs:
       - name: Clippy
         working-directory: src
         run: cargo clippy --workspace --all-targets -- -D warnings
+
+      - name: Clippy with every feature
+        working-directory: src
+        run: cargo clippy --workspace --all-targets --all-features -- -D warnings
+
+  audit:
+    runs-on: ubuntu-latest
+    steps:
+      - uses: actions/checkout@v7.0.0
+      - uses: dtolnay/rust-toolchain@stable
+      - name: Install cargo-audit
+        run: cargo install --locked cargo-audit
+      - name: Audit dependencies
+        working-directory: src
+        run: cargo audit

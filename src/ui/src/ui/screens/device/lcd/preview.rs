@@ -11,6 +11,7 @@ use crate::runtime::ipc;
 use crate::ui::components as widgets;
 use crate::ui::screens::device;
 use crate::ui::theme;
+use halod_shared::ids::DeviceId;
 
 /// UV rect that center-crops `tex` to a square, so painting it into the square
 /// or circular preview fills the area without distorting the source aspect
@@ -85,23 +86,6 @@ pub(super) fn paint_image_circle(
     p.add(egui::Shape::mesh(mesh));
 }
 
-/// Paint an animated spinner arc centred at `center`, driving its own repaint.
-fn paint_spinner(ui: &egui::Ui, center: egui::Pos2, time: f64) {
-    use egui::epaint::PathShape;
-    const SEG: usize = 16;
-    let radius = 13.0;
-    let start = (time * 4.0) as f32 % std::f32::consts::TAU;
-    let pts: Vec<egui::Pos2> = (0..=SEG)
-        .map(|i| {
-            let a = start + i as f32 / SEG as f32 * std::f32::consts::PI * 1.5;
-            center + radius * egui::vec2(a.cos(), a.sin())
-        })
-        .collect();
-    ui.painter()
-        .add(PathShape::line(pts, Stroke::new(2.5, theme::CYAN)));
-    ui.ctx().request_repaint();
-}
-
 /// Whether the "setting image" preview spinner should clear: either the daemon
 /// confirmed `pending` as the active image and its texture is ready, or a fresh
 /// terminal (`Done`/`Failed`) upload signal arrived for this device.
@@ -110,7 +94,7 @@ fn preview_pending_cleared(
     active_image: Option<&str>,
     tex_ready: bool,
     terminal: Option<&LcdUploadProgress>,
-    device_id: &str,
+    device_id: &DeviceId,
 ) -> bool {
     (active_image == Some(pending) && tex_ready)
         || device::is_terminal_upload_for(terminal, device_id)
@@ -120,7 +104,7 @@ pub(super) fn display_card(
     ui: &mut egui::Ui,
     ctx: &TabCtx,
     st: &mut DeviceUi,
-    id: &str,
+    id: &DeviceId,
     lcd: &LcdStatus,
 ) {
     widgets::card_titled(
@@ -182,7 +166,14 @@ pub(super) fn display_card(
                     }
                 }
                 if loading {
-                    paint_spinner(ui, center, ctx.time);
+                    crate::ui::components::paint_spinner(
+                        ui.painter(),
+                        center,
+                        26.0,
+                        ctx.time as f32,
+                        theme::CYAN,
+                    );
+                    ui.ctx().request_repaint();
                 } else if no_preview {
                     p.text(
                         center,
@@ -212,7 +203,7 @@ pub(super) fn display_card(
                 ipc::send(
                     ctx.cmd,
                     halod_shared::commands::DaemonCommand::Device {
-                        device_id: id.to_string(),
+                        device_id: id.clone(),
                         op: DeviceOp::SetScreenDefault,
                     },
                 );
@@ -227,7 +218,7 @@ pub(super) fn display_controls(
     ui: &mut egui::Ui,
     ctx: &TabCtx,
     st: &mut DeviceUi,
-    id: &str,
+    id: &DeviceId,
     lcd: &LcdStatus,
 ) {
     let key = "lcd_bright";
@@ -238,7 +229,7 @@ pub(super) fn display_controls(
         st.queue(
             key,
             DaemonCommand::Device {
-                device_id: id.to_string(),
+                device_id: id.clone(),
                 op: DeviceOp::SetScreenBrightness {
                     brightness: b.round() as u8,
                 },
@@ -275,7 +266,7 @@ pub(super) fn display_controls(
                 ipc::send(
                     ctx.cmd,
                     DaemonCommand::Device {
-                        device_id: id.to_string(),
+                        device_id: id.clone(),
                         op: DeviceOp::SetScreenRotation {
                             rotation: rots[idx],
                         },
@@ -288,7 +279,7 @@ pub(super) fn display_controls(
 
 /// Raw streaming: bypass the Q565 encode and push uncompressed frames.
 /// Shared by the Display card and the editor's Screen style card.
-pub(super) fn raw_streaming_row(ui: &mut egui::Ui, ctx: &TabCtx, id: &str, lcd: &LcdStatus) {
+pub(super) fn raw_streaming_row(ui: &mut egui::Ui, ctx: &TabCtx, id: &DeviceId, lcd: &LcdStatus) {
     let on = lcd.raw_streaming;
     let mut next = on;
     egui::Sides::new().show(
@@ -307,7 +298,7 @@ pub(super) fn raw_streaming_row(ui: &mut egui::Ui, ctx: &TabCtx, id: &str, lcd: 
         ipc::send(
             ctx.cmd,
             halod_shared::commands::DaemonCommand::Device {
-                device_id: id.to_string(),
+                device_id: id.clone(),
                 op: DeviceOp::SetScreenRawStreaming { enabled: next },
             },
         );
@@ -322,7 +313,7 @@ mod tests {
 
     fn terminal(stage: LcdUploadStage, device_id: &str) -> LcdUploadProgress {
         LcdUploadProgress {
-            device_id: device_id.into(),
+            device_id: device_id.parse().unwrap(),
             stage,
             percent: None,
         }
@@ -336,7 +327,7 @@ mod tests {
             Some("a.png"),
             true,
             None,
-            "lcd"
+            &"lcd".parse().unwrap()
         ));
         // Confirmed but texture not yet ready, no terminal → keep spinning.
         assert!(!preview_pending_cleared(
@@ -344,7 +335,7 @@ mod tests {
             Some("a.png"),
             false,
             None,
-            "lcd"
+            &"lcd".parse().unwrap()
         ));
         // A device-write failure clears even though the image never became active.
         let failed = terminal(LcdUploadStage::Failed, "lcd");
@@ -353,10 +344,16 @@ mod tests {
             None,
             false,
             Some(&failed),
-            "lcd"
+            &"lcd".parse().unwrap()
         ));
         // Staleness: no fresh terminal (delivered as `None`) → keep spinning.
-        assert!(!preview_pending_cleared("a.png", None, false, None, "lcd"));
+        assert!(!preview_pending_cleared(
+            "a.png",
+            None,
+            false,
+            None,
+            &"lcd".parse().unwrap()
+        ));
         // A terminal for another device is ignored.
         let other = terminal(LcdUploadStage::Failed, "other");
         assert!(!preview_pending_cleared(
@@ -364,7 +361,7 @@ mod tests {
             None,
             false,
             Some(&other),
-            "lcd"
+            &"lcd".parse().unwrap()
         ));
     }
 

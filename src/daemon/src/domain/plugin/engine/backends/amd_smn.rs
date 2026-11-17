@@ -46,12 +46,12 @@ fn open(
         bail!("amd_smn is only available on Windows");
     }
 }
-pub(super) const DESCRIPTOR: PluginTransportDescriptor = PluginTransportDescriptor {
+pub(super) const DESCRIPTOR: PluginTransportDescriptor = PluginTransportDescriptor::Discovered {
     kind: "amd_smn",
     open,
-    discovery: Some(Discovery {
+    discovery: Discovery {
         matches,
         id_suffix: suffix,
         validate: accept_spec,
-    }),
+    },
 };

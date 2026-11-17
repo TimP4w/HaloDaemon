@@ -6,7 +6,7 @@ use egui::{Pos2, Rect, Vec2};
 use crate::ui::theme;
 
 const ICON_TEXT_GAP: f32 = 9.0;
-const WORDMARK: &str = "halod";
+const WORDMARK: &str = halod_shared::app::APP_DISPLAY_NAME;
 
 pub fn logo_size(painter: &egui::Painter, icon_size: f32, font_size: f32) -> Vec2 {
     let text = painter.layout_no_wrap(WORDMARK.into(), theme::semibold(font_size), theme::TEXT);

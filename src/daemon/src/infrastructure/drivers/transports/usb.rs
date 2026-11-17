@@ -492,10 +492,10 @@ pub(crate) fn present_usb_locations() -> Option<HashSet<UsbLocation>> {
 
 /// Registered device ids whose USB location is no longer on the bus — their
 /// handle is stale and the device must be dropped so a reconnect rebuilds it.
-pub(crate) fn stale_usb_ids(
-    registered: &[(String, UsbLocation)],
+pub(crate) fn stale_usb_ids<Id: Clone>(
+    registered: &[(Id, UsbLocation)],
     present: &HashSet<UsbLocation>,
-) -> Vec<String> {
+) -> Vec<Id> {
     registered
         .iter()
         .filter(|(_, loc)| !present.contains(loc))
@@ -521,7 +521,7 @@ mod liveness_tests {
     fn present_device_is_not_stale() {
         let l = loc(0x2109, 0x8884, 1, 5, &[3]);
         let present = HashSet::from([l.clone()]);
-        assert!(stale_usb_ids(&[("monitor".into(), l)], &present).is_empty());
+        assert!(stale_usb_ids(&[(String::from("monitor"), l)], &present).is_empty());
     }
 
     #[test]
@@ -529,7 +529,7 @@ mod liveness_tests {
         let l = loc(0x2109, 0x8884, 1, 5, &[3]);
         let present = HashSet::new();
         assert_eq!(
-            stale_usb_ids(&[("monitor".into(), l)], &present),
+            stale_usb_ids(&[(String::from("monitor"), l)], &present),
             vec!["monitor".to_owned()]
         );
     }
@@ -557,7 +557,7 @@ mod liveness_tests {
         // An unrelated device sharing the bus must not perturb either decision.
         let mouse = loc(0x046d, 0xc08b, 1, 7, &[2]);
         let present = HashSet::from([l.clone(), mouse.clone()]);
-        assert!(stale_usb_ids(&[("monitor".into(), l)], &present).is_empty());
+        assert!(stale_usb_ids(&[(String::from("monitor"), l)], &present).is_empty());
         let last_present = HashSet::from([mouse, loc(0x2109, 0x8884, 1, 5, &[3])]);
         assert_eq!(present, last_present, "no topology change → no rescan");
     }

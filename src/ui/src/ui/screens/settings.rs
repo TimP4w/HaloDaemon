@@ -9,7 +9,7 @@ use crate::ui::components as widgets;
 use egui::{Align2, Color32, Pos2, Stroke, Vec2};
 use halod_shared::commands::{DaemonCommand, EngineKind};
 use halod_shared::debug_info::{DebugInfo, DependencyStatus};
-use halod_shared::types::{DiscoveryPhase, GuiConfig};
+use halod_shared::types::{CoolingConfig, DiscoveryPhase, GuiConfig};
 
 use crate::domain::state::Debouncer;
 use crate::domain::tour;
@@ -31,6 +31,7 @@ pub struct SettingsUi {
     /// Set once we've asked the daemon for `DebugInfo` to populate the
     /// dependency panel, so we don't re-request it every frame.
     deps_requested: bool,
+    rechecking: bool,
     /// Cached OS "launch at login" state; seeded on first render so the
     /// toggle doesn't hit the filesystem/registry every frame. `None` until
     /// seeded.
@@ -42,6 +43,12 @@ pub struct SettingsUi {
     /// Slider values being dragged, with when they last moved, so a pending
     /// save doesn't snap back to the last broadcast.
     drafts: std::collections::HashMap<&'static str, (f32, f64)>,
+}
+
+impl SettingsUi {
+    pub fn debug_info_arrived(&mut self) {
+        self.rechecking = false;
+    }
 }
 
 #[derive(Clone, Copy, PartialEq, Eq, Debug, Default)]
@@ -355,12 +362,12 @@ fn page_body(
             open_path(&state.config_dir);
         }
     });
-    group(ui, st, Section::Healthcheck, |ui, _| {
+    group(ui, st, Section::Healthcheck, |ui, st| {
         let (title, sub, on, command) = startup_check;
         if widgets::list_row(ui, &title, &sub, |ui| widgets::toggle(ui, on) != on) {
             ipc::send(cmd, command);
         }
-        healthcheck_rows(ui, cmd, debug);
+        healthcheck_rows(ui, cmd, debug, st);
     });
     group(ui, st, Section::About, |ui, st| {
         widgets::list_row(
@@ -589,6 +596,103 @@ fn engine_rows(ui: &mut egui::Ui, state: &TopicStore, cmd: &CommandTx, st: &mut 
             duty: v.round() as u8,
         },
     );
+    for tuning in Tuning::ALL {
+        engine_slider(
+            ui,
+            st,
+            (tuning.key(), &tuning.title(), &tuning.sub()),
+            tuning.live(&state.cooling.config),
+            tuning.range(),
+            |v| tuning.readout(v),
+            |v| tuning.command(v),
+        );
+    }
+}
+
+#[derive(Clone, Copy, PartialEq, Debug)]
+enum Tuning {
+    RampUp,
+    RampDown,
+    Hysteresis,
+    Smoothing,
+    Stale,
+}
+
+impl Tuning {
+    const ALL: [Self; 5] = [
+        Self::RampUp,
+        Self::RampDown,
+        Self::Hysteresis,
+        Self::Smoothing,
+        Self::Stale,
+    ];
+
+    fn key(self) -> &'static str {
+        match self {
+            Self::RampUp => "fan_ramp_up",
+            Self::RampDown => "fan_ramp_down",
+            Self::Hysteresis => "fan_hysteresis",
+            Self::Smoothing => "fan_smoothing",
+            Self::Stale => "fan_stale",
+        }
+    }
+
+    fn title(self) -> Cow<'static, str> {
+        t!(format!("settings.{}_title", self.key()))
+    }
+
+    fn sub(self) -> Cow<'static, str> {
+        t!(format!("settings.{}_sub", self.key()))
+    }
+
+    fn range(self) -> std::ops::RangeInclusive<f32> {
+        match self {
+            Self::RampUp | Self::RampDown => 0.0..=50.0,
+            Self::Hysteresis => 0.0..=10.0,
+            Self::Smoothing => 0.0..=30.0,
+            Self::Stale => 0.0..=300.0,
+        }
+    }
+
+    fn snap(self, v: f32) -> f32 {
+        let step = if self == Self::Hysteresis { 0.5 } else { 1.0 };
+        (v / step).round() * step
+    }
+
+    fn live(self, c: &CoolingConfig) -> f32 {
+        match self {
+            Self::RampUp => c.fan_ramp_up_pct_per_s,
+            Self::RampDown => c.fan_ramp_down_pct_per_s,
+            Self::Hysteresis => c.fan_hysteresis_c,
+            Self::Smoothing => c.fan_smoothing_secs,
+            Self::Stale => c.fan_sensor_stale_secs,
+        }
+    }
+
+    fn readout(self, v: f32) -> String {
+        let v = self.snap(v);
+        let n = format!("{v}");
+        match self {
+            Self::RampUp | Self::RampDown if v == 0.0 => t!("settings.fan_instant"),
+            _ if v == 0.0 => t!("settings.fan_off"),
+            Self::RampUp | Self::RampDown => t!("settings.fan_rate_value", n = n),
+            Self::Hysteresis => t!("settings.fan_celsius_value", n = n),
+            Self::Smoothing | Self::Stale => t!("settings.fan_seconds_value", n = n),
+        }
+        .into_owned()
+    }
+
+    fn command(self, v: f32) -> DaemonCommand {
+        let v = Some(self.snap(v));
+        let only = |t: Self| v.filter(|_| t == self);
+        DaemonCommand::SetCoolingTuning {
+            ramp_up_pct_per_s: only(Self::RampUp),
+            ramp_down_pct_per_s: only(Self::RampDown),
+            hysteresis_c: only(Self::Hysteresis),
+            smoothing_secs: only(Self::Smoothing),
+            sensor_stale_secs: only(Self::Stale),
+        }
+    }
 }
 
 fn tick_label(ms: u64) -> String {
@@ -644,7 +748,12 @@ fn is_scanning(state: &TopicStore) -> bool {
 
 // ── HEALTHCHECK rows ───────────────────────────────────────────────────────────
 
-fn healthcheck_rows(ui: &mut egui::Ui, cmd: &CommandTx, debug: Option<&DebugInfo>) {
+fn healthcheck_rows(
+    ui: &mut egui::Ui,
+    cmd: &CommandTx,
+    debug: Option<&DebugInfo>,
+    st: &mut SettingsUi,
+) {
     match debug {
         None => widgets::list_row(
             ui,
@@ -664,12 +773,32 @@ fn healthcheck_rows(ui: &mut egui::Ui, cmd: &CommandTx, debug: Option<&DebugInfo
             }
         }
     }
-    if button_row(
+    let clicked = widgets::list_row(
         ui,
         &t!("settings.recheck_title"),
         &t!("settings.recheck_sub"),
-        &t!("settings.recheck_button"),
-    ) {
+        |ui| {
+            if st.rechecking {
+                widgets::button_loading(
+                    ui,
+                    &t!("settings.recheck_button"),
+                    widgets::ButtonKind::Secondary,
+                    ROW_BUTTON,
+                );
+                false
+            } else {
+                widgets::button(
+                    ui,
+                    &t!("settings.recheck_button"),
+                    widgets::ButtonKind::Secondary,
+                    ROW_BUTTON,
+                )
+                .clicked()
+            }
+        },
+    );
+    if clicked {
+        st.rechecking = true;
         ipc::send(cmd, DaemonCommand::GetDebugInfo);
     }
 }
@@ -681,16 +810,20 @@ fn dependency_row(ui: &mut egui::Ui, dep: &DependencyStatus) {
     } else {
         impact_text(dep)
     };
-    let status = if dep.present {
-        t!("settings.dep_detected")
-    } else if dep.required {
-        t!("settings.dep_missing")
-    } else {
-        t!("settings.dep_not_found")
-    };
+    let (status, tone) = dependency_status(dep);
     widgets::list_row(ui, &title_text(dep), &subtitle, |ui| {
-        value_text(ui, &status)
+        widgets::tag(ui, &status, tone)
     });
+}
+
+fn dependency_status(dep: &DependencyStatus) -> (std::borrow::Cow<'static, str>, widgets::TagTone) {
+    if dep.present {
+        (t!("settings.dep_detected"), widgets::TagTone::Ok)
+    } else if dep.required {
+        (t!("settings.dep_missing"), widgets::TagTone::Danger)
+    } else {
+        (t!("settings.dep_not_found"), widgets::TagTone::Warn)
+    }
 }
 
 // ── Language ────────────────────────────────────────────────────────────────
@@ -1164,6 +1297,37 @@ fn export_diagnostics(json: String) {
 #[cfg(test)]
 mod tests {
     use super::*;
+
+    #[test]
+    fn the_recheck_spinner_stops_when_a_snapshot_arrives() {
+        let mut st = SettingsUi {
+            rechecking: true,
+            ..Default::default()
+        };
+        st.debug_info_arrived();
+        assert!(!st.rechecking);
+    }
+
+    #[test]
+    fn checks_that_fail_or_are_missing_stand_out() {
+        let dep = |present: bool, required: bool| DependencyStatus {
+            id: halod_shared::debug_info::DependencyRule::Ffmpeg,
+            present,
+            required,
+            platform: "All".into(),
+            fix_variant: String::new(),
+        };
+        assert_eq!(dependency_status(&dep(true, true)).1, widgets::TagTone::Ok);
+        assert_eq!(dependency_status(&dep(true, false)).1, widgets::TagTone::Ok);
+        assert_eq!(
+            dependency_status(&dep(false, true)).1,
+            widgets::TagTone::Danger
+        );
+        assert_eq!(
+            dependency_status(&dep(false, false)).1,
+            widgets::TagTone::Warn
+        );
+    }
     use halod_shared::types::DiscoveryStatus;
 
     #[test]
@@ -1387,6 +1551,46 @@ gui:
                 }
             }
         }
+    }
+
+    #[test]
+    fn each_tuning_command_sets_only_its_own_field() {
+        for tuning in Tuning::ALL {
+            let DaemonCommand::SetCoolingTuning {
+                ramp_up_pct_per_s,
+                ramp_down_pct_per_s,
+                hysteresis_c,
+                smoothing_secs,
+                sensor_stale_secs,
+            } = tuning.command(2.3)
+            else {
+                panic!("unexpected command for {tuning:?}");
+            };
+            let set: Vec<_> = [
+                (Tuning::RampUp, ramp_up_pct_per_s),
+                (Tuning::RampDown, ramp_down_pct_per_s),
+                (Tuning::Hysteresis, hysteresis_c),
+                (Tuning::Smoothing, smoothing_secs),
+                (Tuning::Stale, sensor_stale_secs),
+            ]
+            .into_iter()
+            .filter_map(|(t, v)| v.map(|v| (t, v)))
+            .collect();
+            assert_eq!(set, vec![(tuning, tuning.snap(2.3))]);
+        }
+    }
+
+    #[test]
+    fn tuning_snaps_hysteresis_to_half_degrees_and_others_to_whole_units() {
+        assert_eq!(Tuning::Hysteresis.snap(2.3), 2.5);
+        assert_eq!(Tuning::Smoothing.snap(2.3), 2.0);
+    }
+
+    #[test]
+    fn zero_tuning_reads_as_disabled() {
+        assert_eq!(Tuning::RampDown.readout(0.2), t!("settings.fan_instant"));
+        assert_eq!(Tuning::Stale.readout(0.0), t!("settings.fan_off"));
+        assert_ne!(Tuning::Stale.readout(30.0), t!("settings.fan_off"));
     }
 
     #[test]

@@ -8,14 +8,21 @@ use std::sync::Arc;
 use tokio::sync::{Mutex, RwLock, RwLockReadGuard, RwLockWriteGuard};
 
 use crate::domain::device::Device;
+use halod_shared::ids::{DeviceId, PluginId};
 
 #[derive(Default)]
 pub struct DeviceRegistry {
     devices: RwLock<Vec<Arc<dyn Device>>>,
     revision: AtomicU64,
-    pub(crate) registrations: Mutex<HashSet<String>>,
-    pub(crate) children: Mutex<HashMap<String, HashSet<String>>>,
-    command_locks: Mutex<HashMap<String, Arc<Mutex<()>>>>,
+    pub(crate) registrations: Mutex<HashSet<DeviceId>>,
+    pub(crate) children: Mutex<HashMap<DeviceId, HashSet<DeviceId>>>,
+    command_locks: Mutex<HashMap<CommandTarget, Arc<Mutex<()>>>>,
+}
+
+#[derive(Debug, Clone, PartialEq, Eq, Hash)]
+pub enum CommandTarget {
+    Device(DeviceId),
+    Plugin(PluginId),
 }
 
 impl DeviceRegistry {
@@ -37,7 +44,7 @@ impl DeviceRegistry {
         self.devices.try_write()
     }
 
-    pub async fn find(&self, id: &str) -> Option<Arc<dyn Device>> {
+    pub async fn find(&self, id: &DeviceId) -> Option<Arc<dyn Device>> {
         self.devices
             .read()
             .await
@@ -46,7 +53,7 @@ impl DeviceRegistry {
             .cloned()
     }
 
-    pub async fn known_ids(&self) -> HashSet<String> {
+    pub async fn known_ids(&self) -> HashSet<DeviceId> {
         let mut ids = self.registrations.lock().await.clone();
         ids.extend(self.devices.read().await.iter().map(|d| d.id().to_owned()));
         ids
@@ -56,14 +63,8 @@ impl DeviceRegistry {
         self.revision.load(Ordering::Acquire)
     }
 
-    pub async fn command_lock(&self, id: &str) -> Arc<Mutex<()>> {
-        Arc::clone(
-            self.command_locks
-                .lock()
-                .await
-                .entry(id.to_owned())
-                .or_default(),
-        )
+    pub async fn command_lock(&self, target: CommandTarget) -> Arc<Mutex<()>> {
+        Arc::clone(self.command_locks.lock().await.entry(target).or_default())
     }
 }
 
@@ -107,10 +108,10 @@ mod tests {
             .registrations
             .lock()
             .await
-            .insert("in-flight".into());
+            .insert("in-flight".parse().unwrap());
         assert_eq!(
             registry.known_ids().await,
-            HashSet::from(["registered".to_owned(), "in-flight".to_owned()])
+            HashSet::from(["registered".parse().unwrap(), "in-flight".parse().unwrap()])
         );
     }
 }

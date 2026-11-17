@@ -18,14 +18,15 @@ use crate::domain::events::Change;
 use crate::domain::plugin::recommend;
 use crate::infrastructure::drivers::transports::serial;
 use crate::infrastructure::drivers::transports::smbus::SmBusTransport;
+use halod_shared::ids::{DeviceId, PluginId};
 
-pub async fn set_enabled(id: String, enabled: bool, app: Arc<AppState>) -> Result<()> {
+pub async fn set_enabled(id: PluginId, enabled: bool, app: Arc<AppState>) -> Result<()> {
     if enabled && !app.registry.supports_current_platform(&id) {
         bail!("plugin '{id}' is not supported on this platform");
     }
     {
         let mut cfg = app.config.write().await;
-        cfg.plugins.enabled.retain(|x| x != &id);
+        cfg.plugins.enabled.retain(|x| x != id);
         if enabled {
             cfg.plugins.enabled.push(id.clone());
         }
@@ -57,7 +58,7 @@ pub async fn set_enabled(id: String, enabled: bool, app: Arc<AppState>) -> Resul
 /// previously stored secret untouched, so the GUI never has to round-trip a
 /// secret to keep it.
 pub(crate) async fn persist_config_values(
-    id: &str,
+    id: &PluginId,
     values: &std::collections::HashMap<String, String>,
     app: &Arc<AppState>,
 ) -> Result<()> {
@@ -75,7 +76,7 @@ pub(crate) async fn persist_config_values(
         .collect::<Vec<_>>();
     if !secrets.is_empty() {
         let store = Arc::clone(&app.secret_store);
-        let plugin_id = id.to_owned();
+        let plugin_id = id.clone();
         tokio::task::spawn_blocking(move || -> Result<()> {
             for (key, value) in secrets {
                 store
@@ -88,7 +89,7 @@ pub(crate) async fn persist_config_values(
         .context("secret-store task failed")??;
     }
     let mut cfg = app.config.write().await;
-    let plaintext = cfg.plugins.config.entry(id.to_owned()).or_default();
+    let plaintext = cfg.plugins.config.entry(id.into()).or_default();
     for (key, value) in &values {
         if !secure_keys.contains(key) {
             plaintext.insert(key.clone(), value.clone());
@@ -103,7 +104,7 @@ pub(crate) async fn persist_config_values(
 
 /// Fetch a plugin's display-only asset and send it to the client as base64. Not staged — a pure read.
 pub async fn get_asset(
-    plugin_id: String,
+    plugin_id: PluginId,
     name: String,
     client: ClientHandle,
     app: Arc<AppState>,
@@ -158,7 +159,7 @@ pub async fn get_udev_rules_status(client: ClientHandle, app: Arc<AppState>) -> 
 
 /// Replace a plugin's user-editable config values and reconcile its devices.
 pub async fn set_config(
-    id: String,
+    id: PluginId,
     values: std::collections::HashMap<String, String>,
     app: Arc<AppState>,
 ) -> Result<()> {
@@ -170,10 +171,10 @@ pub async fn set_config(
 
 /// Purge every id-keyed piece of plugin state (secrets, enable flags, config),
 /// returning whether config changed.
-pub(crate) async fn purge_plugin_state(id: &str, app: &Arc<AppState>) -> bool {
+pub(crate) async fn purge_plugin_state(id: &PluginId, app: &Arc<AppState>) -> bool {
     let keys = app.registry.secure_config_keys_for(id);
     let store = Arc::clone(&app.secret_store);
-    let plugin_id = id.to_owned();
+    let plugin_id = id.clone();
     if let Err(error) = tokio::task::spawn_blocking(move || {
         for key in keys {
             if let Err(error) = store.delete(&plugin_id, &key) {
@@ -238,13 +239,15 @@ pub(crate) async fn refresh_recommendations(app: &Arc<AppState>) {
             Default::default()
         }
     };
-    app.registry.refresh_recommendations(&hid, &usb, &gpu_smbus);
+    let catalogs = app.plugin_catalogs.lock().await;
+    app.registry
+        .refresh_recommendations(&hid, &usb, &gpu_smbus, &catalogs);
 }
 
 /// Close and unregister every currently-registered device owned by one of
 /// `plugins` (plus its `_ctrl_` children); leaves every other device untouched.
-async fn teardown_owned_devices(app: &Arc<AppState>, plugins: &[String]) {
-    let owned_ids: Vec<String> = {
+async fn teardown_owned_devices(app: &Arc<AppState>, plugins: &[PluginId]) {
+    let owned_ids: Vec<DeviceId> = {
         let devices = app.device_registry.read().await;
         devices
             .iter()
@@ -260,7 +263,7 @@ async fn teardown_owned_devices(app: &Arc<AppState>, plugins: &[String]) {
     // once every device it tracks is torn down. Passing only the owning parents
     // would leave the key tracked, so the HID rescan skips it and the device
     // never comes back on re-enable.
-    let mut torn_down: std::collections::HashSet<String> = std::collections::HashSet::new();
+    let mut torn_down: std::collections::HashSet<DeviceId> = std::collections::HashSet::new();
     for id in &owned_ids {
         let removed = registration::unregister_device_and_children(app, id).await;
         torn_down.extend(removed);
@@ -271,7 +274,7 @@ async fn teardown_owned_devices(app: &Arc<AppState>, plugins: &[String]) {
 /// Scoped teardown + reprobe for `plugins`: only devices owned by one of
 /// these plugin ids are closed and re-discovered; every other device is
 /// left untouched.
-pub(crate) async fn reconcile_plugins(app: &Arc<AppState>, plugins: &[String]) {
+pub(crate) async fn reconcile_plugins(app: &Arc<AppState>, plugins: &[PluginId]) {
     use crate::domain::registry::observers::discovery::PendingRediscovery;
     // Refresh the requirement cache before rediscovery so a satisfied↔missing
     // transition gates activation this cycle (recovery reactivates, loss tears down).
@@ -316,7 +319,7 @@ async fn drain_rediscovery(app: &Arc<AppState>) {
     }
 }
 
-async fn reconcile_plugin_set(app: &Arc<AppState>, plugins: &[String]) {
+async fn reconcile_plugin_set(app: &Arc<AppState>, plugins: &[PluginId]) {
     use crate::domain::registry::observers::discovery::{DiscoveryFilter, DiscoveryScope};
 
     // Keep both sides of a manifest change in scope. Deleted/disabled plugins
@@ -367,7 +370,7 @@ mod tests {
                 crate::test_support::MockDevice::new("stays-open"),
             ));
 
-            set_enabled("some_plugin".into(), false, app.clone())
+            set_enabled("some_plugin".parse().unwrap(), false, app.clone())
                 .await
                 .unwrap();
 
@@ -382,7 +385,7 @@ mod tests {
                 .await
                 .plugins
                 .enabled
-                .contains(&"some_plugin".to_string()));
+                .contains(&"some_plugin".parse().unwrap()));
         })
         .await;
     }
@@ -411,7 +414,7 @@ mod tests {
                 .track("9abc:def0:Q".into(), HidTrackingEntry::Primary(vec![other]))
                 .await;
 
-            teardown_owned_devices(&app, &["P".to_string()]).await;
+            teardown_owned_devices(&app, &["P".parse().unwrap()]).await;
 
             let keys = app.hid.keys().await;
             assert!(
@@ -422,8 +425,14 @@ mod tests {
                 keys.contains("9abc:def0:Q"),
                 "an untouched plugin's HID key must survive the scoped teardown"
             );
-            assert!(app.find_device_by_id("P-dev").await.is_none());
-            assert!(app.find_device_by_id("Q-dev").await.is_some());
+            assert!(app
+                .find_device_by_id(&"P-dev".parse().unwrap())
+                .await
+                .is_none());
+            assert!(app
+                .find_device_by_id(&"Q-dev".parse().unwrap())
+                .await
+                .is_some());
         })
         .await;
     }
@@ -455,14 +464,20 @@ mod tests {
                 )
                 .await;
 
-            teardown_owned_devices(&app, &["hub_plugin".to_string()]).await;
+            teardown_owned_devices(&app, &["hub_plugin".parse().unwrap()]).await;
 
             assert!(
                 app.hid.keys().await.is_empty(),
                 "the shared key must be untracked once the whole subtree is torn down"
             );
-            assert!(app.find_device_by_id("hub-abc").await.is_none());
-            assert!(app.find_device_by_id("hub-abc_acc_0_1").await.is_none());
+            assert!(app
+                .find_device_by_id(&"hub-abc".parse().unwrap())
+                .await
+                .is_none());
+            assert!(app
+                .find_device_by_id(&"hub-abc_acc_0_1".parse().unwrap())
+                .await
+                .is_none());
         })
         .await;
     }
@@ -485,9 +500,9 @@ mod tests {
                 devices.push(native.clone());
             }
 
-            teardown_owned_devices(&app, &["p1".to_string()]).await;
+            teardown_owned_devices(&app, &["p1".parse().unwrap()]).await;
 
-            let remaining: Vec<String> = app
+            let remaining: Vec<DeviceId> = app
                 .device_registry
                 .read()
                 .await
@@ -511,7 +526,7 @@ mod tests {
             let native = Arc::new(MockDevice::new("native-dev"));
             app.device_registry.write().await.push(native.clone());
 
-            teardown_owned_devices(&app, &["p1".to_string()]).await;
+            teardown_owned_devices(&app, &["p1".parse().unwrap()]).await;
 
             assert_eq!(app.device_registry.read().await.len(), 1);
             assert!(!native.closed.load(Ordering::SeqCst));
@@ -572,13 +587,13 @@ mod tests {
                         .await
                         .plugins
                         .enabled
-                        .contains(&"cfgtest".to_owned())
+                        .contains(&"cfgtest".parse().unwrap())
                 };
-                set_enabled("cfgtest".into(), true, app.clone())
+                set_enabled("cfgtest".parse().unwrap(), true, app.clone())
                     .await
                     .unwrap();
                 assert!(enabled().await);
-                set_enabled("cfgtest".into(), false, app.clone())
+                set_enabled("cfgtest".parse().unwrap(), false, app.clone())
                     .await
                     .unwrap();
                 assert!(!enabled().await);
@@ -607,7 +622,7 @@ mod tests {
             std::fs::write(dir.join("winonly").join("main.lua"), CONFIG_TEST_PLUGIN).unwrap();
             app.registry.load_dir(&dir);
 
-            let result = set_enabled("winonly".into(), true, app.clone()).await;
+            let result = set_enabled("winonly".parse().unwrap(), true, app.clone()).await;
 
             let error = result.expect_err("enable must be rejected on an unsupported platform");
             assert!(error.to_string().contains("not supported on this platform"));
@@ -617,7 +632,7 @@ mod tests {
                     .await
                     .plugins
                     .enabled
-                    .contains(&"winonly".to_owned()),
+                    .contains(&"winonly".parse().unwrap()),
                 "an unsupported plugin must never be persisted as enabled"
             );
 
@@ -664,9 +679,14 @@ mod tests {
         app.registry.load_dir(dir.path());
 
         let (client, mut rx) = test_client();
-        get_asset("assetplug".into(), "logo.png".into(), client, app.clone())
-            .await
-            .unwrap();
+        get_asset(
+            "assetplug".parse().unwrap(),
+            "logo.png".into(),
+            client,
+            app.clone(),
+        )
+        .await
+        .unwrap();
 
         let frame = rx.try_recv().expect("a frame was queued");
         let v: serde_json::Value = serde_json::from_slice(&frame[5..]).unwrap();
@@ -685,9 +705,14 @@ mod tests {
     async fn get_asset_errors_for_unknown_plugin() {
         let app = Arc::new(AppState::new(crate::config::Config::default()));
         let (client, _rx) = test_client();
-        let err = get_asset("does-not-exist".into(), "logo.png".into(), client, app)
-            .await
-            .unwrap_err();
+        let err = get_asset(
+            "does-not-exist".parse().unwrap(),
+            "logo.png".into(),
+            client,
+            app,
+        )
+        .await
+        .unwrap_err();
         assert!(err.to_string().contains("unknown plugin"));
     }
 
@@ -698,7 +723,7 @@ mod tests {
                 let mut values = std::collections::HashMap::new();
                 values.insert("host".to_string(), "127.0.0.1".to_string());
                 values.insert("token".to_string(), "s3cr3t".to_string());
-                set_config("cfgtest".into(), values, app.clone())
+                set_config("cfgtest".parse().unwrap(), values, app.clone())
                     .await
                     .unwrap();
 
@@ -719,7 +744,9 @@ mod tests {
                 );
                 drop(cfg);
                 assert_eq!(
-                    app.secret_store.get("cfgtest", "token").unwrap(),
+                    app.secret_store
+                        .get(&"cfgtest".parse().unwrap(), "token")
+                        .unwrap(),
                     Some("s3cr3t".to_string())
                 );
             })
@@ -734,19 +761,21 @@ mod tests {
             with_config_test_plugin(&app, || async {
                 let mut first = std::collections::HashMap::new();
                 first.insert("token".to_string(), "s3cr3t".to_string());
-                set_config("cfgtest".into(), first, app.clone())
+                set_config("cfgtest".parse().unwrap(), first, app.clone())
                     .await
                     .unwrap();
 
                 // Re-saving with an empty secure value must not clear it.
                 let mut second = std::collections::HashMap::new();
                 second.insert("token".to_string(), "".to_string());
-                set_config("cfgtest".into(), second, app.clone())
+                set_config("cfgtest".parse().unwrap(), second, app.clone())
                     .await
                     .unwrap();
 
                 assert_eq!(
-                    app.secret_store.get("cfgtest", "token").unwrap(),
+                    app.secret_store
+                        .get(&"cfgtest".parse().unwrap(), "token")
+                        .unwrap(),
                     Some("s3cr3t".to_string())
                 );
             })
@@ -775,7 +804,7 @@ mod tests {
 
             let resolved = app.registry.resolved_config_for(
                 app.secret_store.as_ref(),
-                "numcfg",
+                &"numcfg".parse().unwrap(),
                 &[],
             );
             assert_eq!(
@@ -804,13 +833,13 @@ mod tests {
                 m.insert(k.to_string(), v.to_string());
                 m
             };
-            assert!(set_config("numcfg".into(), one("nope", "1"), app.clone())
+            assert!(set_config("numcfg".parse().unwrap(), one("nope", "1"), app.clone())
                 .await
                 .is_err());
-            assert!(set_config("numcfg".into(), one("hz", "999"), app.clone())
+            assert!(set_config("numcfg".parse().unwrap(), one("hz", "999"), app.clone())
                 .await
                 .is_err());
-            assert!(set_config("numcfg".into(), one("hz", "abc"), app.clone())
+            assert!(set_config("numcfg".parse().unwrap(), one("hz", "abc"), app.clone())
                 .await
                 .is_err());
             for (key, invalid) in [
@@ -826,7 +855,7 @@ mod tests {
             ] {
                 assert!(
                     app.registry
-                        .validate_config_values("numcfg", &one(key, invalid))
+                        .validate_config_values(&"numcfg".parse().unwrap(), &one(key, invalid))
                         .is_err(),
                     "{key} accepted invalid value {invalid}"
                 );
@@ -840,10 +869,10 @@ mod tests {
                 ("timeout", "2500"),
             ] {
                 app.registry
-                    .validate_config_values("numcfg", &one(key, valid))
+                    .validate_config_values(&"numcfg".parse().unwrap(), &one(key, valid))
                     .unwrap();
             }
-            set_config("numcfg".into(), one("hz", "50"), app.clone())
+            set_config("numcfg".parse().unwrap(), one("hz", "50"), app.clone())
                 .await
                 .unwrap();
 

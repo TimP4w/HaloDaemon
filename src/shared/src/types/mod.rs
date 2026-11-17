@@ -229,14 +229,15 @@ mod tests {
     #[test]
     fn notification_detail_and_severity_for_detail_codes() {
         let connect = NotificationCode::PluginConnectFailed {
-            plugin: "wled".into(),
+            plugin: "wled".parse().unwrap(),
             detail: "127.0.0.1 blocked".into(),
         };
         let runtime = NotificationCode::PluginRuntimeError {
-            plugin: "wled".into(),
+            plugin: "wled".parse().unwrap(),
             detail: "lua boom".into(),
         };
         let device = NotificationCode::DeviceWriteFailed {
+            device_id: "kb-1".parse().unwrap(),
             device: "keyboard".into(),
             detail: "HID++ rejected write".into(),
         };
@@ -358,12 +359,13 @@ mod tests {
     #[test]
     fn plugin_recommendation_round_trips_and_defaults_accessible() {
         let rec = PluginRecommendation {
-            plugin_id: "nzxt_kraken".into(),
+            plugin_id: "nzxt_kraken".parse().unwrap(),
             plugin_name: "NZXT Kraken".into(),
             hardware: PluginRecommendationMatch::Hid {
                 vid: 0x1e71,
                 pid: 0x2007,
             },
+            install_from: Some("official".into()),
             accessible: false,
         };
         let back: PluginRecommendation =
@@ -452,6 +454,7 @@ mod tests {
     fn notification_roundtrip() {
         let n = Notification {
             code: NotificationCode::DeviceInitFailed {
+                device_id: "kraken-1".parse().unwrap(),
                 device: "Kraken".into(),
                 detail: "thing exploded".into(),
             },

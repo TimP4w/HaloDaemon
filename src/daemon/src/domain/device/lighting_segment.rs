@@ -11,6 +11,7 @@ use super::{
 };
 use anyhow::Result;
 use async_trait::async_trait;
+use halod_shared::ids::DeviceId;
 use halod_shared::types::{
     DeviceType, LedPosition, LightingChannel, LightingDescriptor, LightingDivision, LightingState,
     RgbColor, ZoneTopology,
@@ -136,7 +137,7 @@ pub const SEGMENT_CHANNEL_ID: &str = "strip";
 /// lives in the parent's `LightingDivisionHost` state, read via `LightingDivisionHub::link_name`;
 /// `fallback_name` is only used when the host has lost the slot.
 pub struct LightingSegmentCore {
-    pub id: String,
+    pub id: DeviceId,
     pub channel_id: String,
     pub fallback_name: String,
     pub topology: ZoneTopology,
@@ -148,7 +149,7 @@ pub struct LightingSegmentCore {
 
 impl LightingSegmentCore {
     pub fn new(
-        id: String,
+        id: DeviceId,
         channel_id: String,
         fallback_name: String,
         topology: ZoneTopology,
@@ -176,7 +177,7 @@ pub struct LightingSegmentDevice {
 
 impl LightingSegmentDevice {
     pub fn new(
-        id: String,
+        id: DeviceId,
         channel_id: String,
         name: String,
         topology: ZoneTopology,
@@ -232,7 +233,7 @@ impl LightingSegmentDevice {
 
 #[async_trait]
 impl Device for LightingSegmentDevice {
-    fn id(&self) -> &str {
+    fn id(&self) -> &DeviceId {
         &self.core.id
     }
 

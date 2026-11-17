@@ -1573,7 +1573,7 @@ mod tests {
             write_rate_history: None,
             plugin_assets: crate::ui::screens::device::empty_plugin_assets(),
         };
-        let mut st = DeviceUi::new("dev1".into());
+        let mut st = DeviceUi::new("dev1".parse().unwrap());
         st.lighting.paint_color = Some(violet);
 
         let cmd = pick_cmd(&ctx, &st, &rgb, &EffectPick::Solid)

@@ -14,15 +14,16 @@ use crate::ui::components as widgets;
 use crate::ui::theme::{self, a};
 
 use super::geometry::{
-    apply_drag, body_move, fill_coords, led_bounds, led_screen_pos, letterbox, norm_to_screen,
-    point_in_zone, rounded_zone_outline_sc, screen_to_norm, zone_corners, zone_corners_sc,
-    zone_key, zones_in_marquee,
+    apply_drag, body_move, fill_coords, led_bounds, led_screen_pos, norm_to_screen, point_in_zone,
+    rounded_zone_outline_sc, screen_to_norm, zone_corners, zone_corners_sc, zone_key,
+    zones_in_marquee,
 };
 use super::rack::{rgb_zone_descriptor, ring_zone_context_menu};
 use super::{CanvasUi, DragState, Handle, LedMode, MarqueeState, HANDLE_HIT_R, HANDLE_R};
 
 use crate::domain::tour;
 use crate::domain::tour::AnchorId;
+use halod_shared::ids::DeviceId;
 /// Screen position of the rotation handle — delegated to the shared widget helper.
 use widgets::rotation_handle_pos;
 
@@ -36,11 +37,7 @@ pub(super) fn canvas_view(
     outer: Rect,
 ) {
     tour::anchor(ui.ctx(), AnchorId::CanvasStage, outer);
-    let stage = Rect::from_min_max(
-        outer.min + Vec2::new(14.0, 64.0),
-        outer.max - Vec2::new(14.0, 36.0),
-    );
-    let canvas_rect = letterbox(stage, canvas_ui.canvas_aspect);
+    let canvas_rect = outer;
     let p = ui.painter();
     p.rect_filled(outer, theme::RADIUS_LG, theme::STAGE_BG);
     let gp = p.with_clip_rect(outer.shrink(1.0));
@@ -275,7 +272,7 @@ pub(super) fn canvas_view(
             .canvas
             .placed_zones
             .iter()
-            .find(|p| &p.device_id == dev_id && &p.channel_id == channel_id);
+            .find(|p| p.device_id == dev_id && &p.channel_id == channel_id);
         if let Some(z) = placed {
             egui::Area::new(egui::Id::unique("canvas_zone_context_menu"))
                 .order(egui::Order::Foreground)
@@ -383,30 +380,30 @@ fn draw_zones(p: &egui::Painter, state: &TopicStore, canvas_ui: &CanvasUi, canva
         ));
 
         let device = state.devices.iter().find(|d| d.id == zone.device_id);
-        if canvas_ui.led_mode == LedMode::Leds {
-            if let Some(rz) = rgb_zone_descriptor(state, &zone.device_id, &zone.channel_id) {
-                let zone_leds = canvas_ui
-                    .led_colors
-                    .get(&(zone.device_id.clone(), zone.channel_id.clone()));
-                let unrolled = display.sampling_mode == SamplingMode::Unrolled
-                    && matches!(rz.topology, ZoneTopology::Ring | ZoneTopology::Rings { .. });
-                let bounds = led_bounds(&rz.leds);
-                for (i, led) in rz.leds.iter().enumerate() {
-                    let (fx, fy) = if unrolled {
-                        halod_shared::zone_transform::unrolled_led_pos(i, rz.leds.len())
-                    } else {
-                        // Normalize against the cloud's own extent so the
-                        // outermost LEDs reach the box edge on every axis.
-                        fill_coords(led, bounds)
-                    };
-                    let pos = led_screen_pos(fx, fy, display, canvas_rect);
-                    let col = zone_leds
-                        .and_then(|m| m.get(&led.id))
-                        .map(|c| Color32::from_rgb(c.r, c.g, c.b))
-                        .unwrap_or(a(theme::TEXT_FAINT, 0.6));
-                    theme::glow(p, pos, 5.0, fade(col), 0.5);
-                    p.circle_filled(pos, 2.5, fade(col));
+        if let Some(rz) = rgb_zone_descriptor(state, &zone.device_id, &zone.channel_id) {
+            let zone_leds = canvas_ui
+                .led_colors
+                .get(&(zone.device_id.clone(), zone.channel_id.clone()));
+            let unrolled = display.sampling_mode == SamplingMode::Unrolled
+                && matches!(rz.topology, ZoneTopology::Ring | ZoneTopology::Rings { .. });
+            let bounds = led_bounds(&rz.leds);
+            for (i, led) in rz.leds.iter().enumerate() {
+                let (fx, fy) = if unrolled {
+                    halod_shared::zone_transform::unrolled_led_pos(i, rz.leds.len())
+                } else {
+                    // Normalize against the cloud's own extent so the
+                    // outermost LEDs reach the box edge on every axis.
+                    fill_coords(led, bounds)
+                };
+                let pos = led_screen_pos(fx, fy, display, canvas_rect);
+                let sampled = zone_leds
+                    .and_then(|m| m.get(&led.id))
+                    .map(|c| Color32::from_rgb(c.r, c.g, c.b));
+                let dot = led_dot(canvas_ui.led_mode, sampled);
+                if dot.glow {
+                    theme::glow(p, pos, 5.0, fade(dot.color), 0.5);
                 }
+                p.circle_filled(pos, dot.radius, fade(dot.color));
             }
         }
 
@@ -424,11 +421,8 @@ fn draw_zones(p: &egui::Painter, state: &TopicStore, canvas_ui: &CanvasUi, canva
             theme::body_sm(),
             label_col,
         );
-        let anchor = Pos2::new(
-            corners[0].x + 6.0 * sin,
-            corners[0].y - 6.0 * cos - galley.size().y * cos,
-        );
-        p.add(egui::epaint::TextShape::new(anchor, galley, label_col).with_angle(angle));
+        let (anchor, label_angle) = zone_label_placement(corners[0], corners[1], galley.size().y);
+        p.add(egui::epaint::TextShape::new(anchor, galley, label_col).with_angle(label_angle));
 
         if single_sel
             .as_ref()
@@ -462,7 +456,7 @@ fn hit_test(
     norm: Pos2,
     channels: &[PlacedZone],
     canvas_rect: Rect,
-) -> Option<(String, String, Handle)> {
+) -> Option<(DeviceId, String, Handle)> {
     let norm_screen = norm_to_screen(norm, canvas_rect);
     for zone in channels.iter().rev() {
         let corners = zone_corners(zone, canvas_rect);
@@ -504,7 +498,7 @@ fn badge_hit(
     state: &TopicStore,
     norm: Pos2,
     canvas_rect: Rect,
-) -> Option<(String, String)> {
+) -> Option<(DeviceId, String)> {
     if canvas_ui.selected.len() != 1 {
         return None;
     }
@@ -514,12 +508,45 @@ fn badge_hit(
         .canvas
         .placed_zones
         .iter()
-        .find(|p| &p.device_id == d && &p.channel_id == z)?;
+        .find(|p| p.device_id == d && &p.channel_id == z)?;
     let corners = zone_corners(zone, canvas_rect);
     let screen = norm_to_screen(norm, canvas_rect);
     widgets::remove_badge_rect(&corners)
         .contains(screen)
         .then(|| (d.clone(), z.clone()))
+}
+
+const ZONE_LABEL_GAP: f32 = 6.0;
+
+#[derive(Debug, Clone, Copy, PartialEq)]
+struct LedDot {
+    color: Color32,
+    radius: f32,
+    glow: bool,
+}
+
+fn led_dot(mode: LedMode, sampled: Option<Color32>) -> LedDot {
+    match mode {
+        LedMode::Frame => LedDot {
+            color: a(theme::TEXT_BRIGHT, 0.9),
+            radius: 2.0,
+            glow: false,
+        },
+        LedMode::Leds => LedDot {
+            color: sampled.unwrap_or(a(theme::TEXT_FAINT, 0.6)),
+            radius: 2.5,
+            glow: true,
+        },
+    }
+}
+
+fn zone_label_placement(top_left: Pos2, top_right: Pos2, label_height: f32) -> (Pos2, f32) {
+    let edge = (top_right - top_left).normalized();
+    let outward = Vec2::new(edge.y, -edge.x);
+    (
+        top_left + outward * (ZONE_LABEL_GAP + label_height),
+        edge.y.atan2(edge.x),
+    )
 }
 
 #[cfg(test)]
@@ -528,6 +555,36 @@ mod tests {
     use crate::ui::screens::canvas::test_fixtures::{r, z};
 
     const ROTATE_DIST: f32 = 20.0;
+
+    proptest::proptest! {
+        #[test]
+        fn a_zone_label_keeps_its_place_on_the_rotated_top_edge(rotation in 0.0f32..360.0, label_height in 8.0f32..24.0) {
+            let zone = PlacedZone { rotation, ..z(0.3, 0.4, 0.3, 0.1) };
+            let (sin, cos) = rotation.to_radians().sin_cos();
+            let corners = super::super::geometry::zone_corners_sc(&zone, r(), sin, cos);
+            let (anchor, angle) = zone_label_placement(corners[0], corners[1], label_height);
+            let along = Vec2::angled(angle);
+            let label_down = Vec2::new(-along.y, along.x);
+            let baseline_start = anchor + label_down * label_height;
+            proptest::prop_assert!((along - (corners[1] - corners[0]).normalized()).length() < 1e-3);
+            proptest::prop_assert!((baseline_start - corners[0]).dot(along).abs() < 1e-3);
+            proptest::prop_assert!(((corners[0] - baseline_start).dot(label_down) - ZONE_LABEL_GAP).abs() < 1e-3);
+            proptest::prop_assert!((corners[3] - corners[0]).dot(label_down) > 0.0);
+        }
+    }
+
+    #[test]
+    fn frame_view_draws_every_led_monochrome_and_led_view_shows_its_colour() {
+        let red = Color32::from_rgb(255, 0, 0);
+        let frame = led_dot(LedMode::Frame, Some(red));
+        assert_eq!(frame, led_dot(LedMode::Frame, None));
+        assert!(!frame.glow);
+        assert_ne!(frame.color, red);
+        let leds = led_dot(LedMode::Leds, Some(red));
+        assert_eq!(leds.color, red);
+        assert!(leds.glow);
+        assert_ne!(led_dot(LedMode::Leds, None).color, red);
+    }
 
     #[test]
     fn rotation_handle_above_at_zero() {

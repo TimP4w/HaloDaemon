@@ -2,7 +2,8 @@
 use anyhow::Result;
 use std::collections::{HashMap, HashSet};
 use std::sync::Arc;
-use std::time::{Duration, Instant};
+use std::time::Duration;
+use tokio::time::Instant;
 
 use crate::application::usecases::registry::registration;
 use crate::application::usecases::registry::runtime;
@@ -13,6 +14,7 @@ use crate::{
     domain::device::Device,
     domain::registry::observers::discovery::{DiscoveryHandle, TransportScanner},
 };
+use halod_shared::ids::DeviceId;
 
 const MAX_ENUMERATION_BACKOFF: Duration = Duration::from_secs(30);
 
@@ -40,15 +42,15 @@ pub async fn hotplug_monitor(app: Arc<AppState>) {
             }
             Ok(Err(e)) => {
                 if streak.is_none() {
-                    log::debug!("Hotplug: HID enumeration failed: {e}");
+                    log::debug!("HID enumeration failed: {e}");
                 } else {
-                    log::warn!("Hotplug: HID enumeration failed again: {e}");
+                    log::warn!("HID enumeration failed again: {e}");
                 }
                 back_off(&mut streak).await;
                 continue;
             }
             Err(e) => {
-                log::warn!("Hotplug: spawn_blocking panicked: {e}");
+                log::warn!("HID enumeration task panicked: {e}");
                 back_off(&mut streak).await;
                 continue;
             }
@@ -281,15 +283,15 @@ pub(crate) async fn handle_hid_key_removed(app: Arc<AppState>, key: String) {
         // Children a receiver registered after it was tracked (a paired device
         // that woke later) share its worker and die with it.
         let owned_children = {
-            let tracked: HashSet<&str> = arcs.iter().map(|d| d.id()).collect();
+            let tracked: HashSet<&DeviceId> = arcs.iter().map(|d| d.id()).collect();
             let mut owners = app.device_registry.children.lock().await;
-            let owned: HashSet<String> = tracked
+            let owned: HashSet<DeviceId> = tracked
                 .iter()
                 .filter_map(|id| owners.remove(*id))
                 .flatten()
                 .collect();
             for children in owners.values_mut() {
-                children.retain(|id| !tracked.contains(id.as_str()) && !owned.contains(id));
+                children.retain(|id| !tracked.contains(id) && !owned.contains(id));
             }
             owned
         };
@@ -465,13 +467,13 @@ mod tests {
             .children
             .lock()
             .await
-            .entry("logitech-c547".into())
+            .entry("logitech-c547".parse().unwrap())
             .or_default()
-            .insert("logitech-6B3DD4CD".into());
+            .insert("logitech-6B3DD4CD".parse().unwrap());
 
         handle_hid_key_removed(Arc::clone(&app), "046d:c547:".into()).await;
 
-        let remaining: Vec<String> = app
+        let remaining: Vec<DeviceId> = app
             .device_registry
             .read()
             .await

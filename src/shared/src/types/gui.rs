@@ -182,28 +182,24 @@ pub enum NotificationCode {
     KeyRemapUnavailable {
         detail: String,
     },
-    DeviceReconnectFailed {
-        device: String,
-    },
     ProfileSwitched {
         profile: String,
     },
     LowBattery {
+        device_id: crate::ids::DeviceId,
         device: String,
         battery: String,
         level: u8,
         threshold: u8,
     },
-    ChainLinkRestoreFailed {
-        name: String,
-        detail: String,
-    },
     DeviceInitFailed {
+        device_id: crate::ids::DeviceId,
         device: String,
         detail: String,
     },
     /// `detail` carries the complete error chain for the Details modal.
     DeviceWriteFailed {
+        device_id: crate::ids::DeviceId,
         device: String,
         detail: String,
     },
@@ -212,17 +208,22 @@ pub enum NotificationCode {
     },
     /// Background-path Lua failure, deduplicated daemon-side so it alerts once, not every frame.
     PluginRuntimeError {
-        plugin: String,
+        plugin: crate::ids::PluginId,
         detail: String,
     },
     /// Deduplicated daemon-side per plugin, alerting once per failure episode.
     PluginConnectFailed {
-        plugin: String,
+        plugin: crate::ids::PluginId,
         detail: String,
     },
-    /// `plugin` is the display name and never includes device paths or serials.
+    /// `name` is the display name and never includes device paths or serials.
     PluginRecommended {
-        plugin: String,
+        plugin: crate::ids::PluginId,
+        name: String,
+    },
+    PluginUpdateNeedsPermissions {
+        plugin: crate::ids::PluginId,
+        name: String,
     },
     /// The GUI translates only the title and shows `message` verbatim.
     Generic {
@@ -235,18 +236,17 @@ impl NotificationCode {
         use NotificationCode::*;
         match self {
             EngineStopped { .. }
-            | ChainLinkRestoreFailed { .. }
             | DeviceInitFailed { .. }
             | DeviceWriteFailed { .. }
             | Generic { .. } => NotificationSeverity::Error,
             KeyRemapUnavailable { .. }
-            | DeviceReconnectFailed { .. }
             | FanStalled { .. }
             | PluginRuntimeError { .. }
             | PluginConnectFailed { .. } => NotificationSeverity::Warning,
-            ProfileSwitched { .. } | LowBattery { .. } | PluginRecommended { .. } => {
-                NotificationSeverity::Info
-            }
+            ProfileSwitched { .. }
+            | LowBattery { .. }
+            | PluginRecommended { .. }
+            | PluginUpdateNeedsPermissions { .. } => NotificationSeverity::Info,
         }
     }
 

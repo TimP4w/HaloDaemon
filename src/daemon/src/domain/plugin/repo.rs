@@ -30,3 +30,39 @@ impl RepositoryTrust {
         }
     }
 }
+
+#[cfg(test)]
+mod tests {
+    use super::*;
+    use crate::config::PluginRepoSource;
+    use halod_plugin_signing::SignatureAlgorithm;
+
+    fn record(slug: &str, trusted_key: Option<RepositorySigningKey>) -> PluginRepoRecord {
+        PluginRepoRecord {
+            slug: slug.into(),
+            source: PluginRepoSource::Url(format!("https://{slug}.example/catalog.yaml")),
+            trusted_key,
+        }
+    }
+
+    #[test]
+    fn trust_follows_the_record() {
+        let key = RepositorySigningKey {
+            id: "acme-2026".into(),
+            algorithm: SignatureAlgorithm::Ed25519,
+            public_key: "AAAA".into(),
+        };
+        assert_eq!(
+            RepositoryTrust::for_record(&record(OFFICIAL_PLUGIN_REPO_SLUG, None)).pinned_keys(),
+            Some(OFFICIAL_PLUGIN_REPO_PUBLIC_KEYS.to_vec())
+        );
+        assert_eq!(
+            RepositoryTrust::for_record(&record("acme", Some(key))).pinned_keys(),
+            Some(vec![("acme-2026", "AAAA")])
+        );
+        assert_eq!(
+            RepositoryTrust::for_record(&record("acme", None)).pinned_keys(),
+            None
+        );
+    }
+}

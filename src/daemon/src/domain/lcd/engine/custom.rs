@@ -28,6 +28,7 @@ use crate::domain::plugin::WidgetAudioInput;
 use crate::domain::plugin::WidgetImageInput;
 use crate::domain::plugin::WidgetRenderInput;
 use crate::util::backoff::FailureStreak;
+use halod_shared::ids::{DeviceId, PluginId};
 
 struct PluginSprite {
     signature: u64,
@@ -85,8 +86,8 @@ pub struct CustomTemplate {
     /// Acquired only when the layout has a `NowPlaying` widget — `None`
     /// renders the "no player" dimmed placeholder.
     media: Option<Arc<MediaHandle>>,
-    plugin_handles: HashMap<String, PluginWidgetHandle>,
-    plugin_backoff: HashMap<String, FailureStreak>,
+    plugin_handles: HashMap<PluginId, PluginWidgetHandle>,
+    plugin_backoff: HashMap<PluginId, FailureStreak>,
     plugin_sprites: HashMap<String, PluginSprite>,
     composite_cache: RefCell<HashMap<String, CachedComposite>>,
     system_fonts: HashMap<String, ab_glyph::FontArc>,
@@ -299,7 +300,8 @@ impl CustomTemplate {
                 Some(handle) => handle.clone(),
                 None => {
                     if let Some(backoff) = self.plugin_backoff.get(&entry.plugin_id) {
-                        if !crate::util::backoff::respawn_due(backoff, std::time::Instant::now()) {
+                        if !crate::util::backoff::respawn_due(backoff, tokio::time::Instant::now())
+                        {
                             continue;
                         }
                     }
@@ -443,7 +445,7 @@ impl CustomTemplate {
                     if !handle.is_usable() {
                         // A timeout poisons one plugin VM, not the layout. Drop
                         self.plugin_handles.remove(&entry.plugin_id);
-                        let now = std::time::Instant::now();
+                        let now = tokio::time::Instant::now();
                         self.plugin_backoff
                             .entry(entry.plugin_id.clone())
                             .and_modify(|backoff| backoff.record(now))
@@ -1030,14 +1032,14 @@ fn editor_sprite_signature(widget: &WidgetDef, cw: u32, ch: u32, dynamic: Option
 /// GIF frames) and fonts survive between the GUI's ~200ms polls instead of
 /// being rebuilt from scratch every tick.
 pub(crate) struct EditorSession {
-    pub(crate) device_id: String,
+    pub(crate) device_id: DeviceId,
     tmpl: CustomTemplate,
-    last_used: std::time::Instant,
+    last_used: tokio::time::Instant,
 }
 
 impl EditorSession {
     /// Whether this session has sat idle longer than `timeout` as of `now`.
-    pub(crate) fn is_idle(&self, now: std::time::Instant, timeout: std::time::Duration) -> bool {
+    pub(crate) fn is_idle(&self, now: tokio::time::Instant, timeout: std::time::Duration) -> bool {
         editor_session_is_idle(self.last_used, now, timeout)
     }
 
@@ -1045,9 +1047,9 @@ impl EditorSession {
     /// well past [`EDITOR_SESSION_IDLE_TIMEOUT`]), so eviction-path tests
     /// don't need a real sleep.
     #[cfg(test)]
-    pub(crate) fn new_idle_for_test(device_id: &str) -> Self {
+    pub(crate) fn new_idle_for_test(device_id: &DeviceId) -> Self {
         Self {
-            device_id: device_id.to_string(),
+            device_id: device_id.clone(),
             tmpl: CustomTemplate::new(
                 CustomTemplateDef {
                     widgets: vec![],
@@ -1055,7 +1057,7 @@ impl EditorSession {
                 },
                 std::path::Path::new("/tmp"),
             ),
-            last_used: std::time::Instant::now() - EDITOR_SESSION_IDLE_TIMEOUT * 2,
+            last_used: tokio::time::Instant::now() - EDITOR_SESSION_IDLE_TIMEOUT * 2,
         }
     }
 
@@ -1075,7 +1077,7 @@ impl EditorSession {
 }
 
 pub(crate) fn prepare_editor_session<'a>(
-    device_id: &str,
+    device_id: &DeviceId,
     def: &CustomTemplateDef,
     images_dir: &Path,
     session: &'a mut Option<EditorSession>,
@@ -1086,9 +1088,9 @@ pub(crate) fn prepare_editor_session<'a>(
             session.insert(existing)
         }
         _ => session.insert(EditorSession {
-            device_id: device_id.to_owned(),
+            device_id: device_id.clone(),
             tmpl: CustomTemplate::new(def.clone(), images_dir),
-            last_used: std::time::Instant::now(),
+            last_used: tokio::time::Instant::now(),
         }),
     }
 }
@@ -1100,8 +1102,8 @@ pub(crate) const EDITOR_SESSION_IDLE_TIMEOUT: std::time::Duration =
     std::time::Duration::from_secs(30);
 
 pub(crate) fn editor_session_is_idle(
-    last_used: std::time::Instant,
-    now: std::time::Instant,
+    last_used: tokio::time::Instant,
+    now: tokio::time::Instant,
     timeout: std::time::Duration,
 ) -> bool {
     now.saturating_duration_since(last_used) > timeout
@@ -1123,7 +1125,7 @@ impl CustomTemplate {
 /// plus the current (id, signature) pair for every widget.
 #[allow(clippy::too_many_arguments)] // editor render request plus reusable session state
 pub(crate) fn render_editor_sprites(
-    device_id: &str,
+    device_id: &DeviceId,
     def: &CustomTemplateDef,
     cw: u32,
     ch: u32,
@@ -1132,7 +1134,7 @@ pub(crate) fn render_editor_sprites(
     session: &mut Option<EditorSession>,
 ) -> (Vec<WidgetSprite>, Vec<(String, u64)>) {
     let s = prepare_editor_session(device_id, def, images_dir, session);
-    s.last_used = std::time::Instant::now();
+    s.last_used = tokio::time::Instant::now();
 
     let ctx = TemplateCtx {
         width: cw,
@@ -1196,7 +1198,7 @@ mod tests {
 
     #[test]
     fn editor_session_idle_boundary_is_strict() {
-        let start = std::time::Instant::now();
+        let start = tokio::time::Instant::now();
         let timeout = std::time::Duration::from_secs(30);
         assert!(!editor_session_is_idle(start, start + timeout, timeout));
         assert!(editor_session_is_idle(

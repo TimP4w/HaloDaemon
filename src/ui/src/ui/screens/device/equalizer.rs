@@ -11,6 +11,7 @@ use crate::domain::tour;
 use crate::domain::tour::AnchorId;
 use crate::runtime::ipc;
 use crate::ui::theme;
+use halod_shared::ids::DeviceId;
 
 pub fn show(ui: &mut egui::Ui, ctx: &TabCtx, st: &mut DeviceUi) {
     tour::anchor(ui.ctx(), AnchorId::TabEqualizer, ui.max_rect());
@@ -103,7 +104,7 @@ fn preset_note(preset: &halod_shared::types::EqPreset) -> std::borrow::Cow<'stat
     }
 }
 
-fn preset_list(ui: &mut egui::Ui, ctx: &TabCtx, id: &str, eq: &Equalizer) {
+fn preset_list(ui: &mut egui::Ui, ctx: &TabCtx, id: &DeviceId, eq: &Equalizer) {
     for (idx, preset) in eq.presets.iter().enumerate() {
         let selected = idx == eq.selected_preset;
         if widgets::choice_row(ui, &preset.label, &preset_note(preset), selected).clicked()
@@ -112,7 +113,7 @@ fn preset_list(ui: &mut egui::Ui, ctx: &TabCtx, id: &str, eq: &Equalizer) {
             ipc::send(
                 ctx.cmd,
                 DaemonCommand::Device {
-                    device_id: id.to_string(),
+                    device_id: id.clone(),
                     op: DeviceOp::SetEqPreset { preset_index: idx },
                 },
             );
@@ -133,7 +134,7 @@ fn db_label(v: f32) -> String {
     }
 }
 
-fn bands(ui: &mut egui::Ui, ctx: &TabCtx, st: &mut DeviceUi, id: &str, eq: &Equalizer) {
+fn bands(ui: &mut egui::Ui, ctx: &TabCtx, st: &mut DeviceUi, id: &DeviceId, eq: &Equalizer) {
     let n = eq.bands.len().max(1);
     let (well, _) = ui.allocate_exact_size(Vec2::new(ui.available_width(), WELL_H), Sense::hover());
     let p = ui.painter();
@@ -200,7 +201,7 @@ fn bands(ui: &mut egui::Ui, ctx: &TabCtx, st: &mut DeviceUi, id: &str, eq: &Equa
         st.queue(
             "eq",
             DaemonCommand::Device {
-                device_id: id.to_string(),
+                device_id: id.clone(),
                 op: DeviceOp::SetEqBands {
                     values: st.equalizer.eq.clone(),
                 },

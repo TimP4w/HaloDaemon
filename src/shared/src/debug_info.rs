@@ -45,12 +45,12 @@ pub struct HidEntryDebugInfo {
     #[serde(default)]
     pub product: String,
     #[serde(default, skip_serializing_if = "Option::is_none")]
-    pub matched_device_id: Option<String>,
+    pub matched_device_id: Option<crate::ids::DeviceId>,
 }
 
 #[derive(Debug, Clone, Serialize, Deserialize)]
 pub struct DeviceDebugInfo {
-    pub id: String,
+    pub id: crate::ids::DeviceId,
     pub name: String,
     pub vendor: String,
     pub model: String,
@@ -193,7 +193,7 @@ mod tests {
             usage: 0x0001,
             manufacturer: "Logitech".into(),
             product: "G Pro".into(),
-            matched_device_id: Some("logitech-gpro-1".into()),
+            matched_device_id: Some("logitech-gpro-1".parse().unwrap()),
         };
         let json = serde_json::to_string(&e).unwrap();
         let back: HidEntryDebugInfo = serde_json::from_str(&json).unwrap();
@@ -206,7 +206,10 @@ mod tests {
         assert_eq!(back.usage, 0x0001);
         assert_eq!(back.manufacturer, "Logitech");
         assert_eq!(back.product, "G Pro");
-        assert_eq!(back.matched_device_id, Some("logitech-gpro-1".into()));
+        assert_eq!(
+            back.matched_device_id,
+            Some("logitech-gpro-1".parse().unwrap())
+        );
     }
 
     #[test]
@@ -244,7 +247,7 @@ mod tests {
     #[test]
     fn device_debug_info_round_trip() {
         let d = DeviceDebugInfo {
-            id: "dev-1".into(),
+            id: "dev-1".parse().unwrap(),
             name: "Kraken X73".into(),
             vendor: "NZXT".into(),
             model: "X73".into(),
@@ -301,7 +304,7 @@ mod tests {
                 daemon_build: "halod +default".into(),
             },
             devices: vec![DeviceDebugInfo {
-                id: "dev-1".into(),
+                id: "dev-1".parse().unwrap(),
                 name: "Kraken".into(),
                 vendor: "NZXT".into(),
                 model: "X73".into(),

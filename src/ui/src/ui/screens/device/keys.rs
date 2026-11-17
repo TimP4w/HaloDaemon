@@ -15,7 +15,8 @@ use super::{macro_editor, DeviceUi, TabCtx};
 use crate::domain::tour;
 use crate::domain::tour::AnchorId;
 use crate::runtime::ipc;
-use crate::ui::theme;
+use crate::ui::theme::{self, a};
+use halod_shared::ids::DeviceId;
 
 const LIST_W: f32 = 398.0;
 const ROW_H: f32 = 58.0;
@@ -101,17 +102,14 @@ fn sync_mapping_editor(
 
 // ── Keyboard overview (clickable key picture) ────────────────────────────────
 
-/// Reduce a click on key `idx` to a new selected cid. A mapped key (one with a
-/// KeyRemap cid) selects it; an unmapped key is a no-op (keeps `current`).
-fn key_click_selection(
+fn selectable_cid_at(
     keys: &[halod_shared::keyboard::VisualKey],
-    idx: usize,
-    current: Option<u16>,
+    rects: &[Rect],
+    pos: egui::Pos2,
+    unit: f32,
 ) -> Option<u16> {
-    match keys.get(idx).and_then(|k| k.remap_cid) {
-        Some(cid) => Some(cid),
-        None => current,
-    }
+    let idx = super::keyboard_visual::hit_key(keys, rects, pos, unit)?;
+    keys[idx].remap_cid
 }
 
 /// The index of the key currently highlighted for `cid`, if any.
@@ -129,46 +127,46 @@ fn keyboard_overview(
     status: &halod_shared::keyboard::KeyboardLayoutStatus,
 ) {
     use super::keyboard_visual as kbv;
-    use std::collections::HashSet;
 
     let (resp, inner) = kbv::panel(ui, 240.0, Sense::click());
     let keys = &status.keys;
     let rects = kbv::key_rects(keys, inner, 3.0);
     let unit = kbv::unit_for(keys, inner);
 
-    if resp.clicked() {
-        if let Some(pos) = resp.interact_pointer_pos() {
-            if let Some(i) = kbv::hit_key(keys, &rects, pos, unit) {
-                st.keys.keys_sel_cid = key_click_selection(keys, i, st.keys.keys_sel_cid);
-            }
-        }
-    }
-    if resp.hovered() {
+    let hovered = resp
+        .hover_pos()
+        .and_then(|pos| selectable_cid_at(keys, &rects, pos, unit));
+    if hovered.is_some() {
         ui.ctx().set_cursor_icon(egui::CursorIcon::PointingHand);
+        if resp.clicked() {
+            st.keys.keys_sel_cid = hovered;
+        }
     }
 
     let selected = selected_key_index(keys, st.keys.keys_sel_cid);
-    let remappable: HashSet<u32> = keys
+    let cid_by_led: std::collections::HashMap<u32, u16> = keys
         .iter()
-        .filter(|k| k.remap_cid.is_some())
-        .map(|k| k.led_id)
+        .filter_map(|k| Some((k.led_id, k.remap_cid?)))
         .collect();
-    let (mapped, unmapped) = (theme::BORDER_INNER, theme::RAISED_BG);
+    let selected_cid = st.keys.keys_sel_cid;
     kbv::draw_keyboard(
         ui,
         keys,
         &rects,
-        &|id| {
-            if remappable.contains(&id) {
-                mapped
-            } else {
-                unmapped
-            }
-        },
+        &|id| key_fill(cid_by_led.get(&id).copied(), selected_cid, hovered),
         selected,
         status.language,
         unit,
     );
+}
+
+fn key_fill(cid: Option<u16>, selected: Option<u16>, hovered: Option<u16>) -> egui::Color32 {
+    match cid {
+        Some(cid) if Some(cid) == selected => theme::CYAN,
+        Some(cid) if Some(cid) == hovered => a(theme::CYAN, 0.55),
+        Some(_) => theme::ACCENT_BORDER,
+        None => theme::INNER_BG,
+    }
 }
 
 // ── Left card: button list ───────────────────────────────────────────────────
@@ -178,7 +176,7 @@ fn button_list_card(
     ctx: &TabCtx,
     st: &mut DeviceUi,
     remap: &KeyRemapStatus,
-    id: &str,
+    id: &DeviceId,
     tab_label: &str,
 ) {
     widgets::card_with_margin(ui, egui::Margin::same(8), |ui| {
@@ -208,7 +206,7 @@ fn button_list_card(
                             ipc::send(
                                 ctx.cmd,
                                 DaemonCommand::Device {
-                                    device_id: id.to_string(),
+                                    device_id: id.clone(),
                                     op: DeviceOp::ResetAllButtonMappings,
                                 },
                             );
@@ -329,7 +327,7 @@ fn editor_card(
     ctx: &TabCtx,
     st: &mut DeviceUi,
     remap: &KeyRemapStatus,
-    id: &str,
+    id: &DeviceId,
 ) {
     widgets::card(ui, |ui| {
         ui.set_width(ui.available_width());
@@ -420,7 +418,7 @@ fn editor_card(
                     ipc::send(
                         ctx.cmd,
                         DaemonCommand::Device {
-                            device_id: id.to_string(),
+                            device_id: id.clone(),
                             op: DeviceOp::ResetButtonMapping { cid },
                         },
                     );
@@ -442,7 +440,7 @@ fn action_grid(
     ui: &mut egui::Ui,
     ctx: &TabCtx,
     st: &mut DeviceUi,
-    id: &str,
+    id: &DeviceId,
     cid: u16,
     layer: Layer,
     current_action: &ButtonAction,
@@ -471,7 +469,7 @@ fn action_grid(
                 ipc::send(
                     ctx.cmd,
                     DaemonCommand::Device {
-                        device_id: id.to_string(),
+                        device_id: id.clone(),
                         op: DeviceOp::SetButtonMapping {
                             mapping: ButtonMapping { cid, base, shifted },
                         },
@@ -556,7 +554,7 @@ fn params_editor(
     ui: &mut egui::Ui,
     ctx: &TabCtx,
     st: &mut DeviceUi,
-    id: &str,
+    id: &DeviceId,
     action: ButtonAction,
     layer: Layer,
 ) {
@@ -573,7 +571,7 @@ fn params_editor(
             Layer::Shifted => (other.clone(), act),
         };
         DaemonCommand::Device {
-            device_id: id.to_string(),
+            device_id: id.clone(),
             op: DeviceOp::SetButtonMapping {
                 mapping: ButtonMapping { cid, base, shifted },
             },
@@ -1107,16 +1105,33 @@ mod tests {
     }
 
     #[test]
-    fn key_click_selects_mapped_key_and_ignores_unmapped() {
-        let keys = vec![vkey(0, Some(0x50)), vkey(1, None), vkey(2, Some(0x51))];
-        // Clicking a mapped key selects its cid.
-        assert_eq!(key_click_selection(&keys, 0, None), Some(0x50));
-        assert_eq!(key_click_selection(&keys, 2, Some(0x50)), Some(0x51));
-        // Clicking an unmapped key keeps the current selection (no-op).
-        assert_eq!(key_click_selection(&keys, 1, Some(0x50)), Some(0x50));
-        assert_eq!(key_click_selection(&keys, 1, None), None);
-        // Out-of-range index is a no-op.
-        assert_eq!(key_click_selection(&keys, 9, Some(0x50)), Some(0x50));
+    fn selectable_hovered_and_selected_keys_each_get_their_own_fill() {
+        let plain = key_fill(None, Some(1), Some(1));
+        let selectable = key_fill(Some(2), Some(1), None);
+        let hovered = key_fill(Some(2), Some(1), Some(2));
+        let selected = key_fill(Some(1), Some(1), Some(1));
+        let fills = [plain, selectable, hovered, selected];
+        for (i, a) in fills.iter().enumerate() {
+            for b in &fills[i + 1..] {
+                assert_ne!(a, b);
+            }
+        }
+    }
+
+    #[test]
+    fn only_keys_tied_to_a_remap_button_are_selectable() {
+        let mut keys = vec![vkey(0, Some(0x50)), vkey(1, None)];
+        keys[1].cell.col = 1.0;
+        let avail = Rect::from_min_size(egui::Pos2::ZERO, egui::vec2(200.0, 100.0));
+        let rects = super::super::keyboard_visual::key_rects(&keys, avail, 3.0);
+        let unit = super::super::keyboard_visual::unit_for(&keys, avail);
+        let at = |i: usize| selectable_cid_at(&keys, &rects, rects[i].center(), unit);
+        assert_eq!(at(0), Some(0x50));
+        assert_eq!(at(1), None);
+        assert_eq!(
+            selectable_cid_at(&keys, &rects, egui::Pos2::new(-5.0, -5.0), unit),
+            None
+        );
     }
 
     #[test]

@@ -10,6 +10,16 @@ use crate::ui::theme::{self, a};
 /// it to fit — so a long (e.g. localized) label never touches the edges.
 const LABEL_H_PAD: f32 = 16.0;
 
+#[derive(Clone, Copy, PartialEq, Eq, Debug)]
+enum ButtonState {
+    Idle,
+    Disabled,
+    Loading,
+}
+
+const SPINNER_SIZE: f32 = 14.0;
+const SPINNER_GAP: f32 = 8.0;
+
 /// Visual role of a [`button`].
 #[derive(Clone, Copy, PartialEq)]
 pub enum ButtonKind {
@@ -35,7 +45,15 @@ pub enum ButtonKind {
 pub fn button(ui: &mut egui::Ui, label: &str, kind: ButtonKind, size: Vec2) -> Response {
     let size = fit_size(ui, label, kind, size);
     let (rect, resp) = ui.allocate_exact_size(size, Sense::click());
-    paint_button(ui, rect, resp.id, resp.hovered(), label, kind, false);
+    paint_button(
+        ui,
+        rect,
+        resp.id,
+        resp.hovered(),
+        label,
+        kind,
+        ButtonState::Idle,
+    );
     resp
 }
 
@@ -90,6 +108,31 @@ pub fn paint_close_glyph(p: &egui::Painter, rect: Rect, color: Color32) {
     p.line_segment([c + Vec2::new(3.5, -3.5), c + Vec2::new(-3.5, 3.5)], stroke);
 }
 
+pub fn paint_trash_glyph(p: &egui::Painter, rect: Rect, color: Color32) {
+    let c = rect.center();
+    let stroke = Stroke::new(1.3, color);
+    p.line_segment(
+        [c + Vec2::new(-5.0, -3.5), c + Vec2::new(5.0, -3.5)],
+        stroke,
+    );
+    p.line_segment(
+        [c + Vec2::new(-1.5, -5.5), c + Vec2::new(1.5, -5.5)],
+        stroke,
+    );
+    p.add(egui::Shape::closed_line(
+        vec![
+            c + Vec2::new(-3.8, -3.5),
+            c + Vec2::new(3.8, -3.5),
+            c + Vec2::new(3.1, 5.5),
+            c + Vec2::new(-3.1, 5.5),
+        ],
+        stroke,
+    ));
+    for dx in [-1.3, 1.3] {
+        p.line_segment([c + Vec2::new(dx, -1.0), c + Vec2::new(dx, 3.5)], stroke);
+    }
+}
+
 /// A 6×3 chevron centred at `c`, pointing down (or up when `up`).
 pub fn paint_chevron(p: &egui::Painter, c: egui::Pos2, up: bool, color: Color32) {
     let dy = if up { -1.5 } else { 1.5 };
@@ -108,21 +151,30 @@ pub fn paint_chevron(p: &egui::Painter, c: egui::Pos2, up: bool, color: Color32)
 pub fn button_disabled(ui: &mut egui::Ui, label: &str, kind: ButtonKind, size: Vec2) -> Response {
     let size = fit_size(ui, label, kind, size);
     let (rect, resp) = ui.allocate_exact_size(size, Sense::hover());
-    paint_button(ui, rect, resp.id, false, label, kind, true);
+    paint_button(ui, rect, resp.id, false, label, kind, ButtonState::Disabled);
     resp
 }
 
 /// Like [`button_disabled`] but overlays a small spinner on the right side of
 /// the button to indicate an async operation in progress.
 pub fn button_loading(ui: &mut egui::Ui, label: &str, kind: ButtonKind, size: Vec2) -> Response {
-    let size = fit_size(ui, label, kind, size);
+    let size = fit_width(
+        label_width(ui, label, kind, size.y) + SPINNER_SIZE + SPINNER_GAP,
+        size,
+    );
     let (rect, resp) = ui.allocate_exact_size(size, Sense::hover());
-    paint_button(ui, rect, resp.id, false, label, kind, true);
-    let spin_center = egui::pos2(rect.right() - 14.0, rect.center().y);
-    let spin_rect = Rect::from_center_size(spin_center, Vec2::splat(14.0));
-    ui.new_child(egui::UiBuilder::new().max_rect(spin_rect))
-        .add(egui::Spinner::new().size(12.0).color(a(theme::CYAN, 0.5)));
+    paint_button(ui, rect, resp.id, false, label, kind, ButtonState::Loading);
+    ui.ctx().request_repaint();
     resp
+}
+
+fn loading_layout(center: egui::Pos2, label_w: f32) -> (egui::Pos2, f32) {
+    let group = SPINNER_SIZE + SPINNER_GAP + label_w;
+    let left = center.x - group / 2.0;
+    (
+        egui::pos2(left + SPINNER_SIZE / 2.0, center.y),
+        left + SPINNER_SIZE + SPINNER_GAP,
+    )
 }
 
 /// Same styling as [`button`], but painted at an explicit `rect` for buttons
@@ -138,7 +190,7 @@ pub fn button_at(
     kind: ButtonKind,
 ) -> Response {
     let resp = ui.interact(rect, id, Sense::click());
-    paint_button(ui, rect, id, resp.hovered(), label, kind, false);
+    paint_button(ui, rect, id, resp.hovered(), label, kind, ButtonState::Idle);
     resp
 }
 
@@ -164,12 +216,14 @@ fn button_radius(h: f32) -> f32 {
 /// The rendered size of a flow-laid button: the requested `size`, widened when
 /// the label (measured in its own font) plus padding needs more room.
 fn fit_size(ui: &egui::Ui, label: &str, kind: ButtonKind, size: Vec2) -> Vec2 {
-    let text_w = ui
-        .painter()
-        .layout_no_wrap(label.to_owned(), button_font(kind, size.y), Color32::WHITE)
+    fit_width(label_width(ui, label, kind, size.y), size)
+}
+
+fn label_width(ui: &egui::Ui, label: &str, kind: ButtonKind, height: f32) -> f32 {
+    ui.painter()
+        .layout_no_wrap(label.to_owned(), button_font(kind, height), Color32::WHITE)
         .size()
-        .x;
-    fit_width(text_w, size)
+        .x
 }
 
 /// Pure sizing rule behind [`fit_size`]: never shrink below `size`, but widen to
@@ -188,16 +242,14 @@ fn paint_button(
     hovered: bool,
     label: &str,
     kind: ButtonKind,
-    disabled: bool,
+    state: ButtonState,
 ) {
-    if hovered && !disabled {
+    let disabled = state == ButtonState::Disabled;
+    let hovered = hovered && state == ButtonState::Idle;
+    if hovered {
         ui.ctx().set_cursor_icon(egui::CursorIcon::PointingHand);
     }
-    let t = if disabled {
-        0.0
-    } else {
-        ui.ctx().animate_bool_with_time(id, hovered, 0.12)
-    };
+    let t = ui.ctx().animate_bool_with_time(id, hovered, 0.12);
     let p = ui.painter();
 
     let font = button_font(kind, rect.height());
@@ -285,13 +337,46 @@ fn paint_button(
         p.rect_stroke(rect, radius, stroke, egui::StrokeKind::Inside);
     }
 
-    let text = label.to_string();
-    p.text(rect.center(), Align2::CENTER_CENTER, text, font, text_color);
+    if state == ButtonState::Loading {
+        let galley = p.layout_no_wrap(label.to_string(), font, text_color);
+        let (spinner, text_left) = loading_layout(rect.center(), galley.size().x);
+        super::feedback::paint_spinner(
+            p,
+            spinner,
+            SPINNER_SIZE,
+            ui.input(|i| i.time) as f32,
+            text_color,
+        );
+        p.galley(
+            egui::pos2(text_left, rect.center().y - galley.size().y / 2.0),
+            galley,
+            text_color,
+        );
+        return;
+    }
+    p.text(
+        rect.center(),
+        Align2::CENTER_CENTER,
+        label,
+        font,
+        text_color,
+    );
 }
 
 #[cfg(test)]
 mod tests {
     use super::*;
+
+    #[test]
+    fn a_loading_spinner_and_its_label_are_centred_together() {
+        let center = egui::pos2(100.0, 20.0);
+        let label_w = 60.0;
+        let (spinner, text_left) = loading_layout(center, label_w);
+        let group_left = spinner.x - SPINNER_SIZE / 2.0;
+        let group_right = text_left + label_w;
+        assert!(((group_left + group_right) / 2.0 - center.x).abs() < 1e-4);
+        assert!(spinner.x + SPINNER_SIZE / 2.0 + SPINNER_GAP <= text_left + 1e-4);
+    }
 
     #[test]
     fn small_buttons_use_the_smaller_label_and_radius() {

@@ -3,14 +3,15 @@
 
 use crate::application::state::AppState;
 use crate::config::Config;
+use halod_shared::ids::DeviceId;
 use halod_shared::types::EffectParamValue;
 use std::collections::HashMap;
 
 pub async fn project(
     app: &AppState,
     cfg: &Config,
-    templates: HashMap<String, String>,
-    params: HashMap<String, HashMap<String, EffectParamValue>>,
+    templates: HashMap<DeviceId, String>,
+    params: HashMap<DeviceId, HashMap<String, EffectParamValue>>,
 ) -> halod_shared::types::LcdState {
     let mut lcd = app.lcd.snapshot(&app.registry, templates, params).await;
     lcd.config = cfg.lcd.clone();

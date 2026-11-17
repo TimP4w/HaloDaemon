@@ -10,6 +10,7 @@ use halod_shared::lcd_geometry::MAX_SCALE;
 use super::{DeviceUi, TabCtx};
 use crate::runtime::ipc;
 use crate::runtime::ipc::DecodedEditorRender;
+use halod_shared::ids::DeviceId;
 
 const EDITOR_PREVIEW_FPS: f64 = 5.0;
 const EDITOR_PREVIEW_INTERVAL: f64 = 1.0 / EDITOR_PREVIEW_FPS;
@@ -19,7 +20,7 @@ const EDITOR_PREVIEW_INTERVAL: f64 = 1.0 / EDITOR_PREVIEW_FPS;
 /// periodic re-request keeps firing while the tab is idle. Sends `known`
 /// (every cached texture's id → signature) so the daemon can reply with only
 /// the widgets that changed.
-pub(super) fn request_editor_render(ui: &egui::Ui, ctx: &TabCtx, st: &mut DeviceUi, id: &str) {
+pub(super) fn request_editor_render(ui: &egui::Ui, ctx: &TabCtx, st: &mut DeviceUi, id: &DeviceId) {
     ui.ctx()
         .request_repaint_after(std::time::Duration::from_secs_f64(EDITOR_PREVIEW_INTERVAL));
     let ed = &mut st.lcd.editor;
@@ -32,7 +33,7 @@ pub(super) fn request_editor_render(ui: &egui::Ui, ctx: &TabCtx, st: &mut Device
     ipc::send(
         ctx.cmd,
         halod_shared::commands::DaemonCommand::Device {
-            device_id: id.to_string(),
+            device_id: id.clone(),
             op: DeviceOp::RenderLcdEditor {
                 def: ed.def.clone(),
                 known,

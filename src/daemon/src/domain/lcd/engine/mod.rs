@@ -6,7 +6,8 @@ pub mod video;
 use crate::application::run_loop::{fps_tick_ms, EngineConfig};
 use crate::config::LcdConfig;
 use halod_shared::bus::{topic, BusValue};
-use std::{collections::HashMap, sync::Arc, time::Instant};
+use std::{collections::HashMap, sync::Arc};
+use tokio::time::Instant;
 
 use halod_shared::types::{EffectParamValue, LcdEngineFrame, WireLcdEngineState};
 use image::RgbaImage;
@@ -17,6 +18,7 @@ use crate::application::state::AppState;
 use crate::application::usecases::lcd::runtime;
 use crate::domain::plugin::Registry;
 use custom::CustomTemplate;
+use halod_shared::ids::DeviceId;
 use templates::TemplateCtx;
 
 /// An LCD preview frame already encoded to its framed `lcd_engine_frame` wire
@@ -28,12 +30,12 @@ pub struct LcdWireFrame {
 
 /// Wire-encode one preview frame; `None` if it exceeds the frame size cap.
 pub(crate) fn encode_wire_frame(
-    device_id: &str,
+    device_id: &DeviceId,
     frame_id: u64,
     preview_b64: &str,
 ) -> Option<Arc<LcdWireFrame>> {
     let frame = LcdEngineFrame {
-        device_id: device_id.to_string(),
+        device_id: device_id.into(),
         frame_id,
         preview_b64: preview_b64.to_string(),
     };
@@ -106,7 +108,7 @@ const EDITOR_SESSION_EVICT_INTERVAL: std::time::Duration = std::time::Duration::
 pub struct LcdEngine {
     app_state: Arc<AppState>,
     /// Per-device live template instances, keyed by device_id.
-    device_slots: Mutex<HashMap<String, Arc<Mutex<DeviceSlot>>>>,
+    device_slots: Mutex<HashMap<DeviceId, Arc<Mutex<DeviceSlot>>>>,
     frame_tx: FrameTx,
     /// Wakes the render loop the instant a template becomes active, so an idle
     /// engine starts rendering without waiting for the next poll.
@@ -138,7 +140,7 @@ impl LcdEngine {
     /// the next tick.
     pub async fn set_template_active(
         &self,
-        device_id: &str,
+        device_id: &DeviceId,
         template_id: &str,
         params: &HashMap<String, EffectParamValue>,
     ) {
@@ -151,7 +153,7 @@ impl LcdEngine {
             let mut slots = self.device_slots.lock().await;
             let existed = existing.is_some();
             slots.insert(
-                device_id.to_string(),
+                device_id.clone(),
                 Arc::new(Mutex::new(DeviceSlot {
                     template_id: template_id.to_string(),
                     params: params.clone(),
@@ -186,12 +188,12 @@ impl LcdEngine {
 
     /// Whether `device_id` currently has a live template slot in the engine.
     #[cfg(test)]
-    pub(crate) async fn has_slot(&self, device_id: &str) -> bool {
+    pub(crate) async fn has_slot(&self, device_id: &DeviceId) -> bool {
         self.device_slots.lock().await.contains_key(device_id)
     }
 
     /// Remove a device from the engine (called when deactivating engine mode).
-    pub async fn remove_device(&self, device_id: &str) {
+    pub async fn remove_device(&self, device_id: &DeviceId) {
         let mut slots = self.device_slots.lock().await;
         slots.remove(device_id);
         if slots.is_empty() {
@@ -239,8 +241,8 @@ impl LcdEngine {
 
     pub fn wire_state(
         registry: &Registry,
-        device_templates: HashMap<String, String>,
-        device_template_params: HashMap<String, HashMap<String, EffectParamValue>>,
+        device_templates: HashMap<DeviceId, String>,
+        device_template_params: HashMap<DeviceId, HashMap<String, EffectParamValue>>,
     ) -> WireLcdEngineState {
         WireLcdEngineState {
             available_templates: vec![CustomTemplate::descriptor()],
@@ -270,24 +272,13 @@ impl LcdEngine {
             // Idle whenever no device has an active template; wake instantly when
             // one is set. Everything else (master switch, fps, config changes)
             // routes through the shared engine loop.
-            let self_tick = Arc::clone(&self);
-            let (self_wait, self_has) = (Arc::clone(&self), Arc::clone(&self));
             let engine_loop = crate::application::run_loop::engine_run_loop_idle(
                 "LCD",
                 cfg_rx,
                 tokio::time::MissedTickBehavior::Skip,
-                move |_cfg| {
-                    let this = Arc::clone(&self_tick);
-                    let t = start.elapsed().as_secs_f64();
-                    async move { this.tick(t).await }
-                },
-                move || {
-                    let this = Arc::clone(&self_wait);
-                    async move { this.wake.notified().await }
-                },
-                move || {
-                    let this = Arc::clone(&self_has);
-                    async move { this.has_active_content().await }
+                LcdLoop {
+                    engine: Arc::clone(&self),
+                    start,
                 },
             );
             let evictor = Arc::clone(&self);
@@ -314,12 +305,12 @@ impl LcdEngine {
             .filter(|device| device.is_live())
             .collect();
 
-        let device_templates: HashMap<String, TemplateSpec> = devices
+        let device_templates: HashMap<DeviceId, TemplateSpec> = devices
             .iter()
             .filter_map(|d| {
                 let lcd = d.as_lcd()?;
                 let template_id = lcd.lcd_template_id()?;
-                Some((d.id().to_owned(), (template_id, lcd.lcd_template_params())))
+                Some((d.id().clone(), (template_id, lcd.lcd_template_params())))
             })
             .collect();
 
@@ -379,7 +370,7 @@ impl LcdEngine {
             }
         }
 
-        let live_slots: Vec<(String, Arc<Mutex<DeviceSlot>>)> = slots
+        let live_slots: Vec<(DeviceId, Arc<Mutex<DeviceSlot>>)> = slots
             .iter()
             .map(|(device_id, slot)| (device_id.clone(), Arc::clone(slot)))
             .collect();
@@ -419,7 +410,7 @@ impl LcdEngine {
                 continue;
             }
 
-            let tr = std::time::Instant::now();
+            let tr = tokio::time::Instant::now();
             blocking_section(|| {
                 let DeviceSlot {
                     template,
@@ -475,7 +466,7 @@ impl LcdEngine {
                 }
             }
 
-            let ts = std::time::Instant::now();
+            let ts = tokio::time::Instant::now();
             match lcd
                 .stream_frame(slot.frame_buf.as_raw(), frame_w, frame_h)
                 .await
@@ -493,6 +484,29 @@ impl LcdEngine {
             log::trace!("stream_frame: {}ms", ts.elapsed().as_millis());
         }
     }
+}
+
+struct LcdLoop {
+    engine: Arc<LcdEngine>,
+    start: Instant,
+}
+
+impl crate::application::run_loop::IdleEngine for LcdLoop {
+    type Config = LcdConfig;
+
+    async fn tick(&mut self, _cfg: LcdConfig) {
+        self.engine.tick(self.start.elapsed().as_secs_f64()).await;
+    }
+
+    async fn wait_for_work(&mut self) {
+        self.engine.wake.notified().await;
+    }
+
+    async fn has_work(&mut self) -> bool {
+        self.engine.has_active_content().await
+    }
+
+    async fn on_disabled(&mut self) {}
 }
 
 impl EngineConfig for LcdConfig {
@@ -560,12 +574,12 @@ mod tests {
 
         let engine = LcdEngine::new(app);
         engine
-            .set_template_active("lcd0", "custom", &HashMap::new())
+            .set_template_active(&"lcd0".parse().unwrap(), "custom", &HashMap::new())
             .await;
         assert!(!engine.has_active_content().await);
 
         engine.tick(0.0).await;
-        assert!(!engine.has_slot("lcd0").await);
+        assert!(!engine.has_slot(&"lcd0".parse().unwrap()).await);
     }
 
     #[tokio::test]
@@ -574,7 +588,7 @@ mod tests {
         let engine = LcdEngine::new(app);
 
         engine
-            .set_template_active("dev1", "custom", &HashMap::new())
+            .set_template_active(&"dev1".parse().unwrap(), "custom", &HashMap::new())
             .await;
         assert!(
             engine.device_slots.lock().await.contains_key("dev1"),
@@ -586,7 +600,7 @@ mod tests {
 
         // Hot-swap with the same template — frame_id must be preserved.
         engine
-            .set_template_active("dev1", "custom", &HashMap::new())
+            .set_template_active(&"dev1".parse().unwrap(), "custom", &HashMap::new())
             .await;
         let slot = engine.device_slots.lock().await["dev1"].clone();
         assert_eq!(
@@ -614,13 +628,15 @@ mod tests {
         let engine = LcdEngine::new(app);
 
         engine
-            .set_template_active("dev1", "custom", &HashMap::new())
+            .set_template_active(&"dev1".parse().unwrap(), "custom", &HashMap::new())
             .await;
         let params: HashMap<String, EffectParamValue> = HashMap::from([(
             halod_shared::lcd_custom::WIDGETS_JSON_PARAM.to_string(),
             EffectParamValue::Str("{}".into()),
         )]);
-        engine.set_template_active("dev1", "custom", &params).await;
+        engine
+            .set_template_active(&"dev1".parse().unwrap(), "custom", &params)
+            .await;
 
         let slot = engine.device_slots.lock().await["dev1"].clone();
         assert_eq!(
@@ -647,7 +663,7 @@ mod tests {
             .get_mut(halod_shared::types::DEFAULT_PROFILE_NAME)
             .unwrap()
             .device_states
-            .insert("lcd0".into(), serde_json::json!({ "lcd": state }));
+            .insert("lcd0".parse().unwrap(), serde_json::json!({ "lcd": state }));
         let app = Arc::new(AppState::new(cfg));
         let dev = Arc::new(MockDevice::new("lcd0").with_lcd());
         app.device_registry
@@ -690,7 +706,7 @@ mod tests {
             .unwrap()
             .set_lcd_template_id(Some("custom".into()));
         engine
-            .set_template_active("lcd0", "custom", &HashMap::new())
+            .set_template_active(&"lcd0".parse().unwrap(), "custom", &HashMap::new())
             .await;
 
         crate::application::usecases::profiles::lifecycle::load_active_profile(Arc::clone(&app))
@@ -915,7 +931,9 @@ mod tests {
     #[tokio::test]
     async fn editor_session_evictor_runs_independent_of_the_render_tick() {
         let app = Arc::new(AppState::new(Config::default()));
-        *app.lcd.editor_session.lock() = Some(custom::EditorSession::new_idle_for_test("dev1"));
+        *app.lcd.editor_session.lock() = Some(custom::EditorSession::new_idle_for_test(
+            &"dev1".parse().unwrap(),
+        ));
         let engine = LcdEngine::new(Arc::clone(&app));
         assert!(
             !engine.has_active_content().await,

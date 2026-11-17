@@ -52,7 +52,7 @@ pub fn search_field(ui: &mut egui::Ui, buf: &mut String, hint: &str, width: f32)
             theme::BORDER_INNER
         },
     );
-    let icon = Pos2::new(rect.left() + 18.0, rect.center().y - 1.0);
+    let icon = Pos2::new(rect.left() + 18.0, rect.center().y);
     let stroke = Stroke::new(1.4, theme::TEXT_MUT);
     ui.painter().circle_stroke(icon, 4.2, stroke);
     ui.painter()
@@ -70,6 +70,9 @@ pub fn search_field(ui: &mut egui::Ui, buf: &mut String, hint: &str, width: f32)
         egui::TextEdit::singleline(buf)
             .id(ui.make_persistent_id(("search", hint)))
             .frame(egui::Frame::NONE)
+            .margin(egui::Margin::ZERO)
+            .min_size(Vec2::new(0.0, field.height()))
+            .align(egui::Align2::LEFT_CENTER)
             .desired_width(f32::INFINITY)
             .font(theme::body_md())
             .hint_text(hint),

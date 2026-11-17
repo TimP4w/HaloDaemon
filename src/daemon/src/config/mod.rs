@@ -14,6 +14,7 @@ use crate::domain::profiles::model::Profile;
 use crate::domain::profiles::validate;
 use crate::domain::registry::model::{DeviceLayout, DeviceRecord};
 use crate::util::fs;
+use halod_shared::ids::{DeviceId, PluginId};
 use halod_shared::keyboard::KeyboardLayoutSelection;
 
 // ── On-disk layout ───────────────────────────────────────────────────────────
@@ -41,7 +42,7 @@ pub fn load() -> Result<Config> {
     }
 
     let mut cooling = main.cooling;
-    cooling.fan_failsafe_duty = cooling.fan_failsafe_duty.min(100);
+    cooling.sanitize();
 
     Ok(Config {
         active_profile: main.active_profile,
@@ -293,15 +294,15 @@ impl Default for MainFile {
 #[derive(Debug, Clone, Default, Serialize, Deserialize)]
 struct DevicesFile {
     #[serde(default)]
-    known_devices: HashMap<String, DeviceRecord>,
+    known_devices: HashMap<DeviceId, DeviceRecord>,
     #[serde(default, skip_serializing_if = "HashMap::is_empty")]
-    device_layouts: HashMap<String, DeviceLayout>,
+    device_layouts: HashMap<DeviceId, DeviceLayout>,
     #[serde(default, skip_serializing_if = "HashMap::is_empty")]
-    channel_visibility: HashMap<String, HashMap<String, VisibilityState>>,
+    channel_visibility: HashMap<DeviceId, HashMap<String, VisibilityState>>,
     #[serde(default, skip_serializing_if = "HashMap::is_empty")]
-    device_transforms: HashMap<String, HashMap<String, ZoneContentTransform>>,
+    device_transforms: HashMap<DeviceId, HashMap<String, ZoneContentTransform>>,
     #[serde(default, skip_serializing_if = "HashMap::is_empty")]
-    keyboard_layouts: HashMap<String, KeyboardLayoutSelection>,
+    keyboard_layouts: HashMap<DeviceId, KeyboardLayoutSelection>,
 }
 
 #[derive(Debug, Clone, Default, Serialize, Deserialize)]
@@ -314,18 +315,18 @@ struct AppRulesFile {
 #[serde(deny_unknown_fields)]
 pub struct PluginPolicy {
     #[serde(default, skip_serializing_if = "Vec::is_empty")]
-    pub enabled: Vec<String>,
+    pub enabled: Vec<PluginId>,
     /// Non-secure values only; `secure` fields live in the secret store.
     #[serde(default, skip_serializing_if = "HashMap::is_empty")]
-    pub config: HashMap<String, HashMap<String, String>>,
+    pub config: HashMap<PluginId, HashMap<String, String>>,
     #[serde(default, skip_serializing_if = "Vec::is_empty")]
-    pub integrations_enabled: Vec<String>,
+    pub integrations_enabled: Vec<PluginId>,
     /// Separate from config values so manifest defaults cannot make a
     /// never-configured integration look ready.
     #[serde(default, skip_serializing_if = "Vec::is_empty")]
-    pub integrations_configured: Vec<String>,
+    pub integrations_configured: Vec<PluginId>,
     #[serde(default, skip_serializing_if = "HashMap::is_empty")]
-    pub integration_devices: HashMap<String, String>,
+    pub integration_devices: HashMap<PluginId, String>,
     #[serde(default, skip_serializing_if = "Vec::is_empty")]
     pub repos: Vec<PluginRepoRecord>,
 }
@@ -361,7 +362,7 @@ pub struct Config {
     #[serde(default)]
     pub profiles: HashMap<String, Profile>,
     #[serde(default)]
-    pub known_devices: HashMap<String, DeviceRecord>,
+    pub known_devices: HashMap<DeviceId, DeviceRecord>,
     #[serde(default)]
     pub cooling: CoolingConfig,
     #[serde(default)]
@@ -371,16 +372,16 @@ pub struct Config {
     #[serde(default)]
     pub gui: GuiConfig,
     #[serde(default, skip_serializing_if = "HashMap::is_empty")]
-    pub device_layouts: HashMap<String, DeviceLayout>,
+    pub device_layouts: HashMap<DeviceId, DeviceLayout>,
     /// device_id → `ChannelKind::key(channel_id)` → state. Absent = Visible.
     #[serde(default, skip_serializing_if = "HashMap::is_empty")]
-    pub channel_visibility: HashMap<String, HashMap<String, VisibilityState>>,
+    pub channel_visibility: HashMap<DeviceId, HashMap<String, VisibilityState>>,
     #[serde(default, skip_serializing_if = "HashMap::is_empty")]
-    pub device_transforms: HashMap<String, HashMap<String, ZoneContentTransform>>,
+    pub device_transforms: HashMap<DeviceId, HashMap<String, ZoneContentTransform>>,
     /// device_id → keyboard layout selection. Absent = Auto/Auto (both axes
     /// resolve from the firmware-detected language).
     #[serde(default, skip_serializing_if = "HashMap::is_empty")]
-    pub keyboard_layouts: HashMap<String, KeyboardLayoutSelection>,
+    pub keyboard_layouts: HashMap<DeviceId, KeyboardLayoutSelection>,
     #[serde(default, skip_serializing_if = "Vec::is_empty")]
     pub app_rules: Vec<AppRule>,
     pub plugins: PluginPolicy,
@@ -417,7 +418,7 @@ impl Config {
     /// UI; `Disabled` means hands off the hardware.
     pub fn channel_enabled(
         &self,
-        device_id: &str,
+        device_id: &DeviceId,
         kind: halod_shared::types::ChannelKind,
         channel_id: &str,
     ) -> bool {
@@ -436,17 +437,20 @@ mod tests {
     fn only_a_disabled_channel_is_kept_from_the_engines() {
         use halod_shared::types::ChannelKind;
         let mut cfg = Config::default();
-        assert!(cfg.channel_enabled("dev", ChannelKind::Cooling, "fan1"));
+        assert!(cfg.channel_enabled(&"dev".parse().unwrap(), ChannelKind::Cooling, "fan1"));
 
-        let entry = cfg.channel_visibility.entry("dev".into()).or_default();
+        let entry = cfg
+            .channel_visibility
+            .entry("dev".parse().unwrap())
+            .or_default();
         entry.insert(ChannelKind::Cooling.key("fan1"), VisibilityState::Disabled);
         entry.insert(ChannelKind::Cooling.key("fan2"), VisibilityState::Hidden);
         // Same id, different capability — the key must not collide.
         entry.insert(ChannelKind::Lighting.key("fan1"), VisibilityState::Disabled);
 
-        assert!(!cfg.channel_enabled("dev", ChannelKind::Cooling, "fan1"));
-        assert!(cfg.channel_enabled("dev", ChannelKind::Cooling, "fan2"));
-        assert!(cfg.channel_enabled("other", ChannelKind::Cooling, "fan1"));
+        assert!(!cfg.channel_enabled(&"dev".parse().unwrap(), ChannelKind::Cooling, "fan1"));
+        assert!(cfg.channel_enabled(&"dev".parse().unwrap(), ChannelKind::Cooling, "fan2"));
+        assert!(cfg.channel_enabled(&"other".parse().unwrap(), ChannelKind::Cooling, "fan1"));
     }
 
     #[test]
@@ -459,9 +463,7 @@ mod tests {
 
     #[test]
     fn load_handles_missing_valid_and_malformed_config() {
-        let dir = tempfile::tempdir().unwrap();
-        let _guard = crate::test_support::HALOD_CONFIG_DIR_LOCK.lock();
-        unsafe { std::env::set_var("HALOD_CONFIG_DIR", dir.path()) };
+        let dir = crate::test_support::tmp_config_dir();
 
         // Missing files -> defaults.
         let cfg = load().unwrap();
@@ -481,31 +483,28 @@ mod tests {
         .unwrap();
         let err = load().unwrap_err();
         assert!(err.to_string().contains("devices.yaml"));
-
-        unsafe { std::env::remove_var("HALOD_CONFIG_DIR") };
     }
 
     #[test]
     fn save_then_load_round_trips_every_section() {
-        let dir = tempfile::tempdir().unwrap();
-        let _guard = crate::test_support::HALOD_CONFIG_DIR_LOCK.lock();
-        unsafe { std::env::set_var("HALOD_CONFIG_DIR", dir.path()) };
+        let _dir = crate::test_support::tmp_config_dir();
 
         let mut cfg = Config {
             active_profile: "Gäming Setup".to_string(),
             ..Config::default()
         };
         let mut gaming = Profile::default();
-        gaming
-            .device_states
-            .insert("dev1".into(), serde_json::json!({ "fan_curve": {"a": 1} }));
+        gaming.device_states.insert(
+            "dev1".parse().unwrap(),
+            serde_json::json!({ "fan_curve": {"a": 1} }),
+        );
         gaming.lighting.canvas = Some(CanvasState {
             sample_radius: 9.0,
             ..Default::default()
         });
         cfg.profiles.insert("Gäming Setup".to_string(), gaming);
         cfg.known_devices.insert(
-            "dev1".into(),
+            "dev1".parse().unwrap(),
             DeviceRecord {
                 name: "Dev One".into(),
                 vendor: "Acme".into(),
@@ -514,13 +513,13 @@ mod tests {
             },
         );
         cfg.device_layouts.insert(
-            "hub1".into(),
+            "hub1".parse().unwrap(),
             DeviceLayout {
                 channels: HashMap::new(),
             },
         );
         cfg.keyboard_layouts.insert(
-            "kbd1".into(),
+            "kbd1".parse().unwrap(),
             KeyboardLayoutSelection {
                 variant: Some(halod_shared::keyboard::KeyVariant::Iso),
                 language: Some(halod_shared::types::KeyboardLayout::CH),
@@ -535,9 +534,9 @@ mod tests {
         cfg.cooling.fan_failsafe_duty = 60;
         cfg.rgb.canvas_fps = 45;
         cfg.lcd.enabled = false;
-        cfg.plugins.enabled.push("wled_udp".into());
+        cfg.plugins.enabled.push("wled_udp".parse().unwrap());
         cfg.plugins.config.insert(
-            "openrgb".into(),
+            "openrgb".parse().unwrap(),
             HashMap::from([("host".to_string(), "127.0.0.1".to_string())]),
         );
         cfg.plugins.repos.push(PluginRepoRecord {
@@ -586,15 +585,11 @@ mod tests {
         assert_eq!(reloaded.cooling.fan_failsafe_duty, 60);
         assert_eq!(reloaded.rgb.canvas_fps, 45);
         assert!(!reloaded.lcd.enabled);
-
-        unsafe { std::env::remove_var("HALOD_CONFIG_DIR") };
     }
 
     #[test]
     fn save_prunes_a_removed_profiles_file() {
-        let dir = tempfile::tempdir().unwrap();
-        let _guard = crate::test_support::HALOD_CONFIG_DIR_LOCK.lock();
-        unsafe { std::env::set_var("HALOD_CONFIG_DIR", dir.path()) };
+        let dir = crate::test_support::tmp_config_dir();
 
         let mut cfg = Config::default();
         cfg.profiles.insert("Gaming".into(), Profile::default());
@@ -609,8 +604,6 @@ mod tests {
             .join("profiles")
             .join(profile_filename(DEFAULT_PROFILE_NAME))
             .exists());
-
-        unsafe { std::env::remove_var("HALOD_CONFIG_DIR") };
     }
 
     #[test]
@@ -675,9 +668,7 @@ mod tests {
 
     #[test]
     fn a_legacy_plugins_yaml_is_ignored() {
-        let dir = tempfile::tempdir().unwrap();
-        let _guard = crate::test_support::HALOD_CONFIG_DIR_LOCK.lock();
-        unsafe { std::env::set_var("HALOD_CONFIG_DIR", dir.path()) };
+        let dir = crate::test_support::tmp_config_dir();
         std::fs::write(
             dir.path().join("plugins.yaml"),
             "accepted_authorities: {}\nrepos: [{url: x, slug: y}]\n",
@@ -686,7 +677,35 @@ mod tests {
 
         let loaded = load().unwrap();
         assert!(loaded.plugins.repos.is_empty());
+    }
 
-        unsafe { std::env::remove_var("HALOD_CONFIG_DIR") };
+    #[test]
+    fn config_files_written_with_string_ids_load_typed_and_save_unchanged() {
+        let dir = crate::test_support::tmp_config_dir();
+        let plugin_state = "enabled:\n- nzxt_kraken\nconfig:\n  nzxt_kraken:\n    pump: '50'\nintegrations_enabled:\n- openrgb\nintegrations_configured:\n- openrgb\nintegration_devices:\n  openrgb: candidate-1\n";
+        let devices = "known_devices:\n  nzxt_kraken-8EC3:\n    name: Kraken\n    vendor: NZXT\n    model: Elite\nchannel_visibility:\n  nzxt_kraken-8EC3:\n    lighting:ring: hidden\nkeyboard_layouts:\n  logitech_4136BFCF: {}\n";
+        std::fs::write(dir.path().join("plugin_state.yaml"), plugin_state).unwrap();
+        std::fs::write(dir.path().join("devices.yaml"), devices).unwrap();
+
+        let loaded = load().unwrap();
+        assert_eq!(loaded.plugins.enabled, ["nzxt_kraken"]);
+        assert_eq!(loaded.plugins.config["nzxt_kraken"]["pump"], "50");
+        assert_eq!(loaded.known_devices["nzxt_kraken-8EC3"].name, "Kraken");
+        save(&loaded).unwrap();
+
+        let yaml = |name: &str| -> serde_yaml::Value {
+            serde_yaml::from_str(&std::fs::read_to_string(dir.path().join(name)).unwrap()).unwrap()
+        };
+        let original = |text: &str| -> serde_yaml::Value { serde_yaml::from_str(text).unwrap() };
+        assert_eq!(yaml("plugin_state.yaml"), original(plugin_state));
+        let saved_devices = yaml("devices.yaml");
+        let expected_devices = original(devices);
+        for key in ["channel_visibility", "keyboard_layouts"] {
+            assert_eq!(saved_devices[key], expected_devices[key], "{key}");
+        }
+        assert_eq!(
+            saved_devices["known_devices"]["nzxt_kraken-8EC3"]["name"],
+            expected_devices["known_devices"]["nzxt_kraken-8EC3"]["name"]
+        );
     }
 }

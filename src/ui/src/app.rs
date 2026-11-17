@@ -12,6 +12,7 @@ use std::sync::Arc;
 use crate::domain::{self, state::Page};
 use crate::runtime::ipc::{CommandTx, FrameSinks, UiRx};
 use crate::ui;
+use halod_shared::ids::DeviceId;
 
 pub struct App {
     pub(crate) ui: UiRx,
@@ -31,7 +32,7 @@ pub struct App {
     pub(crate) cooling_ui: ui::screens::cooling::CoolingUi,
     pub(crate) sensor_history: HashMap<String, VecDeque<f32>>,
     /// Rolling write-rate throughput (bytes/sec) per device id.
-    pub(crate) write_rate_history: HashMap<String, VecDeque<f32>>,
+    pub(crate) write_rate_history: HashMap<DeviceId, VecDeque<f32>>,
     pub(crate) last_sample: f64,
     pub(crate) page: Page,
     pub(crate) device_ui: ui::screens::device::DeviceUi,

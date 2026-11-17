@@ -9,10 +9,11 @@ use crate::domain::events::Change;
 use crate::domain::input::validate::{validate_button_mapping, validate_macro};
 use crate::domain::profiles::device_state::persist_device_state;
 use crate::domain::registry::require_device_owned_id;
+use halod_shared::ids::DeviceId;
 use halod_shared::types::{ButtonMapping, MacroStep};
 
 pub async fn set_button_mapping(
-    id: String,
+    id: DeviceId,
     mapping: ButtonMapping,
     app: Arc<AppState>,
 ) -> Result<()> {
@@ -28,7 +29,7 @@ pub async fn set_button_mapping(
     Ok(())
 }
 
-pub async fn reset_button_mapping(id: String, cid: u16, app: Arc<AppState>) -> Result<()> {
+pub async fn reset_button_mapping(id: DeviceId, cid: u16, app: Arc<AppState>) -> Result<()> {
     let device = require_device_owned_id(&id, &app).await?;
     let cap = device
         .as_key_remap()
@@ -40,7 +41,7 @@ pub async fn reset_button_mapping(id: String, cid: u16, app: Arc<AppState>) -> R
     Ok(())
 }
 
-pub async fn reset_all_button_mappings(id: String, app: Arc<AppState>) -> Result<()> {
+pub async fn reset_all_button_mappings(id: DeviceId, app: Arc<AppState>) -> Result<()> {
     let device = require_device_owned_id(&id, &app).await?;
     let cap = device
         .as_key_remap()
@@ -62,7 +63,11 @@ pub async fn play_macro(steps: Vec<MacroStep>, app: Arc<AppState>) -> Result<()>
     Ok(())
 }
 
-pub async fn set_software_dpi_steps(id: String, steps: Vec<u32>, app: Arc<AppState>) -> Result<()> {
+pub async fn set_software_dpi_steps(
+    id: DeviceId,
+    steps: Vec<u32>,
+    app: Arc<AppState>,
+) -> Result<()> {
     let device = require_device_owned_id(&id, &app).await?;
     let cap = device
         .as_dpi()
@@ -99,7 +104,7 @@ mod tests {
             base: ButtonAction::Native,
             shifted: ButtonAction::Native,
         };
-        set_button_mapping("dev1".into(), mapping, app)
+        set_button_mapping("dev1".parse().unwrap(), mapping, app)
             .await
             .unwrap();
         let last = dev
@@ -116,7 +121,7 @@ mod tests {
     async fn set_button_mapping_error_on_missing_device() {
         let app = Arc::new(AppState::new(Config::default()));
         let err = set_button_mapping(
-            "no-such-device".into(),
+            "no-such-device".parse().unwrap(),
             ButtonMapping {
                 cid: 0,
                 base: ButtonAction::Native,
@@ -138,7 +143,7 @@ mod tests {
             base: ButtonAction::Native,
             shifted: ButtonAction::Native,
         };
-        let err = set_button_mapping("dev1".into(), mapping, app)
+        let err = set_button_mapping("dev1".parse().unwrap(), mapping, app)
             .await
             .unwrap_err();
         assert!(err.to_string().contains("key remapping"), "got: {err}");
@@ -148,14 +153,16 @@ mod tests {
     async fn reset_button_mapping_happy_path() {
         let dev = Arc::new(MockDevice::new("dev1").with_key_remap());
         let app = app_with(vec![dev.clone()]);
-        reset_button_mapping("dev1".into(), 1, app).await.unwrap();
+        reset_button_mapping("dev1".parse().unwrap(), 1, app)
+            .await
+            .unwrap();
     }
 
     #[tokio::test]
     async fn reset_button_mapping_error_when_capability_absent() {
         let dev = Arc::new(MockDevice::new("dev1"));
         let app = app_with(vec![dev.clone()]);
-        let err = reset_button_mapping("dev1".into(), 1, app)
+        let err = reset_button_mapping("dev1".parse().unwrap(), 1, app)
             .await
             .unwrap_err();
         assert!(err.to_string().contains("key remapping"), "got: {err}");
@@ -165,14 +172,16 @@ mod tests {
     async fn reset_all_button_mappings_happy_path() {
         let dev = Arc::new(MockDevice::new("dev1").with_key_remap());
         let app = app_with(vec![dev.clone()]);
-        reset_all_button_mappings("dev1".into(), app).await.unwrap();
+        reset_all_button_mappings("dev1".parse().unwrap(), app)
+            .await
+            .unwrap();
     }
 
     #[tokio::test]
     async fn reset_all_button_mappings_error_when_capability_absent() {
         let dev = Arc::new(MockDevice::new("dev1"));
         let app = app_with(vec![dev.clone()]);
-        let err = reset_all_button_mappings("dev1".into(), app)
+        let err = reset_all_button_mappings("dev1".parse().unwrap(), app)
             .await
             .unwrap_err();
         assert!(err.to_string().contains("key remapping"), "got: {err}");
@@ -182,7 +191,7 @@ mod tests {
     async fn set_software_dpi_steps_happy_path() {
         let dev = Arc::new(MockDevice::new("dev1").with_dpi());
         let app = app_with(vec![dev.clone()]);
-        set_software_dpi_steps("dev1".into(), vec![800, 1600], app)
+        set_software_dpi_steps("dev1".parse().unwrap(), vec![800, 1600], app)
             .await
             .unwrap();
         let steps = dev.dpi_last_steps.as_ref().unwrap().lock().clone().unwrap();
@@ -236,7 +245,7 @@ mod tests {
     async fn set_software_dpi_steps_error_when_capability_absent() {
         let dev = Arc::new(MockDevice::new("dev1")); // no dpi capability
         let app = app_with(vec![dev.clone()]);
-        let err = set_software_dpi_steps("dev1".into(), vec![800], app)
+        let err = set_software_dpi_steps("dev1".parse().unwrap(), vec![800], app)
             .await
             .unwrap_err();
         assert!(err.to_string().contains("software DPI"), "got: {err}");

@@ -31,6 +31,7 @@ use crate::domain::device::{
     LightingStateSlot, OnboardProfilesCapability, PairingCapability, RangeCapability,
     RangeStateCache, SensorCapability, VisibilitySlot,
 };
+use halod_shared::ids::{DeviceId, PluginId};
 
 mod dpi;
 mod health;
@@ -39,7 +40,7 @@ mod lcd;
 mod lighting;
 mod status;
 
-use dpi::DpiFacet;
+use dpi::{DpiFacet, ModeSwitch};
 use health::Health;
 use key_remap::KeyRemapFacet;
 use lcd::LcdFacet;
@@ -415,11 +416,11 @@ pub(in crate::domain::plugin) enum RuntimeState {
 /// A device whose behaviour is defined by a plugin script rather than native
 /// Rust.
 pub struct LuaDevice {
-    id: String,
+    id: DeviceId,
     name: String,
     vendor: String,
     model: String,
-    plugin_id: String,
+    plugin_id: PluginId,
     plugin_type: PluginKind,
     dynamic_children: bool,
     device_type: DeviceType,
@@ -473,7 +474,7 @@ pub struct LuaDevice {
     event_task: Option<tokio::task::JoinHandle<()>>,
     event_paused: Arc<AtomicBool>,
     event_resume: Arc<tokio::sync::Notify>,
-    dynamic_child_ids: Arc<RwLock<HashMap<u32, String>>>,
+    dynamic_child_ids: Arc<RwLock<HashMap<u32, DeviceId>>>,
 
     /// Host-owned virtual-audio sink registry, drained on close; the guard tears
     /// remaining sinks down on drop even if the worker is dead.
@@ -497,7 +498,7 @@ pub struct LuaDevice {
 }
 
 pub(in crate::domain::plugin) struct LuaDeviceParts<'a> {
-    pub id: String,
+    pub id: DeviceId,
     pub manifest: &'a PluginManifest,
     pub spec: Option<&'a DeviceSpec>,
     pub notify: Weak<crate::application::state::AppState>,
@@ -656,7 +657,7 @@ impl LuaDevice {
             data,
         } = *spawn;
         let transport_kind = super::transport::descriptor_for(&dev_match.transport)
-            .map(|descriptor| descriptor.kind)
+            .map(|descriptor| descriptor.kind())
             .unwrap_or("tcp");
         if let Some(runtime) = &runtime {
             *runtime.lock() = RuntimeState::Initializing;
@@ -800,7 +801,7 @@ impl LuaDevice {
                             outcome.button_events.released
                         );
                         app.input_events.publish(crate::application::state::ButtonEvent {
-                            device_id,
+                            device_id: device_id.clone(),
                             pressed: outcome.button_events.pressed,
                             released: outcome.button_events.released,
                         });
@@ -1002,7 +1003,7 @@ impl LuaDevice {
     }
 
     fn build_base(
-        id: String,
+        id: DeviceId,
         manifest: &PluginManifest,
         spec: Option<&DeviceSpec>,
         worker: Option<PluginHandle>,
@@ -1024,7 +1025,7 @@ impl LuaDevice {
             visibility: VisibilitySlot::default(),
             transport_kind: spec
                 .and_then(|s| super::transport::descriptor_for(s.transport.kind()))
-                .map(|d| d.kind)
+                .map(|d| d.kind())
                 .unwrap_or("tcp"),
             identity: OnceLock::new(),
             dynamic_model: OnceLock::new(),
@@ -1195,7 +1196,7 @@ impl LuaDevice {
 
 #[async_trait]
 impl Device for LuaDevice {
-    fn id(&self) -> &str {
+    fn id(&self) -> &DeviceId {
         &self.id
     }
 
@@ -1225,12 +1226,12 @@ impl Device for LuaDevice {
             .then_some(&self.keyboard_layout)
     }
 
-    fn integration_id(&self) -> Option<String> {
+    fn integration_id(&self) -> Option<PluginId> {
         let is_child = self.worker.as_ref().is_some_and(|w| w.is_child());
         integration_root_id(self.plugin_type, &self.plugin_id, is_child)
     }
 
-    fn owning_plugin_id(&self) -> Option<String> {
+    fn owning_plugin_id(&self) -> Option<PluginId> {
         Some(self.plugin_id.clone())
     }
 
@@ -1756,8 +1757,8 @@ impl Controller for LuaDevice {
     /// integration (server dropped mid-enumerate).
     async fn resync_children(
         &self,
-        existing: &HashSet<String>,
-    ) -> Result<(Vec<Arc<dyn Device>>, Vec<String>)> {
+        existing: &HashSet<DeviceId>,
+    ) -> Result<(Vec<Arc<dyn Device>>, Vec<DeviceId>)> {
         if self.plugin_type != PluginKind::Integration && !self.dynamic_children {
             return Ok((vec![], vec![]));
         }
@@ -1771,7 +1772,7 @@ impl Controller for LuaDevice {
         let Some(ctx) = self.child_build_ctx() else {
             anyhow::bail!("integration root missing child-build context");
         };
-        let live_ids: HashSet<String> = detected
+        let live_ids: HashSet<DeviceId> = detected
             .iter()
             .map(|c| child_device_id(&self.id, c))
             .collect();
@@ -1792,9 +1793,9 @@ impl Controller for LuaDevice {
                 added.push(child);
             }
         }
-        let gone: Vec<String> = existing
+        let gone: Vec<DeviceId> = existing
             .iter()
-            .filter(|id| !live_ids.contains(*id))
+            .filter(|id| !live_ids.contains(id.as_str()))
             .cloned()
             .collect();
         Ok((added, gone))
@@ -1814,12 +1815,14 @@ struct DiscoveredChainAccessory {
     device: Arc<dyn Device>,
 }
 
-fn child_device_id(root: &str, controller: &DetectedController) -> String {
-    controller
-        .id
-        .clone()
-        .filter(|id| !id.is_empty())
-        .unwrap_or_else(|| format!("{root}_ctrl_{}", controller.index))
+fn child_device_id(root: &DeviceId, controller: &DetectedController) -> DeviceId {
+    DeviceId::sanitized(
+        controller
+            .id
+            .as_deref()
+            .filter(|id| !id.is_empty())
+            .unwrap_or(&format!("{root}_ctrl_{}", controller.index)),
+    )
 }
 
 impl LuaDevice {
@@ -1888,7 +1891,7 @@ impl LuaDevice {
                 .find(|channel| channel.channel_id == channel_str)
                 .and_then(|channel| channel.cooling_channel.clone());
             let leaf: Arc<dyn Device> = Arc::new(ChainLeaf::new(
-                format!("{}_acc_{}_{}", self.id, channel_str, d.accessory),
+                DeviceId::sanitized(&format!("{}_acc_{}_{}", self.id, channel_str, d.accessory)),
                 self.id.clone(),
                 self.vendor.clone(),
                 channel_str.clone(),
@@ -2055,8 +2058,12 @@ impl LuaDevice {
 /// The controllers it exposes as children report `None` so they stay listable
 /// and remain eligible for duplicate-device conflict detection against the
 /// native driver for the same hardware.
-fn integration_root_id(plugin_type: PluginKind, plugin_id: &str, is_child: bool) -> Option<String> {
-    (plugin_type == PluginKind::Integration && !is_child).then(|| plugin_id.to_owned())
+fn integration_root_id(
+    plugin_type: PluginKind,
+    plugin_id: &PluginId,
+    is_child: bool,
+) -> Option<PluginId> {
+    (plugin_type == PluginKind::Integration && !is_child).then(|| plugin_id.clone())
 }
 
 struct PollPause<'a>(&'a LuaDevice);
@@ -2154,7 +2161,19 @@ impl LuaDevice {
             return Ok(());
         }
         if let Some(dpi) = self.worker()?.dpi_status().await? {
-            facet.refresh(&dpi);
+            if let Some(host_steps) = facet.refresh(&dpi) {
+                match facet.validate_steps(&host_steps) {
+                    Ok(()) => {
+                        let result = self.worker()?.dpi_set_steps(&host_steps).await;
+                        self.track(result).await?;
+                        facet.record_steps(host_steps);
+                    }
+                    Err(error) => log::warn!(
+                        "'{}' keeps the device's DPI steps: saved host steps {host_steps:?} are invalid: {error}",
+                        self.id
+                    ),
+                }
+            }
         }
         Ok(())
     }
@@ -2306,15 +2325,15 @@ impl BooleanCapability for LuaDevice {
         {
             current.value = value;
         }
-        if let Some(reapply) = self
-            .dpi
-            .as_ref()
-            .and_then(|dpi| dpi.switch_mode(key, value))
-        {
-            if let Some(steps) = reapply {
+        match self.dpi.as_ref().map_or(ModeSwitch::NotModeControl, |dpi| {
+            dpi.switch_mode(key, value)
+        }) {
+            ModeSwitch::NotModeControl => {}
+            ModeSwitch::Host(Some(steps)) => {
                 self.set_dpi_steps(steps).await?;
+                self.refresh_dpi_status().await?;
             }
-            self.refresh_dpi_status().await?;
+            ModeSwitch::Host(None) | ModeSwitch::Onboard => self.refresh_dpi_status().await?,
         }
         Ok(())
     }
@@ -2567,7 +2586,7 @@ impl KeyboardLayoutCapability for LuaDevice {
 
 #[async_trait]
 impl LightingDivisionAdapter for LuaDevice {
-    fn parent_id(&self) -> String {
+    fn parent_id(&self) -> DeviceId {
         self.id.clone()
     }
     fn channels(&self) -> Vec<ChannelDescriptor> {
@@ -2641,7 +2660,7 @@ mod tests {
 
     fn hid_device(id: &str, manifest: &PluginManifest, transport: Arc<dyn Transport>) -> LuaDevice {
         LuaDevice::new(LuaDeviceParts {
-            id: id.into(),
+            id: id.parse().unwrap(),
             manifest,
             spec: Some(&manifest.devices[0]),
             notify: Weak::new(),
@@ -2674,7 +2693,7 @@ mod tests {
         let manifest = crate::domain::plugin::parse_manifest_from_dir(&dir).unwrap();
 
         let device = LuaDevice::new(LuaDeviceParts {
-            id: "layout_plug_0".into(),
+            id: "layout_plug_0".parse().unwrap(),
             manifest: &manifest,
             spec: Some(&manifest.devices[0]),
             notify: Weak::new(),
@@ -2696,7 +2715,7 @@ mod tests {
     async fn wire_device_control_layout_is_empty_without_a_manifest_layout() {
         let (_tmp, manifest) = test_manifest("no_layout", &["controls"], "return {}");
         let device = LuaDevice::new(LuaDeviceParts {
-            id: "no_layout_0".into(),
+            id: "no_layout_0".parse().unwrap(),
             manifest: &manifest,
             spec: Some(&manifest.devices[0]),
             notify: Weak::new(),
@@ -2711,7 +2730,7 @@ mod tests {
     async fn discovery_identity_reaches_conflict_detection_and_wire() {
         let (_tmp, manifest) = test_manifest("identity", &["controls"], "return {}");
         let device = LuaDevice::new(LuaDeviceParts {
-            id: "identity_0".into(),
+            id: "identity_0".parse().unwrap(),
             manifest: &manifest,
             spec: Some(&manifest.devices[0]),
             notify: Weak::new(),
@@ -2728,7 +2747,7 @@ mod tests {
         );
         assert_eq!(
             device.conflict_origin(),
-            DeviceOrigin::Plugin("identity".into())
+            DeviceOrigin::Plugin("identity".parse().unwrap())
         );
     }
 
@@ -2746,7 +2765,7 @@ mod tests {
         let manifest = crate::domain::plugin::parse_manifest_from_dir(&dir).unwrap();
 
         let receiver = LuaDevice::new(LuaDeviceParts {
-            id: "scoped_caps_0".into(),
+            id: "scoped_caps_0".parse().unwrap(),
             manifest: &manifest,
             spec: Some(&manifest.devices[0]),
             notify: Weak::new(),
@@ -2759,7 +2778,7 @@ mod tests {
         ));
 
         let mouse = LuaDevice::new(LuaDeviceParts {
-            id: "scoped_caps_1".into(),
+            id: "scoped_caps_1".parse().unwrap(),
             manifest: &manifest,
             spec: Some(&manifest.devices[1]),
             notify: Weak::new(),
@@ -2992,6 +3011,34 @@ mod tests {
         restarted.close().await;
     }
 
+    #[tokio::test]
+    async fn host_steps_are_reapplied_after_the_plugin_reinitializes_them() {
+        let script = r#"
+            local steps={400,800,1600}
+            return {
+                initialize=function() return {
+                    dpi={min=100,max=3200,steps={400,800,1600},current=800,onboard=false},
+                    controls={booleans={{key="reinit",label="Reinit"}}},booleans={reinit=false}}
+                end,
+                set_boolean=function(dev,key,value) steps={400,800,1600} end,
+                set_dpi_steps=function(dev,value) steps=value end,
+                dpi_status=function() return {min=100,max=3200,steps=steps,current=800,onboard=false} end,
+            }
+        "#;
+        let (_tmp, manifest) = test_manifest("dpi_reinit", &["dpi", "controls"], script);
+        let dev = hid_device("mouse", &manifest, Arc::new(MockTransport::empty()));
+        assert!(dev.initialize().await.unwrap());
+        dev.set_dpi_steps(vec![1600, 400, 800]).await.unwrap();
+        dev.set_boolean("reinit", true).await.unwrap();
+        assert_eq!(dev.dpi_status().await.steps, vec![1600, 400, 800]);
+        assert_eq!(dev.dpi_status().await.steps, vec![1600, 400, 800]);
+        assert_eq!(
+            DpiCapability::save_state(&dev),
+            serde_json::json!({"steps":[1600,400,800]})
+        );
+        dev.close().await;
+    }
+
     #[test]
     fn every_manifest_capability_maps_to_a_runtime_capability() {
         for name in crate::domain::plugin::manifest::SUPPORTED_CAPABILITIES {
@@ -3017,22 +3064,26 @@ mod tests {
         // The root (non-child worker) is hidden under Integrations; the
         // controllers it exposes as children stay listable and conflict-eligible.
         assert_eq!(
-            integration_root_id(PluginKind::Integration, "openrgb", false).as_deref(),
+            integration_root_id(PluginKind::Integration, &"openrgb".parse().unwrap(), false)
+                .as_deref(),
             Some("openrgb")
         );
         assert_eq!(
-            integration_root_id(PluginKind::Integration, "openrgb", true),
+            integration_root_id(PluginKind::Integration, &"openrgb".parse().unwrap(), true),
             None
         );
         // A plain device plugin never claims an integration id.
-        assert_eq!(integration_root_id(PluginKind::Device, "acme", false), None);
+        assert_eq!(
+            integration_root_id(PluginKind::Device, &"acme".parse().unwrap(), false),
+            None
+        );
     }
 
     #[test]
     fn device_only_keeps_plugin_identity_without_capabilities() {
         let (_tmp, manifest) = test_manifest("identity_only", &[], "return {}");
         let dev = LuaDevice::new(LuaDeviceParts {
-            id: "identity_only-0".into(),
+            id: "identity_only-0".parse().unwrap(),
             manifest: &manifest,
             spec: Some(&manifest.devices[0]),
             notify: Weak::new(),
@@ -3573,7 +3624,7 @@ mod tests {
         let runtime = Arc::new(Mutex::new(RuntimeState::OpeningTransport));
         let command = super::super::transport::CommandExecutor::new(["nvidia-smi".to_owned()]);
         let dev = LuaDevice::new(LuaDeviceParts {
-            id: "fatal_init-0".into(),
+            id: "fatal_init-0".parse().unwrap(),
             manifest: &manifest,
             spec: Some(&manifest.devices[0]),
             notify: Weak::new(),
@@ -3715,7 +3766,7 @@ mod tests {
     async fn lcd_writes_do_not_leave_polling_paused_when_the_worker_is_gone() {
         let (_tmp, manifest) = test_manifest("lcd_no_worker", &["lighting"], "return {}");
         let dev = LuaDevice::new(LuaDeviceParts {
-            id: "lcd_no_worker-0".into(),
+            id: "lcd_no_worker-0".parse().unwrap(),
             manifest: &manifest,
             spec: Some(&manifest.devices[0]),
             notify: Weak::new(),

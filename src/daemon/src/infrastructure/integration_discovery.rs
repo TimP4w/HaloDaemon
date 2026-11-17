@@ -1,8 +1,9 @@
 // SPDX-License-Identifier: GPL-3.0-or-later
 
 use std::collections::HashMap;
-use std::net::{IpAddr, UdpSocket};
-use std::time::{Duration, Instant};
+use std::net::{IpAddr, SocketAddr, UdpSocket};
+use std::time::Duration;
+use tokio::time::Instant;
 
 use anyhow::{Context, Result};
 use mdns_sd::{ServiceDaemon, ServiceEvent};
@@ -13,14 +14,43 @@ use crate::domain::plugin::manifest::IntegrationDiscoveryConfig;
 pub async fn scan(config: IntegrationDiscoveryConfig) -> Result<Value> {
     let mdns_config = config.clone();
     let mdns_task = tokio::task::spawn_blocking(move || scan_mdns(&mdns_config.mdns));
-    let ssdp_task = tokio::task::spawn_blocking(move || scan_ssdp(&config.ssdp));
-    let (mdns, ssdp) = tokio::join!(mdns_task, ssdp_task);
+    let ssdp_targets = config.ssdp.clone();
+    let ssdp_task = tokio::task::spawn_blocking(move || scan_ssdp(&ssdp_targets));
+    let (mdns, ssdp, tcp) = tokio::join!(mdns_task, ssdp_task, scan_tcp(&config.tcp));
     let mdns = mdns.context("mDNS discovery task panicked")??;
     let ssdp = ssdp.context("SSDP discovery task panicked")??;
-    Ok(json!({ "mdns": mdns, "ssdp": ssdp }))
+    Ok(json!({ "mdns": mdns, "ssdp": ssdp, "tcp": tcp }))
+}
+
+const TCP_PROBE_TIMEOUT: Duration = Duration::from_millis(500);
+
+async fn scan_tcp(endpoints: &[SocketAddr]) -> Vec<Value> {
+    let probes = endpoints.iter().map(|&endpoint| async move {
+        let open =
+            tokio::time::timeout(TCP_PROBE_TIMEOUT, tokio::net::TcpStream::connect(endpoint))
+                .await
+                .is_ok_and(|connected| connected.is_ok());
+        open.then(|| {
+            json!({
+                "service": "tcp",
+                "id": endpoint.to_string(),
+                "name": endpoint.to_string(),
+                "host": endpoint.ip().to_string(),
+                "port": endpoint.port(),
+            })
+        })
+    });
+    futures_util::future::join_all(probes)
+        .await
+        .into_iter()
+        .flatten()
+        .collect()
 }
 
 fn scan_mdns(services: &[String]) -> Result<Vec<Value>> {
+    if services.is_empty() {
+        return Ok(Vec::new());
+    }
     let daemon = ServiceDaemon::new().context("starting mDNS browser")?;
     let mut found = HashMap::<String, Value>::new();
     for service in services {
@@ -152,6 +182,27 @@ mod tests {
         );
         assert_eq!(headers["location"], "http://192.0.2.1/device.xml");
         assert_eq!(headers["usn"], "uuid:one");
+    }
+
+    #[tokio::test]
+    async fn tcp_probe_reports_only_listening_endpoints() {
+        let listener = tokio::net::TcpListener::bind("127.0.0.1:0").await.unwrap();
+        let open = listener.local_addr().unwrap();
+        let closed = {
+            let spare = std::net::TcpListener::bind("127.0.0.1:0").unwrap();
+            spare.local_addr().unwrap()
+        };
+        let found = scan_tcp(&[open, closed]).await;
+        assert_eq!(
+            found,
+            [json!({
+                "service": "tcp",
+                "id": open.to_string(),
+                "name": open.to_string(),
+                "host": "127.0.0.1",
+                "port": open.port(),
+            })]
+        );
     }
 
     #[test]

@@ -181,14 +181,15 @@ fn header_meta(dev: &WireDevice) -> String {
         device::transport_label(dev)
     };
     let mut parts = vec![device::type_label(dev).to_string(), link];
-    let known: Vec<_> = batteries(dev)
+    let all = batteries(dev);
+    let multi = all.len() > 1;
+    let known: Vec<_> = all
         .into_iter()
         .filter(|b| !matches!(b.status, BatteryStatus::Unknown))
         .collect();
-    let multi = known.len() > 1;
-    for (i, b) in known.iter().enumerate() {
-        let label = if multi {
-            t!("devtabs.battery_n", n = i + 1).to_string()
+    for b in &known {
+        let label = if multi && !b.label.is_empty() {
+            b.label.clone()
         } else {
             t!("devtabs.battery").to_string()
         };
@@ -304,6 +305,26 @@ mod tests {
         );
         headset.transport = Some("hid".into());
         assert_eq!(header_meta(&headset), "Headset · Wireless · Battery 64%");
+
+        let cell = |key: &str, label: &str, level, status| Battery {
+            key: key.into(),
+            label: label.into(),
+            level,
+            status,
+        };
+        headset.capabilities[1] = DeviceCapability::Battery(vec![
+            cell("headset", "Headset", 80, BatteryStatus::Discharging),
+            cell("slot", "Charging Slot", 0, BatteryStatus::Unknown),
+        ]);
+        assert_eq!(header_meta(&headset), "Headset · Wireless · Headset 80%");
+        headset.capabilities[1] = DeviceCapability::Battery(vec![
+            cell("headset", "Headset", 80, BatteryStatus::Discharging),
+            cell("slot", "Charging Slot", 100, BatteryStatus::Discharging),
+        ]);
+        assert_eq!(
+            header_meta(&headset),
+            "Headset · Wireless · Headset 80% · Charging Slot 100%"
+        );
 
         let mut hub = dev(DeviceType::Hub, vec![]);
         hub.transport = Some("smbus".into());

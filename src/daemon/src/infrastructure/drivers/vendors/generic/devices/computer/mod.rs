@@ -22,6 +22,7 @@ use crate::domain::device::{
     VisibilitySlot,
 };
 use crate::util::task::TaskHandle;
+use halod_shared::ids::DeviceId;
 use halod_shared::types::{
     Boolean, Choice, ChoiceDisplay, ChoiceOption, DeviceCapability, DeviceType, Sensor,
 };
@@ -47,7 +48,7 @@ fn os_label() -> &'static str {
 
 /// The PC/OS device. Grows a new field + capability impl per OS-specific feature.
 pub struct ComputerDevice {
-    id: String,
+    id: DeviceId,
     /// `None` when the host exposes no switchable power profile.
     power_profile: Option<Box<dyn PowerProfileBackend>>,
     choice_cache: ChoiceStateCache,
@@ -67,7 +68,7 @@ impl ComputerDevice {
         keep_awake: Box<dyn KeepAwake>,
     ) -> Self {
         Self {
-            id: "computer".to_string(),
+            id: DeviceId::sanitized("computer"),
             power_profile,
             choice_cache: ChoiceStateCache::default(),
             selected_profile: Mutex::new(1),
@@ -82,7 +83,7 @@ impl ComputerDevice {
 
 #[async_trait]
 impl Device for ComputerDevice {
-    fn id(&self) -> &str {
+    fn id(&self) -> &DeviceId {
         &self.id
     }
     fn name(&self) -> &str {

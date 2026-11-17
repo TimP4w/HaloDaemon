@@ -25,7 +25,7 @@ const DIAL: f32 = 104.0;
 /// One battery line inside a battery widget.
 pub struct BatteryRow {
     pub name: String,
-    pub level: u8,
+    pub level: Option<u8>,
     pub charging: bool,
 }
 
@@ -121,7 +121,7 @@ pub fn resolve(w: &HomeWidget, sensors: &[SensorView], state: &TopicStore) -> Op
         HomeWidgetKind::Battery { batteries } => {
             let rows: Vec<BatteryRow> = batteries
                 .iter()
-                .filter_map(|reference| battery_row(reference, state))
+                .map(|reference| battery_row(reference, state))
                 .collect();
             (!rows.is_empty()).then(|| Resolved {
                 label: named(&t!("home.widget_battery")),
@@ -132,19 +132,36 @@ pub fn resolve(w: &HomeWidget, sensors: &[SensorView], state: &TopicStore) -> Op
     }
 }
 
-fn battery_row(reference: &str, state: &TopicStore) -> Option<BatteryRow> {
-    let (device_id, key) = split_battery_ref(reference)?;
-    let device = state.devices.iter().find(|d| d.id == device_id)?;
-    let batteries = device.capabilities.iter().find_map(|cap| match cap {
+fn battery_row(reference: &str, state: &TopicStore) -> BatteryRow {
+    let unavailable = BatteryRow {
+        name: reference.to_owned(),
+        level: None,
+        charging: false,
+    };
+    let Some((device_id, key)) = split_battery_ref(reference) else {
+        return unavailable;
+    };
+    let Some(device) = state.devices.iter().find(|d| d.id == device_id) else {
+        return unavailable;
+    };
+    let Some(batteries) = device.capabilities.iter().find_map(|cap| match cap {
         DeviceCapability::Battery(b) => Some(b),
         _ => None,
-    })?;
-    let battery = batteries.iter().find(|b| b.key == key)?;
-    Some(BatteryRow {
-        name: battery_name(&device.name, &battery.label, batteries.len()),
-        level: battery.level,
-        charging: battery.status == BatteryStatus::Charging,
-    })
+    }) else {
+        return unavailable;
+    };
+    match batteries.iter().find(|b| b.key == key) {
+        Some(battery) => BatteryRow {
+            name: battery_name(&device.name, &battery.label, batteries.len()),
+            level: Some(battery.level),
+            charging: battery.status == BatteryStatus::Charging,
+        },
+        None => BatteryRow {
+            name: battery_name(&device.name, key, 2),
+            level: None,
+            charging: false,
+        },
+    }
 }
 
 /// A battery's display name: the device alone when it has a single cell, else
@@ -366,26 +383,40 @@ fn battery(p: &egui::Painter, inner: Rect, top: Pos2, rows: &[BatteryRow]) {
     let name_w = (inner.width() * 0.4).clamp(48.0, 150.0);
     for (i, row) in rows.iter().enumerate() {
         let y = top.y + 10.0 + i as f32 * 28.0;
-        let color = theme::battery_color(row.level, row.charging);
+        let name_color = if row.level.is_some() {
+            theme::TEXT_DIM
+        } else {
+            theme::TEXT_FAINT
+        };
         p.text(
             Pos2::new(inner.left(), y),
             Align2::LEFT_CENTER,
             ellipsize(p, &row.name, &theme::body_md(), name_w),
             theme::body_md(),
-            theme::TEXT_DIM,
+            name_color,
         );
         let track = Rect::from_min_max(
             Pos2::new(inner.left() + name_w + 12.0, y - 3.0),
             Pos2::new(inner.right() - 48.0, y + 3.0),
         );
         p.rect_filled(track, 1.0, theme::BORDER);
+        let Some(level) = row.level else {
+            p.text(
+                Pos2::new(inner.right(), y),
+                Align2::RIGHT_CENTER,
+                t!("home.widget_battery_unavailable"),
+                theme::caption(),
+                theme::TEXT_FAINT,
+            );
+            continue;
+        };
         let mut fill = track;
-        fill.set_right(track.left() + track.width() * row.level as f32 / 100.0);
-        p.rect_filled(fill, 1.0, color);
+        fill.set_right(track.left() + track.width() * level as f32 / 100.0);
+        p.rect_filled(fill, 1.0, theme::battery_color(level, row.charging));
         p.text(
             Pos2::new(inner.right(), y),
             Align2::RIGHT_CENTER,
-            format!("{}%", row.level),
+            format!("{level}%"),
             theme::medium(13.0),
             theme::TEXT,
         );
@@ -445,7 +476,7 @@ mod tests {
 
     fn battery_device(id: &str, name: &str, batteries: Vec<Battery>) -> WireDevice {
         WireDevice {
-            id: id.into(),
+            id: id.parse().unwrap(),
             name: name.into(),
             capabilities: vec![DeviceCapability::Battery(batteries)],
             ..Default::default()
@@ -499,7 +530,11 @@ mod tests {
             },
             "",
         );
-        assert!(resolve(&no_battery, &sensors, &state).is_none());
+        let Data::Battery(rows) = resolve(&no_battery, &sensors, &state).unwrap().data else {
+            panic!("a battery widget keeps its rows");
+        };
+        assert_eq!(rows[0].level, None);
+        assert_eq!(rows[0].name, "mouse/main");
     }
 
     #[test]
@@ -525,7 +560,46 @@ mod tests {
             panic!("expected a battery widget");
         };
         let names: Vec<_> = rows.iter().map(|r| r.name.as_str()).collect();
-        assert_eq!(names, vec!["Echo 7.1 · L", "Glide Pro"]);
+        assert_eq!(names, vec!["Echo 7.1 · L", "Glide Pro", "Echo 7.1 · gone"]);
+        assert_eq!(
+            rows.iter().map(|r| r.level).collect::<Vec<_>>(),
+            [Some(54), Some(78), None]
+        );
+    }
+
+    #[test]
+    fn battery_rows_survive_a_device_id_change() {
+        let before = TopicStore {
+            devices: vec![battery_device(
+                "logitech_1234",
+                "Glide Pro",
+                vec![battery("battery", "Battery", 60)],
+            )],
+            ..Default::default()
+        };
+        let w = widget(
+            HomeWidgetKind::Battery {
+                batteries: vec!["logitech_1234/battery".into()],
+            },
+            "",
+        );
+        let rows = |state: &TopicStore| match resolve(&w, &[], state).unwrap().data {
+            Data::Battery(rows) => rows,
+            _ => panic!("battery"),
+        };
+        assert_eq!(rows(&before)[0].level, Some(60));
+        let after = TopicStore {
+            devices: vec![battery_device(
+                "logitech-1234",
+                "Glide Pro",
+                vec![battery("battery", "Battery", 60)],
+            )],
+            ..Default::default()
+        };
+        let unavailable = rows(&after);
+        assert_eq!(unavailable.len(), 1);
+        assert_eq!(unavailable[0].level, None);
+        assert_eq!(unavailable[0].name, "logitech_1234/battery");
     }
 
     #[test]

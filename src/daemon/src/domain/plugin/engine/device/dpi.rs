@@ -20,6 +20,14 @@ struct Dpi {
     mode: DpiMode,
     mode_control: Option<String>,
     host_steps: Option<Vec<u16>>,
+    reapply_attempted: bool,
+}
+
+#[derive(Debug, PartialEq, Eq)]
+pub(super) enum ModeSwitch {
+    NotModeControl,
+    Onboard,
+    Host(Option<Vec<u16>>),
 }
 
 impl DpiFacet {
@@ -34,14 +42,27 @@ impl DpiFacet {
         }
     }
 
-    /// Replace the state with a fresh device report.
-    pub(super) fn refresh(&self, dpi: &InitDpi) {
+    /// Replace the state with a fresh device report. Host steps the device
+    /// reports differently are reapplied once; a second mismatch adopts the
+    /// device's own steps so a firmware that normalises them is not rewritten
+    /// on every poll.
+    pub(super) fn refresh(&self, dpi: &InitDpi) -> Option<Vec<u16>> {
         let mut state = self.0.lock();
         let host_steps = state.host_steps.take();
+        let attempted = state.reapply_attempted;
         *state = Dpi::from_runtime(dpi);
-        if dpi.onboard {
-            state.host_steps = host_steps;
+        let known = host_steps?;
+        if dpi.onboard || known == dpi.steps {
+            state.host_steps = Some(known);
+            return None;
         }
+        if attempted {
+            state.host_steps = Some(dpi.steps.clone());
+            return None;
+        }
+        state.host_steps = Some(known.clone());
+        state.reapply_attempted = true;
+        Some(known)
     }
 
     pub(super) fn validate_steps(&self, steps: &[u16]) -> Result<()> {
@@ -115,20 +136,20 @@ impl DpiFacet {
         }
     }
 
-    /// Apply a boolean write to the mode control. Returns `None` when `key`
-    /// is not the mode control, otherwise the host steps to reapply (only when
-    /// switching to host mode).
-    pub(super) fn switch_mode(&self, key: &str, host: bool) -> Option<Option<Vec<u16>>> {
+    /// Apply a boolean write to the mode control; switching to host mode
+    /// yields the host steps to reapply.
+    pub(super) fn switch_mode(&self, key: &str, host: bool) -> ModeSwitch {
         let mut state = self.0.lock();
         if state.mode_control.as_deref() != Some(key) {
-            return None;
+            return ModeSwitch::NotModeControl;
         }
-        state.mode = if host {
-            DpiMode::Host
+        if host {
+            state.mode = DpiMode::Host;
+            ModeSwitch::Host(state.host_steps.clone())
         } else {
-            DpiMode::Onboard
-        };
-        Some(host.then(|| state.host_steps.clone()).flatten())
+            state.mode = DpiMode::Onboard;
+            ModeSwitch::Onboard
+        }
     }
 
     pub(super) fn status(&self) -> DpiStatus {
@@ -164,6 +185,7 @@ impl Default for Dpi {
             mode: DpiMode::Host,
             mode_control: None,
             host_steps: None,
+            reapply_attempted: false,
         }
     }
 }
@@ -181,6 +203,7 @@ impl Dpi {
             .unwrap_or(steps.len() / 2);
         Self {
             host_steps: (!dpi.onboard).then(|| steps.clone()),
+            reapply_attempted: false,
             steps,
             available: dpi.available_dpis.clone(),
             index,
@@ -214,27 +237,65 @@ mod tests {
     }
 
     #[test]
-    fn install_keeps_restored_host_steps_but_refresh_takes_the_devices() {
+    fn install_and_refresh_keep_restored_host_steps_and_ask_to_reapply_them() {
         let facet = DpiFacet::default();
         facet.remember_host_steps(vec![400, 800]);
         facet.install(&descriptor(&[1600], false));
         assert_eq!(facet.host_steps(), Some(vec![400, 800]));
-        facet.refresh(&descriptor(&[1600], false));
-        assert_eq!(facet.host_steps(), Some(vec![1600]));
-        facet.refresh(&descriptor(&[3200], true));
-        assert_eq!(facet.host_steps(), Some(vec![1600]));
+        assert_eq!(
+            facet.refresh(&descriptor(&[1600], false)),
+            Some(vec![400, 800])
+        );
+        assert_eq!(facet.refresh(&descriptor(&[400, 800], false)), None);
+        assert_eq!(facet.refresh(&descriptor(&[3200], true)), None);
+        assert_eq!(facet.host_steps(), Some(vec![400, 800]));
+    }
+
+    #[test]
+    fn a_first_report_seeds_the_host_steps() {
+        let facet = DpiFacet::default();
+        assert_eq!(facet.refresh(&descriptor(&[800, 1600], false)), None);
+        assert_eq!(facet.host_steps(), Some(vec![800, 1600]));
+    }
+
+    #[test]
+    fn a_device_report_after_reinitialize_does_not_replace_known_host_steps() {
+        let facet = DpiFacet::default();
+        facet.install(&descriptor(&[400, 800, 1600], false));
+        facet.record_steps(vec![1600, 400, 800]);
+        assert_eq!(
+            facet.refresh(&descriptor(&[400, 800, 1600], false)),
+            Some(vec![1600, 400, 800])
+        );
+        assert_eq!(facet.host_steps(), Some(vec![1600, 400, 800]));
+    }
+
+    #[test]
+    fn steps_a_device_keeps_normalising_are_reapplied_once_then_adopted() {
+        let facet = DpiFacet::default();
+        facet.install(&descriptor(&[400, 800, 1600], false));
+        facet.record_steps(vec![1600, 400, 800]);
+        assert!(facet
+            .refresh(&descriptor(&[400, 800, 1600], false))
+            .is_some());
+        assert_eq!(facet.refresh(&descriptor(&[400, 800, 1600], false)), None);
+        assert_eq!(facet.host_steps(), Some(vec![400, 800, 1600]));
+        assert_eq!(facet.refresh(&descriptor(&[400, 800, 1600], false)), None);
     }
 
     #[test]
     fn only_the_mode_control_switches_mode_and_host_mode_reapplies_steps() {
         let facet = DpiFacet::default();
         facet.install(&descriptor(&[800, 1600], false));
-        assert_eq!(facet.switch_mode("other", false), None);
-        assert_eq!(facet.switch_mode("host_mode", false), Some(None));
+        assert_eq!(
+            facet.switch_mode("other", false),
+            ModeSwitch::NotModeControl
+        );
+        assert_eq!(facet.switch_mode("host_mode", false), ModeSwitch::Onboard);
         assert!(facet.is_onboard());
         assert_eq!(
             facet.switch_mode("host_mode", true),
-            Some(Some(vec![800, 1600]))
+            ModeSwitch::Host(Some(vec![800, 1600]))
         );
         assert!(!facet.is_onboard());
     }

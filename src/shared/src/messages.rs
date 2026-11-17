@@ -52,7 +52,7 @@ pub enum DaemonMessage {
         files: Vec<LcdImageFile>,
     },
     PluginAsset {
-        plugin_id: String,
+        plugin_id: crate::ids::PluginId,
         name: String,
         data_b64: String,
     },
@@ -132,7 +132,7 @@ mod tests {
             (
                 DaemonMessage::LcdUploadProgress {
                     data: LcdUploadProgress {
-                        device_id: "lcd".into(),
+                        device_id: "lcd".parse().unwrap(),
                         stage: LcdUploadStage::Processing,
                         percent: Some(42),
                     },
@@ -173,7 +173,7 @@ mod tests {
             ),
             (
                 DaemonMessage::PluginAsset {
-                    plugin_id: "acme".into(),
+                    plugin_id: "acme".parse().unwrap(),
                     name: "logo.png".into(),
                     data_b64: "AA==".into(),
                 },

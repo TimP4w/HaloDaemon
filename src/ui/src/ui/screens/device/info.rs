@@ -2,7 +2,7 @@
 //! Info tab — throughput chart, device details, capabilities, diagnostics
 //! (`GetDebugInfo` snapshot as JSON) and visibility management.
 
-use halod_shared::commands::DeviceOp;
+use halod_shared::commands::{DaemonCommand, DeviceOp};
 use std::collections::VecDeque;
 
 use crate::ui::components as widgets;
@@ -15,6 +15,7 @@ use super::{DeviceUi, TabCtx};
 use crate::domain::models::device::find_hub_write_rate;
 use crate::runtime::ipc;
 use crate::ui::theme;
+use halod_shared::ids::DeviceId;
 
 /// Chart windows offered by the range selector, in seconds (history is sampled at 1 Hz).
 const RANGES: [usize; 3] = [60, 600, 3600];
@@ -288,7 +289,7 @@ fn details_card(ui: &mut egui::Ui, ctx: &TabCtx, dbg: Option<&DeviceDebugInfo>) 
                 String::new()
             },
         ),
-        (t!("devtabs.info_id"), dev.id.clone()),
+        (t!("devtabs.info_id"), dev.id.to_string()),
     ];
     widgets::card_with_margin(ui, egui::Margin::symmetric(20, 6), |ui| {
         ui.spacing_mut().item_spacing.y = 0.0;
@@ -391,10 +392,44 @@ pub fn show(ui: &mut egui::Ui, ctx: &TabCtx, st: &mut DeviceUi) {
                 )
             };
             if full_button(ui, &label, kind) {
-                set_visibility(ctx, target);
+                if target == VisibilityState::Disabled {
+                    st.pending_disable = Some((dev.id.clone(), dev.name.clone()));
+                } else {
+                    set_visibility(ctx, target);
+                }
             }
         });
     });
+    if let Some((device_id, _)) = disable_confirm(ui.ctx(), &mut st.pending_disable) {
+        ipc::send(ctx.cmd, disable_command(device_id));
+    }
+}
+
+pub(crate) fn disable_confirm(
+    ctx: &egui::Context,
+    pending: &mut Option<(DeviceId, String)>,
+) -> Option<(DeviceId, String)> {
+    let name = pending
+        .as_ref()
+        .map(|(_, name)| name.clone())
+        .unwrap_or_default();
+    widgets::confirm_delete_dialog(
+        ctx,
+        "device_disable_confirm",
+        &t!("devtabs.disable_device_title", name = name),
+        &t!("devtabs.disable_device_confirm", name = name),
+        &t!("devtabs.disable_device"),
+        pending,
+    )
+}
+
+pub(crate) fn disable_command(device_id: DeviceId) -> DaemonCommand {
+    DaemonCommand::Device {
+        device_id,
+        op: DeviceOp::SetDeviceVisibility {
+            state: VisibilityState::Disabled,
+        },
+    }
 }
 
 fn aside_card(ui: &mut egui::Ui, title: &str, body: impl FnOnce(&mut egui::Ui)) {
@@ -449,7 +484,23 @@ fn cap_label_tr(c: &DeviceCapability) -> std::borrow::Cow<'static, str> {
 
 #[cfg(test)]
 mod tests {
-    use super::{axis_max, cap_label_tr, window_points, CHART_POINTS};
+    use super::{axis_max, cap_label_tr, disable_command, window_points, CHART_POINTS};
+    use halod_shared::commands::{DaemonCommand, DeviceOp};
+    use halod_shared::types::VisibilityState;
+
+    #[test]
+    fn confirming_a_disable_sends_the_visibility_change_for_that_device() {
+        let command = disable_command("mouse-1".parse().unwrap());
+        assert!(matches!(
+            command,
+            DaemonCommand::Device {
+                device_id,
+                op: DeviceOp::SetDeviceVisibility {
+                    state: VisibilityState::Disabled
+                }
+            } if device_id == "mouse-1"
+        ));
+    }
     use halod_shared::types::DeviceCapability as C;
     use std::collections::VecDeque;
 

@@ -18,7 +18,8 @@
 use std::io::Read;
 use std::process::{Command, Stdio};
 use std::sync::{Arc, OnceLock};
-use std::time::{Duration, Instant};
+use std::time::Duration;
+use tokio::time::Instant;
 
 use anyhow::Result;
 use halod_shared::types::{Permission, WriteRateStatus};
@@ -405,16 +406,37 @@ type PluginOpenFn = fn(
     Option<halod_shared::types::WriteRateLimit>,
 ) -> Result<PluginIo>;
 
-pub struct PluginTransportDescriptor {
-    /// The `match.transport` discriminator (e.g. "hid", "smbus").
-    pub kind: &'static str,
-    /// Open the live transport. `config` is the plugin's resolved non-secure
-    /// config; `granted` is what the manifest declares, so a backend that
-    /// reaches off the matched device (e.g. `tcp`) gates on `Permission::Network`.
-    pub open: PluginOpenFn,
-    /// How discovery matches and names this backend's devices; `None` for a
-    /// backend instantiated from config (see `integration_scan`).
-    pub discovery: Option<Discovery>,
+pub enum PluginTransportDescriptor {
+    Discovered {
+        kind: &'static str,
+        open: PluginOpenFn,
+        discovery: Discovery,
+    },
+    Configured {
+        kind: &'static str,
+        open: PluginOpenFn,
+    },
+}
+
+impl PluginTransportDescriptor {
+    pub fn kind(&self) -> &'static str {
+        match self {
+            Self::Discovered { kind, .. } | Self::Configured { kind, .. } => kind,
+        }
+    }
+
+    pub fn open(&self) -> PluginOpenFn {
+        match self {
+            Self::Discovered { open, .. } | Self::Configured { open, .. } => *open,
+        }
+    }
+
+    pub fn discovery(&self) -> Option<&Discovery> {
+        match self {
+            Self::Discovered { discovery, .. } => Some(discovery),
+            Self::Configured { .. } => None,
+        }
+    }
 }
 
 pub struct Discovery {
@@ -431,14 +453,16 @@ pub fn accept_spec(_: &DeviceSpec) -> Result<()> {
 
 /// Resolve a `match.transport` kind to its registered backend.
 pub fn descriptor_for(kind: &str) -> Option<&'static PluginTransportDescriptor> {
-    super::backends::DESCRIPTORS.iter().find(|d| d.kind == kind)
+    super::backends::DESCRIPTORS
+        .iter()
+        .find(|d| d.kind() == kind)
 }
 
 /// Every registered backend kind, for error messages.
 pub fn known_kinds() -> Vec<&'static str> {
     super::backends::DESCRIPTORS
         .iter()
-        .map(|d| d.kind)
+        .map(PluginTransportDescriptor::kind)
         .collect()
 }
 
@@ -451,9 +475,36 @@ mod tests {
         let kinds = super::known_kinds();
         for kind in &kinds {
             assert_eq!(kinds.iter().filter(|k| *k == kind).count(), 1, "{kind}");
-            assert_eq!(super::descriptor_for(kind).unwrap().kind, *kind);
+            assert_eq!(super::descriptor_for(kind).unwrap().kind(), *kind);
         }
         assert!(super::descriptor_for("nope").is_none());
+    }
+
+    #[test]
+    fn each_descriptor_variant_is_named_where_its_manifest_declares_it() {
+        use crate::domain::plugin::manifest::{RawDeviceSpec, TransportsConfig};
+        for descriptor in crate::domain::plugin::engine::backends::DESCRIPTORS {
+            let kind = descriptor.kind();
+            let as_device_match = serde_yaml::from_str::<RawDeviceSpec>(&format!(
+                "vendor: V\nmodel: M\nmatch: {{ {kind}: {{}} }}\n"
+            ));
+            let unknown = |result: Result<(), serde_yaml::Error>| {
+                result.is_err_and(|error| error.to_string().contains("unknown field"))
+            };
+            let named_by_device = !unknown(as_device_match.map(drop));
+            let named_by_transports = !unknown(
+                serde_yaml::from_str::<TransportsConfig>(&format!("{kind}: {{}}\n")).map(drop),
+            );
+            match descriptor {
+                super::PluginTransportDescriptor::Discovered { .. } => {
+                    assert!(named_by_device, "{kind}");
+                }
+                super::PluginTransportDescriptor::Configured { .. } => {
+                    assert!(!named_by_device, "{kind}");
+                    assert!(named_by_transports, "{kind}");
+                }
+            }
+        }
     }
 
     #[test]

@@ -1,5 +1,6 @@
 // SPDX-License-Identifier: GPL-3.0-or-later
 use crate::domain::cooling::engine::fan_curve;
+use halod_shared::ids::DeviceId;
 use halod_shared::types::FanCurveStatus;
 use std::collections::HashMap;
 use tokio::sync::Mutex;
@@ -20,7 +21,12 @@ impl CoolingEngineState {
         }
     }
 
-    pub async fn record_applied_duty(&self, device_id: &str, channel_id: &str, duty: u8) -> bool {
+    pub async fn record_applied_duty(
+        &self,
+        device_id: &DeviceId,
+        channel_id: &str,
+        duty: u8,
+    ) -> bool {
         self.applied_duties
             .lock()
             .await
@@ -28,11 +34,15 @@ impl CoolingEngineState {
             != Some(duty)
     }
 
+    pub async fn applied_duty(&self, key: &str) -> Option<u8> {
+        self.applied_duties.lock().await.get(key).copied()
+    }
+
     /// Join device-collected fan curve records with the engine's live statuses.
     pub async fn snapshot(
         &self,
         fan_curves: Vec<(
-            String,
+            DeviceId,
             String,
             crate::domain::cooling::model::FanCurveRecord,
         )>,
@@ -62,7 +72,7 @@ impl CoolingEngineState {
 
 /// Collision-free key for the internal status map. Device and channel IDs are
 /// external strings, so a visible delimiter is not safe here.
-pub fn curve_key(device_id: &str, channel_id: &str) -> String {
+pub fn curve_key(device_id: &DeviceId, channel_id: &str) -> String {
     format!("{}:{device_id}{channel_id}", device_id.len())
 }
 
@@ -74,13 +84,12 @@ mod tests {
     #[tokio::test]
     async fn snapshot_joins_fan_curve_with_status() {
         let state = CoolingEngineState::new();
-        state
-            .statuses
-            .lock()
-            .await
-            .insert(curve_key("fan_dev", "default"), FanCurveStatus::NoSensor);
+        state.statuses.lock().await.insert(
+            curve_key(&"fan_dev".parse().unwrap(), "default"),
+            FanCurveStatus::NoSensor,
+        );
         let fan_curves = vec![(
-            "fan_dev".to_string(),
+            "fan_dev".parse().unwrap(),
             "default".to_string(),
             FanCurveRecord {
                 sensor_id: Some("cpu_temp".to_string()),
@@ -100,7 +109,7 @@ mod tests {
     async fn snapshot_does_not_warn_before_engine_evaluation() {
         let state = CoolingEngineState::new();
         let fan_curves = vec![(
-            "fan_dev".to_string(),
+            "fan_dev".parse().unwrap(),
             "default".to_string(),
             FanCurveRecord {
                 sensor_id: None,

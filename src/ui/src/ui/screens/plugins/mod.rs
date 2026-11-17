@@ -22,6 +22,7 @@ use crate::ui::screens::plugin_integration;
 use crate::ui::screens::plugin_integration::IntegrationPanel;
 use crate::ui::theme;
 use halod_shared::commands::DaemonCommand;
+use halod_shared::ids::PluginId;
 
 mod access;
 mod repo;
@@ -56,7 +57,7 @@ struct RepoCheck {
 /// What the detail column shows: a plugin, a repo, or nothing (empty state).
 #[derive(Default, Clone, PartialEq, Eq, Debug)]
 enum Selection {
-    Plugin(String),
+    Plugin(PluginId),
     Repo(String),
     #[default]
     None,
@@ -67,27 +68,28 @@ pub struct PluginsUi {
     selection: Selection,
     add_repo: Option<AddRepoState>,
     pending_repo_delete: Option<String>,
-    pending_uninstall: Option<String>,
+    pending_uninstall: Option<PluginId>,
     checking_repo: Option<RepoCheck>,
     /// Plugin ids whose enable/disable is applying → target state; the toggle is
     /// locked at the target until the daemon confirms.
-    in_flight: HashMap<String, bool>,
+    in_flight: HashMap<PluginId, bool>,
     requested_assets: HashSet<String>,
     asset_textures: HashMap<String, egui::TextureHandle>,
     /// Plugin ids whose install or update is in flight → egui start time.
-    installing: HashMap<String, f64>,
-    updating_all: Option<f64>,
+    installing: HashMap<PluginId, f64>,
+    updates: UpdatePrompt,
     issue_modal: Option<(String, String)>,
     udev_rule_details: Option<Vec<String>>,
     #[cfg(target_os = "linux")]
     next_udev_status_check: f64,
-    udev_command_copied: bool,
+    udev_command_copied_at: Option<f64>,
     udev_info_open: bool,
     udev_rechecking: Option<f64>,
     filter: usize,
     search: String,
     integration: IntegrationPanel,
     pub(crate) enable_prompt: EnablePrompt,
+    setup_on_enable: HashMap<PluginId, ()>,
 }
 
 /// The plugin list's type filter.
@@ -149,13 +151,14 @@ impl PluginsUi {
             )
         }) {
             self.installing.clear();
-            self.updating_all = None;
+            self.checking_repo = None;
+            self.in_flight.clear();
+            self.integration.forget_in_flight();
         }
     }
 
-    #[cfg(all(test, feature = "screenshots"))]
-    pub(crate) fn select_plugin(&mut self, id: &str) {
-        self.selection = Selection::Plugin(id.to_owned());
+    pub(crate) fn select_plugin(&mut self, id: &PluginId) {
+        self.selection = Selection::Plugin(id.into());
     }
 
     pub fn release_textures(&mut self) {
@@ -176,9 +179,22 @@ impl PluginsUi {
             &cx.state.plugins.repos,
         );
         self.sync_assets(ui.ctx(), cx.cmd, &cx.state.plugins.plugins, cx.assets);
+        for plugin_id in
+            enabled_awaiting_setup(&mut self.setup_on_enable, &cx.state.plugins.plugins)
+        {
+            ipc::send(
+                cx.cmd,
+                DaemonCommand::Integration {
+                    plugin_id,
+                    op: halod_shared::commands::IntegrationOp::BeginSetup,
+                },
+            );
+        }
 
         self.body(ui, cx, page);
         self.integration.modals(ui.ctx(), cx.cmd);
+        self.updates.show(ui.ctx(), &cx.state.plugins);
+        self.send_ready_updates(now, cx.cmd);
 
         self.add_repo_modal(ui.ctx(), cx.cmd);
         self.repo_delete_modal(ui.ctx(), cx.cmd);
@@ -200,13 +216,17 @@ impl PluginsUi {
                 if !rechecking {
                     self.udev_rechecking = None;
                 }
-                let (close, recheck) =
-                    udev_info_modal(ui.ctx(), status, rechecking, &mut self.udev_command_copied);
+                let (close, recheck) = udev_info_modal(
+                    ui.ctx(),
+                    status,
+                    rechecking,
+                    &mut self.udev_command_copied_at,
+                );
                 if recheck && !rechecking {
                     self.udev_rechecking = Some(now);
                     ipc::send(cx.cmd, DaemonCommand::GetUdevRulesStatus);
                 }
-                if rechecking {
+                if self.udev_rechecking.is_some() {
                     ui.ctx().request_repaint();
                 }
                 if close {
@@ -227,7 +247,7 @@ impl PluginsUi {
         plugin_assets: &HashMap<String, Vec<u8>>,
     ) {
         if let Selection::Plugin(id) = &self.selection {
-            if let Some(p) = plugins.iter().find(|p| &p.id == id) {
+            if let Some(p) = plugins.iter().find(|p| p.id == id) {
                 for (plugin_id, name) in assets_to_request(p, plugin_assets, &self.requested_assets)
                 {
                     self.requested_assets
@@ -276,17 +296,49 @@ impl PluginsUi {
         cmd: &CommandTx,
     ) {
         if let Some(id) = self.enable_prompt.show(ctx, plugins, cmd) {
+            self.setup_on_enable.insert(id.clone(), ());
             self.in_flight.insert(id, true);
         }
     }
 
-    fn install(&mut self, now: f64, cmd: &CommandTx, repo: &str, id: &str) {
-        self.installing.insert(id.to_owned(), now);
+    fn request_updates(
+        &mut self,
+        now: f64,
+        cmd: &CommandTx,
+        state: &PluginsState,
+        ids: &[&PluginId],
+    ) {
+        self.updates.request(plan_updates(state, ids));
+        self.send_ready_updates(now, cmd);
+    }
+
+    fn send_ready_updates(&mut self, now: f64, cmd: &CommandTx) {
+        for update in self.updates.take_ready() {
+            self.install(
+                now,
+                cmd,
+                &update.repo,
+                &update.id,
+                update.permissions_confirmed(),
+            );
+        }
+    }
+
+    fn install(
+        &mut self,
+        now: f64,
+        cmd: &CommandTx,
+        repo: &str,
+        id: &PluginId,
+        permissions_confirmed: bool,
+    ) {
+        self.installing.insert(id.clone(), now);
         ipc::send(
             cmd,
             DaemonCommand::InstallPlugin {
                 repo: repo.to_owned(),
-                id: id.to_owned(),
+                id: id.clone(),
+                permissions_confirmed,
             },
         );
     }
@@ -320,13 +372,8 @@ impl PluginsUi {
             ),
         );
         let now = ui.input(|i| i.time);
-        clear_finished_installs(
-            &mut self.installing,
-            &mut self.updating_all,
-            &cx.state.plugins,
-            now,
-        );
-        if self.updating_all.is_some() || !self.installing.is_empty() {
+        clear_finished_installs(&mut self.installing, &cx.state.plugins, now);
+        if self.updates.is_pending() || !self.installing.is_empty() {
             ui.ctx().request_repaint();
         }
 
@@ -385,10 +432,14 @@ impl PluginsUi {
     fn banners(&mut self, ui: &mut egui::Ui, cx: &PluginsCtx) {
         let now = ui.input(|i| i.time);
         if let Some(status) = cx.udev.filter(|status| udev_rules_need_action(status)) {
-            match udev_rules_banner(ui, status, self.udev_command_copied) {
+            let copied = udev_copied_visible(self.udev_command_copied_at, now);
+            if copied {
+                ui.ctx().request_repaint();
+            }
+            match udev_rules_banner(ui, status, copied) {
                 UdevBannerAction::Install => {
                     ui.ctx().copy_text(udev_install_commands());
-                    self.udev_command_copied = true;
+                    self.udev_command_copied_at = Some(now);
                 }
                 UdevBannerAction::Info => self.udev_info_open = true,
                 UdevBannerAction::None => {}
@@ -397,9 +448,17 @@ impl PluginsUi {
         }
         let due = updates_due_count(&cx.state.plugins);
         if due > 0 {
-            if update_all_banner(ui, due, self.updating_all.is_some()) {
-                self.updating_all = Some(now);
-                ipc::send(cx.cmd, DaemonCommand::UpdateAllPlugins);
+            let busy = self.updates.is_pending() || !self.installing.is_empty();
+            if update_all_banner(ui, due, busy) && !busy {
+                let due_ids: Vec<&PluginId> = cx
+                    .state
+                    .plugins
+                    .plugins
+                    .iter()
+                    .filter(|p| update_for(p, &cx.state.plugins.available).is_some())
+                    .map(|p| &p.id)
+                    .collect();
+                self.request_updates(now, cx.cmd, &cx.state.plugins, &due_ids);
             }
             ui.add_space(theme::SPACE_5);
         }
@@ -442,7 +501,7 @@ impl PluginsUi {
                 || cx.udev.is_some_and(|status| {
                     status.supported
                         && !status.current
-                        && status.plugins_requiring_update.iter().any(|id| id == &p.id)
+                        && status.plugins_requiring_update.contains(&p.id)
                 });
             let logo = self.logo(p);
             match list_row(
@@ -463,7 +522,7 @@ impl PluginsUi {
 
     fn detail_column(&mut self, ui: &mut egui::Ui, cx: &PluginsCtx, page: &mut Page) {
         let plugin = match &self.selection {
-            Selection::Plugin(id) => cx.state.plugins.plugins.iter().find(|p| &p.id == id),
+            Selection::Plugin(id) => cx.state.plugins.plugins.iter().find(|p| p.id == id),
             _ => None,
         };
         let repo = match &self.selection {
@@ -490,7 +549,7 @@ impl PluginsUi {
                 });
             });
         if let (Some(action), Some(r)) = (action, repo) {
-            self.apply_repo_action(ui.input(|i| i.time), cx.cmd, r, action);
+            self.apply_repo_action(ui.input(|i| i.time), cx.cmd, &cx.state.plugins, r, action);
         }
     }
 
@@ -590,7 +649,7 @@ impl PluginsUi {
                     &update.version,
                     self.installing.contains_key(&p.id),
                 ) {
-                    self.install(now, cx.cmd, &update.repo, &p.id);
+                    self.request_updates(now, cx.cmd, &cx.state.plugins, &[&p.id]);
                 }
             }
             return;
@@ -631,7 +690,7 @@ impl PluginsUi {
                 &update.version,
                 self.installing.contains_key(&p.id),
             ) {
-                self.install(now, cx.cmd, &update.repo, &p.id);
+                self.request_updates(now, cx.cmd, &cx.state.plugins, &[&p.id]);
             }
         }
 
@@ -686,7 +745,7 @@ fn resolve_selection(
     repos: &[PluginRepoInfo],
 ) -> Selection {
     match &current {
-        Selection::Plugin(id) if plugins.iter().any(|p| &p.id == id) => return current,
+        Selection::Plugin(id) if plugins.iter().any(|p| p.id == id) => return current,
         Selection::Repo(slug) if repos.iter().any(|r| &r.slug == slug) => return current,
         _ => {}
     }
@@ -726,8 +785,7 @@ pub(super) fn updates_due_count(state: &PluginsState) -> usize {
 
 /// An install is done once the plugin is present with no update left due.
 fn clear_finished_installs(
-    installing: &mut HashMap<String, f64>,
-    updating_all: &mut Option<f64>,
+    installing: &mut HashMap<PluginId, f64>,
     state: &PluginsState,
     now: f64,
 ) {
@@ -738,11 +796,6 @@ fn clear_finished_installs(
             .any(|p| p.id == id && update_for(p, &state.available).is_none())
     };
     installing.retain(|id, started| !done(id) && now - *started < UPDATE_TIMEOUT);
-    if let Some(started) = *updating_all {
-        if updates_due_count(state) == 0 || now - started > UPDATE_TIMEOUT {
-            *updating_all = None;
-        }
-    }
 }
 
 /// Decode any newly-arrived asset bytes into GPU textures, keyed like the
@@ -777,7 +830,7 @@ fn assets_to_request(
     p: &PluginInfo,
     cache: &HashMap<String, Vec<u8>>,
     already_requested: &HashSet<String>,
-) -> Vec<(String, String)> {
+) -> Vec<(PluginId, String)> {
     let mut names: Vec<String> = p.logo.iter().cloned().collect();
     names.extend(p.effect_thumbnails.iter().map(|t| t.thumbnail.clone()));
     names
@@ -856,7 +909,8 @@ pub(crate) fn recommendation_toasts(
                 key,
                 Notification {
                     code: NotificationCode::PluginRecommended {
-                        plugin: rec.plugin_name.clone(),
+                        plugin: rec.plugin_id.clone(),
+                        name: rec.plugin_name.clone(),
                     },
                     show_native: true,
                     timestamp_ms,
@@ -875,12 +929,12 @@ fn plugin_toggle_landed(p: &PluginInfo, target: bool, discovering: bool) -> bool
 
 /// Drop landed (or vanished) in-flight toggles, unlocking them. Pure/testable.
 fn reconcile_in_flight(
-    in_flight: &mut HashMap<String, bool>,
+    in_flight: &mut HashMap<PluginId, bool>,
     plugins: &[PluginInfo],
     discovering: bool,
 ) {
-    crate::domain::state::retain_in_flight(in_flight, plugins, |p, target| {
-        plugin_toggle_landed(p, target, discovering)
+    crate::domain::state::drain_landed(in_flight, plugins, |p, target| {
+        plugin_toggle_landed(p, *target, discovering)
     });
 }
 
@@ -897,6 +951,20 @@ enum PluginStatus {
     Inactive,
     /// Off — disabled or unsupported.
     Disabled,
+}
+
+fn enabled_awaiting_setup(
+    pending: &mut HashMap<PluginId, ()>,
+    plugins: &[PluginInfo],
+) -> Vec<PluginId> {
+    crate::domain::state::drain_landed(pending, plugins, |p, ()| p.enabled)
+        .into_iter()
+        .filter(|id| {
+            plugins.iter().any(|p| {
+                p.id == *id && plugin_integration::awaits_setup(p) && p.integration_setup.is_none()
+            })
+        })
+        .collect()
 }
 
 fn plugin_status(p: &PluginInfo) -> PluginStatus {
@@ -973,6 +1041,26 @@ fn requirement_line(s: &PluginRequirementStatus) -> String {
     }
 }
 
+fn row_note(p: &PluginInfo, update_available: bool) -> (String, egui::Color32) {
+    let integration = p.plugin_type == halod_shared::types::PluginKind::Integration;
+    if update_available {
+        (
+            t!("plugins.update_available").into_owned(),
+            theme::WARN_TEXT,
+        )
+    } else if p.experimental {
+        (t!("plugins.experimental").into_owned(), theme::WARN_TEXT)
+    } else if plugin_integration::awaits_setup(p) {
+        (t!("plugins.not_set_up").into_owned(), theme::WARN_TEXT)
+    } else if integration && !p.integration_configured {
+        (t!("plugins.not_set_up").into_owned(), theme::TEXT_MUT)
+    } else if integration && p.enabled && !p.integration_enabled {
+        (t!("plugins.paused").into_owned(), theme::WARN_TEXT)
+    } else {
+        (p.version.clone(), theme::TEXT_MUT)
+    }
+}
+
 fn list_row(
     ui: &mut egui::Ui,
     p: &PluginInfo,
@@ -1003,22 +1091,7 @@ fn list_row(
         theme::medium(14.0),
         theme::TEXT,
     );
-    let (note, note_color) = if update_available {
-        (
-            t!("plugins.update_available").into_owned(),
-            theme::WARN_TEXT,
-        )
-    } else if p.experimental {
-        (t!("plugins.experimental").into_owned(), theme::WARN_TEXT)
-    } else if plugin_integration::awaits_setup(p) {
-        (t!("plugins.not_set_up").into_owned(), theme::WARN_TEXT)
-    } else if p.plugin_type == halod_shared::types::PluginKind::Integration
-        && !p.integration_configured
-    {
-        (t!("plugins.not_set_up").into_owned(), theme::TEXT_MUT)
-    } else {
-        (p.version.clone(), theme::TEXT_MUT)
-    };
+    let (note, note_color) = row_note(p, update_available);
     let kind = ui.painter().text(
         Pos2::new(text_x, center_y + 2.0),
         Align2::LEFT_TOP,
@@ -1141,6 +1214,9 @@ fn detail_meta(p: &PluginInfo) -> String {
     let mut parts = vec![plugin_type_label(p.plugin_type).into_owned()];
     if !p.version.is_empty() {
         parts.push(p.version.clone());
+    }
+    if !p.license.is_empty() {
+        parts.push(p.license.clone());
     }
     if repo::trust_badges(p.provenance).is_empty() {
         parts.push(provenance_label(p.provenance).into_owned());
@@ -1307,11 +1383,14 @@ mod tests {
         compatible: bool,
     ) -> AvailablePlugin {
         AvailablePlugin {
+            matches: Default::default(),
             repo: repo.into(),
-            id: id.into(),
+            id: id.parse().unwrap(),
+            name: format!("{id} name"),
             version: version.into(),
             api: "3.0".into(),
             compatible,
+            uses: Default::default(),
         }
     }
 
@@ -1320,6 +1399,161 @@ mod tests {
         p.repo = "official".into();
         p.version = version.into();
         p
+    }
+
+    fn using(permissions: &[halod_shared::types::Permission]) -> halod_shared::types::PackageUses {
+        halod_shared::types::PackageUses {
+            permissions: permissions.to_vec(),
+            ..Default::default()
+        }
+    }
+
+    fn update_state() -> PluginsState {
+        use halod_shared::types::Permission::{Hid, Network};
+        let mut wider = installed("wider", "1.0.0");
+        wider.uses = using(&[Hid]);
+        let mut same = installed("same", "1.0.0");
+        same.uses = using(&[Hid, Network]);
+        let mut also_wider = installed("also_wider", "1.0.0");
+        also_wider.uses = using(&[]);
+        let mut offers = [
+            available("official", "wider", "1.1.0", true),
+            available("official", "same", "1.1.0", true),
+            available("official", "also_wider", "1.1.0", true),
+        ];
+        offers[0].uses = using(&[Hid, Network]);
+        offers[1].uses = using(&[Hid]);
+        offers[2].uses = using(&[Hid]);
+        PluginsState {
+            plugins: vec![wider, same, also_wider],
+            available: offers.to_vec(),
+            ..Default::default()
+        }
+    }
+
+    fn ids(names: &[&str]) -> Vec<PluginId> {
+        names.iter().map(|name| name.parse().unwrap()).collect()
+    }
+
+    fn sent_installs(
+        rx: &mut tokio::sync::mpsc::UnboundedReceiver<DaemonCommand>,
+    ) -> Vec<PluginId> {
+        std::iter::from_fn(|| rx.try_recv().ok())
+            .filter_map(|command| match command {
+                DaemonCommand::InstallPlugin { id, .. } => Some(id),
+                _ => None,
+            })
+            .collect()
+    }
+
+    #[test]
+    fn update_all_prompts_each_widened_plugin_in_order_and_skips_the_declined() {
+        let (cmd, mut rx) = tokio::sync::mpsc::unbounded_channel();
+        let state = update_state();
+        let mut screen = PluginsUi::default();
+        let planned = ids(&["wider", "same", "also_wider"]);
+        screen.request_updates(1.0, &cmd, &state, &planned.iter().collect::<Vec<_>>());
+        assert!(sent_installs(&mut rx).is_empty());
+        assert_eq!(
+            screen.updates.current().map(|u| u.id.as_str()),
+            Some("wider")
+        );
+        screen.updates.resolve(&"wider".parse().unwrap(), false);
+        screen.send_ready_updates(2.0, &cmd);
+        assert_eq!(
+            screen.updates.current().map(|u| u.id.as_str()),
+            Some("also_wider")
+        );
+        screen.updates.resolve(&"also_wider".parse().unwrap(), true);
+        screen.send_ready_updates(3.0, &cmd);
+        assert_eq!(sent_installs(&mut rx), ["same", "also_wider"]);
+        assert!(!screen.updates.is_pending());
+    }
+
+    #[test]
+    fn only_a_confirmed_wider_update_installs_with_its_permissions_confirmed() {
+        let (cmd, mut rx) = tokio::sync::mpsc::unbounded_channel();
+        let state = update_state();
+        let mut screen = PluginsUi::default();
+        let planned = ids(&["wider", "same"]);
+        screen.request_updates(1.0, &cmd, &state, &planned.iter().collect::<Vec<_>>());
+        screen.updates.resolve(&"wider".parse().unwrap(), true);
+        screen.send_ready_updates(1.0, &cmd);
+        let confirmed: Vec<(PluginId, bool)> = std::iter::from_fn(|| rx.try_recv().ok())
+            .filter_map(|command| match command {
+                DaemonCommand::InstallPlugin {
+                    id,
+                    permissions_confirmed,
+                    ..
+                } => Some((id, permissions_confirmed)),
+                _ => None,
+            })
+            .collect();
+        assert_eq!(
+            confirmed,
+            [
+                ("wider".parse().unwrap(), true),
+                ("same".parse().unwrap(), false)
+            ]
+        );
+    }
+
+    #[test]
+    fn requesting_the_same_update_twice_prompts_once() {
+        let mut prompt = UpdatePrompt::default();
+        let planned = ids(&["wider"]);
+        let ids: Vec<&PluginId> = planned.iter().collect();
+        prompt.request(plan_updates(&update_state(), &ids));
+        prompt.request(plan_updates(&update_state(), &ids));
+        prompt.resolve(&"wider".parse().unwrap(), true);
+        assert_eq!(prompt.current(), None);
+        assert_eq!(prompt.take_ready().len(), 1);
+        assert!(!prompt.is_pending());
+    }
+
+    #[test]
+    fn a_failed_refresh_stops_the_repo_spinner() {
+        let mut screen = PluginsUi {
+            checking_repo: Some(RepoCheck {
+                slug: "official".into(),
+                prev_sync: None,
+                started: 1.0,
+            }),
+            ..Default::default()
+        };
+        screen.observe_notifications(&[halod_shared::types::Notification {
+            code: halod_shared::types::NotificationCode::Generic {
+                message: "refresh failed".to_owned(),
+            },
+            show_native: false,
+            timestamp_ms: 0,
+        }]);
+        assert!(screen.checking_repo.is_none());
+    }
+
+    #[test]
+    fn a_failed_install_is_forgotten_and_a_vanished_plugin_declines_its_prompt() {
+        let (cmd, _rx) = tokio::sync::mpsc::unbounded_channel();
+        let mut state = update_state();
+        let mut screen = PluginsUi::default();
+        let planned = ids(&["wider"]);
+        screen.request_updates(1.0, &cmd, &state, &planned.iter().collect::<Vec<_>>());
+        assert!(screen.updates.is_pending());
+        state.plugins.remove(0);
+        screen.updates.show(&egui::Context::default(), &state);
+        screen.send_ready_updates(2.0, &cmd);
+        assert!(!screen.updates.is_pending());
+        assert!(screen.installing.is_empty());
+
+        screen.install(1.0, &cmd, "official", &"same".parse().unwrap(), false);
+        screen.observe_notifications(&[halod_shared::types::Notification {
+            code: halod_shared::types::NotificationCode::Generic {
+                message: "install failed".to_owned(),
+            },
+            show_native: false,
+            timestamp_ms: 0,
+        }]);
+        assert!(screen.installing.is_empty());
     }
 
     #[test]
@@ -1353,32 +1587,47 @@ mod tests {
             available: vec![available("official", "kraken", "1.1.0", true)],
             ..Default::default()
         };
-        let mut installing = HashMap::from([("kraken".to_owned(), 0.0), ("new".to_owned(), 0.0)]);
-        let mut updating_all = Some(0.0);
+        let mut installing = HashMap::from([
+            ("kraken".parse().unwrap(), 0.0),
+            ("new".parse().unwrap(), 0.0),
+        ]);
 
-        clear_finished_installs(&mut installing, &mut updating_all, &state, 1.0);
+        clear_finished_installs(&mut installing, &state, 1.0);
         assert_eq!(installing.len(), 2);
-        assert!(updating_all.is_some());
 
         state.plugins[0].version = "1.1.0".into();
-        clear_finished_installs(&mut installing, &mut updating_all, &state, 2.0);
+        clear_finished_installs(&mut installing, &state, 2.0);
         assert_eq!(installing.keys().collect::<Vec<_>>(), ["new"]);
-        assert!(updating_all.is_none());
 
-        clear_finished_installs(
-            &mut installing,
-            &mut updating_all,
-            &state,
-            UPDATE_TIMEOUT + 1.0,
-        );
+        clear_finished_installs(&mut installing, &state, UPDATE_TIMEOUT + 1.0);
         assert!(installing.is_empty());
+    }
+
+    #[test]
+    fn a_failed_enable_or_resume_releases_its_toggle() {
+        let (cmd, _rx) = tokio::sync::mpsc::unbounded_channel();
+        let plugin = info("amd_smn", false);
+        let mut screen = PluginsUi::default();
+        screen.toggle(&cmd, &plugin);
+        assert!(screen.enable_prompt.resolve(&cmd, &plugin.id, true));
+        screen.in_flight.insert(plugin.id.clone(), true);
+        screen.integration.begin_resume(&"openrgb".parse().unwrap());
+        assert_eq!(screen.locked_target(&plugin), Some(true));
+        screen.observe_notifications(&[halod_shared::types::Notification {
+            code: halod_shared::types::NotificationCode::Generic {
+                message: "plugin 'amd_smn' is not supported on this platform".to_owned(),
+            },
+            show_native: false,
+            timestamp_ms: 0,
+        }]);
+        assert_eq!(screen.locked_target(&plugin), None);
+        assert!(!screen.integration.resuming(&"openrgb".parse().unwrap()));
     }
 
     #[test]
     fn command_error_notification_stops_install_progress_immediately() {
         let mut screen = PluginsUi {
-            installing: HashMap::from([("plugin-a".to_owned(), 1.0)]),
-            updating_all: Some(1.0),
+            installing: HashMap::from([("plugin-a".parse().unwrap(), 1.0)]),
             ..Default::default()
         };
         screen.observe_notifications(&[halod_shared::types::Notification {
@@ -1389,10 +1638,9 @@ mod tests {
             timestamp_ms: 0,
         }]);
         assert!(screen.installing.is_empty());
-        assert!(screen.updating_all.is_none());
     }
 
-    fn queued(screen: &mut PluginsUi, plugins: &[PluginInfo]) -> Option<String> {
+    fn queued(screen: &mut PluginsUi, plugins: &[PluginInfo]) -> Option<PluginId> {
         screen
             .enable_prompt
             .current(plugins)
@@ -1408,7 +1656,9 @@ mod tests {
         assert!(rx.try_recv().is_err());
         assert_eq!(queued(&mut screen, &plugins).as_deref(), Some("acme"));
 
-        assert!(screen.enable_prompt.resolve(&cmd, "acme", true));
+        assert!(screen
+            .enable_prompt
+            .resolve(&cmd, &"acme".parse().unwrap(), true));
         assert!(matches!(
             rx.try_recv(),
             Ok(DaemonCommand::SetPluginEnabled { id, enabled: true }) if id == "acme"
@@ -1424,7 +1674,9 @@ mod tests {
         let plugins = [info("acme", false)];
         screen.toggle(&cmd, &plugins[0]);
 
-        assert!(!screen.enable_prompt.resolve(&cmd, "acme", false));
+        assert!(!screen
+            .enable_prompt
+            .resolve(&cmd, &"acme".parse().unwrap(), false));
         assert!(rx.try_recv().is_err());
         assert_eq!(screen.locked_target(&plugins[0]), None);
         assert_eq!(queued(&mut screen, &plugins), None);
@@ -1448,7 +1700,7 @@ mod tests {
 
     pub(super) fn info(id: &str, enabled: bool) -> PluginInfo {
         PluginInfo {
-            id: id.into(),
+            id: id.parse().unwrap(),
             name: format!("{id} device"),
             translations: Default::default(),
             path: format!("/home/u/.config/halod/plugins/{id}.lua"),
@@ -1469,7 +1721,8 @@ mod tests {
             effect_thumbnails: vec![],
             repo: String::new(),
             provenance: Default::default(),
-            access: Default::default(),
+            uses: Default::default(),
+            matches: Default::default(),
             provides: vec![],
             consumes: vec![],
             data_records: vec![],
@@ -1489,6 +1742,51 @@ mod tests {
     }
 
     #[test]
+    fn the_detail_line_names_the_license() {
+        let p = PluginInfo {
+            license: "GPL-3.0-or-later".into(),
+            ..info("openrgb", true)
+        };
+        assert!(detail_meta(&p).contains("GPL-3.0-or-later"));
+        assert!(!detail_meta(&info("openrgb", true)).ends_with(" · "));
+    }
+
+    #[test]
+    fn a_paused_integration_says_so_in_the_list() {
+        let integration = |enabled: bool, running: bool| PluginInfo {
+            plugin_type: halod_shared::types::PluginKind::Integration,
+            integration_configured: true,
+            integration_enabled: running,
+            ..info("openrgb", enabled)
+        };
+        let paused = t!("plugins.paused").into_owned();
+        assert_eq!(row_note(&integration(true, false), false).0, paused);
+        assert_eq!(row_note(&integration(true, true), false).0, "1.0.0");
+        assert_eq!(row_note(&integration(false, false), false).0, "1.0.0");
+    }
+
+    #[test]
+    fn an_enabled_integration_opens_its_setup_once_the_enable_lands() {
+        let integration = |enabled: bool, configured: bool| PluginInfo {
+            plugin_type: halod_shared::types::PluginKind::Integration,
+            integration_configured: configured,
+            ..info("openrgb", enabled)
+        };
+        let mut pending: HashMap<PluginId, ()> = [("openrgb".parse().unwrap(), ())].into();
+        assert!(enabled_awaiting_setup(&mut pending, &[integration(false, false)]).is_empty());
+        assert_eq!(pending.len(), 1);
+        assert_eq!(
+            enabled_awaiting_setup(&mut pending, &[integration(true, false)]),
+            ["openrgb"]
+        );
+        assert!(pending.is_empty());
+
+        let mut configured: HashMap<PluginId, ()> = [("openrgb".parse().unwrap(), ())].into();
+        assert!(enabled_awaiting_setup(&mut configured, &[integration(true, true)]).is_empty());
+        assert!(configured.is_empty());
+    }
+
+    #[test]
     fn toggle_lands_only_when_matched_and_scan_done() {
         let on = info("p", true);
         let off = info("p", false);
@@ -1504,9 +1802,9 @@ mod tests {
     #[test]
     fn reconcile_unlocks_landed_and_vanished_toggles() {
         let mut in_flight = HashMap::from([
-            ("keep".to_string(), false), // still applying
-            ("done".to_string(), true),  // landed
-            ("gone".to_string(), true),  // plugin disappeared
+            ("keep".parse().unwrap(), false), // still applying
+            ("done".parse().unwrap(), true),  // landed
+            ("gone".parse().unwrap(), true),  // plugin disappeared
         ]);
         let plugins = vec![info("keep", true), info("done", true)];
 
@@ -1520,7 +1818,7 @@ mod tests {
     #[test]
     fn reconcile_keeps_all_locked_while_scanning() {
         let plugins = vec![info("done", true)];
-        let mut in_flight = HashMap::from([("done".to_string(), true)]);
+        let mut in_flight = HashMap::from([("done".parse().unwrap(), true)]);
         reconcile_in_flight(&mut in_flight, &plugins, true);
         assert!(in_flight.contains_key("done"), "scanning → locked");
     }
@@ -1529,12 +1827,13 @@ mod tests {
     fn recommendation_toasts_fire_once_and_respect_persisted_seen() {
         use std::collections::BTreeSet;
         let rec = PluginRecommendation {
-            plugin_id: "nzxt_kraken".into(),
+            plugin_id: "nzxt_kraken".parse().unwrap(),
             plugin_name: "NZXT Kraken".into(),
             hardware: halod_shared::types::PluginRecommendationMatch::Hid {
                 vid: 0x1e71,
                 pid: 0x2007,
             },
+            install_from: None,
             accessible: true,
         };
         let key = recommendation_key(&rec);
@@ -1621,8 +1920,8 @@ mod tests {
         assert_eq!(
             reqs,
             vec![
-                ("a".to_owned(), "logo.png".to_owned()),
-                ("a".to_owned(), "rainbow.png".to_owned()),
+                ("a".parse().unwrap(), "logo.png".to_owned()),
+                ("a".parse().unwrap(), "rainbow.png".to_owned()),
             ]
         );
     }
@@ -1636,9 +1935,15 @@ mod tests {
             thumbnail: "rainbow.png".into(),
         }];
         let mut cache = HashMap::new();
-        cache.insert(ipc::plugin_asset_cache_key("a", "logo.png"), vec![1, 2, 3]);
+        cache.insert(
+            ipc::plugin_asset_cache_key(&"a".parse().unwrap(), "logo.png"),
+            vec![1, 2, 3],
+        );
         let mut requested = HashSet::new();
-        requested.insert(ipc::plugin_asset_cache_key("a", "rainbow.png"));
+        requested.insert(ipc::plugin_asset_cache_key(
+            &"a".parse().unwrap(),
+            "rainbow.png",
+        ));
 
         assert!(assets_to_request(&p, &cache, &requested).is_empty());
     }
@@ -1673,8 +1978,8 @@ mod tests {
     fn selection_keeps_valid_current() {
         let plugins = vec![info("a", true), info("b", false)];
         assert_eq!(
-            resolve_selection(Selection::Plugin("b".into()), &plugins, &[]),
-            Selection::Plugin("b".into())
+            resolve_selection(Selection::Plugin("b".parse().unwrap()), &plugins, &[]),
+            Selection::Plugin("b".parse().unwrap())
         );
     }
 
@@ -1682,19 +1987,19 @@ mod tests {
     fn selection_falls_back_to_first_when_missing_or_none() {
         let plugins = vec![info("a", true), info("b", false)];
         assert_eq!(
-            resolve_selection(Selection::Plugin("gone".into()), &plugins, &[]),
-            Selection::Plugin("a".into())
+            resolve_selection(Selection::Plugin("gone".parse().unwrap()), &plugins, &[]),
+            Selection::Plugin("a".parse().unwrap())
         );
         assert_eq!(
             resolve_selection(Selection::None, &plugins, &[]),
-            Selection::Plugin("a".into())
+            Selection::Plugin("a".parse().unwrap())
         );
     }
 
     #[test]
     fn selection_is_none_for_empty_list() {
         assert_eq!(
-            resolve_selection(Selection::Plugin("a".into()), &[], &[]),
+            resolve_selection(Selection::Plugin("a".parse().unwrap()), &[], &[]),
             Selection::None
         );
         assert_eq!(
@@ -1718,7 +2023,7 @@ mod tests {
         let plugins = vec![info("a", true)];
         assert_eq!(
             resolve_selection(Selection::Repo("gone".into()), &plugins, &[]),
-            Selection::Plugin("a".into())
+            Selection::Plugin("a".parse().unwrap())
         );
     }
 

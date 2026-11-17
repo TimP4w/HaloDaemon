@@ -15,6 +15,7 @@ use crate::domain::tour;
 use crate::domain::tour::AnchorId;
 use crate::runtime::ipc::{self, CommandTx};
 use crate::ui::theme;
+use halod_shared::ids::DeviceId;
 
 const ADD_LEDS_DEFAULT: u32 = 30;
 
@@ -100,7 +101,7 @@ pub fn show(ui: &mut egui::Ui, ctx: &TabCtx) {
     }
 
     let total_leds: u32 = channels.iter().map(|c| used_leds(c)).sum();
-    let dev_id = ctx.dev.id.as_str();
+    let dev_id = &ctx.dev.id;
 
     ui.horizontal(|ui| {
         let right_w = 260.0;
@@ -154,7 +155,7 @@ pub fn show(ui: &mut egui::Ui, ctx: &TabCtx) {
 fn channel_card(
     ui: &mut egui::Ui,
     ctx: &TabCtx,
-    dev_id: &str,
+    dev_id: &DeviceId,
     channel: &LightingChannel,
     tour_anchor: bool,
 ) {
@@ -223,7 +224,7 @@ fn empty_header(ui: &mut egui::Ui) {
 fn discover_button(
     ui: &mut egui::Ui,
     ctx: &TabCtx,
-    dev_id: &str,
+    dev_id: &DeviceId,
     channel_id: &str,
     tour_anchor: bool,
 ) {
@@ -257,11 +258,11 @@ fn discover_button(
     }
 }
 
-fn request_detect(cmd: &CommandTx, dev_id: &str, channel_id: &str) {
+fn request_detect(cmd: &CommandTx, dev_id: &DeviceId, channel_id: &str) {
     ipc::send(
         cmd,
         DaemonCommand::Device {
-            device_id: dev_id.to_owned(),
+            device_id: dev_id.clone(),
             op: DeviceOp::LightingDetectSegments {
                 channel_id: channel_id.to_owned(),
             },
@@ -272,13 +273,13 @@ fn request_detect(cmd: &CommandTx, dev_id: &str, channel_id: &str) {
 fn link_row(
     ui: &mut egui::Ui,
     ctx: &TabCtx,
-    dev_id: &str,
+    dev_id: &DeviceId,
     channel_id: &str,
     index: usize,
     link: &LightingSegmentInfo,
 ) {
     widgets::inset(ui, egui::Margin::symmetric(12, 10), |ui| {
-        ui.with_layout(egui::Layout::left_to_right(egui::Align::Center), |ui| {
+        ui.horizontal(|ui| {
             ui.spacing_mut().item_spacing.x = theme::SPACE_5;
             let (badge, _) = ui.allocate_exact_size(Vec2::splat(22.0), Sense::hover());
             let p = ui.painter();
@@ -325,7 +326,7 @@ fn link_row(
                     ipc::send(
                         ctx.cmd,
                         DaemonCommand::Device {
-                            device_id: dev_id.to_string(),
+                            device_id: dev_id.clone(),
                             op: DeviceOp::LightingRemoveSegment {
                                 channel_id: channel_id.to_string(),
                                 segment_id: link.device_id.clone(),
@@ -394,7 +395,7 @@ fn name_field(ui: &mut egui::Ui, ctx: &TabCtx, link: &LightingSegmentInfo) {
 fn add_link_panel(
     ui: &mut egui::Ui,
     ctx: &TabCtx,
-    dev_id: &str,
+    dev_id: &DeviceId,
     channel: &LightingChannel,
     remaining: u32,
 ) {
@@ -495,7 +496,7 @@ fn add_link_panel(
                             ipc::send(
                                 ctx.cmd,
                                 DaemonCommand::Device {
-                                    device_id: dev_id.to_string(),
+                                    device_id: dev_id.clone(),
                                     op: DeviceOp::LightingAddSegment {
                                         channel_id: channel.id.clone(),
                                         name: name.trim().to_string(),
@@ -549,7 +550,7 @@ mod tests {
     #[test]
     fn discovering_a_header_flashes_only_that_header() {
         let (cmd, mut rx) = tokio::sync::mpsc::unbounded_channel();
-        request_detect(&cmd, "hub", "ch2");
+        request_detect(&cmd, &"hub".parse().unwrap(), "ch2");
         assert!(matches!(
             rx.try_recv(),
             Ok(DaemonCommand::Device {
@@ -612,7 +613,7 @@ mod tests {
     fn hub_with_link() -> halod_shared::types::WireDevice {
         use halod_shared::types::*;
         WireDevice {
-            id: "hub1".into(),
+            id: "hub1".parse().unwrap(),
             name: "Hub".into(),
             vendor: "v".into(),
             model: "m".into(),
@@ -629,7 +630,7 @@ mod tests {
                         division: LightingDivision::Divisible {
                             max_leds: 120,
                             segments: vec![LightingSegmentInfo {
-                                device_id: "child1".into(),
+                                device_id: "child1".parse().unwrap(),
                                 channel_id: "lighting".into(),
                                 name: "Strip".into(),
                                 topology: ZoneTopology::Linear,
@@ -731,7 +732,7 @@ mod tests {
         render_with_watchdog(
             "locked",
             dev_with_links(vec![LightingSegmentInfo {
-                device_id: "c".into(),
+                device_id: "c".parse().unwrap(),
                 channel_id: "lighting".into(),
                 name: "Locked".into(),
                 topology: ZoneTopology::Linear,
@@ -749,5 +750,53 @@ mod tests {
     #[test]
     fn render_editable_link() {
         render_with_watchdog("editable", hub_with_link());
+    }
+
+    fn rendered_height(dev: &halod_shared::types::WireDevice, screen_h: f32) -> f32 {
+        let state = TopicStore::default();
+        let (tx, _rx) = tokio::sync::mpsc::unbounded_channel();
+        let ctx = egui::Context::default();
+        theme::install_fonts(&ctx);
+        let input = egui::RawInput {
+            screen_rect: Some(egui::Rect::from_min_size(
+                egui::Pos2::ZERO,
+                egui::vec2(900.0, screen_h),
+            )),
+            ..Default::default()
+        };
+        let mut height = 0.0;
+        for _ in 0..3 {
+            let _ = crate::ui::run_headless(&ctx, input.clone(), |ui| {
+                egui::CentralPanel::default().show(ui, |ui| {
+                    let tab = TabCtx {
+                        state: &state,
+                        dev,
+                        cmd: &tx,
+                        time: 0.0,
+                        debug: None,
+                        lcd_images: &[],
+                        lcd_preview: None,
+                        lcd_upload: None,
+                        lcd_upload_terminal: None,
+                        lcd_template: None,
+                        lcd_editor_render: None,
+                        led_colors: crate::ui::screens::device::empty_led_colors(),
+                        write_rate_history: None,
+                        plugin_assets: crate::ui::screens::device::empty_plugin_assets(),
+                    };
+                    height = ui.vertical(|ui| show(ui, &tab)).response.rect.height();
+                });
+            });
+        }
+        height
+    }
+
+    #[test]
+    fn card_height_follows_its_links_not_the_screen() {
+        let dev = hub_with_link();
+        let short = rendered_height(&dev, 700.0);
+        let tall = rendered_height(&dev, 1400.0);
+        assert!((short - tall).abs() < 0.5, "short {short} vs tall {tall}");
+        assert!(short < 350.0, "one link should not need {short}px");
     }
 }

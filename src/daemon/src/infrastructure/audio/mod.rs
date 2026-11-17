@@ -4,7 +4,7 @@ use std::sync::{
     atomic::{AtomicBool, AtomicU64, Ordering},
     Arc, OnceLock,
 };
-use std::time::Instant;
+use tokio::time::Instant;
 
 pub mod dsp;
 pub mod sink;

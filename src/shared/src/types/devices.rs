@@ -127,7 +127,7 @@ pub enum VisibilityState {
 
 #[derive(Debug, Clone, Serialize, Deserialize, Default)]
 pub struct WireDevice {
-    pub id: String,
+    pub id: crate::ids::DeviceId,
     pub name: String,
     pub vendor: String,
     pub model: String,
@@ -151,7 +151,7 @@ pub struct WireDevice {
     pub control_layout: Vec<CategoryLayout>,
     /// Set when this device is an integration's root, not real hardware; shown only on the Integrations page.
     #[serde(default, skip_serializing_if = "Option::is_none")]
-    pub integration_id: Option<String>,
+    pub integration_id: Option<crate::ids::PluginId>,
     /// Computed per snapshot, never persisted.
     #[serde(default, skip_serializing_if = "Option::is_none")]
     pub conflict: Option<DeviceConflictSummary>,
@@ -166,8 +166,8 @@ pub enum ConflictConfidence {
 
 #[derive(Debug, Clone, PartialEq, Eq, Serialize, Deserialize)]
 pub struct DeviceConflictSummary {
-    pub peer_ids: Vec<String>,
-    pub recommended_id: String,
+    pub peer_ids: Vec<crate::ids::DeviceId>,
+    pub recommended_id: crate::ids::DeviceId,
     pub confidence: ConflictConfidence,
     /// Lets clients explain an integration/plugin choice without guessing from the device id.
     #[serde(default)]
@@ -176,7 +176,7 @@ pub struct DeviceConflictSummary {
 
 #[derive(Debug, Clone, PartialEq, Eq, Serialize, Deserialize)]
 pub struct ConflictParticipant {
-    pub id: String,
+    pub id: crate::ids::DeviceId,
     pub source: ConflictDeviceSource,
 }
 
@@ -185,8 +185,8 @@ pub struct ConflictParticipant {
 pub enum ConflictDeviceSource {
     #[default]
     Builtin,
-    Plugin(String),
-    Integration(String),
+    Plugin(crate::ids::PluginId),
+    Integration(crate::ids::PluginId),
 }
 
 fn span_default() -> u8 {
@@ -220,7 +220,7 @@ pub enum PairingState {
 #[derive(Debug, Clone, Serialize, Deserialize, Default)]
 pub struct PairingSlot {
     pub slot: u8,
-    pub device_id: String,
+    pub device_id: crate::ids::DeviceId,
     pub name: String,
     pub connected: bool,
 }
@@ -372,7 +372,7 @@ pub struct ChoiceOption {
     pub label: String,
 }
 
-#[derive(Debug, Clone, Serialize, Deserialize)]
+#[derive(Debug, Clone, Serialize, Deserialize, PartialEq)]
 pub struct Boolean {
     pub key: String,
     pub value: bool,
@@ -396,7 +396,7 @@ pub enum BatteryStatus {
     Unknown,
 }
 
-#[derive(Debug, Clone, Serialize, Deserialize)]
+#[derive(Debug, Clone, Serialize, Deserialize, PartialEq)]
 pub struct Battery {
     pub key: String,
     pub label: String,
@@ -410,7 +410,7 @@ pub struct ConnectionStatus {
     pub connection_type: ConnectionType,
 }
 
-#[derive(Debug, Clone, Serialize, Deserialize)]
+#[derive(Debug, Clone, Serialize, Deserialize, PartialEq)]
 pub struct EqBand {
     pub index: usize,
     pub label: String,
@@ -436,7 +436,7 @@ pub struct EqPreset {
     pub bands: Option<Vec<f32>>,
 }
 
-#[derive(Debug, Clone, Serialize, Deserialize)]
+#[derive(Debug, Clone, Serialize, Deserialize, PartialEq)]
 pub struct Equalizer {
     pub presets: Vec<EqPreset>,
     pub selected_preset: usize,
@@ -471,7 +471,7 @@ pub enum SensorType {
     FanDuty,
 }
 
-#[derive(Debug, Clone, Serialize, Deserialize)]
+#[derive(Debug, Clone, Serialize, Deserialize, PartialEq)]
 pub struct Sensor {
     pub id: String,
     pub name: String,
