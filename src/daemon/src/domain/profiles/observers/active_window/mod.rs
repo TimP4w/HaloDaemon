@@ -50,7 +50,7 @@ impl FocusWatcherEngine {
                     }
                 }
                 Err(e) => {
-                    log::info!("[FocusWatcher] No platform backend available: {e}");
+                    log::info!("No platform backend available: {e}");
                     run_idle_loop(ctrl_rx).await;
                 }
             }
@@ -96,10 +96,7 @@ async fn apply_focus(
 
             if let Some(rule) = matched {
                 if !profiles_exist.contains_key(&rule.profile) {
-                    log::warn!(
-                        "[FocusWatcher] Rule profile '{}' not found, skipping",
-                        rule.profile
-                    );
+                    log::warn!("Rule profile '{}' not found, skipping", rule.profile);
                     if last_active_rule.take().is_some() {
                         switch_profile_direct(baseline.to_string(), app.clone()).await;
                     }

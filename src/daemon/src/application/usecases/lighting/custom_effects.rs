@@ -37,7 +37,7 @@ pub fn list_custom_effects() -> Vec<EffectDef> {
     paths.sort();
     if paths.len() > MAX_CUSTOM_EFFECTS {
         log::warn!(
-            "[RGB] {} custom-effect files exceed the {MAX_CUSTOM_EFFECTS} cap; ignoring the rest",
+            "{} custom-effect files exceed the {MAX_CUSTOM_EFFECTS} cap; ignoring the rest",
             paths.len()
         );
         paths.truncate(MAX_CUSTOM_EFFECTS);
@@ -48,7 +48,7 @@ pub fn list_custom_effects() -> Vec<EffectDef> {
         .filter_map(|path| {
             let stem = path.file_stem()?.to_str()?;
             if !validate_effect_name(stem) {
-                log::warn!("[RGB] ignoring custom effect with invalid name: {stem}");
+                log::warn!("ignoring custom effect with invalid name: {stem}");
                 return None;
             }
             let raw = config::read_bounded(&path, "custom effect").ok()?;
@@ -84,7 +84,7 @@ pub async fn save_custom_effect(
     let path = effect_path(&name);
     let yaml = serde_yaml::to_string(&def)?;
     tokio::task::spawn_blocking(move || fs::atomic_write(&path, &yaml)).await??;
-    log::info!("[RGB] saved custom effect '{name}'");
+    log::info!("saved custom effect '{name}'");
     app.lighting.custom_effects.refresh().await;
     app.record_change(Change::LightingCatalog).await;
     Ok(())
@@ -95,7 +95,7 @@ pub async fn delete_custom_effect(name: String, app: Arc<AppState>) -> Result<()
         anyhow::bail!("invalid effect name");
     }
     match tokio::fs::remove_file(effect_path(&name)).await {
-        Ok(()) => log::info!("[RGB] deleted custom effect '{name}'"),
+        Ok(()) => log::info!("deleted custom effect '{name}'"),
         Err(e) if e.kind() == std::io::ErrorKind::NotFound => {}
         Err(e) => return Err(e.into()),
     }

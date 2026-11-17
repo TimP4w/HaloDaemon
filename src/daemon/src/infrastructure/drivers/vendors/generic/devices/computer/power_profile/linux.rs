@@ -58,7 +58,7 @@ impl PowerProfileBackend for LinuxPowerProfile {
         match dbus_set_active(id).await {
             Ok(()) => Ok(()),
             Err(e) => {
-                log::debug!("[ComputerDevice] D-Bus set failed ({e:#}); trying powerprofilesctl");
+                log::debug!("D-Bus set failed ({e:#}); trying powerprofilesctl");
                 ctl_set(id).await
             }
         }

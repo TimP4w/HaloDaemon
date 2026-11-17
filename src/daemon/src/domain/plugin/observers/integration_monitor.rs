@@ -210,7 +210,7 @@ async fn reconcile_live_root(
             // Server dropped mid-enumerate; `resync_children` already greyed the
             // device. Surface the new offline state to the GUI. Next tick's
             // liveness check routes this plugin through Case B.
-            log::info!("[integration] {} dropped: {e:#}", root.id());
+            log::info!("{} dropped: {e:#}", root.id());
             runtime::topology_changed(app).await;
         }
         Ok((added, gone)) => {

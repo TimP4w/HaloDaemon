@@ -249,7 +249,7 @@ pub trait LightingCapability: Send + Sync {
         if let Some(s) = v.get("state") {
             if let Ok(state) = serde_json::from_value(s.clone()) {
                 if let Err(e) = self.apply(state).await {
-                    log::debug!("[rgb restore_state] apply failed: {e:#}");
+                    log::debug!("apply failed: {e:#}");
                     ok = false;
                 }
             }
@@ -286,7 +286,7 @@ pub trait RangeCapability: Send + Sync {
                 continue;
             }
             if let Err(e) = self.set_range(&key, value).await {
-                log::debug!("[range restore_state] set_range({key}) failed: {e:#}");
+                log::debug!("set_range({key}) failed: {e:#}");
                 ok = false;
             }
         }
@@ -313,7 +313,7 @@ pub trait ChoiceCapability: Send + Sync {
         let mut ok = true;
         for (key, selected) in self.choice_cache().load_pairs(v) {
             if let Err(e) = self.set_choice(&key, selected).await {
-                log::debug!("[choice restore_state] set_choice({key}) failed: {e:#}");
+                log::debug!("set_choice({key}) failed: {e:#}");
                 ok = false;
             }
         }
@@ -337,7 +337,7 @@ pub trait BooleanCapability: Send + Sync {
 
     async fn to_wire(&self) -> Option<DeviceCapability> {
         let booleans = self.get_booleans().await.unwrap_or_else(|e| {
-            log::trace!("[BooleanCapability::to_wire] {e}");
+            log::trace!("{e}");
             Default::default()
         });
         if booleans.is_empty() {
@@ -363,7 +363,7 @@ pub trait BooleanCapability: Send + Sync {
                     continue;
                 }
                 if let Err(e) = self.set_boolean(&key, value).await {
-                    log::debug!("[boolean restore_state] set_boolean({key}) failed: {e:#}");
+                    log::debug!("set_boolean({key}) failed: {e:#}");
                     ok = false;
                 }
             }
@@ -387,7 +387,7 @@ pub trait BatteryCapability: Send + Sync {
 
     async fn to_wire(&self) -> Option<DeviceCapability> {
         let batteries = self.get_batteries().await.unwrap_or_else(|e| {
-            log::debug!("[BatteryCapability::to_wire] {e}");
+            log::debug!("{e}");
             Default::default()
         });
         if batteries.is_empty() {
@@ -444,7 +444,7 @@ pub trait EqualizerCapability: Send + Sync {
         let mut ok = true;
         if let Some(preset) = v["preset"].as_u64() {
             if let Err(e) = self.set_eq_preset(preset as usize).await {
-                log::debug!("[eq restore_state] set_eq_preset failed: {e:#}");
+                log::debug!("set_eq_preset failed: {e:#}");
                 ok = false;
             }
         }
@@ -455,7 +455,7 @@ pub trait EqualizerCapability: Send + Sync {
                 .collect();
             if values.len() == 10 {
                 if let Err(e) = self.set_eq_bands(&values).await {
-                    log::debug!("[eq restore_state] set_eq_bands failed: {e:#}");
+                    log::debug!("set_eq_bands failed: {e:#}");
                     ok = false;
                 }
             }
@@ -471,7 +471,7 @@ pub trait SensorCapability: Send + Sync {
     async fn to_wire(&self) -> Option<DeviceCapability> {
         Some(DeviceCapability::Sensors(
             self.get_sensors().await.unwrap_or_else(|e| {
-                log::debug!("[SensorCapability::to_wire] {e}");
+                log::debug!("{e}");
                 Default::default()
             }),
         ))
@@ -665,11 +665,11 @@ pub trait LcdCapability: Send + Sync {
         let mut failure = None;
         if let Some(b) = v["brightness"].as_u64() {
             let b = u8::try_from(b).unwrap_or_else(|_| {
-                log::warn!("[lcd restore_state] brightness {b} out of range, clamping to 0");
+                log::warn!("brightness {b} out of range, clamping to 0");
                 0
             });
             if let Err(e) = self.set_brightness(b).await {
-                log::debug!("[lcd restore_state] set_brightness failed: {e:#}");
+                log::debug!("set_brightness failed: {e:#}");
                 failure = Some(format!("restoring brightness failed: {e}"));
             }
         }
@@ -679,13 +679,13 @@ pub trait LcdCapability: Send + Sync {
             let degrees = match rotation {
                 Ok(rotation) => Some(rotation.degrees()),
                 Err(error) => {
-                    log::warn!("[lcd restore_state] invalid rotation {value}: {error}");
+                    log::warn!("invalid rotation {value}: {error}");
                     None
                 }
             };
             if let Some(degrees) = degrees {
                 if let Err(e) = self.set_rotation(degrees).await {
-                    log::debug!("[lcd restore_state] set_rotation failed: {e:#}");
+                    log::debug!("set_rotation failed: {e:#}");
                     failure.get_or_insert_with(|| format!("restoring rotation failed: {e}"));
                 }
             }

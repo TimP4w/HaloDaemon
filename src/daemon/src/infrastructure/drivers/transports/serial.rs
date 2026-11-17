@@ -196,7 +196,7 @@ impl SerialEvents {
         let mut queue = self.bytes.lock();
         if queue.len() == EVENT_QUEUE_CAPACITY {
             queue.pop_front();
-            log::debug!("[SerialTransport] event queue full; dropping oldest event");
+            log::debug!("event queue full; dropping oldest event");
         }
         queue.push_back(TransportEvent {
             endpoint: EVENT_ENDPOINT,

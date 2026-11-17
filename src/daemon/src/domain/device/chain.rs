@@ -309,10 +309,7 @@ impl LightingDivisionHost {
             child.name().to_string(),
             zone.topology.clone(),
             u32::try_from(zone.leds.len()).unwrap_or_else(|_| {
-                log::warn!(
-                    "[chain] LED count {} truncated to u32::MAX",
-                    zone.leds.len()
-                );
+                log::warn!("LED count {} truncated to u32::MAX", zone.leds.len());
                 u32::MAX
             }),
             /* locked */ true,

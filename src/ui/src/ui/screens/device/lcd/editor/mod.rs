@@ -295,7 +295,7 @@ fn send_def(ctx: &TabCtx, st: &mut DeviceUi, id: &str, immediate: bool) {
     let json = match serde_json::to_string(&st.lcd.editor.def) {
         Ok(json) => json,
         Err(e) => {
-            log::warn!("[LCD editor] cannot serialize template def: {e}");
+            log::warn!("cannot serialize template def: {e}");
             return;
         }
     };

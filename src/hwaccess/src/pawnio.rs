@@ -154,7 +154,7 @@ fn read_blob_from_disk(name: &str) -> Option<Vec<u8>> {
     for dir in dirs {
         let path = dir.join(name);
         if let Ok(data) = std::fs::read(&path) {
-            log::debug!("[PawnIO] using blob {}", path.display());
+            log::debug!("using blob {}", path.display());
             return Some(data);
         }
     }
@@ -203,14 +203,14 @@ impl PawnioModule {
             };
             let hr = unsafe { (api.load)(handle, blob.as_ptr(), blob.len()) };
             if hr == 0 {
-                log::debug!("[PawnIO] loaded module {name}");
+                log::debug!("loaded module {name}");
                 return Ok(Self {
                     api,
                     handle: Mutex::new(handle),
                     blob_name: name.to_string(),
                 });
             }
-            log::debug!("[PawnIO] rejected {name}: HRESULT=0x{:08x}", hr as u32);
+            log::debug!("rejected {name}: HRESULT=0x{:08x}", hr as u32);
             last_err = Some(anyhow!("pawnio_load({name}): HRESULT=0x{:08x}", hr as u32));
         }
 

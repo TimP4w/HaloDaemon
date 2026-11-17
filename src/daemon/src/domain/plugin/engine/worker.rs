@@ -1057,10 +1057,7 @@ impl PluginHandle {
                 .drain_events(EVENT_DISPATCH_BATCH)
                 .map_err(|e| anyhow!("draining transport events: {e:#}"))?;
             if !events.is_empty() {
-                log::trace!(
-                    "[plugin worker] drained {} transport event(s)",
-                    events.len()
-                );
+                log::trace!("drained {} transport event(s)", events.len());
             }
             let Some(callback) = func(&ctx.manifest, "event") else {
                 return Ok(Vec::new());
@@ -1097,10 +1094,10 @@ impl PluginHandle {
                     None => Value::Nil,
                 };
                 if matches!(route, Value::Boolean(false)) {
-                    log::trace!("[plugin worker] event_source dropped a report (reply/ack)");
+                    log::trace!("event_source dropped a report (reply/ack)");
                     continue;
                 }
-                log::trace!("[plugin worker] event_source route={route:?}");
+                log::trace!("event_source route={route:?}");
                 let targets = match route {
                     Value::Integer(0) => vec![(None, dev.clone())],
                     Value::Integer(index) if index > 0 => match u32::try_from(index).ok() {
@@ -1112,9 +1109,7 @@ impl PluginHandle {
                     _ => vec![(None, dev.clone())],
                 };
                 if targets.is_empty() {
-                    log::trace!(
-                        "[plugin worker] event route={route:?} matched no child dev; report dropped"
-                    );
+                    log::trace!("event route={route:?} matched no child dev; report dropped");
                 }
                 for (child_index, target) in targets {
                     let value: Value = match callback.call((target, event_table.clone())) {

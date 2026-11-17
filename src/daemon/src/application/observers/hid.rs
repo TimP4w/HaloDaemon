@@ -349,7 +349,7 @@ pub(crate) async fn handle_hid_key_removed(app: Arc<AppState>, key: String) {
                 }
                 .await
                 {
-                    log::error!("[hotplug] controller rescan task failed: {e}");
+                    log::error!("controller rescan task failed: {e}");
                 }
             });
         }

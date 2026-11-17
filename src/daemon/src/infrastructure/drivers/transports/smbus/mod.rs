@@ -183,7 +183,7 @@ impl SmBusTransport {
         tokio::task::spawn_blocking(|| (enumerate_buses(), enumerate_gpu_buses()))
             .await
             .unwrap_or_else(|e| {
-                log::error!("[SmBus] enumerate_for_debug task panicked: {e}");
+                log::error!("enumerate_for_debug task panicked: {e}");
                 Default::default()
             })
     }
@@ -317,7 +317,7 @@ async fn discover(app: Arc<AppState>) -> Result<()> {
         // is a defense-in-depth backstop for malformed runtime state.
         if job.bus_kind == SmbusBusKind::Gpu && job.pci_match.is_empty() {
             log::warn!(
-                "[SmBusTransport] GPU scan entry declares no pci_match; refusing to \
+                "GPU scan entry declares no pci_match; refusing to \
                  scan GPU buses (risk of hanging the display bus). Entry skipped."
             );
             continue;
@@ -327,18 +327,14 @@ async fn discover(app: Arc<AppState>) -> Result<()> {
             SmbusBusKind::Chipset => chipset_buses.iter().filter(|b| !b.is_gpu_bus()).collect(),
             SmbusBusKind::Gpu => gpu_buses.iter().collect(),
         };
-        log::debug!(
-            "[SmBusTransport] {:?}: {} bus(es) to scan",
-            job.bus_kind,
-            buses.len()
-        );
+        log::debug!("{:?}: {} bus(es) to scan", job.bus_kind, buses.len());
 
         for bus_info in buses {
             // Consult the PCI gate before opening the bus: a card the gate doesn't
             // list is never touched. `confirmed` matches downgrade to no probe.
             let Some(effective_probe) = gate_bus(&job.pci_match, bus_info, job.probe) else {
                 log::debug!(
-                    "[SmBusTransport] bus {} ({:04x}:{:04x} / {:04x}:{:04x}) not in PCI gate; skipping",
+                    "bus {} ({:04x}:{:04x} / {:04x}:{:04x}) not in PCI gate; skipping",
                     bus_info.bus_number,
                     bus_info.pci_vendor,
                     bus_info.pci_device,
@@ -362,14 +358,10 @@ async fn discover(app: Arc<AppState>) -> Result<()> {
                 Ok(b) => b,
                 Err(e) => {
                     if open_warned {
-                        log::debug!(
-                            "[SmBusTransport] Cannot open bus {}: {}",
-                            bus_info.bus_number,
-                            e
-                        );
+                        log::debug!("Cannot open bus {}: {}", bus_info.bus_number, e);
                     } else {
                         log::warn!(
-                            "[SmBusTransport] cannot open SMBus bus {}: {}, \
+                            "cannot open SMBus bus {}: {}, \
                              SMBus RGB devices (e.g. DRAM) on this bus \
                              will be unavailable",
                             bus_info.bus_number,
@@ -440,7 +432,7 @@ async fn run_pre_scan(
             PreScan::Plugin { plugin_id, .. } => plugin_id.as_str(),
             _ => "native",
         };
-        log::debug!("[SmBusTransport] pre_scan ({who}) failed on bus {bus_number}: {e}");
+        log::debug!("pre_scan ({who}) failed on bus {bus_number}: {e}");
     }
 }
 

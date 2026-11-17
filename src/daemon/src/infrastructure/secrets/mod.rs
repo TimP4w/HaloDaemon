@@ -38,13 +38,11 @@ pub trait SecretStore: Send + Sync {
 pub fn open_secret_store() -> Arc<dyn SecretStore> {
     match keyring_store::KeyringStore::probe() {
         Ok(store) => {
-            log::info!("[secrets] using the OS keyring for secure plugin config");
+            log::info!("using the OS keyring for secure plugin config");
             Arc::new(store)
         }
         Err(e) => {
-            log::info!(
-                "[secrets] OS keyring unavailable ({e:#}); falling back to the encrypted file store"
-            );
+            log::info!("OS keyring unavailable ({e:#}); falling back to the encrypted file store");
             Arc::new(file_store::FileKeyStore::new())
         }
     }

@@ -165,7 +165,7 @@ impl ChipsetBus {
                  (Intel) or SmbusPIIX4.bin (AMD) next to the executable ({e})"
             )
         })?;
-        log::info!("[SmBus] loaded PawnIO module {}", module.blob_name());
+        log::info!("loaded PawnIO module {}", module.blob_name());
 
         let name: Vec<u16> = "Global\\Access_SMBUS.HTP.Method\0".encode_utf16().collect();
         let mutex = unsafe { CreateMutexW(None, false, PCWSTR(name.as_ptr())) }
@@ -249,7 +249,7 @@ impl ChipsetBus {
                 // Latching disables only the optimisation — callers fall
                 // back to byte-at-a-time, so correctness is unaffected.
                 self.block_unsupported.store(true, Ordering::Relaxed);
-                log::warn!("[SmBus] block write rejected, disabling fast path: {e}");
+                log::warn!("block write rejected, disabling fast path: {e}");
                 Err(e)
             }
         }
@@ -275,7 +275,7 @@ pub(super) fn enumerate_buses() -> Vec<BusInfo> {
     let conn = match WMIConnection::new() {
         Ok(c) => c,
         Err(e) => {
-            log::debug!("[SmBus] WMI connect failed: {e}");
+            log::debug!("WMI connect failed: {e}");
             return vec![];
         }
     };
@@ -284,7 +284,7 @@ pub(super) fn enumerate_buses() -> Vec<BusInfo> {
         match conn.raw_query("SELECT DeviceID, Name FROM Win32_PnPEntity") {
             Ok(r) => r,
             Err(e) => {
-                log::debug!("[SmBus] WMI query failed: {e}");
+                log::debug!("WMI query failed: {e}");
                 return vec![];
             }
         };
@@ -330,9 +330,7 @@ pub(super) fn enumerate_buses() -> Vec<BusInfo> {
         for port in 0..port_count {
             buses.push(BusInfo {
                 bus_number: u8::try_from(bus_number).unwrap_or_else(|_| {
-                    log::warn!(
-                        "[chipset] SMBus bus_number {bus_number} exceeds u8, clamping to 255"
-                    );
+                    log::warn!("SMBus bus_number {bus_number} exceeds u8, clamping to 255");
                     255
                 }),
                 adapter_name: if port_count > 1 {
@@ -351,13 +349,13 @@ pub(super) fn enumerate_buses() -> Vec<BusInfo> {
 
     if buses.is_empty() {
         log::warn!(
-            "[SmBus] no chipset SMBus controller found via WMI, DRAM RGB \
+            "no chipset SMBus controller found via WMI, DRAM RGB \
              will be unavailable"
         );
     } else {
         for b in &buses {
             log::info!(
-                "[SmBus] chipset bus {} = {} (VEN_{:04X}&DEV_{:04X})",
+                "chipset bus {} = {} (VEN_{:04X}&DEV_{:04X})",
                 b.bus_number,
                 b.adapter_name,
                 b.pci_vendor,

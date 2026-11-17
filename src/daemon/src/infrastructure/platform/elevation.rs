@@ -116,7 +116,7 @@ pub(crate) fn spawn_broker_elevated(
     // SAFETY: `info` and every string buffer it points at outlive the call.
     unsafe { ShellExecuteExW(&mut info) }
         .map_err(|e| anyhow!("ShellExecuteExW(runas) for halod-broker: {e}"))?;
-    log::info!("[elevation] launched halod-broker with a UAC prompt");
+    log::info!("launched halod-broker with a UAC prompt");
     Ok(())
 }
 

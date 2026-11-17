@@ -355,7 +355,7 @@ fn build_match_rule(
 
 pub async fn run(weak: Weak<MediaHandle>) {
     let Some(session) = Connection::session().await.ok() else {
-        log::warn!("[media/linux] failed to connect to session bus");
+        log::warn!("failed to connect to session bus");
         return;
     };
 
@@ -404,15 +404,15 @@ pub async fn run(weak: Weak<MediaHandle>) {
 
     let Ok(props_rule) = build_match_rule("org.freedesktop.DBus.Properties", "PropertiesChanged")
     else {
-        log::warn!("[media/linux] failed to build PropertiesChanged match rule");
+        log::warn!("failed to build PropertiesChanged match rule");
         return;
     };
     let Ok(seeked_rule) = build_match_rule(PLAYER_IFACE, "Seeked") else {
-        log::warn!("[media/linux] failed to build Seeked match rule");
+        log::warn!("failed to build Seeked match rule");
         return;
     };
     let Ok(name_owner_rule) = build_match_rule("org.freedesktop.DBus", "NameOwnerChanged") else {
-        log::warn!("[media/linux] failed to build NameOwnerChanged match rule");
+        log::warn!("failed to build NameOwnerChanged match rule");
         return;
     };
 
@@ -421,7 +421,7 @@ pub async fn run(weak: Weak<MediaHandle>) {
         MessageStream::for_match_rule(seeked_rule, &session, Some(32)).await,
         MessageStream::for_match_rule(name_owner_rule, &session, Some(32)).await,
     ) else {
-        log::warn!("[media/linux] failed to subscribe to MPRIS signals");
+        log::warn!("failed to subscribe to MPRIS signals");
         return;
     };
 
@@ -536,7 +536,7 @@ pub async fn run(weak: Weak<MediaHandle>) {
             }
         }
     }
-    log::debug!("[media/linux] watcher stopped (no more consumers)");
+    log::debug!("watcher stopped (no more consumers)");
 }
 
 /// Signal senders are unique connection names (`:1.42`); players are tracked

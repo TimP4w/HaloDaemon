@@ -370,7 +370,7 @@ impl RgbEngine {
             loop {
                 let cfg = cfg_rx.current();
                 if !cfg.enabled() {
-                    log::info!("[RGB] Engine disabled, waiting for re-enable");
+                    log::info!("Engine disabled, waiting for re-enable");
                     if !cfg_rx.changed().await {
                         break;
                     }

@@ -184,14 +184,14 @@ fn log_status_changes(
         if matches!(status, FanCurveStatus::Ok) {
             if let Some(old) = old {
                 log::info!(
-                    "[FanCurve] Cooling recovered for {}:{} from {old:?} (sensor: {sensor})",
+                    "Cooling recovered for {}:{} from {old:?} (sensor: {sensor})",
                     target.device_id,
                     target.channel_id
                 );
             }
         } else {
             log::warn!(
-                "[FanCurve] Cooling warning for {}:{}: {status:?} (previous: {old:?}, sensor: {sensor})",
+                "Cooling warning for {}:{}: {status:?} (previous: {old:?}, sensor: {sensor})",
                 target.device_id,
                 target.channel_id
             );
@@ -230,7 +230,7 @@ impl FanCurveEngine {
         let state = map.entry(fan_id.to_string()).or_default();
         state.missing_device_ticks += 1;
         if should_log_missing_device(state.missing_device_ticks) {
-            log::debug!("[FanCurve] Fan/pump device not found or not controllable: {fan_id}");
+            log::debug!("Fan/pump device not found or not controllable: {fan_id}");
         }
     }
 
@@ -463,7 +463,7 @@ impl FanCurveEngine {
     ) -> FanCurveStatus {
         if let Err(e) = record.validate() {
             log::warn!(
-                "[FanCurve] Invalid curve for {}:{}: {e:#}",
+                "Invalid curve for {}:{}: {e:#}",
                 curve_target.device_id,
                 curve_target.channel_id
             );
@@ -484,19 +484,19 @@ impl FanCurveEngine {
                 return FanCurveStatus::NoSensor;
             };
             let Some(sensor) = sensors.get(sensor_id) else {
-                log::debug!("[FanCurve] Sensor not found: {sensor_id}");
+                log::debug!("Sensor not found: {sensor_id}");
                 if !self.sensor_missing_within_grace(key) {
                     self.apply_failsafe(key, curve_target, failsafe_duty).await;
                 }
                 return FanCurveStatus::NoSensor;
             };
             if sensor.sensor_type != halod_shared::types::SensorType::Temperature {
-                log::warn!("[FanCurve] Sensor {sensor_id} is not a temperature sensor");
+                log::warn!("Sensor {sensor_id} is not a temperature sensor");
                 self.apply_failsafe(key, curve_target, failsafe_duty).await;
                 return FanCurveStatus::NoSensor;
             }
             if !sensor.value.is_finite() {
-                log::warn!("[FanCurve] Sensor {sensor_id} returned a non-finite temperature");
+                log::warn!("Sensor {sensor_id} returned a non-finite temperature");
                 if !self.sensor_missing_within_grace(key) {
                     self.apply_failsafe(key, curve_target, failsafe_duty).await;
                 }
@@ -521,7 +521,7 @@ impl FanCurveEngine {
                 let duty = target.round().clamp(0.0, 100.0) as u8;
                 if let Err(e) = apply_duty(device, &curve_target.channel_id, duty).await {
                     log::warn!(
-                        "[FanCurve] Failed to set duty for {}:{}: {e}",
+                        "Failed to set duty for {}:{}: {e}",
                         curve_target.device_id,
                         curve_target.channel_id
                     );
@@ -732,7 +732,7 @@ impl FanCurveEngine {
                 Err(e) => {
                     if self.mark_failsafe_error(key) {
                         log::warn!(
-                            "[FanCurve] Failsafe set_duty failed for {}:{}: {e}",
+                            "Failsafe set_duty failed for {}:{}: {e}",
                             target.device_id,
                             target.channel_id
                         );

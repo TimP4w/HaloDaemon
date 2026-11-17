@@ -68,7 +68,7 @@ pub fn start_config_save_worker(app: Arc<AppState>) -> tokio::task::JoinHandle<(
                             .send_replace(ConfigSaveState::DirtyWhileSaving);
                     }
                     Ok(Err(error)) => {
-                        log::warn!("[Config] Save failed, retrying: {error}");
+                        log::warn!("Save failed, retrying: {error}");
                         app.config
                             .persistence()
                             .save_state
@@ -80,7 +80,7 @@ pub fn start_config_save_worker(app: Arc<AppState>) -> tokio::task::JoinHandle<(
                         }
                     }
                     Err(error) => {
-                        log::warn!("[Config] Save worker panicked, retrying: {error}");
+                        log::warn!("Save worker panicked, retrying: {error}");
                         app.config
                             .persistence()
                             .save_state

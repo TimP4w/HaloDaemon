@@ -24,14 +24,14 @@ fn read_blocking() -> HostMetrics {
     let conn = match WMIConnection::new() {
         Ok(c) => c,
         Err(e) => {
-            log::debug!("[ComputerDevice] metrics WMI connect failed: {e}");
+            log::debug!("metrics WMI connect failed: {e}");
             return HostMetrics::default();
         }
     };
 
     let query = |sql: &str| -> Vec<HashMap<String, Variant>> {
         conn.raw_query(sql).unwrap_or_else(|e| {
-            log::debug!("[ComputerDevice] metrics WMI query failed: {e}");
+            log::debug!("metrics WMI query failed: {e}");
             Vec::new()
         })
     };

@@ -34,11 +34,7 @@ pub async fn load_active_profile(app: Arc<AppState>) {
             lcd_engine.remove_device(device.id()).await;
         }
     }
-    log::info!(
-        "[Profile] Loading '{}' onto {} device(s)",
-        active_name,
-        devices.len()
-    );
+    log::info!("Loading '{}' onto {} device(s)", active_name, devices.len());
     for device in &devices {
         registration::restore_saved_state(&app, device).await;
         if let Some(record) = known_devices.get(device.id()) {
@@ -73,14 +69,11 @@ pub async fn load_active_profile(app: Arc<AppState>) {
             };
             if std::path::Path::new(&path).is_file() {
                 if let Err(e) = video.start(device.id(), &path).await {
-                    log::warn!(
-                        "[Profile] Failed to replay LCD video for '{}': {e:#}",
-                        device.name()
-                    );
+                    log::warn!("Failed to replay LCD video for '{}': {e:#}", device.name());
                 }
             } else {
                 log::warn!(
-                    "[Profile] Saved LCD video '{path}' for '{}' no longer exists; clearing",
+                    "Saved LCD video '{path}' for '{}' no longer exists; clearing",
                     device.name()
                 );
                 lcd.set_video_path(None);
@@ -97,7 +90,7 @@ pub async fn switch_profile_direct(name: String, app: Arc<AppState>) {
     {
         let mut cfg = app.config.write().await;
         if !cfg.profiles.contains_key(&name) {
-            log::warn!("[FocusWatcher] Profile '{name}' not found, skipping switch");
+            log::warn!("Profile '{name}' not found, skipping switch");
             return;
         }
         cfg.active_profile = name;
@@ -118,7 +111,7 @@ pub async fn switch_profile(name: String, app: Arc<AppState>) -> Result<()> {
         if !cfg.profiles.contains_key(&name) {
             anyhow::bail!("profile not found: {name}");
         }
-        log::info!("[Profile] Switching to '{name}'");
+        log::info!("Switching to '{name}'");
         cfg.active_profile = name;
         cfg.clone()
     };
@@ -150,7 +143,7 @@ pub async fn add_profile(name: String, app: Arc<AppState>) -> Result<()> {
         if cfg.profiles.contains_key(&name) {
             anyhow::bail!("profile already exists: {name}");
         }
-        log::info!("[Profile] Adding '{name}'");
+        log::info!("Adding '{name}'");
         cfg.profiles.insert(name.clone(), Profile::default());
         cfg.active_profile = name.clone();
     }
@@ -173,7 +166,7 @@ pub async fn remove_profile(name: String, app: Arc<AppState>) -> Result<()> {
         if !cfg.profiles.contains_key(&name) {
             anyhow::bail!("profile not found: {name}");
         }
-        log::info!("[Profile] Removing '{name}'");
+        log::info!("Removing '{name}'");
         cfg.profiles.remove(&name);
         let active_removed = cfg.active_profile == name;
         if active_removed {
@@ -215,7 +208,7 @@ pub async fn rename_profile(old_name: String, new_name: String, app: Arc<AppStat
         if cfg.profiles.contains_key(&new_name) {
             anyhow::bail!("profile already exists: {new_name}");
         }
-        log::info!("[Profile] Renaming '{old_name}' → '{new_name}'");
+        log::info!("Renaming '{old_name}' → '{new_name}'");
         let profile = cfg.profiles.remove(&old_name).unwrap();
         cfg.profiles.insert(new_name.clone(), profile);
         let active_renamed = cfg.active_profile == old_name;

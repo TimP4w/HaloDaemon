@@ -53,10 +53,7 @@ pub(crate) async fn reconcile_owned_children(
             removed
         };
         for child in removed {
-            log::info!(
-                "[receiver] Removed {} after receiver slot changed",
-                child.id()
-            );
+            log::info!("Removed {} after receiver slot changed", child.id());
             super::registration::close_device(app, &child).await;
         }
     }
@@ -111,10 +108,10 @@ pub(crate) async fn revive_owned_children(
         match super::registration::init_device(app, &child).await {
             Ok(true) => {
                 super::registration::restore_saved_state(app, &child).await;
-                log::info!("[receiver] Reinitialized {} after it came back", child.id());
+                log::info!("Reinitialized {} after it came back", child.id());
                 revived = true;
             }
-            _ => log::debug!("[receiver] {} is still unreachable", child.id()),
+            _ => log::debug!("{} is still unreachable", child.id()),
         }
     }
     revived
@@ -152,7 +149,7 @@ pub async fn unpair(id: String, slot: u8, app: Arc<AppState>) -> Result<()> {
             .await
             .retain(|d| d.id() != removed_id);
         super::registration::close_device(&app, &removed).await;
-        log::info!("[receiver] Removed {removed_id} after unpair");
+        log::info!("Removed {removed_id} after unpair");
     } else {
         // Lua/plugin controllers cannot return a concrete child `Arc` through
         // the pairing ABI. Diff their owned children after the hardware write

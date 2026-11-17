@@ -85,7 +85,7 @@ pub fn serve_forever() -> Result<()> {
     let config = config()?.clone();
     let sec = PipeSecurity::from_sddl(&winsec::coordinator_dacl_sddl(&config.coordinator.sid)?)?;
     log::info!(
-        "[broker] pipe secured to coordinator SID {} session {}",
+        "pipe secured to coordinator SID {} session {}",
         config.coordinator.sid,
         config.coordinator.session
     );
@@ -117,14 +117,14 @@ pub fn serve_forever() -> Result<()> {
         let handle = match create_instance(PIPE_NAME, &sec) {
             Ok(handle) => handle,
             Err(e) => {
-                log::warn!("[broker] create pipe instance failed, retrying: {e}");
+                log::warn!("create pipe instance failed, retrying: {e}");
                 std::thread::sleep(Duration::from_millis(500));
                 continue;
             }
         };
         let mut stream = PipeStream::new(handle);
         if let Err(e) = wait_for_client(handle) {
-            log::warn!("[broker] wait_for_client failed: {e}");
+            log::warn!("wait_for_client failed: {e}");
             drop(stream);
             continue;
         }
@@ -136,12 +136,12 @@ pub fn serve_forever() -> Result<()> {
         match stream.wait_readable(AUTHENTICATION_TIMEOUT) {
             Ok(true) => {}
             Ok(false) => {
-                log::warn!("[broker] client did not authenticate within the timeout; refusing");
+                log::warn!("client did not authenticate within the timeout; refusing");
                 drop(stream);
                 continue;
             }
             Err(e) => {
-                log::debug!("[broker] authentication wait failed: {e}");
+                log::debug!("authentication wait failed: {e}");
                 drop(stream);
                 continue;
             }
@@ -149,12 +149,12 @@ pub fn serve_forever() -> Result<()> {
         let first_request: Request = match proto::read_frame(&mut stream) {
             Ok(request @ Request::Authenticate { .. }) => request,
             Ok(_) => {
-                log::warn!("[broker] first client frame was not Authenticate; refusing");
+                log::warn!("first client frame was not Authenticate; refusing");
                 drop(stream);
                 continue;
             }
             Err(e) => {
-                log::debug!("[broker] could not read authentication frame: {e}");
+                log::debug!("could not read authentication frame: {e}");
                 drop(stream);
                 continue;
             }
@@ -163,7 +163,7 @@ pub fn serve_forever() -> Result<()> {
         let identity = match clientauth::pipe_client_identity(handle) {
             Ok(id) => id,
             Err(e) => {
-                log::warn!("[broker] could not identify pipe client ({e}); refusing");
+                log::warn!("could not identify pipe client ({e}); refusing");
                 drop(stream);
                 continue;
             }
@@ -184,7 +184,7 @@ pub fn serve_forever() -> Result<()> {
             }
             Admission::WrongUser => {
                 log::warn!(
-                    "[broker] refusing client SID {} session {}: expected SID {} session {}",
+                    "refusing client SID {} session {}: expected SID {} session {}",
                     identity.sid,
                     identity.session,
                     config.coordinator.sid,
@@ -193,7 +193,7 @@ pub fn serve_forever() -> Result<()> {
                 drop(stream);
             }
             Admission::TooMany => {
-                log::warn!("[broker] refusing client: {MAX_CLIENTS} connections already active");
+                log::warn!("refusing client: {MAX_CLIENTS} connections already active");
                 drop(stream);
             }
         }
@@ -369,7 +369,7 @@ fn serve(mut stream: PipeStream, first_request: Request) {
                 Ok(Activity::Request) => {}
                 Ok(Activity::Closed) | Err(mpsc::RecvTimeoutError::Disconnected) => return,
                 Err(mpsc::RecvTimeoutError::Timeout) => {
-                    log::info!("[broker] disconnecting idle client");
+                    log::info!("disconnecting idle client");
                     disconnect_handle_value(pipe_handle);
                     return;
                 }
@@ -385,9 +385,9 @@ fn serve(mut stream: PipeStream, first_request: Request) {
                         // A client dropping its pipe handle is the normal
                         // teardown for a discovery probe or a released device;
                         // keep it out of the (Debug-capped) op log.
-                        log::trace!("[broker] connection closed: {e}");
+                        log::trace!("connection closed: {e}");
                     } else {
-                        log::debug!("[broker] connection closed unexpectedly: {e}");
+                        log::debug!("connection closed unexpectedly: {e}");
                     }
                     break;
                 }
@@ -406,7 +406,7 @@ fn serve(mut stream: PipeStream, first_request: Request) {
             },
         };
         if let Err(e) = proto::write_frame(&mut stream, &resp) {
-            log::debug!("[broker] reply write failed: {e}");
+            log::debug!("reply write failed: {e}");
             break;
         }
     }

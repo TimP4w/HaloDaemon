@@ -120,7 +120,7 @@ impl Device for ComputerDevice {
         });
         *self.poll_task.lock().await = Some(TaskHandle(handle));
 
-        log::info!("[ComputerDevice] initialized ({})", os_label());
+        log::info!("initialized ({})", os_label());
         Ok(true)
     }
 
@@ -128,7 +128,7 @@ impl Device for ComputerDevice {
         self.poll_task.lock().await.take();
         if self.keep_awake.is_active() {
             if let Err(e) = self.keep_awake.set(false).await {
-                log::warn!("[ComputerDevice] failed to release keep-awake on close: {e:#}");
+                log::warn!("failed to release keep-awake on close: {e:#}");
             }
         }
     }

@@ -37,10 +37,7 @@ pub async fn switch_onboard_profile(id: String, slot: u16, app: Arc<AppState>) -
     let cap = device
         .as_onboard_profiles()
         .context("device does not support onboard profiles")?;
-    log::info!(
-        "[OnboardProfile] Switching '{}' to slot {slot}",
-        device.name()
-    );
+    log::info!("Switching '{}' to slot {slot}", device.name());
     cap.switch_profile(slot).await?;
     app.record_change(Change::Device(id)).await;
     Ok(())
@@ -53,7 +50,7 @@ pub async fn restore_onboard_profile(id: String, slot: u16, app: Arc<AppState>) 
         .as_onboard_profiles()
         .context("device does not support onboard profiles")?;
     ensure_writable(cap, slot).await?;
-    log::info!("[OnboardProfile] Restoring '{}' slot {slot}", device.name());
+    log::info!("Restoring '{}' slot {slot}", device.name());
     cap.restore_profile(slot).await?;
     app.record_change(Change::Device(id)).await;
     Ok(())
@@ -71,10 +68,7 @@ pub async fn set_onboard_profile_enabled(
         .as_onboard_profiles()
         .context("device does not support onboard profiles")?;
     ensure_writable(cap, slot).await?;
-    log::info!(
-        "[OnboardProfile] '{}' slot {slot} enabled={enabled}",
-        device.name()
-    );
+    log::info!("'{}' slot {slot} enabled={enabled}", device.name());
     cap.set_profile_enabled(slot, enabled).await?;
     app.record_change(Change::Device(id)).await;
     Ok(())

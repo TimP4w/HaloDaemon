@@ -26,18 +26,18 @@ pub async fn resume_events() -> Result<UnboundedReceiver<()>> {
             let message = match message {
                 Ok(message) => message,
                 Err(e) => {
-                    log::debug!("[power] PrepareForSleep stream error: {e}");
+                    log::debug!("PrepareForSleep stream error: {e}");
                     break;
                 }
             };
             match message.body().deserialize::<bool>() {
-                Ok(true) => log::debug!("[power] system is suspending"),
+                Ok(true) => log::debug!("system is suspending"),
                 Ok(false) => {
                     if tx.send(()).is_err() {
                         break;
                     }
                 }
-                Err(e) => log::debug!("[power] malformed PrepareForSleep: {e}"),
+                Err(e) => log::debug!("malformed PrepareForSleep: {e}"),
             }
         }
     });

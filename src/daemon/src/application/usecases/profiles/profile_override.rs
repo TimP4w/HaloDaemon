@@ -22,7 +22,7 @@ pub async fn remove_profile_override(
         if profile_name == DEFAULT_PROFILE_NAME {
             bail!("cannot remove overrides from the default profile");
         }
-        log::info!("[Profile] Removing override {target:?} from '{profile_name}'");
+        log::info!("Removing override {target:?} from '{profile_name}'");
         let is_active = cfg.active_profile == profile_name;
         let Some(profile) = cfg.profiles.get_mut(&profile_name) else {
             bail!("unknown profile '{profile_name}'");

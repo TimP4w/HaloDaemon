@@ -146,19 +146,19 @@ impl Background {
             return Vec::new();
         }
         if halod_shared::types::validate_image_filename(filename).is_err() {
-            log::warn!("[LCD bg] rejected image filename: {filename}");
+            log::warn!("rejected image filename: {filename}");
             return Vec::new();
         }
         let path = images_dir.join(filename);
         let data = match crate::util::image::read_image_bounded(&path) {
             Ok(d) => d,
             Err(e) => {
-                log::warn!("[LCD bg] cannot read {filename}: {e}");
+                log::warn!("cannot read {filename}: {e}");
                 return Vec::new();
             }
         };
         Self::decode_frames(&data).unwrap_or_else(|e| {
-            log::warn!("[LCD bg] decode {filename} failed: {e}");
+            log::warn!("decode {filename} failed: {e}");
             Vec::new()
         })
     }

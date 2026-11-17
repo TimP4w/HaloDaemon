@@ -44,7 +44,7 @@ pub struct FileKeyStore {
 impl FileKeyStore {
     pub fn new() -> Self {
         let state = load_secrets_file().unwrap_or_else(|e| {
-            log::warn!("[secrets] failed to read {SECRETS_FILE}, starting empty: {e:#}");
+            log::warn!("failed to read {SECRETS_FILE}, starting empty: {e:#}");
             SecretsFile::default()
         });
         Self {

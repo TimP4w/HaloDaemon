@@ -65,7 +65,7 @@ pub fn run(weak: Weak<MediaHandle>) {
         match poll_once(&mut art_cache) {
             Ok(info) => handle.publish(info),
             Err(e) => {
-                log::debug!("[media/windows] GSMTC poll failed: {e:?}");
+                log::debug!("GSMTC poll failed: {e:?}");
                 handle.publish(None);
             }
         }

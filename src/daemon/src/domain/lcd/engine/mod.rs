@@ -431,7 +431,7 @@ impl LcdEngine {
             slot.last_sig = sig;
             let (frame_w, frame_h) = slot.frame_buf.dimensions();
             log::trace!(
-                "[LCD engine timing] template render: {}ms ({frame_w}x{frame_h})",
+                "template render: {}ms ({frame_w}x{frame_h})",
                 tr.elapsed().as_millis()
             );
 
@@ -490,10 +490,7 @@ impl LcdEngine {
                     bump_fail_streak(&mut slot.fail_streak);
                 }
             }
-            log::trace!(
-                "[LCD engine timing] stream_frame: {}ms",
-                ts.elapsed().as_millis()
-            );
+            log::trace!("stream_frame: {}ms", ts.elapsed().as_millis());
         }
     }
 }

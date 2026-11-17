@@ -96,7 +96,7 @@ async fn restore_rgb(device: &dyn Device, lcd: &dyn LcdCapability) {
         if let Some(state) = rgb.current_state() {
             if !matches!(state, LightingState::Engine) {
                 if let Err(e) = rgb.apply(state).await {
-                    log::warn!("[LCD] RGB restore failed after image upload: {e}");
+                    log::warn!("RGB restore failed after image upload: {e}");
                 }
             }
         }
@@ -185,7 +185,7 @@ async fn set_screen_image_inner(
     let data = base64::engine::general_purpose::STANDARD.decode(&data_b64)?;
     halod_shared::types::validate_image_upload_size(data.len() as u64).map_err(|e| anyhow!(e))?;
     log::debug!(
-        "[LCD] set_screen_image: received {} bytes for device {}",
+        "set_screen_image: received {} bytes for device {}",
         data.len(),
         device.id()
     );
@@ -199,14 +199,14 @@ async fn set_screen_image_inner(
     let (compressed, ext) =
         tokio::task::spawn_blocking(move || compress_for_storage(&data, width, height, progress))
             .await??;
-    log::debug!("[LCD] compressed to {} bytes ({})", compressed.len(), ext);
+    log::debug!("compressed to {} bytes ({})", compressed.len(), ext);
     send_upload_progress(client, device.id(), LcdUploadStage::Applying, None);
 
     let filename = format!("{}.{}", Uuid::new_v4(), ext);
     let dir = config::lcd_images_dir();
     tokio::fs::create_dir_all(&dir).await?;
     tokio::fs::write(dir.join(&filename), &compressed).await?;
-    log::info!("[LCD] saved image as {}", filename);
+    log::info!("saved image as {}", filename);
     invalidate_editor_image_cache(app);
 
     stop_video_for_device(app, lcd, device.id()).await;
@@ -262,7 +262,7 @@ async fn set_screen_image_from_library_inner(
         .await
         .map_err(|e| anyhow!("image not found: {e}"))?;
     log::info!(
-        "[LCD] applying library image {} ({} bytes) to device {}",
+        "applying library image {} ({} bytes) to device {}",
         filename,
         data.len(),
         device.id()
@@ -329,10 +329,7 @@ pub async fn set_screen_rotation(
         .as_lcd()
         .ok_or_else(|| anyhow!("device does not support LCD"))?;
     let degrees = rotation.degrees();
-    log::info!(
-        "[LCD] set_screen_rotation: {degrees}° for device {}",
-        device.id()
-    );
+    log::info!("set_screen_rotation: {degrees}° for device {}", device.id());
     lcd.lcd_state().set_health(LcdHealth::Starting);
     let result = async {
         lcd.set_rotation(degrees).await?;
@@ -355,7 +352,7 @@ pub async fn set_screen_brightness(id: String, brightness: u8, app: Arc<AppState
         .as_lcd()
         .ok_or_else(|| anyhow!("device does not support LCD"))?;
     log::info!(
-        "[LCD] set_screen_brightness: {} for device {}",
+        "set_screen_brightness: {} for device {}",
         brightness,
         device.id()
     );
@@ -375,7 +372,7 @@ pub async fn set_screen_default(id: String, app: Arc<AppState>) -> Result<()> {
     let lcd = device
         .as_lcd()
         .ok_or_else(|| anyhow!("device does not support LCD"))?;
-    log::info!("[LCD] set_screen_default for device {}", device.id());
+    log::info!("set_screen_default for device {}", device.id());
     stop_video_for_device(&app, lcd, device.id()).await;
     deactivate_engine_for_device(&app, lcd, device.id()).await;
     lcd.lcd_state().set_health(LcdHealth::Starting);
@@ -397,7 +394,7 @@ pub async fn set_screen_raw_streaming(id: String, enabled: bool, app: Arc<AppSta
     let lcd = device
         .as_lcd()
         .ok_or_else(|| anyhow!("device does not support LCD"))?;
-    log::info!("[LCD] set_screen_raw_streaming: {enabled} for device {id}");
+    log::info!("set_screen_raw_streaming: {enabled} for device {id}");
     lcd.lcd_state().set_health(LcdHealth::Starting);
     lcd.set_raw_streaming(enabled);
     lcd.lcd_state().set_health(LcdHealth::Stable);
@@ -425,7 +422,7 @@ pub async fn set_screen_video(id: String, path: String, app: Arc<AppState>) -> R
     let lcd = device
         .as_lcd()
         .ok_or_else(|| anyhow!("device does not support LCD"))?;
-    log::info!("[LCD] set_screen_video: {path} for device {id}");
+    log::info!("set_screen_video: {path} for device {id}");
     lcd.lcd_state().set_health(LcdHealth::Starting);
 
     let path_clone = path.clone();
@@ -492,7 +489,7 @@ pub async fn list_lcd_images(client: ClientHandle) -> Result<()> {
         .into_iter()
         .map(|(name, size_bytes)| LcdImageFile { name, size_bytes })
         .collect();
-    log::debug!("[LCD] list_lcd_images: {} files", files.len());
+    log::debug!("list_lcd_images: {} files", files.len());
     client.send(&DaemonMessage::LcdImages { files });
     Ok(())
 }
@@ -502,7 +499,7 @@ pub async fn delete_lcd_image(filename: String, app: Arc<AppState>) -> Result<()
     validate_image_filename(&filename).map_err(|e| anyhow!(e))?;
     let path = config::lcd_images_dir().join(&filename);
     match tokio::fs::remove_file(&path).await {
-        Ok(()) => log::info!("[LCD] deleted image {}", filename),
+        Ok(()) => log::info!("deleted image {}", filename),
         Err(e) if e.kind() == std::io::ErrorKind::NotFound => {}
         Err(e) => return Err(e.into()),
     }

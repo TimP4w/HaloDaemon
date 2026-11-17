@@ -236,7 +236,7 @@ fn service_main(arguments: Vec<OsString>) {
         .and_then(server::configure)
         .and_then(|()| run_service());
     if let Err(e) = result {
-        log::error!("[broker] service fatal: {e:#}");
+        log::error!("service fatal: {e:#}");
     }
 }
 
@@ -280,13 +280,13 @@ fn run_service() -> Result<()> {
     };
 
     set_state(ServiceState::Running)?;
-    log::info!("[broker] service running");
+    log::info!("service running");
 
     // The RPC accept loop runs on its own thread forever; a fatal pipe error is
     // unrecoverable, so exit the process (SCM restarts on next demand-start).
     std::thread::spawn(|| {
         if let Err(e) = server::serve_forever() {
-            log::error!("[broker] serve_forever failed: {e:#}");
+            log::error!("serve_forever failed: {e:#}");
             std::process::exit(1);
         }
     });
@@ -296,14 +296,14 @@ fn run_service() -> Result<()> {
     let idle_tx = stop_tx;
     std::thread::spawn(move || {
         server::wait_until_idle(IDLE_GRACE);
-        log::info!("[broker] idle; requesting service stop");
+        log::info!("idle; requesting service stop");
         let _ = idle_tx.send(());
     });
 
     // Block until SCM STOP or the idle watcher fires.
     let _ = stop_rx.recv();
     set_state(ServiceState::Stopped)?;
-    log::info!("[broker] service stopped");
+    log::info!("service stopped");
     Ok(())
 }
 

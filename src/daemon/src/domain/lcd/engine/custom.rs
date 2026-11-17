@@ -112,7 +112,7 @@ impl CustomTemplate {
         let def = match params.get(halod_shared::lcd_custom::WIDGETS_JSON_PARAM) {
             Some(EffectParamValue::Str(json)) => serde_json::from_str::<CustomTemplateDef>(json)
                 .unwrap_or_else(|e| {
-                    log::warn!("[LCD custom] invalid widgets_json, using default: {e}");
+                    log::warn!("invalid widgets_json, using default: {e}");
                     CustomTemplateDef::default()
                 }),
             _ => CustomTemplateDef::default(),
@@ -752,15 +752,15 @@ fn y_ratio(w: &WidgetDef) -> f32 {
 /// Cache key for an `Image` widget at on-screen size; shared by render and prune paths.
 fn decode_source_image(images_dir: &Path, filename: &str) -> Option<Arc<DecodedImage>> {
     if halod_shared::types::validate_image_filename(filename).is_err() {
-        log::warn!("[LCD custom] rejected image filename: {filename}");
+        log::warn!("rejected image filename: {filename}");
         return None;
     }
     let path = images_dir.join(filename);
     let data = crate::util::image::read_image_bounded(&path)
-        .map_err(|e| log::warn!("[LCD custom] cannot read {filename}: {e}"))
+        .map_err(|e| log::warn!("cannot read {filename}: {e}"))
         .ok()?;
     let decoded = super::templates::decode_image_frames(&data)
-        .map_err(|e| log::warn!("[LCD custom] decode {filename} failed: {e}"))
+        .map_err(|e| log::warn!("decode {filename} failed: {e}"))
         .ok()?;
     let (frames, delays): (Vec<RgbaImage>, Vec<f64>) = decoded.into_iter().unzip();
     let frames = bound_decoded_bytes(frames, DECODED_IMAGE_MAX_BYTES);

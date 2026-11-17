@@ -94,7 +94,7 @@ fn write_one(dev: &hidapi::HidDevice, pkt: &[u8], use_feature_report: bool) -> R
         // Debug, not warn: a disconnected device fails every write, flooding the
         // log until hotplug removes it. The error is returned anyway.
         log::debug!(
-            "[HidTransport] {} (feature_report={}, {} bytes: {:02x?})",
+            "{} (feature_report={}, {} bytes: {:02x?})",
             e,
             use_feature_report,
             pkt.len(),
@@ -185,10 +185,10 @@ impl HidEvents {
         let mut reports = self.reports.lock();
         if reports.len() == EVENT_QUEUE_CAPACITY {
             reports.pop_front();
-            log::debug!("[HidTransport] event queue full; dropping oldest event");
+            log::debug!("event queue full; dropping oldest event");
         }
         log::trace!(
-            "[HidTransport] event push endpoint={endpoint} depth={} bytes={:02x?}",
+            "event push endpoint={endpoint} depth={} bytes={:02x?}",
             reports.len() + 1,
             data
         );
@@ -227,17 +227,11 @@ fn spawn_event_reader(dev: hidapi::HidDevice, endpoint: InputEndpoint, events: W
                 Ok(0) => {}
                 Ok(n) => {
                     buf.truncate(n);
-                    log::trace!(
-                        "[HidTransport] {} event reader read {n} bytes",
-                        endpoint.name()
-                    );
+                    log::trace!("{} event reader read {n} bytes", endpoint.name());
                     events.push(endpoint.name(), buf);
                 }
                 Err(error) => {
-                    log::debug!(
-                        "[HidTransport] {} event reader stopped: {error}",
-                        endpoint.name()
-                    );
+                    log::debug!("{} event reader stopped: {error}", endpoint.name());
                     break;
                 }
             }
@@ -430,7 +424,7 @@ impl HidTransport {
         }
         if drained > 0 {
             log::trace!(
-                "[HidTransport] dropped {drained} stale input reports before a write on {}",
+                "dropped {drained} stale input reports before a write on {}",
                 self.primary_path
             );
         }
@@ -440,16 +434,10 @@ impl HidTransport {
     fn start_event_listener(&self) -> Result<()> {
         let mut started = self.event_listener_started.lock();
         if *started {
-            log::trace!(
-                "[HidTransport] event listener already started for {}",
-                self.primary_path
-            );
+            log::trace!("event listener already started for {}", self.primary_path);
             return Ok(());
         }
-        log::debug!(
-            "[HidTransport] starting event listener for {}",
-            self.primary_path
-        );
+        log::debug!("starting event listener for {}", self.primary_path);
         let api = hidapi::HidApi::new().context("failed to create HidApi for event listener")?;
         let primary = HidIo::open_input(&api, &self.primary_path, "event")?;
         spawn_event_reader(

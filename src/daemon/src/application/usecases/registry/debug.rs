@@ -451,7 +451,7 @@ pub(crate) fn enumerate_hid() -> Vec<HidEntryDebugInfo> {
     let api = match hidapi::HidApi::new() {
         Ok(a) => a,
         Err(e) => {
-            log::warn!("[debug] HidApi::new failed: {e}");
+            log::warn!("HidApi::new failed: {e}");
             return Vec::new();
         }
     };

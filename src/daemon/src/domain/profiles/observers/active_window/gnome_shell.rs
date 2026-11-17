@@ -132,7 +132,7 @@ pub async fn spawn() -> anyhow::Result<mpsc::Receiver<FocusEvent>> {
             let msg = match msg {
                 Ok(m) => m,
                 Err(e) => {
-                    log::debug!("[FocusWatcher/GnomeShell] stream error: {e}");
+                    log::debug!("stream error: {e}");
                     break;
                 }
             };
@@ -140,7 +140,7 @@ pub async fn spawn() -> anyhow::Result<mpsc::Receiver<FocusEvent>> {
             if sender != owner {
                 owner = gnome_shell_owner(&session).await;
                 if sender != owner {
-                    log::debug!("[FocusWatcher/GnomeShell] dropping signal from unexpected sender {sender:?}");
+                    log::debug!("dropping signal from unexpected sender {sender:?}");
                     continue;
                 }
             }
@@ -165,15 +165,15 @@ pub async fn spawn() -> anyhow::Result<mpsc::Receiver<FocusEvent>> {
                 }
                 Ok(_) => {} // Catch-all for any other Ok variant.
                 Err(e) => {
-                    log::debug!("[FocusWatcher/GnomeShell] deserialize error: {e}");
+                    log::debug!("deserialize error: {e}");
                 }
             }
         }
-        log::debug!("[FocusWatcher/GnomeShell] event stream ended");
+        log::debug!("event stream ended");
     });
     tokio::spawn(async move {
         if let Err(e) = consumer.await {
-            log::warn!("[FocusWatcher/GnomeShell] consumer task panicked: {e}");
+            log::warn!("consumer task panicked: {e}");
         }
     });
 

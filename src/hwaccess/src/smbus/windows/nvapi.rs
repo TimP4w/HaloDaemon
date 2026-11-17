@@ -100,7 +100,7 @@ fn init_nvapi() -> Option<NvApi> {
     let read_ptr = unsafe { query(FN_I2C_READ_EX) };
     let write_ptr = unsafe { query(FN_I2C_WRITE_EX) };
     if init_ptr == 0 || enum_ptr == 0 || pci_ptr == 0 || read_ptr == 0 || write_ptr == 0 {
-        log::debug!("[SmBus] NvAPI present but a required function is missing");
+        log::debug!("NvAPI present but a required function is missing");
         return None;
     }
 
@@ -144,7 +144,7 @@ fn init_nvapi() -> Option<NvApi> {
     if gpus.is_empty() {
         return None;
     }
-    log::info!("[SmBus] NvAPI discovered {} GPU i2c bus(es)", gpus.len());
+    log::info!("NvAPI discovered {} GPU i2c bus(es)", gpus.len());
     Some(NvApi {
         _lib: lib,
         i2c_read,

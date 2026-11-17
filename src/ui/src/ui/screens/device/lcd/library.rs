@@ -316,7 +316,7 @@ pub(super) fn select_image(
     // Reject anything the daemon would reject anyway (path traversal, bad
     // extension) before it ever leaves the GUI — the daemon re-checks on receipt.
     if let Err(e) = halod_shared::types::validate_image_filename(filename) {
-        log::warn!("[LCD] refusing to apply invalid image filename {filename:?}: {e}");
+        log::warn!("refusing to apply invalid image filename {filename:?}: {e}");
         return;
     }
     if active_template_id.is_some() {

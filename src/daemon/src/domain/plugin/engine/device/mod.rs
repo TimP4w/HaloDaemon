@@ -794,7 +794,7 @@ impl LuaDevice {
                             continue;
                         }
                         log::trace!(
-                            "[plugin event] button event device={device_id} child_index={:?} pressed={:?} released={:?}",
+                            "button event device={device_id} child_index={:?} pressed={:?} released={:?}",
                             outcome.child_index,
                             outcome.button_events.pressed,
                             outcome.button_events.released

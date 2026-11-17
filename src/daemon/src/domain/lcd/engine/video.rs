@@ -152,7 +152,7 @@ impl VideoEngine {
             .await
             .insert(device_id.to_string(), VideoStream::Playing { task, child });
         set_device_health(device.as_ref(), LcdHealth::Stable);
-        log::info!("[Video] streaming {path} to {device_id} ({w}x{h})");
+        log::info!("streaming {path} to {device_id} ({w}x{h})");
         Ok(())
     }
 
@@ -197,7 +197,7 @@ impl VideoEngine {
         match tokio::time::timeout(std::time::Duration::from_secs(2), &mut task).await {
             Ok(_) => {}
             Err(_) => {
-                log::warn!("[Video] reader task for {device_id} did not stop in time");
+                log::warn!("reader task for {device_id} did not stop in time");
                 task.abort();
                 let _ = task.await;
             }
@@ -209,7 +209,7 @@ impl VideoEngine {
         if let Some(device) = device {
             set_device_health(device.as_ref(), LcdHealth::Stable);
         }
-        log::info!("[Video] stopped stream for {device_id}");
+        log::info!("stopped stream for {device_id}");
     }
 
     fn spawn_player(
@@ -309,7 +309,7 @@ impl VideoEngine {
                     }
                 }
             };
-            log::warn!("[Video] {device_id}: {failure}");
+            log::warn!("{device_id}: {failure}");
             {
                 let mut child = child_guard.lock().await;
                 let _ = child.kill().await;

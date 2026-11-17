@@ -225,7 +225,7 @@ pub async fn save_template(name: String, def: CustomTemplateDef, app: Arc<AppSta
     );
     let path = template_path(&name);
     tokio::task::spawn_blocking(move || fs::atomic_write(&path, &yaml)).await??;
-    log::info!("[LCD] saved template '{name}'");
+    log::info!("saved template '{name}'");
     app.lcd.refresh_templates().await;
     app.record_change(Change::LcdCatalog).await;
     Ok(())
@@ -251,7 +251,7 @@ pub async fn load_template(name: String, client: ClientHandle) -> Result<()> {
 pub async fn delete_template(name: String, app: Arc<AppState>) -> Result<()> {
     validate_template_name(&name)?;
     match tokio::fs::remove_file(template_path(&name)).await {
-        Ok(()) => log::info!("[LCD] deleted template '{name}'"),
+        Ok(()) => log::info!("deleted template '{name}'"),
         Err(e) if e.kind() == std::io::ErrorKind::NotFound => {}
         Err(e) => return Err(e.into()),
     }
