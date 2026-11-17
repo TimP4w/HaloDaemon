@@ -76,6 +76,7 @@ pub struct AppState {
     pub rediscovery_runner: Mutex<()>,
     /// Last verified catalog per remote repository slug.
     pub plugin_catalogs: Mutex<std::collections::HashMap<String, RepoCatalog>>,
+    pub plugin_store: Mutex<()>,
     pub repo_refresh_retry: Arc<RetryQueue>,
     /// The device-plugin registry (loaded manifests, consent/config, notice
     /// dedup, load warnings).
@@ -110,6 +111,7 @@ impl AppState {
             pending_rediscovery: Mutex::new(PendingRediscovery::Clean),
             rediscovery_runner: Mutex::new(()),
             plugin_catalogs: Mutex::default(),
+            plugin_store: Mutex::default(),
             repo_refresh_retry: Arc::default(),
             registry: Registry::default(),
             data_bus: Arc::new(DataBus::default()),

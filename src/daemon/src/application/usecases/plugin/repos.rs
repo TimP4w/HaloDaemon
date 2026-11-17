@@ -75,6 +75,7 @@ async fn remember(app: &AppState, slug: &str, catalog: halod_plugin_signing::Cat
 }
 
 pub async fn add_repo(source: PluginRepoLocation, app: Arc<AppState>) -> Result<()> {
+    let _store = app.plugin_store.lock().await;
     let (slug, source) = match source {
         PluginRepoLocation::Url(url) => {
             halod_plugin_signing::fetch::https_url(&url)?;
@@ -135,6 +136,7 @@ pub async fn remove_repo(slug: String, app: Arc<AppState>) -> Result<()> {
     if slug == OFFICIAL_PLUGIN_REPO_SLUG {
         bail!("the official plugin repository cannot be removed");
     }
+    let _store = app.plugin_store.lock().await;
     let record = record(&app, &slug).await?;
     let ids = app.registry.plugins_from_repo(&slug);
     for id in &ids {
@@ -272,17 +274,26 @@ async fn selected(app: &Arc<AppState>, slug: &str, id: &str) -> Result<CatalogPa
 }
 
 pub async fn install_plugin(repo: String, id: String, app: Arc<AppState>) -> Result<()> {
-    let record = record(&app, &repo).await?;
-    let url = url_of(&record)
-        .ok_or_else(|| anyhow!("plugins in a local folder are not installed"))?
-        .to_owned();
-    let entry = selected(&app, &repo, &id).await?;
-    let stage_slug = repo.clone();
-    let staging = blocking(move || catalog::stage(&stage_slug, &url, &entry)).await?;
+    let staging = fetch_and_stage(&app, &repo, &id).await?;
     install_staged(&app, &repo, &id, staging).await
 }
 
+async fn fetch_and_stage(app: &Arc<AppState>, repo: &str, id: &str) -> Result<PathBuf> {
+    let record = record(app, repo).await?;
+    let url = url_of(&record)
+        .ok_or_else(|| anyhow!("plugins in a local folder are not installed"))?
+        .to_owned();
+    let entry = selected(app, repo, id).await?;
+    let stage_slug = repo.to_owned();
+    blocking(move || catalog::stage(&stage_slug, &url, &entry)).await
+}
+
 async fn install_staged(app: &Arc<AppState>, repo: &str, id: &str, staging: PathBuf) -> Result<()> {
+    let _store = app.plugin_store.lock().await;
+    swap_and_load(app, repo, id, staging).await
+}
+
+async fn swap_and_load(app: &Arc<AppState>, repo: &str, id: &str, staging: PathBuf) -> Result<()> {
     let mut copies: Vec<(PathBuf, PathBuf)> = remote_slugs(app)
         .await
         .into_iter()
@@ -323,6 +334,7 @@ async fn install_staged(app: &Arc<AppState>, repo: &str, id: &str, staging: Path
 
 pub async fn uninstall_plugin(id: String, app: Arc<AppState>) -> Result<()> {
     validate_identifier("plugin id", &id)?;
+    let _store = app.plugin_store.lock().await;
     let dirs: Vec<PathBuf> = remote_slugs(&app)
         .await
         .into_iter()
@@ -339,6 +351,7 @@ pub async fn uninstall_plugin(id: String, app: Arc<AppState>) -> Result<()> {
 }
 
 pub async fn update_all_plugins(app: Arc<AppState>) -> Result<()> {
+    let _store = app.plugin_store.lock().await;
     let updates: Vec<(String, String)> = {
         let catalogs = app.plugin_catalogs.lock().await;
         app.registry
@@ -360,7 +373,11 @@ pub async fn update_all_plugins(app: Arc<AppState>) -> Result<()> {
     };
     let mut failures = Vec::new();
     for (slug, id) in updates {
-        if let Err(error) = install_plugin(slug, id.clone(), Arc::clone(&app)).await {
+        let installed = match fetch_and_stage(&app, &slug, &id).await {
+            Ok(staging) => swap_and_load(&app, &slug, &id, staging).await,
+            Err(error) => Err(error),
+        };
+        if let Err(error) = installed {
             failures.push(format!("{id}: {error:#}"));
         }
     }
@@ -446,9 +463,12 @@ mod tests {
     }
 
     fn staged(slug: &str, id: &str, version: &str) -> PathBuf {
-        let staging = catalog::repo_dir(slug).join(format!(".{id}.staging-{version}"));
-        crate::test_support::write_plugin_package(&staging, id, version, "3.0");
-        staging.join(id)
+        std::fs::create_dir_all(catalog::repo_dir(slug)).unwrap();
+        let fixtures = crate::config::config_dir()
+            .join("fixtures")
+            .join(slug)
+            .join(version);
+        crate::test_support::write_plugin_package(&fixtures, id, version, "3.0")
     }
 
     #[tokio::test]
@@ -507,6 +527,46 @@ mod tests {
             assert_eq!(installed_version(&app, "demo").as_deref(), Some("2.0.0"));
             assert!(!catalog::repo_dir("official").join("demo").exists());
             assert!(!catalog::repo_dir("official").join(".demo.old").exists());
+        })
+        .await;
+    }
+
+    #[tokio::test]
+    async fn concurrent_installs_of_one_plugin_both_finish_without_leftovers() {
+        crate::test_support::with_tmp_config(|app| async move {
+            with_remote_repo(&app, "official").await;
+            install_staged(
+                &app,
+                "official",
+                "demo",
+                staged("official", "demo", "1.0.0"),
+            )
+            .await
+            .unwrap();
+            let (first, second) = tokio::join!(
+                install_staged(
+                    &app,
+                    "official",
+                    "demo",
+                    staged("official", "demo", "1.1.0")
+                ),
+                install_staged(
+                    &app,
+                    "official",
+                    "demo",
+                    staged("official", "demo", "1.2.0")
+                ),
+            );
+            first.unwrap();
+            second.unwrap();
+            assert!(installed_version(&app, "demo").is_some());
+            let leftovers: Vec<_> = std::fs::read_dir(catalog::repo_dir("official"))
+                .unwrap()
+                .flatten()
+                .map(|entry| entry.file_name().to_string_lossy().into_owned())
+                .filter(|name| name.starts_with('.'))
+                .collect();
+            assert!(leftovers.is_empty(), "{leftovers:?}");
         })
         .await;
     }
