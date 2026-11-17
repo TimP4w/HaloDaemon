@@ -757,13 +757,6 @@ impl Registry {
             .unwrap_or_default()
     }
 
-    pub(crate) fn origin(&self, plugin_id: &str) -> Option<String> {
-        self.snapshot()
-            .origins
-            .get(plugin_id)
-            .map(|origin| origin.repo.clone())
-    }
-
     pub(crate) fn plugins_from_repo(&self, slug: &str) -> Vec<String> {
         self.snapshot()
             .origins

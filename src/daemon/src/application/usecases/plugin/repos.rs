@@ -276,42 +276,36 @@ pub async fn install_plugin(repo: String, id: String, app: Arc<AppState>) -> Res
         .ok_or_else(|| anyhow!("plugins in a local folder are not installed"))?
         .to_owned();
     let entry = selected(&app, &repo, &id).await?;
-    let first_install = app.registry.origin(&id).is_none();
-    let (stage_slug, stage_entry) = (repo.clone(), entry.clone());
-    let staging = blocking(move || catalog::stage(&stage_slug, &url, &stage_entry)).await?;
-    let target = catalog::repo_dir(&repo).join(&id);
-    let backup = catalog::repo_dir(&repo).join(format!(".{id}.old"));
+    let stage_slug = repo.clone();
+    let staging = blocking(move || catalog::stage(&stage_slug, &url, &entry)).await?;
+    install_staged(&app, &repo, &id, staging).await
+}
+
+async fn install_staged(app: &Arc<AppState>, repo: &str, id: &str, staging: PathBuf) -> Result<()> {
+    let target = catalog::repo_dir(repo).join(id);
+    let backup = catalog::repo_dir(repo).join(format!(".{id}.old"));
     let (swap_target, swap_backup) = (target.clone(), backup.clone());
     blocking(move || swap_in(&staging, &swap_target, &swap_backup)).await?;
 
-    reload_registry(&app).await;
+    reload_registry(app).await;
     if let Some(problem) = app.registry.load_problem(&target) {
         let (restore_target, restore_backup) = (target.clone(), backup.clone());
         blocking(move || swap_back(&restore_target, &restore_backup)).await?;
-        reconcile_plugins(&app, std::slice::from_ref(&id)).await;
-        bail!("{id} {} failed to load: {problem}", entry.version);
+        reconcile_plugins(app, &[id.to_owned()]).await;
+        bail!("{id} failed to load: {problem}");
     }
-    let others: Vec<PathBuf> = remote_slugs(&app)
+    let others: Vec<PathBuf> = remote_slugs(app)
         .await
         .into_iter()
         .filter(|slug| *slug != repo)
-        .map(|slug| catalog::repo_dir(&slug).join(&id))
+        .map(|slug| catalog::repo_dir(&slug).join(id))
         .collect();
     blocking(move || {
         remove_dir(&backup)?;
         others.iter().try_for_each(|dir| remove_dir(dir))
     })
     .await?;
-    if first_install {
-        let mut cfg = app.config.write().await;
-        if !cfg.plugins.enabled.contains(&id) {
-            cfg.plugins.enabled.push(id.clone());
-        }
-        app.registry.replace_policy(&cfg.plugins);
-        drop(cfg);
-        app.request_config_save();
-    }
-    reconcile_plugins(&app, std::slice::from_ref(&id)).await;
+    reconcile_plugins(app, &[id.to_owned()]).await;
     Ok(())
 }
 
@@ -407,6 +401,57 @@ mod tests {
         );
         assert_eq!(slug_for("../.."), "repo");
         assert!(slug_for(&"a".repeat(200)).len() <= 64);
+    }
+
+    async fn with_remote_repo(app: &AppState, slug: &str) {
+        app.config
+            .write()
+            .await
+            .plugins
+            .repos
+            .push(PluginRepoRecord {
+                slug: slug.to_owned(),
+                source: PluginRepoSource::Url(format!("https://{slug}.example/catalog.yaml")),
+                trusted_key: None,
+            });
+    }
+
+    fn installed_from(app: &AppState, id: &str) -> Option<String> {
+        app.registry
+            .installed()
+            .into_iter()
+            .find(|(_, installed, _)| installed == id)
+            .map(|(slug, _, _)| slug)
+    }
+
+    fn staged(slug: &str, id: &str, version: &str) -> PathBuf {
+        let staging = catalog::repo_dir(slug).join(format!(".{id}.staging-{version}"));
+        crate::test_support::write_plugin_package(&staging, id, version, "3.0");
+        staging.join(id)
+    }
+
+    #[tokio::test]
+    async fn first_install_leaves_the_plugin_disabled_until_confirmed() {
+        crate::test_support::with_tmp_config(|app| async move {
+            with_remote_repo(&app, "official").await;
+            install_staged(
+                &app,
+                "official",
+                "demo",
+                staged("official", "demo", "1.0.0"),
+            )
+            .await
+            .unwrap();
+            assert_eq!(installed_from(&app, "demo").as_deref(), Some("official"));
+            assert!(!app
+                .config
+                .read()
+                .await
+                .plugins
+                .enabled
+                .contains(&"demo".to_owned()));
+        })
+        .await;
     }
 
     fn dir_with(path: &Path, marker: &str) {

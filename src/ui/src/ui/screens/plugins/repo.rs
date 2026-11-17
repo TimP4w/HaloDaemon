@@ -150,7 +150,11 @@ impl PluginsUi {
                 });
                 ipc::send(cmd, DaemonCommand::RefreshPluginRepos);
             }
-            RepoAction::Install(id) => self.install(now, cmd, &r.slug, &id),
+            RepoAction::Install(id) => {
+                self.enable_prompt.request(&id);
+                self.install(now, cmd, &r.slug, &id);
+            }
+            RepoAction::Update(id) => self.install(now, cmd, &r.slug, &id),
             RepoAction::Delete => self.pending_repo_delete = Some(r.slug.clone()),
         }
     }
@@ -519,6 +523,7 @@ pub(super) enum RepoAction {
     SelectPlugin(String),
     Refresh,
     Install(String),
+    Update(String),
     Delete,
 }
 
@@ -704,7 +709,7 @@ pub(super) fn repo_detail_body(
                 .layout(egui::Layout::right_to_left(egui::Align::Center)),
         );
         let installing = view.installing.contains_key(entry.id);
-        let mut clicked = false;
+        let mut clicked = None;
         match entry.action() {
             Some(EntryAction::NeedsNewerDaemon) => {
                 right.label(
@@ -722,15 +727,20 @@ pub(super) fn repo_detail_body(
                 let size = Vec2::new(90.0, 28.0);
                 if installing {
                     widgets::button_loading(&mut right, &label, ButtonKind::Secondary, size);
-                } else {
-                    clicked =
-                        widgets::button(&mut right, &label, ButtonKind::Secondary, size).clicked();
+                } else if widgets::button(&mut right, &label, ButtonKind::Secondary, size).clicked()
+                {
+                    clicked = Some(kind);
                 }
             }
             None => {}
         }
-        if clicked {
-            action = Some(RepoAction::Install(entry.id.to_owned()));
+        if let Some(kind) = clicked {
+            let id = entry.id.to_owned();
+            action = Some(if kind == EntryAction::Install {
+                RepoAction::Install(id)
+            } else {
+                RepoAction::Update(id)
+            });
         } else if resp.clicked() && entry.installed.is_some() {
             action = Some(RepoAction::SelectPlugin(entry.id.to_owned()));
         }
@@ -899,5 +909,33 @@ mod tests {
         ));
         ui.apply_repo_action(3.0, &cmd, &r, RepoAction::Delete);
         assert_eq!(ui.pending_repo_delete.as_deref(), Some("acme"));
+    }
+
+    fn offered(ui: &mut PluginsUi, plugins: &[PluginInfo]) -> Option<String> {
+        ui.enable_prompt
+            .current(plugins)
+            .map(|plugin| plugin.id.clone())
+    }
+
+    #[test]
+    fn installing_offers_the_enable_prompt_once_the_plugin_arrives_disabled() {
+        let (cmd, _rx) = tokio::sync::mpsc::unbounded_channel();
+        let mut ui = PluginsUi::default();
+        ui.apply_repo_action(1.0, &cmd, &repo("acme"), RepoAction::Install("p".into()));
+        assert_eq!(offered(&mut ui, &[]), None);
+        let arrived = [info("p", false)];
+        assert_eq!(offered(&mut ui, &arrived).as_deref(), Some("p"));
+    }
+
+    #[test]
+    fn updating_never_offers_the_enable_prompt() {
+        let (cmd, mut rx) = tokio::sync::mpsc::unbounded_channel();
+        let mut ui = PluginsUi::default();
+        ui.apply_repo_action(1.0, &cmd, &repo("acme"), RepoAction::Update("p".into()));
+        assert!(matches!(
+            rx.try_recv(),
+            Ok(DaemonCommand::InstallPlugin { id, .. }) if id == "p"
+        ));
+        assert_eq!(offered(&mut ui, &[info("p", false)]), None);
     }
 }

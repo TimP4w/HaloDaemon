@@ -2,6 +2,8 @@
 #![cfg(test)]
 //! Shared mock device + builders for unit tests. Test-only.
 
+use std::path::{Path, PathBuf};
+
 use crate::application::state::AppState;
 use crate::config::Config;
 use crate::domain::cooling::model::FanCurveRecord;
@@ -98,6 +100,18 @@ where
 pub struct TmpConfigDir {
     _dir: tempfile::TempDir,
     _guard: parking_lot::MutexGuard<'static, ()>,
+}
+
+pub fn write_plugin_package(root: &Path, id: &str, version: &str, api: &str) -> PathBuf {
+    let package = root.join(id);
+    std::fs::create_dir_all(&package).unwrap();
+    std::fs::write(
+        package.join("plugin.yaml"),
+        format!("id: {id}\nversion: {version}\napi: \"{api}\"\ntype: integration\ntransports:\n  command:\n    commands: [nvidia-smi]\n"),
+    )
+    .unwrap();
+    std::fs::write(package.join("main.lua"), "return {}\n").unwrap();
+    package
 }
 
 pub fn tmp_config_dir() -> TmpConfigDir {

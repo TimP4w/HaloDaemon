@@ -329,14 +329,7 @@ fn command_manifest(commands: &[&str]) -> super::PluginManifest {
 }
 
 fn write_plugin(root: &std::path::Path, id: &str, api: &str) {
-    let package = root.join(id);
-    std::fs::create_dir_all(&package).unwrap();
-    std::fs::write(
-        package.join("plugin.yaml"),
-        format!("id: {id}\nversion: 1.0.0\napi: \"{api}\"\ntype: integration\ntransports:\n  command:\n    commands: [nvidia-smi]\n"),
-    )
-    .unwrap();
-    std::fs::write(package.join("main.lua"), "return {}\n").unwrap();
+    test_support::write_plugin_package(root, id, "1.0.0", api);
 }
 
 #[test]
@@ -388,7 +381,7 @@ fn an_incompatible_api_is_listed_but_not_loaded() {
     let registry = super::Registry::default();
     registry.load_dir(root.path());
 
-    assert!(registry.origin("future").is_none());
+    assert!(registry.installed().is_empty());
     let issue = registry
         .list(&FileKeyStore::new())
         .pop()
