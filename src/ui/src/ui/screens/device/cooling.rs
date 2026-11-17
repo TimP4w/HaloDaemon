@@ -10,15 +10,14 @@ use halod_shared::types::{
 };
 
 use super::{editing, DeviceUi, TabCtx};
+use crate::domain::tour;
+use crate::domain::tour::AnchorId;
+use crate::runtime::ipc;
 use crate::ui::screens::cooling::preset_display_name;
 use crate::ui::theme;
 
 pub fn show(ui: &mut egui::Ui, ctx: &TabCtx, st: &mut DeviceUi) {
-    crate::domain::tour::anchor(
-        ui.ctx(),
-        crate::domain::tour::AnchorId::TabCooling,
-        ui.max_rect(),
-    );
+    tour::anchor(ui.ctx(), AnchorId::TabCooling, ui.max_rect());
     let all_channels = visible_cooling_channels(ctx.dev, true);
     let has_hidden = all_channels.len() > cooling_channels(ctx.dev).len();
     let channels = visible_cooling_channels(ctx.dev, st.cooling.show_hidden);
@@ -100,7 +99,7 @@ pub fn show(ui: &mut egui::Ui, ctx: &TabCtx, st: &mut DeviceUi) {
                                 (t!("cooling.disable_channel"), VisibilityState::Disabled)
                             };
                             if widgets::context_menu_item(ui, &label, theme::TEXT).clicked() {
-                                crate::runtime::ipc::send(
+                                ipc::send(
                                     ctx.cmd,
                                     DaemonCommand::SetChannelVisibility {
                                         device_id: ctx.dev.id.clone(),
@@ -179,11 +178,7 @@ fn top_row(
             let mut pick: Option<Option<String>> = None;
             let sensor_combo_rect =
                 Rect::from_min_size(ui.cursor().min, Vec2::new(ui.available_width(), 28.0));
-            crate::domain::tour::anchor(
-                ui.ctx(),
-                crate::domain::tour::AnchorId::CoolingSensor,
-                sensor_combo_rect,
-            );
+            tour::anchor(ui.ctx(), AnchorId::CoolingSensor, sensor_combo_rect);
             let options: Vec<(String, String)> = sensors
                 .iter()
                 .map(|(d, s)| (s.id.clone(), format!("{d} · {} ({:.0}°C)", s.name, s.value)))
@@ -201,7 +196,7 @@ fn top_row(
             if let Some(sel) = pick {
                 st.cooling.curve_sensor = sel;
                 st.last_edit = ctx.time;
-                crate::runtime::ipc::send(
+                ipc::send(
                     ctx.cmd,
                     curve_points_command(
                         ctx.dev.id.clone(),
@@ -283,11 +278,7 @@ fn curve_card(
                         .unwrap_or(usize::MAX);
                     let seg = ui.scope(|ui| widgets::segmented(ui, &labels, &mut idx, false));
                     let pick = seg.inner.then(|| presets.get(idx)).flatten();
-                    crate::domain::tour::anchor(
-                        ui.ctx(),
-                        crate::domain::tour::AnchorId::CoolingPreset,
-                        seg.response.rect,
-                    );
+                    tour::anchor(ui.ctx(), AnchorId::CoolingPreset, seg.response.rect);
                     if let Some(p) = pick {
                         st.cooling.curve = p.points.clone();
                         st.last_edit = ctx.time;
@@ -330,11 +321,7 @@ fn curve_card(
             Pos2::new(outer.left() + 40.0, outer.top() + 8.0),
             Pos2::new(outer.right() - 6.0, outer.bottom() - 22.0),
         );
-        crate::domain::tour::anchor(
-            ui.ctx(),
-            crate::domain::tour::AnchorId::CoolingCurveEditor,
-            plot,
-        );
+        tour::anchor(ui.ctx(), AnchorId::CoolingCurveEditor, plot);
         // Y axis (duty %) and X axis (°C) labels.
         for i in 0..=4 {
             let frac = i as f32 / 4.0;

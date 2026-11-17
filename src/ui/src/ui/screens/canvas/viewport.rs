@@ -21,6 +21,8 @@ use super::geometry::{
 use super::rack::{rgb_zone_descriptor, ring_zone_context_menu};
 use super::{CanvasUi, DragState, Handle, LedMode, MarqueeState, HANDLE_HIT_R, HANDLE_R};
 
+use crate::domain::tour;
+use crate::domain::tour::AnchorId;
 /// Screen position of the rotation handle — delegated to the shared widget helper.
 use widgets::rotation_handle_pos;
 
@@ -33,7 +35,7 @@ pub(super) fn canvas_view(
     time: f64,
     outer: Rect,
 ) {
-    crate::domain::tour::anchor(ui.ctx(), crate::domain::tour::AnchorId::CanvasStage, outer);
+    tour::anchor(ui.ctx(), AnchorId::CanvasStage, outer);
     let stage = Rect::from_min_max(
         outer.min + Vec2::new(14.0, 64.0),
         outer.max - Vec2::new(14.0, 36.0),

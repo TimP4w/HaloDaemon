@@ -8,6 +8,9 @@ use halod_shared::types::{FanCurveStatus, PluginIssueKind, UdevRulesStatus};
 use crate::domain::models::device as model;
 use crate::domain::models::udev::udev_rules_need_action;
 use crate::domain::state::Page;
+use crate::domain::tour;
+use crate::domain::tour::AnchorId;
+use crate::ui::screens::plugin_integration;
 use crate::ui::theme::{self, a};
 
 const NAV: [Page; 5] = [
@@ -26,7 +29,7 @@ pub fn plugins_needing_action(state: &TopicStore) -> usize {
         .iter()
         .filter(|p| {
             p.health.issue.is_some()
-                || crate::ui::screens::plugin_integration::awaits_setup(p)
+                || plugin_integration::awaits_setup(p)
                 || crate::ui::screens::plugins::update_for(p, &state.plugins.available).is_some()
         })
         .count()
@@ -169,13 +172,13 @@ pub fn nav_tabs(
             *page = target.clone();
         }
         let anchor = match target {
-            Page::Lighting => crate::domain::tour::AnchorId::HomeSidebarLighting,
-            Page::Cooling => crate::domain::tour::AnchorId::HomeSidebarCooling,
-            Page::Plugins => crate::domain::tour::AnchorId::HomeSidebarPlugins,
-            Page::Settings => crate::domain::tour::AnchorId::HomeSidebarSettings,
-            _ => crate::domain::tour::AnchorId::HomeSidebarHome,
+            Page::Lighting => AnchorId::HomeSidebarLighting,
+            Page::Cooling => AnchorId::HomeSidebarCooling,
+            Page::Plugins => AnchorId::HomeSidebarPlugins,
+            Page::Settings => AnchorId::HomeSidebarSettings,
+            _ => AnchorId::HomeSidebarHome,
         };
-        crate::domain::tour::anchor(ui.ctx(), anchor, *rect);
+        tour::anchor(ui.ctx(), anchor, *rect);
     }
     rects.last().map_or(left, |r| r.right())
 }

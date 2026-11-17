@@ -3,6 +3,7 @@
 
 use egui::{Pos2, Rect, Stroke, Vec2};
 
+use crate::ui::screens::settings;
 use crate::ui::theme;
 
 /// Inner margin of every modal frame; the close × is inset from the frame edge.
@@ -224,7 +225,7 @@ pub fn issue_modal(ctx: &egui::Context, id: &str, title: &str, detail: &str) -> 
             }
             let copied_at = ui.ctx().data(|d| d.get_temp::<f64>(copied_key));
             let now = ui.ctx().input(|i| i.time);
-            if crate::ui::screens::settings::copied_feedback_visible(copied_at, now) {
+            if settings::copied_feedback_visible(copied_at, now) {
                 ui.add_space(theme::SPACE_5);
                 ui.label(
                     egui::RichText::new(t!("plugins.issue_copied"))

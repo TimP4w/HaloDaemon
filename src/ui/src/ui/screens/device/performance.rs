@@ -7,14 +7,12 @@ use halod_shared::commands::{DaemonCommand, DeviceOp};
 use halod_shared::types::{DeviceCapability, DpiStatus};
 
 use super::{editing, DeviceUi, TabCtx};
+use crate::domain::tour;
+use crate::domain::tour::AnchorId;
 use crate::ui::theme;
 
 pub fn show(ui: &mut egui::Ui, ctx: &TabCtx, st: &mut DeviceUi) {
-    crate::domain::tour::anchor(
-        ui.ctx(),
-        crate::domain::tour::AnchorId::TabPerformance,
-        ui.max_rect(),
-    );
+    tour::anchor(ui.ctx(), AnchorId::TabPerformance, ui.max_rect());
     let Some(dpi) = ctx.dev.capabilities.iter().find_map(|c| match c {
         DeviceCapability::Dpi(d) => Some(d.clone()),
         _ => None,

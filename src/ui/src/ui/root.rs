@@ -5,14 +5,39 @@
 
 use crate::app::App;
 use crate::domain;
+use crate::domain::native_notification;
 use crate::domain::state::Page;
+use crate::runtime::ipc;
+use crate::ui::components;
+use crate::ui::components::toast::ToastEvent;
+use crate::ui::screens::canvas;
+use crate::ui::screens::cooling;
+use crate::ui::screens::depcheck;
+use crate::ui::screens::depcheck::GraceAction;
+use crate::ui::screens::device;
+use crate::ui::screens::device::DeviceUi;
+use crate::ui::screens::device::FrameCtx;
+use crate::ui::screens::home;
+use crate::ui::screens::onboarding;
+use crate::ui::screens::onboarding::Outcome;
+use crate::ui::screens::plugins::PluginsCtx;
+use crate::ui::screens::profile;
+use crate::ui::screens::settings;
+use crate::ui::screens::startup;
+use crate::ui::shell;
+use crate::ui::theme;
+use crate::ui::theme::BORDER;
+use crate::ui::theme::MAIN_BG;
+use crate::ui::theme::RADIUS_LG;
+use crate::ui::theme::SIDEBAR_BG;
+use crate::ui::theme::TITLE_BG;
 
 const DEPCHECK_GRACE_SECS: f64 = 4.0;
 
 impl App {
     pub(crate) fn sync_state(&mut self) {
         if self.ui.state.poll() {
-            crate::ui::screens::settings::apply_locale(&self.ui.state.get().gui.language);
+            settings::apply_locale(&self.ui.state.get().gui.language);
         }
     }
 
@@ -44,12 +69,7 @@ impl App {
                 .debug
                 .get()
                 .as_ref()
-                .map(|i| {
-                    crate::ui::screens::depcheck::failing(i)
-                        .iter()
-                        .map(|d| d.id)
-                        .collect()
-                })
+                .map(|i| depcheck::failing(i).iter().map(|d| d.id).collect())
                 .unwrap_or_default();
             self.depcheck_grace.observe(&failing);
         }
@@ -95,9 +115,7 @@ impl App {
                 )
             });
         let lcd_upload = self.ui.lcd_upload.get().clone();
-        if let Some(template) =
-            crate::runtime::ipc::take_changed(&mut self.ui.lcd_template, "lcd_template")
-        {
+        if let Some(template) = ipc::take_changed(&mut self.ui.lcd_template, "lcd_template") {
             self.pending_lcd_template = template;
         }
         let lcd_template = self.pending_lcd_template.take();
@@ -110,14 +128,14 @@ impl App {
             self.depcheck_grace
                 .advance(connected, time, DEPCHECK_GRACE_SECS);
         match grace_action {
-            crate::ui::screens::depcheck::GraceAction::Recheck => crate::runtime::ipc::send(
+            GraceAction::Recheck => ipc::send(
                 &self.cmd,
                 halod_shared::commands::DaemonCommand::GetDebugInfo,
             ),
-            crate::ui::screens::depcheck::GraceAction::RepaintAfter(secs) => {
+            GraceAction::RepaintAfter(secs) => {
                 ctx.request_repaint_after(std::time::Duration::from_secs_f64(secs));
             }
-            crate::ui::screens::depcheck::GraceAction::None => {}
+            GraceAction::None => {}
         }
 
         // Move any daemon-pushed notifications into the toast stack.
@@ -139,16 +157,16 @@ impl App {
             });
         }
         self.plugins_ui.observe_notifications(&incoming);
-        crate::ui::screens::profile::observe_notifications(&mut self.profile_ui, &incoming);
+        profile::observe_notifications(&mut self.profile_ui, &incoming);
         self.toasts.ingest(incoming, time);
 
         if self.page == Page::Lighting {
             if let Some(frame) = canvas_frame {
-                crate::ui::screens::canvas::ingest_frame(ctx, &mut self.canvas_ui, frame);
+                canvas::ingest_frame(ctx, &mut self.canvas_ui, frame);
             }
         } else if matches!(self.page, Page::Device(_)) {
             if let Some(frame) = canvas_frame {
-                crate::ui::screens::canvas::ingest_led_colors(&mut self.canvas_ui, frame);
+                canvas::ingest_led_colors(&mut self.canvas_ui, frame);
             }
         }
 
@@ -188,7 +206,7 @@ impl App {
         }
 
         if !self.entered {
-            if crate::ui::screens::startup::show(ui, &state, connected) {
+            if startup::show(ui, &state, connected) {
                 self.entered = true;
             }
             ctx.request_repaint();
@@ -197,11 +215,8 @@ impl App {
 
         // Prevent desktop bleed-through under transparent panels.
         let screen = ui.max_rect();
-        ctx.layer_painter(egui::LayerId::background()).rect_filled(
-            screen,
-            crate::ui::theme::RADIUS_LG,
-            crate::ui::theme::SIDEBAR_BG,
-        );
+        ctx.layer_painter(egui::LayerId::background())
+            .rect_filled(screen, RADIUS_LG, SIDEBAR_BG);
 
         // Repaint bottom-right rounded corner, which egui's scrollbar would
         // otherwise square off.
@@ -220,12 +235,12 @@ impl App {
                 sw: 0,
                 se: 12,
             },
-            crate::ui::theme::MAIN_BG,
+            MAIN_BG,
         );
         border.rect_stroke(
             screen,
-            crate::ui::theme::RADIUS_LG,
-            egui::Stroke::new(1.0, crate::ui::theme::BORDER),
+            RADIUS_LG,
+            egui::Stroke::new(1.0, BORDER),
             egui::StrokeKind::Inside,
         );
 
@@ -243,9 +258,9 @@ impl App {
                         sw: 0,
                         se: 0,
                     },
-                    crate::ui::theme::TITLE_BG,
+                    TITLE_BG,
                 );
-                crate::ui::shell::title_bar(
+                shell::title_bar(
                     ui,
                     &state,
                     &self.cmd,
@@ -299,13 +314,13 @@ impl App {
                         sw: 12,
                         se: 12,
                     },
-                    crate::ui::theme::MAIN_BG,
+                    MAIN_BG,
                 );
-                crate::ui::theme::top_right_halo(ui.painter(), ui.max_rect(), time as f32);
+                theme::top_right_halo(ui.painter(), ui.max_rect(), time as f32);
                 ctx.request_repaint_after(std::time::Duration::from_millis(33));
                 match &self.page {
                     Page::Home => {
-                        crate::ui::screens::home::show(
+                        home::show(
                             ui,
                             &state,
                             &self.cmd,
@@ -318,7 +333,7 @@ impl App {
                     }
                     Page::Device(id) => {
                         let id = id.clone();
-                        let frame = crate::ui::screens::device::FrameCtx {
+                        let frame = FrameCtx {
                             state: &state,
                             cmd: &self.cmd,
                             time,
@@ -333,22 +348,10 @@ impl App {
                             write_rate_history: &self.write_rate_history,
                             plugin_assets: &plugin_assets,
                         };
-                        crate::ui::screens::device::show(
-                            ui,
-                            frame,
-                            &id,
-                            &mut self.device_ui,
-                            &mut self.page,
-                        );
+                        device::show(ui, frame, &id, &mut self.device_ui, &mut self.page);
                     }
                     Page::Cooling => {
-                        crate::ui::screens::cooling::show(
-                            ui,
-                            &state,
-                            &self.cmd,
-                            &mut self.page,
-                            &mut self.cooling_ui,
-                        );
+                        cooling::show(ui, &state, &self.cmd, &mut self.page, &mut self.cooling_ui);
                     }
                     Page::Lighting => {
                         crate::ui::screens::lighting::show(
@@ -367,7 +370,7 @@ impl App {
                         self.effect_designer_ui.show(ui, &self.cmd, &mut self.page);
                     }
                     Page::Settings => {
-                        crate::ui::screens::settings::show(
+                        settings::show(
                             ui,
                             &state,
                             &self.cmd,
@@ -380,12 +383,12 @@ impl App {
                     Page::Plugins => {
                         if !self.serial_ports_requested {
                             self.serial_ports_requested = true;
-                            crate::runtime::ipc::send(
+                            ipc::send(
                                 &self.cmd,
                                 halod_shared::commands::DaemonCommand::ListSerialPorts,
                             );
                         }
-                        let cx = crate::ui::screens::plugins::PluginsCtx {
+                        let cx = PluginsCtx {
                             state: &state,
                             cmd: &self.cmd,
                             assets: &plugin_assets,
@@ -396,7 +399,7 @@ impl App {
                     }
                     Page::Profile(name) => {
                         let name = name.clone();
-                        crate::ui::screens::profile::show(
+                        profile::show(
                             ui,
                             &state,
                             &self.cmd,
@@ -409,17 +412,12 @@ impl App {
                 }
                 // Daemon-down scrim over the whole content area.
                 if !connected {
-                    crate::ui::shell::daemon_overlay(ui);
+                    shell::daemon_overlay(ui);
                 }
 
                 // Modal overlays rendered unconditionally so they work from any page.
                 if !tour_active && !onboarding_active {
-                    crate::ui::screens::profile::add_modal(
-                        ui.ctx(),
-                        &state,
-                        &self.cmd,
-                        &mut self.profile_ui,
-                    );
+                    profile::add_modal(ui.ctx(), &state, &self.cmd, &mut self.profile_ui);
                 }
             });
 
@@ -432,20 +430,14 @@ impl App {
             let recs = &state.plugins.recommendations;
             onboarding_shown = true;
             self.depcheck_ui.dismiss_for_session();
-            let outcome = crate::ui::screens::onboarding::show(
-                ctx,
-                &state,
-                debug,
-                &self.cmd,
-                &mut self.onboarding_ui,
-                time,
-            );
+            let outcome =
+                onboarding::show(ctx, &state, debug, &self.cmd, &mut self.onboarding_ui, time);
             for id in self.onboarding_ui.take_enable_requests() {
                 self.plugins_ui.enable_prompt.request(&id);
             }
-            if !matches!(outcome, crate::ui::screens::onboarding::Outcome::Pending) {
+            if !matches!(outcome, Outcome::Pending) {
                 self.onboarding_completed = true;
-                crate::runtime::ipc::send(
+                ipc::send(
                     &self.cmd,
                     MarkTourSeen {
                         tour: plugins_screen::ONBOARDING_KEY.to_string(),
@@ -454,7 +446,7 @@ impl App {
                 for rec in recs {
                     let key = plugins_screen::recommendation_key(rec);
                     self.recommendation_toasted.insert(key.clone());
-                    crate::runtime::ipc::send(&self.cmd, MarkTourSeen { tour: key });
+                    ipc::send(&self.cmd, MarkTourSeen { tour: key });
                 }
             }
         }
@@ -463,7 +455,7 @@ impl App {
             .show_enable_prompt(ctx, &state.plugins.plugins, &self.cmd);
 
         if !onboarding_shown && !tour_active {
-            crate::ui::screens::depcheck::show(
+            depcheck::show(
                 ctx,
                 &state,
                 &self.cmd,
@@ -475,13 +467,7 @@ impl App {
         }
         let depcheck_visible = !onboarding_shown
             && !tour_active
-            && crate::ui::screens::depcheck::visible(
-                &state,
-                debug,
-                connected,
-                within_grace,
-                &self.depcheck_ui,
-            );
+            && depcheck::visible(&state, debug, connected, within_grace, &self.depcheck_ui);
 
         if !onboarding_shown && !tour_active && !depcheck_visible {
             use crate::ui::screens::plugins as plugins_screen;
@@ -495,7 +481,7 @@ impl App {
             if !toasts.is_empty() {
                 let mut notifications = Vec::with_capacity(toasts.len());
                 for (key, notification) in toasts {
-                    crate::runtime::ipc::send(&self.cmd, MarkTourSeen { tour: key });
+                    ipc::send(&self.cmd, MarkTourSeen { tour: key });
                     notifications.push(notification);
                 }
                 show_native_notifications(&notifications);
@@ -516,7 +502,7 @@ impl App {
         // Toasts overlay everything, including the daemon-down scrim.
         if let Some(event) = self.toasts.show(ctx) {
             match event {
-                crate::ui::components::toast::ToastEvent::Details(note) => {
+                ToastEvent::Details(note) => {
                     if let Some(detail) = note.code.detail() {
                         let (title, _) =
                             crate::domain::models::notifications::notification_text(&note.code);
@@ -526,11 +512,7 @@ impl App {
             }
         }
         if !domain::tour::is_active(&self.tour) && !onboarding_active {
-            crate::ui::components::issue_modal_slot(
-                ctx,
-                "issue_details",
-                &mut self.issue_details_modal,
-            );
+            components::issue_modal_slot(ctx, "issue_details", &mut self.issue_details_modal);
         }
     }
 }
@@ -542,7 +524,7 @@ pub(crate) fn show_native_notifications(notifications: &[halod_shared::types::No
         }
         let (title, message) =
             crate::domain::models::notifications::notification_text(&notification.code);
-        crate::domain::native_notification::show(&title, &message, notification.code.severity());
+        native_notification::show(&title, &message, notification.code.severity());
     }
 }
 
@@ -551,7 +533,7 @@ pub(crate) fn show_native_notifications(notifications: &[halod_shared::types::No
 /// priority over any tab tour until it's been seen.
 fn tour_key_for(
     page: &Page,
-    device_ui: &crate::ui::screens::device::DeviceUi,
+    device_ui: &DeviceUi,
     lighting_tab: usize,
     tour_state: &domain::tour::TourState,
     daemon_seen: &std::collections::BTreeSet<String>,

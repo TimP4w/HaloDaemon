@@ -9,6 +9,10 @@ use halod_shared::types::{DeviceCapability, PairingSlot, PairingState, PairingSt
 use super::TabCtx;
 use crate::domain::models::device as model;
 use crate::domain::state::Page;
+use crate::domain::tour;
+use crate::domain::tour::AnchorId;
+use crate::runtime::ipc;
+use crate::ui::icons;
 use crate::ui::theme;
 
 pub fn show(ui: &mut egui::Ui, ctx: &TabCtx, page: &mut Page) {
@@ -43,11 +47,7 @@ pub fn show(ui: &mut egui::Ui, ctx: &TabCtx, page: &mut Page) {
             }
         });
     });
-    crate::domain::tour::anchor(
-        ui.ctx(),
-        crate::domain::tour::AnchorId::TabChildrenList,
-        card.response.rect,
-    );
+    tour::anchor(ui.ctx(), AnchorId::TabChildrenList, card.response.rect);
 }
 
 /// The shared card shell of the child-device and pairing-slot lists: `CARD_BG`
@@ -84,7 +84,7 @@ fn child_row(ui: &mut egui::Ui, d: &WireDevice) -> bool {
     let badge_rect = Rect::from_center_size(Pos2::new(row.left() + 35.0, cy), Vec2::splat(34.0));
     p.rect_filled(badge_rect, 8.0, theme::TILE_BG);
     let glyph = Rect::from_center_size(badge_rect.center(), Vec2::splat(20.0));
-    crate::ui::icons::draw_device(p, glyph, d.device_type, theme::TEXT_DIM);
+    icons::draw_device(p, glyph, d.device_type, theme::TEXT_DIM);
     p.text(
         Pos2::new(badge_rect.right() + 12.0, cy),
         Align2::LEFT_CENTER,
@@ -118,11 +118,7 @@ pub fn pairing(ui: &mut egui::Ui, ctx: &TabCtx) {
             slots_panel(&mut cols[1], &id, ctx, &ps);
         });
     });
-    crate::domain::tour::anchor(
-        ui.ctx(),
-        crate::domain::tour::AnchorId::TabPairing,
-        cols_resp.response.rect,
-    );
+    tour::anchor(ui.ctx(), AnchorId::TabPairing, cols_resp.response.rect);
 }
 
 const PAIR_TIMEOUT_SECS: u8 = 30;
@@ -217,7 +213,7 @@ fn receiver_panel(ui: &mut egui::Ui, id: &str, ctx: &TabCtx, ps: &PairingStatus,
                 .clicked()
                 {
                     ui.ctx().data_mut(|d| d.insert_temp(cancel_key, true));
-                    crate::runtime::ipc::send(
+                    ipc::send(
                         ctx.cmd,
                         halod_shared::commands::DaemonCommand::Device {
                             device_id: id.to_string(),
@@ -241,7 +237,7 @@ fn receiver_panel(ui: &mut egui::Ui, id: &str, ctx: &TabCtx, ps: &PairingStatus,
                 .clicked()
                 {
                     ui.ctx().data_mut(|d| d.remove::<bool>(cancel_key));
-                    crate::runtime::ipc::send(
+                    ipc::send(
                         ctx.cmd,
                         halod_shared::commands::DaemonCommand::Device {
                             device_id: id.to_string(),
@@ -332,7 +328,7 @@ fn pair_slot_row(
     )
     .clicked()
     {
-        crate::runtime::ipc::send(
+        ipc::send(
             ctx.cmd,
             halod_shared::commands::DaemonCommand::Device {
                 device_id: id.to_string(),

@@ -7,9 +7,15 @@
 use crate::domain::topic_store::TopicStore;
 use egui::{Color32, Pos2, Rect, Sense, Stroke, Vec2};
 
+use crate::domain::lifecycle;
 use crate::domain::state::Page;
+use crate::domain::tour;
+use crate::domain::tour::AnchorId;
 use crate::runtime::ipc::CommandTx;
+use crate::ui::components::toast::Toasts;
 use crate::ui::screens::profile;
+use crate::ui::screens::settings;
+use crate::ui::screens::settings::LOG_FILE;
 use crate::ui::theme::{self, a};
 
 /// Window-chrome style for the title-bar controls, auto-detected per OS so the
@@ -481,7 +487,7 @@ pub fn title_bar(
     profile_ui: &mut profile::ProfileUi,
     page: &mut Page,
     udev_status: Option<&halod_shared::types::UdevRulesStatus>,
-    toasts: &mut crate::ui::components::toast::Toasts,
+    toasts: &mut Toasts,
 ) {
     let rect = ui.max_rect();
     let cy = rect.center().y;
@@ -496,11 +502,7 @@ pub fn title_bar(
     };
     let btn_rect = profile::title_button(ui, state, profile_ui, profile_right, cy);
     super::bell::bell(ui, btn_rect.left() - 20.0, cy, toasts);
-    crate::domain::tour::anchor(
-        ui.ctx(),
-        crate::domain::tour::AnchorId::HomeProfile,
-        btn_rect,
-    );
+    tour::anchor(ui.ctx(), AnchorId::HomeProfile, btn_rect);
 
     // Dropdown rendered as a Foreground Area (must be called every frame)
     profile::title_dropdown(ui.ctx(), state, cmd, profile_ui, page, btn_rect);
@@ -554,12 +556,12 @@ pub fn daemon_overlay(ui: &mut egui::Ui) {
                     let size = Vec2::new(0.0, 36.0);
                     use crate::ui::components::{button, ButtonKind};
                     if button(ui, &t!("shell.start_daemon"), ButtonKind::Primary, size).clicked() {
-                        crate::domain::lifecycle::ensure_daemon_up();
+                        lifecycle::ensure_daemon_up();
                     }
                     if button(ui, &t!("shell.open_log"), ButtonKind::Secondary, size).clicked() {
-                        crate::ui::screens::settings::open_path(
+                        settings::open_path(
                             &halod_shared::app::config_dir()
-                                .join(crate::ui::screens::settings::LOG_FILE)
+                                .join(LOG_FILE)
                                 .display()
                                 .to_string(),
                         );

@@ -25,8 +25,17 @@ use halod_shared::debug_info::DebugInfo;
 use halod_shared::types::{ButtonAction, EffectParamValue, RgbColor, WireDevice};
 
 use crate::domain::models::device_tabs::{realign_tab, tab_label, tabs_for, TabKind};
+use crate::domain::state::Debouncer;
 use crate::domain::state::Page;
+use crate::domain::tour::AnchorId;
 use crate::runtime::ipc::CommandTx;
+use crate::runtime::ipc::DecodedEditorRender;
+use crate::runtime::ipc::DecodedFrame;
+use crate::ui::components;
+use crate::ui::screens::canvas::LedColorMap;
+use crate::ui::theme::SPACE_2;
+use crate::ui::theme::SPACE_6;
+use crate::ui::theme::SPACE_8;
 use header::header;
 
 /// Debounce window for coalesced slider/curve/paint commands.
@@ -49,7 +58,7 @@ pub struct DeviceUi {
     pub scratch: HashMap<String, f32>,
     /// Debounced outbound commands. Flushed by [`flush_pending`] once the
     /// user pauses.
-    pub pending: crate::domain::state::Debouncer,
+    pub pending: Debouncer,
     /// Whether a `GetDebugInfo` snapshot has been requested for this device.
     pub debug_requested: bool,
     /// Last time (egui seconds) the user touched an edit buffer.
@@ -345,12 +354,12 @@ pub struct FrameCtx<'a> {
     pub time: f64,
     pub debug: Option<&'a DebugInfo>,
     pub lcd_images: &'a [String],
-    pub lcd_preview: Option<crate::runtime::ipc::DecodedFrame>,
+    pub lcd_preview: Option<DecodedFrame>,
     pub lcd_upload: Option<halod_shared::types::LcdUploadProgress>,
     pub lcd_upload_terminal: Option<halod_shared::types::LcdUploadProgress>,
     pub lcd_template: Option<(String, halod_shared::lcd_custom::CustomTemplateDef)>,
-    pub lcd_editor_render: Option<crate::runtime::ipc::DecodedEditorRender>,
-    pub led_colors: &'a crate::ui::screens::canvas::LedColorMap,
+    pub lcd_editor_render: Option<DecodedEditorRender>,
+    pub led_colors: &'a LedColorMap,
     pub write_rate_history: &'a HashMap<String, std::collections::VecDeque<f32>>,
     pub plugin_assets: &'a HashMap<String, Vec<u8>>,
 }
@@ -364,7 +373,7 @@ pub struct TabCtx<'a> {
     pub debug: Option<&'a DebugInfo>,
     pub lcd_images: &'a [String],
     /// Latest engine-rendered LCD preview for the open device (pre-decoded RGBA).
-    pub lcd_preview: Option<crate::runtime::ipc::DecodedFrame>,
+    pub lcd_preview: Option<DecodedFrame>,
     /// Stage/percent of the in-flight LCD image upload; `None` when idle.
     pub lcd_upload: Option<halod_shared::types::LcdUploadProgress>,
     /// A terminal (`Done`/`Failed`) upload signal, delivered as a one-shot edge:
@@ -374,9 +383,9 @@ pub struct TabCtx<'a> {
     pub lcd_template: Option<(String, halod_shared::lcd_custom::CustomTemplateDef)>,
     /// Latest on-demand LCD editor render (per-widget sprites) for the open
     /// device; the custom-template editor composites these.
-    pub lcd_editor_render: Option<crate::runtime::ipc::DecodedEditorRender>,
+    pub lcd_editor_render: Option<DecodedEditorRender>,
     /// Live per-LED colors from the latest canvas frame (lighting preview).
-    pub led_colors: &'a crate::ui::screens::canvas::LedColorMap,
+    pub led_colors: &'a LedColorMap,
     /// Rolling history of the device's effective write-rate throughput
     /// (bytes/sec). `None` until the first sample lands.
     pub write_rate_history: Option<&'a std::collections::VecDeque<f32>>,
@@ -406,9 +415,8 @@ pub(crate) fn empty_plugin_assets() -> &'static std::collections::HashMap<String
 
 /// Shared empty LED-color map for contexts without live canvas frames (tests).
 #[cfg(test)]
-pub fn empty_led_colors() -> &'static crate::ui::screens::canvas::LedColorMap {
-    static EMPTY: std::sync::OnceLock<crate::ui::screens::canvas::LedColorMap> =
-        std::sync::OnceLock::new();
+pub fn empty_led_colors() -> &'static LedColorMap {
+    static EMPTY: std::sync::OnceLock<LedColorMap> = std::sync::OnceLock::new();
     EMPTY.get_or_init(Default::default)
 }
 
@@ -455,29 +463,24 @@ pub fn show(
     egui::ScrollArea::vertical()
         .auto_shrink([false, false])
         .show(ui, |ui| {
-            crate::ui::components::page_frame(ui, |ui| {
-                if crate::ui::components::back_link(
+            components::page_frame(ui, |ui| {
+                if components::back_link(
                     ui,
                     &t!("devtabs.back_all_devices"),
-                    Some(crate::domain::tour::AnchorId::DeviceBackLink),
+                    Some(AnchorId::DeviceBackLink),
                 ) {
                     *page = Page::Home;
                 }
-                ui.add_space(crate::ui::theme::SPACE_2);
+                ui.add_space(SPACE_2);
                 header(ui, dev, ui_state, cmd);
-                ui.add_space(crate::ui::theme::SPACE_8);
+                ui.add_space(SPACE_8);
 
                 let labels: Vec<std::borrow::Cow<'static, str>> =
                     tabs.iter().map(|t| tab_label(t.kind, dev)).collect();
                 let label_refs: Vec<&str> = labels.iter().map(|c| c.as_ref()).collect();
-                let tab_bar_rect =
-                    crate::ui::components::tab_bar(ui, &mut ui_state.tab, &label_refs);
-                crate::domain::tour::anchor(
-                    ui.ctx(),
-                    crate::domain::tour::AnchorId::DeviceTabBar,
-                    tab_bar_rect,
-                );
-                ui.add_space(crate::ui::theme::SPACE_6);
+                let tab_bar_rect = components::tab_bar(ui, &mut ui_state.tab, &label_refs);
+                crate::domain::tour::anchor(ui.ctx(), AnchorId::DeviceTabBar, tab_bar_rect);
+                ui.add_space(SPACE_6);
                 // Remember the selection by kind for the next frame's realign.
                 ui_state.tab_kind = tabs.get(ui_state.tab).map(|t| t.kind);
 

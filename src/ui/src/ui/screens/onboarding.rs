@@ -8,8 +8,11 @@ use halod_shared::commands::DaemonCommand;
 use halod_shared::debug_info::DebugInfo;
 use halod_shared::types::{AvailablePlugin, PluginRecommendation, PluginsState};
 
+use crate::domain::models::device;
 use crate::runtime::ipc::{self, CommandTx};
 use crate::ui::components::{self as widgets, ButtonKind};
+use crate::ui::screens::depcheck;
+use crate::ui::screens::settings;
 use crate::ui::theme;
 
 const WELCOME: u8 = 0;
@@ -360,7 +363,7 @@ fn step_health(ui: &mut egui::Ui, debug: Option<&DebugInfo>) {
         });
         return;
     };
-    let failing = crate::ui::screens::depcheck::failing(info);
+    let failing = depcheck::failing(info);
     let missing_optional = info
         .dependencies
         .iter()
@@ -386,18 +389,15 @@ fn step_health(ui: &mut egui::Ui, debug: Option<&DebugInfo>) {
                     } else {
                         (t!("onboarding.check_missing"), widgets::TagTone::Warn)
                     };
-                    let impact = crate::ui::screens::depcheck::impact_text(dep);
+                    let impact = depcheck::impact_text(dep);
                     let sub = if dep.required {
                         impact
                     } else {
                         t!("onboarding.check_optional", impact = impact).into_owned()
                     };
-                    widgets::list_row(
-                        ui,
-                        &crate::ui::screens::depcheck::title_text(dep),
-                        &sub,
-                        |ui| widgets::tag(ui, &tag, tone),
-                    );
+                    widgets::list_row(ui, &depcheck::title_text(dep), &sub, |ui| {
+                        widgets::tag(ui, &tag, tone)
+                    });
                 }
             });
         });
@@ -405,7 +405,7 @@ fn step_health(ui: &mut egui::Ui, debug: Option<&DebugInfo>) {
 
 fn step_prefs(ui: &mut egui::Ui, st: &mut OnboardingUi, state: &TopicStore, cmd: &CommandTx) {
     inset_list(ui, |ui| {
-        crate::ui::screens::settings::start_on_boot_row(ui, &mut st.start_on_boot);
+        settings::start_on_boot_row(ui, &mut st.start_on_boot);
         widgets::list_row(
             ui,
             &t!("settings.close_to_tray_title"),
@@ -416,7 +416,7 @@ fn step_prefs(ui: &mut egui::Ui, st: &mut OnboardingUi, state: &TopicStore, cmd:
                 }
             },
         );
-        crate::ui::screens::settings::language_row(ui, state, cmd, &t!("onboarding.language_sub"));
+        settings::language_row(ui, state, cmd, &t!("onboarding.language_sub"));
     });
 }
 
@@ -524,11 +524,7 @@ fn step_plugins(
 }
 
 fn step_done(ui: &mut egui::Ui, st: &OnboardingUi, state: &TopicStore) {
-    let devices = state
-        .devices
-        .iter()
-        .filter(|d| crate::domain::models::device::listable(d))
-        .count();
+    let devices = state.devices.iter().filter(|d| device::listable(d)).count();
     let plugins = state.plugins.plugins.iter().filter(|p| p.enabled).count()
         + install_targets(st, &state.plugins).len();
     let sensors = crate::domain::models::sensors::sensors(state).len();

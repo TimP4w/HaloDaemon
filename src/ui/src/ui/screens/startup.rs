@@ -7,6 +7,7 @@ use halod_shared::types::{DiscoveryDetail, DiscoveryPhase, DISCOVERY_STEPS};
 
 use crate::domain::models::device as model;
 use crate::ui::components as widgets;
+use crate::ui::shell;
 use crate::ui::theme;
 
 #[derive(Debug, Clone, Copy, PartialEq, Eq)]
@@ -61,7 +62,7 @@ pub fn show(ui: &mut egui::Ui, state: &TopicStore, connected: bool) -> bool {
     egui::Panel::top("startup_title")
         .exact_size(52.0)
         .frame(egui::Frame::NONE.fill(theme::BODY))
-        .show(ui, |ui| crate::ui::shell::title_bar_plain(ui, state));
+        .show(ui, |ui| shell::title_bar_plain(ui, state));
 
     egui::CentralPanel::default()
         .frame(egui::Frame::NONE.fill(theme::BODY))

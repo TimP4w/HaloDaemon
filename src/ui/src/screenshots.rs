@@ -26,10 +26,16 @@ use serde_json::json;
 
 use crate::app::App;
 use crate::domain::models::device_tabs::{tabs_for, TabKind};
+use crate::domain::state::HideState;
 use crate::domain::state::Page;
+use crate::domain::tour::defs::ALL_TOUR_KEYS;
 use crate::domain::tray::Tray;
 use crate::runtime::ipc;
+use crate::svg;
 use crate::ui::screens::device::DeviceUi;
+use crate::ui::screens::device::LcdMediaTab;
+use crate::ui::screens::onboarding::OnboardingUi;
+use crate::ui::theme;
 
 /// Logical window size, matching the production viewport in `main.rs`.
 const SIZE: (f32, f32) = (1320.0, 860.0);
@@ -46,7 +52,7 @@ fn app_with(cmd: ipc::CommandTx, ui_rx: ipc::UiRx, sinks: ipc::FrameSinks) -> Ap
         Tray::headless(),
         Arc::new(AtomicBool::new(false)),
         Arc::new(AtomicBool::new(false)),
-        Arc::new(crate::domain::state::HideState::default()),
+        Arc::new(HideState::default()),
     );
     app.entered = true;
     app
@@ -74,7 +80,7 @@ fn harness(app: App, scale: f32) -> egui_kittest::Harness<'static, App> {
         .build_ui_state(
             move |ui: &mut egui::Ui, app: &mut App| {
                 if !themed {
-                    crate::ui::theme::install(ui.ctx());
+                    theme::install(ui.ctx());
                     themed = true;
                     return;
                 }
@@ -327,7 +333,7 @@ fn shell_state() {
     app.entered = which != "startup";
     app.onboarding_completed = onboarding.is_none();
     if let Some(step) = onboarding {
-        app.onboarding_ui = crate::ui::screens::onboarding::OnboardingUi::at_step(step);
+        app.onboarding_ui = OnboardingUi::at_step(step);
     }
     if which == "conflicts" {
         app.home_ui.open_conflicts(&devices);
@@ -395,7 +401,7 @@ fn device_state_shots(
             a.device_ui.tab = i;
             // Show the editor without re-activating the custom template on the live device.
             let lcd = &mut a.device_ui.lcd;
-            lcd.media_tab = crate::ui::screens::device::LcdMediaTab::Template;
+            lcd.media_tab = LcdMediaTab::Template;
             lcd.prev_mode_tab = Some(lcd.media_tab);
             lcd.seeded_profile = Some(a.ui.state.get().profiles.active.clone());
             if let Some(w) = def.widgets.first() {
@@ -486,10 +492,7 @@ fn cap(kind: &str, data: serde_json::Value) -> serde_json::Value {
 /// `gui` config that suppresses first-run onboarding and every page/tab tour so
 /// the captured screen isn't covered by a wizard or coach-mark overlay.
 fn gui_onboarded() -> serde_json::Value {
-    let mut seen: Vec<String> = crate::domain::tour::defs::ALL_TOUR_KEYS
-        .iter()
-        .map(|k| k.id().to_string())
-        .collect();
+    let mut seen: Vec<String> = ALL_TOUR_KEYS.iter().map(|k| k.id().to_string()).collect();
     seen.push(halod_shared::types::ONBOARDING_TOUR_KEY.to_string());
     json!({ "seen_tours": seen })
 }
@@ -883,7 +886,7 @@ fn logo_sprite(target: u32) -> (u32, u32, Vec<u8>) {
         env!("CARGO_MANIFEST_DIR"),
         "/../../assets/icon.svg"
     ));
-    let pixmap = crate::svg::rasterize(ICON, Some(target)).expect("icon.svg parses");
+    let pixmap = svg::rasterize(ICON, Some(target)).expect("icon.svg parses");
     (pixmap.width(), pixmap.height(), pixmap.data().to_vec())
 }
 
@@ -1057,7 +1060,7 @@ fn fan() {
 fn lcd() {
     let state = lcd_state();
     let mut ui = device_ui_on_tab(&state, "kraken-lcd", TabKind::Lcd);
-    ui.lcd.media_tab = crate::ui::screens::device::LcdMediaTab::Template;
+    ui.lcd.media_tab = LcdMediaTab::Template;
     ui.lcd.seeded_profile = Some("Gaming".to_string());
     ui.lcd.editor.def = lcd_template();
     ui.lcd.editor.seeded = true;

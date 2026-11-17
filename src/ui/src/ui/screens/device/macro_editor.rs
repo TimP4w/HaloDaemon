@@ -21,6 +21,7 @@ use halod_shared::types::{
 
 use super::keys::Layer;
 use super::{DeviceUi, TabCtx};
+use crate::runtime::ipc;
 use crate::ui::theme::{self, a};
 
 /// Smallest representable wait; also the recording gap threshold.
@@ -325,7 +326,7 @@ fn commit_action(
     }
     if immediate {
         st.last_edit = ctx.time;
-        crate::runtime::ipc::send(ctx.cmd, cmd);
+        ipc::send(ctx.cmd, cmd);
     } else {
         st.queue(&format!("btn:macro:{cid}:{}", layer.tag()), cmd, ctx.time);
     }
@@ -549,7 +550,7 @@ fn header_row(
             if widgets::button(ui, &t!("misc.macro_play"), widgets::ButtonKind::Ghost, size)
                 .clicked()
             {
-                crate::runtime::ipc::send(
+                ipc::send(
                     ctx.cmd,
                     DaemonCommand::PlayMacro {
                         steps: steps.to_vec(),

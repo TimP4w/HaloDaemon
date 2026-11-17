@@ -11,7 +11,9 @@ use halod_shared::types::{LcdStatus, LcdUploadProgress, LcdUploadStage};
 
 use super::gif::decode_next_thumb;
 use super::{DeviceUi, LcdMediaTab, PickerTarget, TabCtx};
+use crate::runtime::ipc;
 use crate::ui::components as widgets;
+use crate::ui::screens::device;
 use crate::ui::theme;
 
 /// Maximum library tiles shown (not counting the "None" slot).
@@ -96,7 +98,7 @@ fn cleared_upload_base(
     terminal: Option<&LcdUploadProgress>,
     device_id: &str,
 ) -> Option<usize> {
-    if crate::ui::screens::device::is_terminal_upload_for(terminal, device_id) {
+    if device::is_terminal_upload_for(terminal, device_id) {
         return None;
     }
     base.filter(|&b| lib_len <= b)
@@ -257,7 +259,7 @@ pub(super) fn delete_image_modal(ui: &mut egui::Ui, ctx: &TabCtx, st: &mut Devic
         &t!("lcd.delete"),
         &mut st.lcd.confirm_delete_image,
     ) {
-        crate::runtime::ipc::send(
+        ipc::send(
             ctx.cmd,
             halod_shared::commands::DaemonCommand::DeleteLcdImage {
                 filename: filename.clone(),
@@ -267,7 +269,7 @@ pub(super) fn delete_image_modal(ui: &mut egui::Ui, ctx: &TabCtx, st: &mut Devic
         st.lcd.requested.remove(&filename);
         // The daemon doesn't push the library after a delete; re-list so
         // the removed tile disappears.
-        crate::runtime::ipc::send(
+        ipc::send(
             ctx.cmd,
             halod_shared::commands::DaemonCommand::ListLcdImages,
         );
@@ -284,7 +286,7 @@ pub(super) fn select_none(
 ) {
     st.lcd.preview_pending = None;
     if active_template_id.is_some() {
-        crate::runtime::ipc::send(
+        ipc::send(
             ctx.cmd,
             halod_shared::commands::DaemonCommand::Device {
                 device_id: id.to_string(),
@@ -293,7 +295,7 @@ pub(super) fn select_none(
         );
         st.lcd.template_params.clear();
     }
-    crate::runtime::ipc::send(
+    ipc::send(
         ctx.cmd,
         halod_shared::commands::DaemonCommand::Device {
             device_id: id.to_string(),
@@ -318,7 +320,7 @@ pub(super) fn select_image(
         return;
     }
     if active_template_id.is_some() {
-        crate::runtime::ipc::send(
+        ipc::send(
             ctx.cmd,
             halod_shared::commands::DaemonCommand::Device {
                 device_id: id.to_string(),
@@ -328,7 +330,7 @@ pub(super) fn select_image(
         st.lcd.template_params.clear();
     }
     st.lcd.preview_pending = Some(filename.to_string());
-    crate::runtime::ipc::send(
+    ipc::send(
         ctx.cmd,
         halod_shared::commands::DaemonCommand::Device {
             device_id: id.to_string(),
@@ -395,7 +397,7 @@ pub(super) fn poll_picker(ui: &egui::Ui, ctx: &TabCtx, st: &mut DeviceUi, id: &s
         Err(TryRecvError::Empty) => st.lcd.picker = Some((target, rx)),
         Ok(Some(path)) => match target {
             PickerTarget::Image => start_upload(ui, ctx, st, id, path),
-            PickerTarget::Video => crate::runtime::ipc::send(
+            PickerTarget::Video => ipc::send(
                 ctx.cmd,
                 halod_shared::commands::DaemonCommand::Device {
                     device_id: id.to_string(),
@@ -436,7 +438,7 @@ fn start_upload(ui: &egui::Ui, ctx: &TabCtx, st: &mut DeviceUi, id: &str, path: 
             Ok(bytes) => {
                 use base64::Engine as _;
                 let b64 = base64::engine::general_purpose::STANDARD.encode(&bytes);
-                crate::runtime::ipc::send(
+                ipc::send(
                     &cmd,
                     halod_shared::commands::DaemonCommand::Device {
                         device_id,

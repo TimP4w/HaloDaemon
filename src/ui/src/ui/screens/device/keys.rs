@@ -12,17 +12,16 @@ use halod_shared::types::{
 };
 
 use super::{macro_editor, DeviceUi, TabCtx};
+use crate::domain::tour;
+use crate::domain::tour::AnchorId;
+use crate::runtime::ipc;
 use crate::ui::theme;
 
 const LIST_W: f32 = 398.0;
 const ROW_H: f32 = 58.0;
 
 pub fn show(ui: &mut egui::Ui, ctx: &TabCtx, st: &mut DeviceUi) {
-    crate::domain::tour::anchor(
-        ui.ctx(),
-        crate::domain::tour::AnchorId::TabKeys,
-        ui.max_rect(),
-    );
+    tour::anchor(ui.ctx(), AnchorId::TabKeys, ui.max_rect());
     let Some(remap) = ctx.dev.capabilities.iter().find_map(|c| match c {
         DeviceCapability::KeyRemap(r) => Some(r.clone()),
         _ => None,
@@ -206,7 +205,7 @@ fn button_list_card(
                         )
                         .clicked()
                         {
-                            crate::runtime::ipc::send(
+                            ipc::send(
                                 ctx.cmd,
                                 DaemonCommand::Device {
                                     device_id: id.to_string(),
@@ -377,11 +376,7 @@ fn editor_card(
                     .scope(|ui| widgets::segmented(ui, &labels, &mut idx, false))
                     .response
                     .rect;
-                crate::domain::tour::anchor(
-                    ui.ctx(),
-                    crate::domain::tour::AnchorId::KeysLayerShift,
-                    rect,
-                );
+                tour::anchor(ui.ctx(), AnchorId::KeysLayerShift, rect);
                 st.keys.layer = Layer::from_shifted(idx == 1);
             },
         );
@@ -422,7 +417,7 @@ fn editor_card(
                     st.keys.keys_shifted_action = Some(ButtonAction::Native);
                     st.keys.chord_capture = None;
                     st.last_edit = ctx.time;
-                    crate::runtime::ipc::send(
+                    ipc::send(
                         ctx.cmd,
                         DaemonCommand::Device {
                             device_id: id.to_string(),
@@ -461,11 +456,7 @@ fn action_grid(
     let selected = protos.iter().position(|p| same_category(current_action, p));
     let tiles = widgets::option_grid(ui, &labels, selected, 4);
     if let Some(grid) = tiles.iter().map(|t| t.rect).reduce(|a, b| a.union(b)) {
-        crate::domain::tour::anchor(
-            ui.ctx(),
-            crate::domain::tour::AnchorId::KeysActionCategory,
-            grid,
-        );
+        tour::anchor(ui.ctx(), AnchorId::KeysActionCategory, grid);
     }
     for (proto, tile) in protos.into_iter().zip(&tiles) {
         if matches!(proto, ButtonAction::Macro { .. }) {
@@ -477,7 +468,7 @@ fn action_grid(
             layer.set(st, new_action);
             st.last_edit = ctx.time;
             if mapping_is_complete(&base, &shifted) {
-                crate::runtime::ipc::send(
+                ipc::send(
                     ctx.cmd,
                     DaemonCommand::Device {
                         device_id: id.to_string(),
@@ -557,7 +548,7 @@ fn direction_pills(
         let a = make_action(dir);
         layer.set(st, a.clone());
         st.last_edit = ctx.time;
-        crate::runtime::ipc::send(ctx.cmd, make_cmd(a));
+        ipc::send(ctx.cmd, make_cmd(a));
     }
 }
 
@@ -601,7 +592,7 @@ fn params_editor(
         } = &cmd
         {
             if mapping_is_complete(&mapping.base, &mapping.shifted) {
-                crate::runtime::ipc::send(ctx.cmd, cmd);
+                ipc::send(ctx.cmd, cmd);
             }
         }
     };
@@ -796,11 +787,7 @@ fn params_editor(
         ButtonAction::Macro { steps } => {
             let macro_rect =
                 Rect::from_min_size(ui.cursor().min, Vec2::new(ui.available_width(), 28.0));
-            crate::domain::tour::anchor(
-                ui.ctx(),
-                crate::domain::tour::AnchorId::KeysMacro,
-                macro_rect,
-            );
+            tour::anchor(ui.ctx(), AnchorId::KeysMacro, macro_rect);
             macro_editor::show(ui, ctx, st, id, cid, layer, steps);
         }
         ButtonAction::KeyChord { key, modifiers } => {
@@ -855,7 +842,7 @@ fn action_text_field(
 /// selected, the later parameters-card anchor replaces this fallback with the
 /// full macro editor rect in the same frame.
 fn anchor_macro_tour(ctx: &egui::Context, rect: Rect) {
-    crate::domain::tour::anchor(ctx, crate::domain::tour::AnchorId::KeysMacro, rect);
+    tour::anchor(ctx, AnchorId::KeysMacro, rect);
 }
 
 // ── Data helpers ─────────────────────────────────────────────────────────────

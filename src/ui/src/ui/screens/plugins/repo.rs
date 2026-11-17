@@ -1,5 +1,7 @@
 // SPDX-License-Identifier: GPL-3.0-or-later
 use super::*;
+use crate::domain::tour;
+use crate::domain::tour::AnchorId;
 
 impl PluginsUi {
     pub(super) fn repositories(&mut self, ui: &mut egui::Ui, cx: &PluginsCtx) {
@@ -65,8 +67,8 @@ impl PluginsUi {
     /// The add-source button backs two consecutive tour steps; register both
     /// anchors so neither is skipped as missing.
     pub(super) fn anchor_add_plugin_source(ctx: &egui::Context, rect: Rect) {
-        crate::domain::tour::anchor(ctx, crate::domain::tour::AnchorId::PluginsAddPlugin, rect);
-        crate::domain::tour::anchor(ctx, crate::domain::tour::AnchorId::PluginsAddRepo, rect);
+        tour::anchor(ctx, AnchorId::PluginsAddPlugin, rect);
+        tour::anchor(ctx, AnchorId::PluginsAddRepo, rect);
     }
 
     pub(super) fn skipped_notice(&mut self, ui: &mut egui::Ui, state: &TopicStore) {
@@ -349,11 +351,7 @@ pub(super) fn repo_row(
 ) -> RepoRowAction {
     let (rect, resp) = widgets::hover_row(ui, 48.0, selected);
     if r.official {
-        crate::domain::tour::anchor(
-            ui.ctx(),
-            crate::domain::tour::AnchorId::PluginsOfficialRepo,
-            rect,
-        );
+        tour::anchor(ui.ctx(), AnchorId::PluginsOfficialRepo, rect);
     }
     let mut refresh = false;
     let mut right = ui.new_child(

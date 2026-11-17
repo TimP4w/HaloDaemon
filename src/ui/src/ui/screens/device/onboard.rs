@@ -7,6 +7,9 @@ use halod_shared::commands::DeviceOp;
 use halod_shared::types::{Boolean, DeviceCapability, OnboardProfileSlot, OnboardProfiles};
 
 use super::TabCtx;
+use crate::domain::tour;
+use crate::domain::tour::AnchorId;
+use crate::runtime::ipc;
 use crate::ui::theme;
 
 /// Boolean-capability key for the ONBOARD_PROFILES host/onboard mode switch.
@@ -37,11 +40,7 @@ fn slot_can_restore(slot: &OnboardProfileSlot) -> bool {
 }
 
 pub fn show(ui: &mut egui::Ui, ctx: &TabCtx) {
-    crate::domain::tour::anchor(
-        ui.ctx(),
-        crate::domain::tour::AnchorId::TabOnboard,
-        ui.max_rect(),
-    );
+    tour::anchor(ui.ctx(), AnchorId::TabOnboard, ui.max_rect());
     let Some(op) = ctx.dev.capabilities.iter().find_map(|c| match c {
         DeviceCapability::OnboardProfiles(p) => Some(p),
         _ => None,
@@ -79,7 +78,7 @@ fn host_mode_row(ui: &mut egui::Ui, id: &str, ctx: &TabCtx, b: &Boolean) {
             &t!("devtabs.host_mode_desc"),
             |ui| {
                 if !b.read_only && widgets::toggle(ui, b.value) != b.value {
-                    crate::runtime::ipc::send(
+                    ipc::send(
                         ctx.cmd,
                         halod_shared::commands::DaemonCommand::Device {
                             device_id: id.to_string(),
@@ -170,7 +169,7 @@ fn slot_row(
                     !switch_disabled(host_mode, active),
                 )
             {
-                crate::runtime::ipc::send(
+                ipc::send(
                     ctx.cmd,
                     halod_shared::commands::DaemonCommand::Device {
                         device_id: id.to_string(),
@@ -185,7 +184,7 @@ fn slot_row(
                     (t!("devtabs.create"), true, widgets::ButtonKind::Ghost)
                 };
                 if widgets::button(ui, &label, kind, egui::vec2(68.0, 28.0)).clicked() {
-                    crate::runtime::ipc::send(
+                    ipc::send(
                         ctx.cmd,
                         halod_shared::commands::DaemonCommand::Device {
                             device_id: id.to_string(),
@@ -206,7 +205,7 @@ fn slot_row(
                 )
                 .clicked()
             {
-                crate::runtime::ipc::send(
+                ipc::send(
                     ctx.cmd,
                     halod_shared::commands::DaemonCommand::Device {
                         device_id: id.to_string(),

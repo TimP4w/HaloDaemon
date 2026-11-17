@@ -22,6 +22,10 @@ use halod_shared::types::{
 use halod_shared::zone_transform::ZoneContentTransform;
 
 use super::{DeviceUi, TabCtx};
+use crate::domain::models::device;
+use crate::domain::tour;
+use crate::domain::tour::AnchorId;
+use crate::runtime::ipc;
 use crate::ui::components::rgb_to_color32;
 use crate::ui::theme;
 
@@ -97,20 +101,15 @@ fn fill_for<'a>(
 }
 
 pub fn show(ui: &mut egui::Ui, ctx: &TabCtx, st: &mut DeviceUi) {
-    crate::domain::tour::anchor(
-        ui.ctx(),
-        crate::domain::tour::AnchorId::TabLighting,
-        ui.max_rect(),
-    );
+    tour::anchor(ui.ctx(), AnchorId::TabLighting, ui.max_rect());
     let Some(rgb) = ctx.dev.capabilities.iter().find_map(|c| match c {
         DeviceCapability::Lighting(r) => Some(r),
         _ => None,
     }) else {
         return;
     };
-    let channels = crate::domain::models::device::plain_channels(ctx.dev);
-    let Some(zone) = crate::domain::models::device::resolve_zone(&channels, &st.lighting.zone)
-    else {
+    let channels = device::plain_channels(ctx.dev);
+    let Some(zone) = device::resolve_zone(&channels, &st.lighting.zone) else {
         widgets::empty_state(
             ui,
             &t!("lighting.no_zones_title"),
@@ -197,12 +196,12 @@ fn leave_canvas_modal(ui: &mut egui::Ui, ctx: &TabCtx, st: &mut DeviceUi) {
         confirm,
         cancel || dismissed,
     ) {
-        crate::runtime::ipc::send(ctx.cmd, cmd);
+        ipc::send(ctx.cmd, cmd);
     }
 }
 
 fn preview(ui: &mut egui::Ui, ctx: &TabCtx, st: &mut DeviceUi, rgb: &LightingStatus, mode: &Mode) {
-    let channels = crate::domain::models::device::plain_channels(ctx.dev);
+    let channels = device::plain_channels(ctx.dev);
     if channels.is_empty() {
         return;
     }
@@ -291,7 +290,7 @@ fn preview(ui: &mut egui::Ui, ctx: &TabCtx, st: &mut DeviceUi, rgb: &LightingSta
                     .clicked()
                     {
                         st.lighting.paint_buf.remove(&zone.id);
-                        crate::runtime::ipc::send(ctx.cmd, paint_cmd(ctx, st));
+                        ipc::send(ctx.cmd, paint_cmd(ctx, st));
                     }
                     if widgets::button(
                         ui,
@@ -305,7 +304,7 @@ fn preview(ui: &mut egui::Ui, ctx: &TabCtx, st: &mut DeviceUi, rgb: &LightingSta
                         let m: HashMap<u32, RgbColor> =
                             zone.leds.iter().map(|l| (l.id, c)).collect();
                         st.lighting.paint_buf.insert(zone.id.clone(), m);
-                        crate::runtime::ipc::send(ctx.cmd, paint_cmd(ctx, st));
+                        ipc::send(ctx.cmd, paint_cmd(ctx, st));
                     }
                 },
             );
@@ -384,9 +383,9 @@ fn transform_controls(ui: &mut egui::Ui, ctx: &TabCtx, st: &mut DeviceUi, rgb: &
     let button = |ui: &mut egui::Ui, label: &str| {
         widgets::button(ui, label, widgets::ButtonKind::Secondary, size).clicked()
     };
-    crate::domain::tour::anchor(
+    tour::anchor(
         ui.ctx(),
-        crate::domain::tour::AnchorId::LightingTransform,
+        AnchorId::LightingTransform,
         Rect::from_min_size(ui.cursor().min, Vec2::new(ui.available_width(), 30.0)),
     );
     let (picked, reset) = egui::Sides::new().height(30.0).show(
@@ -452,7 +451,7 @@ fn transform_controls(ui: &mut egui::Ui, ctx: &TabCtx, st: &mut DeviceUi, rgb: &
     };
 
     if let Some(new_tx) = changed_tx {
-        crate::runtime::ipc::send(ctx.cmd, tx_cmd(ctx, &zone.id, new_tx));
+        ipc::send(ctx.cmd, tx_cmd(ctx, &zone.id, new_tx));
     }
 }
 
@@ -531,14 +530,14 @@ fn right_panel(
             let row_cursor = ui.cursor().min;
             if first_row {
                 // Anchor the first effect row (Static + Paint) for the tour.
-                crate::domain::tour::anchor(
+                tour::anchor(
                     ui.ctx(),
-                    crate::domain::tour::AnchorId::LightingEffectsGrid,
+                    AnchorId::LightingEffectsGrid,
                     Rect::from_min_size(row_cursor, Vec2::new(ui.available_width(), cell_h)),
                 );
-                crate::domain::tour::anchor(
+                tour::anchor(
                     ui.ctx(),
-                    crate::domain::tour::AnchorId::LightingPaintCell,
+                    AnchorId::LightingPaintCell,
                     Rect::from_min_size(
                         egui::pos2(row_cursor.x + cell_w + gap, row_cursor.y),
                         Vec2::new(cell_w, cell_h),
@@ -560,7 +559,7 @@ fn right_panel(
                     if matches!(mode, Mode::Engine) {
                         st.lighting.confirm_leave_canvas = Some(cmd);
                     } else {
-                        crate::runtime::ipc::send(ctx.cmd, cmd);
+                        ipc::send(ctx.cmd, cmd);
                     }
                 }
             });
@@ -575,13 +574,9 @@ fn right_panel(
             widgets::ButtonKind::Secondary,
             egui::vec2(ui.available_width(), 36.0),
         );
-        crate::domain::tour::anchor(
-            ui.ctx(),
-            crate::domain::tour::AnchorId::LightingPlaceCanvas,
-            canvas_btn.rect,
-        );
+        tour::anchor(ui.ctx(), AnchorId::LightingPlaceCanvas, canvas_btn.rect);
         if canvas_btn.clicked() {
-            crate::runtime::ipc::send(ctx.cmd, place_on_canvas_cmd(ctx, st));
+            ipc::send(ctx.cmd, place_on_canvas_cmd(ctx, st));
         }
     });
 
@@ -615,7 +610,7 @@ fn right_panel(
                             if let Some(eff) =
                                 rgb.descriptor.native_effects.iter().find(|e| &e.id == id)
                             {
-                                crate::runtime::ipc::send(ctx.cmd, effect_cmd(ctx, st, rgb, eff));
+                                ipc::send(ctx.cmd, effect_cmd(ctx, st, rgb, eff));
                             }
                         }
                         Mode::Direct(id) => {
@@ -627,7 +622,7 @@ fn right_panel(
                                 .iter()
                                 .find(|a| &a.id == id)
                             {
-                                crate::runtime::ipc::send(ctx.cmd, direct_cmd(ctx, st, rgb, anim));
+                                ipc::send(ctx.cmd, direct_cmd(ctx, st, rgb, anim));
                             }
                         }
                         _ => {}

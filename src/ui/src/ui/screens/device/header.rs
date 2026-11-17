@@ -5,6 +5,15 @@ use egui::{Align2, Pos2, Rect, Stroke, Vec2};
 use halod_shared::commands::DeviceOp;
 use halod_shared::types::{Battery, BatteryStatus, ConnectionType, DeviceCapability, WireDevice};
 
+use crate::domain::models::device;
+use crate::domain::tour;
+use crate::domain::tour::AnchorId;
+use crate::runtime::ipc;
+use crate::runtime::ipc::CommandTx;
+use crate::ui::components;
+use crate::ui::components::ButtonKind;
+use crate::ui::components::TagTone;
+use crate::ui::icons;
 use crate::ui::theme;
 
 /// Total LED count reported across all of the device's RGB capabilities and channels.
@@ -28,11 +37,11 @@ pub(super) fn header(
     ui: &mut egui::Ui,
     dev: &WireDevice,
     ui_state: &mut super::DeviceUi,
-    cmd: &crate::runtime::ipc::CommandTx,
+    cmd: &CommandTx,
 ) {
     let (rect, _) =
         ui.allocate_exact_size(Vec2::new(ui.available_width(), 48.0), egui::Sense::hover());
-    crate::domain::tour::anchor(ui.ctx(), crate::domain::tour::AnchorId::DeviceHeader, rect);
+    tour::anchor(ui.ctx(), AnchorId::DeviceHeader, rect);
     let cy = rect.center().y;
     let tx = rect.left() + 64.0;
 
@@ -40,7 +49,7 @@ pub(super) fn header(
         let tile = Rect::from_min_size(rect.min, Vec2::splat(48.0));
         let p = ui.painter();
         theme::paint_surface(p, tile, theme::RADIUS_MD, theme::TILE_BG, theme::TRACK);
-        crate::ui::components::device_badge(p, tile.shrink(8.0), dev.device_type);
+        components::device_badge(p, tile.shrink(8.0), dev.device_type);
     }
 
     let name_cy = cy - 10.0;
@@ -70,25 +79,25 @@ pub(super) fn header(
             Pos2::new(save_rect.right() + 6.0, name_cy - 14.0),
             Vec2::new(64.0, 28.0),
         );
-        let save_resp = crate::ui::components::button_at(
+        let save_resp = components::button_at(
             ui,
             save_rect,
             ui.scope_id().with("rename_save"),
             &t!("devtabs.save"),
-            crate::ui::components::ButtonKind::Primary,
+            ButtonKind::Primary,
         );
-        let cancel_resp = crate::ui::components::button_at(
+        let cancel_resp = components::button_at(
             ui,
             cancel_rect,
             ui.scope_id().with("rename_cancel"),
             &t!("devtabs.cancel"),
-            crate::ui::components::ButtonKind::Secondary,
+            ButtonKind::Secondary,
         );
 
         if commit || save_resp.clicked() {
             let trimmed = ui_state.rename_val.trim().to_string();
             if !trimmed.is_empty() {
-                crate::runtime::ipc::send(
+                ipc::send(
                     cmd,
                     halod_shared::commands::DaemonCommand::Device {
                         device_id: dev.id.clone(),
@@ -142,7 +151,7 @@ pub(super) fn header(
             Stroke::new(1.0, border_col),
             egui::StrokeKind::Middle,
         );
-        crate::ui::icons::draw_pencil(p, btn_rect.shrink(7.0), icon_col);
+        icons::draw_pencil(p, btn_rect.shrink(7.0), icon_col);
     }
 
     let p = ui.painter();
@@ -154,11 +163,11 @@ pub(super) fn header(
         theme::TEXT_DIM,
     );
     if !dev.connected {
-        crate::ui::components::paint_tag(
+        components::paint_tag(
             p,
             Pos2::new(rect.right(), cy),
             &t!("devtabs.offline"),
-            crate::ui::components::TagTone::Danger,
+            TagTone::Danger,
         );
     }
 }
@@ -169,12 +178,9 @@ fn header_meta(dev: &WireDevice) -> String {
     let link = if connection(dev).or(dev.connection_type) == Some(ConnectionType::Wireless) {
         t!("devtabs.wireless").to_string()
     } else {
-        crate::domain::models::device::transport_label(dev)
+        device::transport_label(dev)
     };
-    let mut parts = vec![
-        crate::domain::models::device::type_label(dev).to_string(),
-        link,
-    ];
+    let mut parts = vec![device::type_label(dev).to_string(), link];
     let known: Vec<_> = batteries(dev)
         .into_iter()
         .filter(|b| !matches!(b.status, BatteryStatus::Unknown))

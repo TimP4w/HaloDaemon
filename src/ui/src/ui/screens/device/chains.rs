@@ -11,6 +11,9 @@ use halod_shared::types::{
 use super::TabCtx;
 #[cfg(test)]
 use crate::domain::topic_store::TopicStore;
+use crate::domain::tour;
+use crate::domain::tour::AnchorId;
+use crate::runtime::ipc;
 use crate::ui::theme;
 
 const ADD_LEDS_DEFAULT: u32 = 30;
@@ -73,11 +76,7 @@ fn used_leds(channel: &LightingChannel) -> u32 {
 }
 
 pub fn show(ui: &mut egui::Ui, ctx: &TabCtx) {
-    crate::domain::tour::anchor(
-        ui.ctx(),
-        crate::domain::tour::AnchorId::TabChains,
-        ui.max_rect(),
-    );
+    tour::anchor(ui.ctx(), AnchorId::TabChains, ui.max_rect());
     let channels: Vec<&LightingChannel> = ctx
         .dev
         .capabilities
@@ -235,16 +234,12 @@ fn discover_button(ui: &mut egui::Ui, ctx: &TabCtx, dev_id: &str, channels: &[&L
         widgets::ButtonKind::Secondary,
         Vec2::new(88.0, 36.0),
     );
-    crate::domain::tour::anchor(
-        ui.ctx(),
-        crate::domain::tour::AnchorId::ChainsDiscover,
-        resp.rect,
-    );
+    tour::anchor(ui.ctx(), AnchorId::ChainsDiscover, resp.rect);
     if resp.clicked() && !flashing {
         ui.ctx()
             .data_mut(|d| d.insert_temp(flash_at_key, now + 2.4));
         for channel in channels {
-            crate::runtime::ipc::send(
+            ipc::send(
                 ctx.cmd,
                 DaemonCommand::Device {
                     device_id: dev_id.to_string(),
@@ -310,7 +305,7 @@ fn link_row(
                 let (rect, _) = ui.allocate_exact_size(Vec2::splat(26.0), Sense::hover());
                 let id = egui::Id::unique(("ln_rm", &link.device_id));
                 if widgets::glyph_button_at(ui, rect, id, widgets::paint_close_glyph).clicked() {
-                    crate::runtime::ipc::send(
+                    ipc::send(
                         ctx.cmd,
                         DaemonCommand::Device {
                             device_id: dev_id.to_string(),
@@ -368,7 +363,7 @@ fn name_field(ui: &mut egui::Ui, ctx: &TabCtx, link: &LightingSegmentInfo) {
     if resp.lost_focus() {
         let trimmed = buf.trim().to_string();
         if !trimmed.is_empty() && trimmed != link.name {
-            crate::runtime::ipc::send(
+            ipc::send(
                 ctx.cmd,
                 DaemonCommand::Device {
                     device_id: link.device_id.clone(),
@@ -405,11 +400,7 @@ fn add_link_panel(
             widgets::ButtonKind::Secondary,
             Vec2::new(ui.available_width(), 30.0),
         );
-        crate::domain::tour::anchor(
-            ui.ctx(),
-            crate::domain::tour::AnchorId::ChainsAddLink,
-            resp.rect,
-        );
+        tour::anchor(ui.ctx(), AnchorId::ChainsAddLink, resp.rect);
         if resp.clicked() {
             ui.ctx().data_mut(|d| {
                 d.insert_temp(open_key, true);
@@ -484,7 +475,7 @@ fn add_link_panel(
                         can_add,
                     ) {
                         if let Some(led_count) = parsed {
-                            crate::runtime::ipc::send(
+                            ipc::send(
                                 ctx.cmd,
                                 DaemonCommand::Device {
                                     device_id: dev_id.to_string(),

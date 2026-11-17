@@ -27,8 +27,15 @@ use inspector::{empty_selection_card, screen_style_card, selected_widget_card};
 use library::{delete_template_modal, library_card, save_template_modal};
 use stage::stage;
 
+use crate::runtime::ipc;
 use crate::ui::components as widgets;
 use crate::ui::screens::device::{DeviceUi, LcdMediaTab, TabCtx};
+use crate::ui::theme;
+use crate::ui::theme::CYAN;
+use crate::ui::theme::RADIUS_MD;
+use crate::ui::theme::SPACE_4;
+use crate::ui::theme::SPACE_8;
+use crate::ui::theme::TEXT;
 
 /// Per-device editor state, held in `LcdTab`.
 #[derive(Default)]
@@ -144,7 +151,7 @@ pub fn show(
     let mut left_column = Rect::NOTHING;
     let mut inspector_rect = Rect::NOTHING;
     widgets::split_columns(ui, main_w, 16.0, |left, right| {
-        left.spacing_mut().item_spacing.y = crate::ui::theme::SPACE_8;
+        left.spacing_mut().item_spacing.y = SPACE_8;
         widgets::card_with_margin(left, egui::Margin::same(24), |ui| {
             ui.set_width(ui.available_width());
             stage(ui, ctx, st, id, lcd);
@@ -163,7 +170,7 @@ pub fn show(
         });
         left_column = left.min_rect();
 
-        right.spacing_mut().item_spacing.y = crate::ui::theme::SPACE_8;
+        right.spacing_mut().item_spacing.y = SPACE_8;
         let sel = st.lcd.editor.primary().cloned();
         aside_card(right, |ui| match &sel {
             Some(sel) => selected_widget_card(ui, ctx, st, id, sel),
@@ -187,17 +194,14 @@ pub fn show(
                 .map(|descriptor| descriptor.name.as_str())
                 .unwrap_or("Widget");
             let ghost = Rect::from_center_size(pos, Vec2::new(80.0, 42.0));
-            ui.painter().rect_filled(
-                ghost,
-                crate::ui::theme::RADIUS_MD,
-                crate::ui::theme::a(crate::ui::theme::CYAN, 0.16),
-            );
+            ui.painter()
+                .rect_filled(ghost, RADIUS_MD, theme::a(CYAN, 0.16));
             ui.painter().text(
                 ghost.center(),
                 egui::Align2::CENTER_CENTER,
                 name,
-                crate::ui::theme::caption(),
-                crate::ui::theme::TEXT,
+                theme::caption(),
+                TEXT,
             );
         }
         if ui.input(|input| input.pointer.primary_released()) {
@@ -247,7 +251,7 @@ pub fn show(
 fn aside_card(ui: &mut egui::Ui, body: impl FnOnce(&mut egui::Ui)) {
     widgets::card_with_margin(ui, egui::Margin::same(18), |ui| {
         ui.set_width(ui.available_width());
-        ui.spacing_mut().item_spacing.y = crate::ui::theme::SPACE_4;
+        ui.spacing_mut().item_spacing.y = SPACE_4;
         body(ui);
     });
 }
@@ -299,7 +303,7 @@ fn send_def(ctx: &TabCtx, st: &mut DeviceUi, id: &str, immediate: bool) {
     params.insert(WIDGETS_JSON_PARAM.to_string(), EffectParamValue::Str(json));
     if immediate {
         st.last_edit = ctx.time;
-        crate::runtime::ipc::send(
+        ipc::send(
             ctx.cmd,
             halod_shared::commands::DaemonCommand::Device {
                 device_id: id.to_string(),

@@ -13,7 +13,9 @@ use std::sync::Arc;
 use crate::domain::topic_store::TopicStore;
 use halod_shared::types::{BatteryStatus, DeviceCapability, DEFAULT_PROFILE_NAME};
 
+use crate::domain::state::HideState;
 use crate::runtime::ipc::CommandTx;
+use crate::svg;
 
 #[cfg(unix)]
 mod linux;
@@ -51,7 +53,7 @@ pub fn battery_lines(state: &TopicStore) -> Vec<String> {
 /// The embedded app icon rendered to RGBA8 pixels: `(rgba, width, height)`.
 fn render_icon_rgba() -> (Vec<u8>, u32, u32) {
     let bytes = include_bytes!("../../../../../assets/icon.svg");
-    let pixmap = crate::svg::rasterize(bytes, None).expect("embedded icon is valid SVG");
+    let pixmap = svg::rasterize(bytes, None).expect("embedded icon is valid SVG");
     let (w, h) = (pixmap.width(), pixmap.height());
     (pixmap.take(), w, h)
 }
@@ -71,7 +73,7 @@ pub fn app_icon() -> egui::IconData {
 /// On eframe, `Visible(true)` re-shows the window. On the Linux custom loop the
 /// window may have been destroyed, so set `wants_show` too — the loop recreates
 /// it. `request_repaint` wakes the loop (via its proxy) to act on the flag.
-pub(crate) fn present(ctx: &egui::Context, hide_state: &crate::domain::state::HideState) {
+pub(crate) fn present(ctx: &egui::Context, hide_state: &HideState) {
     hide_state.wants_show.store(true, Ordering::SeqCst);
     ctx.send_viewport_cmd(egui::ViewportCommand::Visible(true));
     ctx.send_viewport_cmd(egui::ViewportCommand::Focus);
@@ -84,12 +86,7 @@ pub(crate) fn present(ctx: &egui::Context, hide_state: &crate::domain::state::Hi
 ///
 /// Sets `force_quit` so the backend lets the close through even when "close to
 /// tray" is enabled (which otherwise hides the window instead).
-fn quit(
-    ctx: &egui::Context,
-    cmd: &CommandTx,
-    force_quit: &AtomicBool,
-    hide_state: &crate::domain::state::HideState,
-) {
+fn quit(ctx: &egui::Context, cmd: &CommandTx, force_quit: &AtomicBool, hide_state: &HideState) {
     force_quit.store(true, Ordering::SeqCst);
     crate::runtime::ipc::send(cmd, halod_shared::commands::DaemonCommand::Shutdown);
     ctx.send_viewport_cmd(egui::ViewportCommand::Close);
@@ -108,12 +105,7 @@ use windows::PlatformTray;
 struct PlatformTray;
 #[cfg(not(any(unix, windows)))]
 impl PlatformTray {
-    fn new(
-        _: &egui::Context,
-        _: CommandTx,
-        _: Arc<AtomicBool>,
-        _: Arc<crate::domain::state::HideState>,
-    ) -> Self {
+    fn new(_: &egui::Context, _: CommandTx, _: Arc<AtomicBool>, _: Arc<HideState>) -> Self {
         Self
     }
     fn sync(&mut self, _: &egui::Context, _: &TrayModel, _: bool) {}
@@ -157,7 +149,7 @@ impl Tray {
         ctx: &egui::Context,
         cmd: CommandTx,
         force_quit: Arc<AtomicBool>,
-        hide_state: Arc<crate::domain::state::HideState>,
+        hide_state: Arc<HideState>,
     ) -> Self {
         Self {
             inner: PlatformTray::new(ctx, cmd, force_quit, hide_state),

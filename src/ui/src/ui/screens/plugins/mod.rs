@@ -12,9 +12,14 @@ use halod_shared::types::{
 
 use crate::domain::models::plugin_issues::plugin_issue_detail;
 use crate::domain::models::udev::udev_rules_need_action;
+use crate::domain::state::Page;
+use crate::domain::tour;
+use crate::domain::tour::AnchorId;
 use crate::runtime::ipc::{self, CommandTx};
 use crate::ui::components::{self as widgets, ButtonKind};
 use crate::ui::icons;
+use crate::ui::screens::plugin_integration;
+use crate::ui::screens::plugin_integration::IntegrationPanel;
 use crate::ui::theme;
 use halod_shared::commands::DaemonCommand;
 
@@ -81,7 +86,7 @@ pub struct PluginsUi {
     udev_rechecking: Option<f64>,
     filter: usize,
     search: String,
-    integration: crate::ui::screens::plugin_integration::IntegrationPanel,
+    integration: IntegrationPanel,
     pub(crate) enable_prompt: EnablePrompt,
 }
 
@@ -158,12 +163,7 @@ impl PluginsUi {
         self.requested_assets.clear();
     }
 
-    pub fn show(
-        &mut self,
-        ui: &mut egui::Ui,
-        cx: &PluginsCtx,
-        page: &mut crate::domain::state::Page,
-    ) {
+    pub fn show(&mut self, ui: &mut egui::Ui, cx: &PluginsCtx, page: &mut Page) {
         let now = ui.input(|input| input.time);
         #[cfg(target_os = "linux")]
         if now >= self.next_udev_status_check {
@@ -310,7 +310,7 @@ impl PluginsUi {
         }
     }
 
-    fn body(&mut self, ui: &mut egui::Ui, cx: &PluginsCtx, page: &mut crate::domain::state::Page) {
+    fn body(&mut self, ui: &mut egui::Ui, cx: &PluginsCtx, page: &mut Page) {
         reconcile_in_flight(
             &mut self.in_flight,
             &cx.state.plugins.plugins,
@@ -347,11 +347,7 @@ impl PluginsUi {
                     widgets::search_field(ui, &mut self.search, &t!("plugins.search"), 260.0);
                 },
             );
-            crate::domain::tour::anchor(
-                ui.ctx(),
-                crate::domain::tour::AnchorId::PluginsOverview,
-                title,
-            );
+            tour::anchor(ui.ctx(), AnchorId::PluginsOverview, title);
             self.banners(ui, cx);
             widgets::split_columns(ui, 400.0, 16.0, |side, detail| {
                 self.sidebar(side, cx);
@@ -442,7 +438,7 @@ impl PluginsUi {
             let selected = self.selection == Selection::Plugin(p.id.clone());
             let update_available = update_for(p, &cx.state.plugins.available).is_some();
             let needs_action = update_available
-                || crate::ui::screens::plugin_integration::awaits_setup(p)
+                || plugin_integration::awaits_setup(p)
                 || cx.udev.is_some_and(|status| {
                     status.supported
                         && !status.current
@@ -465,12 +461,7 @@ impl PluginsUi {
         }
     }
 
-    fn detail_column(
-        &mut self,
-        ui: &mut egui::Ui,
-        cx: &PluginsCtx,
-        page: &mut crate::domain::state::Page,
-    ) {
+    fn detail_column(&mut self, ui: &mut egui::Ui, cx: &PluginsCtx, page: &mut Page) {
         let plugin = match &self.selection {
             Selection::Plugin(id) => cx.state.plugins.plugins.iter().find(|p| &p.id == id),
             _ => None,
@@ -503,13 +494,7 @@ impl PluginsUi {
         }
     }
 
-    fn detail_body(
-        &mut self,
-        ui: &mut egui::Ui,
-        cx: &PluginsCtx,
-        p: &PluginInfo,
-        page: &mut crate::domain::state::Page,
-    ) {
+    fn detail_body(&mut self, ui: &mut egui::Ui, cx: &PluginsCtx, p: &PluginInfo, page: &mut Page) {
         let logo = self.logo(p);
         let locked_target = self.locked_target(p);
         let update = update_for(p, &cx.state.plugins.available);
@@ -561,11 +546,7 @@ impl PluginsUi {
                 } else {
                     widgets::button(ui, &label, ButtonKind::Secondary, size)
                 };
-                crate::domain::tour::anchor(
-                    ui.ctx(),
-                    crate::domain::tour::AnchorId::PluginsToggle,
-                    resp.rect,
-                );
+                tour::anchor(ui.ctx(), AnchorId::PluginsToggle, resp.rect);
                 toggle_clicked = resp.clicked();
             },
         );
@@ -1016,7 +997,7 @@ fn list_row(
         )
     } else if p.experimental {
         (t!("plugins.experimental").into_owned(), theme::WARN_TEXT)
-    } else if crate::ui::screens::plugin_integration::awaits_setup(p) {
+    } else if plugin_integration::awaits_setup(p) {
         (t!("plugins.not_set_up").into_owned(), theme::WARN_TEXT)
     } else if p.plugin_type == halod_shared::types::PluginKind::Integration
         && !p.integration_configured
@@ -1061,11 +1042,7 @@ fn list_row(
         ),
         widgets::TOGGLE_SIZE,
     );
-    crate::domain::tour::anchor(
-        ui.ctx(),
-        crate::domain::tour::AnchorId::PluginsToggle,
-        toggle_rect,
-    );
+    tour::anchor(ui.ctx(), AnchorId::PluginsToggle, toggle_rect);
     let toggle_on = locked_target.unwrap_or(p.enabled);
     if widgets::toggle_at(
         ui,

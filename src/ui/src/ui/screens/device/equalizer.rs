@@ -7,14 +7,13 @@ use halod_shared::commands::{DaemonCommand, DeviceOp};
 use halod_shared::types::{DeviceCapability, EqBand, Equalizer};
 
 use super::{editing, DeviceUi, TabCtx};
+use crate::domain::tour;
+use crate::domain::tour::AnchorId;
+use crate::runtime::ipc;
 use crate::ui::theme;
 
 pub fn show(ui: &mut egui::Ui, ctx: &TabCtx, st: &mut DeviceUi) {
-    crate::domain::tour::anchor(
-        ui.ctx(),
-        crate::domain::tour::AnchorId::TabEqualizer,
-        ui.max_rect(),
-    );
+    tour::anchor(ui.ctx(), AnchorId::TabEqualizer, ui.max_rect());
     let Some(eq) = ctx.dev.capabilities.iter().find_map(|c| match c {
         DeviceCapability::Equalizer(e) => Some(e.clone()),
         _ => None,
@@ -61,7 +60,7 @@ pub fn show(ui: &mut egui::Ui, ctx: &TabCtx, st: &mut DeviceUi) {
                         let flat = flat_bands(&eq.bands);
                         st.equalizer.eq = flat.clone();
                         st.last_edit = ctx.time;
-                        crate::runtime::ipc::send(
+                        ipc::send(
                             ctx.cmd,
                             DaemonCommand::Device {
                                 device_id: id.clone(),
@@ -110,7 +109,7 @@ fn preset_list(ui: &mut egui::Ui, ctx: &TabCtx, id: &str, eq: &Equalizer) {
         if widgets::choice_row(ui, &preset.label, &preset_note(preset), selected).clicked()
             && !selected
         {
-            crate::runtime::ipc::send(
+            ipc::send(
                 ctx.cmd,
                 DaemonCommand::Device {
                     device_id: id.to_string(),

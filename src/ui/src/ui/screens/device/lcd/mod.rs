@@ -34,7 +34,13 @@ use library::{delete_image_modal, media_content, poll_picker, select_image, sele
 use preview::display_card;
 
 use super::{DeviceUi, LcdMediaTab, PickerTarget, TabCtx};
+use crate::domain::tour;
+use crate::domain::tour::AnchorId;
 use crate::ui::components as widgets;
+use crate::ui::theme;
+use crate::ui::theme::SPACE_4;
+use crate::ui::theme::SPACE_6;
+use crate::ui::theme::TEXT_DIM;
 
 /// Cache key for the preview texture. Each mode/image combination maps to a
 /// distinct string so any transition (GIF → none, image → other image) is seen
@@ -133,16 +139,12 @@ pub fn show(ui: &mut egui::Ui, ctx: &TabCtx, st: &mut DeviceUi) {
         }
     }
 
-    ui.add_space(crate::ui::theme::SPACE_4);
+    ui.add_space(SPACE_4);
 
     match st.lcd.media_tab {
         LcdMediaTab::Template => editor::show(ui, ctx, st, &id, lcd),
         _ => {
-            crate::domain::tour::anchor(
-                ui.ctx(),
-                crate::domain::tour::AnchorId::TabLcd,
-                ui.max_rect(),
-            );
+            tour::anchor(ui.ctx(), AnchorId::TabLcd, ui.max_rect());
             ui.columns(2, |cols| {
                 display_card(&mut cols[0], ctx, st, &id, lcd);
                 media_content(&mut cols[1], ctx, st, &id, lcd);
@@ -179,11 +181,7 @@ fn activate_video_mode(ctx: &TabCtx, id: &str, lcd: &LcdStatus) {
 fn mode_header(ui: &mut egui::Ui, ctx: &TabCtx, st: &mut DeviceUi) {
     let hdr_rect =
         egui::Rect::from_min_size(ui.cursor().min, egui::Vec2::new(ui.available_width(), 40.0));
-    crate::domain::tour::anchor(
-        ui.ctx(),
-        crate::domain::tour::AnchorId::LcdModeTabs,
-        hdr_rect,
-    );
+    tour::anchor(ui.ctx(), AnchorId::LcdModeTabs, hdr_rect);
     let tabs = media_tabs(ctx.state.health.ffmpeg_available);
     let labels: Vec<std::borrow::Cow<'static, str>> = tabs
         .iter()
@@ -212,7 +210,7 @@ fn mode_header(ui: &mut egui::Ui, ctx: &TabCtx, st: &mut DeviceUi) {
             if !editing {
                 return;
             }
-            ui.spacing_mut().item_spacing.x = crate::ui::theme::SPACE_6;
+            ui.spacing_mut().item_spacing.x = SPACE_6;
             if widgets::button(
                 ui,
                 &t!("lcd.save_as_template"),
@@ -225,8 +223,8 @@ fn mode_header(ui: &mut egui::Ui, ctx: &TabCtx, st: &mut DeviceUi) {
             }
             ui.label(
                 egui::RichText::new(t!("lcd.widget_count", n = count))
-                    .font(crate::ui::theme::body_md())
-                    .color(crate::ui::theme::TEXT_DIM),
+                    .font(theme::body_md())
+                    .color(TEXT_DIM),
             );
         },
     );

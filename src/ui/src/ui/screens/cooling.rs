@@ -14,6 +14,8 @@ use halod_shared::types::{
 
 use crate::domain::models::device as model;
 use crate::domain::state::Page;
+use crate::domain::tour;
+use crate::domain::tour::AnchorId;
 use crate::runtime::ipc::CommandTx;
 use crate::ui::theme::{self, a};
 
@@ -142,11 +144,7 @@ pub fn show(
                         }
                     },
                 );
-                crate::domain::tour::anchor(
-                    ui.ctx(),
-                    crate::domain::tour::AnchorId::CoolingCurve,
-                    title,
-                );
+                tour::anchor(ui.ctx(), AnchorId::CoolingCurve, title);
                 ui.add_space(theme::SPACE_1);
                 cooler_grid(ui, state, cmd, &coolers, page);
             });

@@ -12,14 +12,13 @@ use halod_shared::types::{
 };
 
 use super::{DeviceUi, TabCtx};
+use crate::domain::tour;
+use crate::domain::tour::AnchorId;
+use crate::runtime::ipc;
 use crate::ui::theme;
 
 pub fn show(ui: &mut egui::Ui, ctx: &TabCtx, st: &mut DeviceUi) {
-    crate::domain::tour::anchor(
-        ui.ctx(),
-        crate::domain::tour::AnchorId::TabControls,
-        ui.max_rect(),
-    );
+    tour::anchor(ui.ctx(), AnchorId::TabControls, ui.max_rect());
     let id = ctx.dev.id.clone();
     let siblings = collect_siblings(&ctx.dev.capabilities);
 
@@ -274,7 +273,7 @@ fn setting_row(ui: &mut egui::Ui, id: &str, ctx: &TabCtx, st: &mut DeviceUi, s: 
                     };
                     if changed {
                         st.set(&edit_key, pick as f32, ctx.time);
-                        crate::runtime::ipc::send(
+                        ipc::send(
                             ctx.cmd,
                             halod_shared::commands::DaemonCommand::Device {
                                 device_id: id.to_string(),
@@ -305,7 +304,7 @@ fn setting_row(ui: &mut egui::Ui, id: &str, ctx: &TabCtx, st: &mut DeviceUi, s: 
                         if let Ok(idx) = new_id.parse::<usize>() {
                             if idx != selected {
                                 st.set(&edit_key, idx as f32, ctx.time);
-                                crate::runtime::ipc::send(
+                                ipc::send(
                                     ctx.cmd,
                                     halod_shared::commands::DaemonCommand::Device {
                                         device_id: id.to_string(),
@@ -333,7 +332,7 @@ fn setting_row(ui: &mut egui::Ui, id: &str, ctx: &TabCtx, st: &mut DeviceUi, s: 
                             let on = selected == 1;
                             if widgets::toggle(ui, on) != on {
                                 st.set(&edit_key, usize::from(!on) as f32, ctx.time);
-                                crate::runtime::ipc::send(
+                                ipc::send(
                                     ctx.cmd,
                                     halod_shared::commands::DaemonCommand::Device {
                                         device_id: id.to_string(),
@@ -424,7 +423,7 @@ fn setting_row(ui: &mut egui::Ui, id: &str, ctx: &TabCtx, st: &mut DeviceUi, s: 
                 |ui| {
                     if widgets::toggle_ex(ui, on, b.read_only).clicked() {
                         st.set(&edit_key, if on { 0.0 } else { 1.0 }, ctx.time);
-                        crate::runtime::ipc::send(
+                        ipc::send(
                             ctx.cmd,
                             halod_shared::commands::DaemonCommand::Device {
                                 device_id: id.to_string(),
@@ -448,7 +447,7 @@ fn setting_row(ui: &mut egui::Ui, id: &str, ctx: &TabCtx, st: &mut DeviceUi, s: 
             )
             .clicked()
             {
-                crate::runtime::ipc::send(
+                ipc::send(
                     ctx.cmd,
                     halod_shared::commands::DaemonCommand::Device {
                         device_id: id.to_string(),

@@ -10,15 +10,14 @@ use halod_shared::lcd_custom::WidgetDef;
 use halod_shared::types::EffectParamValue;
 
 use super::{send_def, DeviceUi, TabCtx};
+use crate::domain::tour;
+use crate::domain::tour::AnchorId;
+use crate::runtime::ipc;
 use crate::ui::components as widgets;
 use crate::ui::theme;
 
 pub(super) fn library_card(ui: &mut egui::Ui, ctx: &TabCtx, st: &mut DeviceUi, id: &str) {
-    crate::domain::tour::anchor(
-        ui.ctx(),
-        crate::domain::tour::AnchorId::LcdEditorPalette,
-        ui.max_rect(),
-    );
+    tour::anchor(ui.ctx(), AnchorId::LcdEditorPalette, ui.max_rect());
     ui.set_width(ui.available_width());
     ui.spacing_mut().item_spacing.y = theme::SPACE_5;
     egui::Sides::new().show(
@@ -49,7 +48,7 @@ pub(super) fn library_card(ui: &mut egui::Ui, ctx: &TabCtx, st: &mut DeviceUi, i
                     .requested_widget_icons
                     .insert(descriptor.id.clone())
             {
-                crate::runtime::ipc::send(
+                ipc::send(
                     ctx.cmd,
                     DaemonCommand::GetLcdWidgetIcon {
                         catalog_id: descriptor.id.clone(),
@@ -87,7 +86,7 @@ pub(super) fn library_card(ui: &mut egui::Ui, ctx: &TabCtx, st: &mut DeviceUi, i
         widgets::pill_strip(ui, |ui| {
             for preset in &ctx.state.lcd.engine.available_presets {
                 if widgets::pill(ui, &preset.name, false) {
-                    crate::runtime::ipc::send(
+                    ipc::send(
                         ctx.cmd,
                         DaemonCommand::GetLcdPluginPreset {
                             catalog_id: preset.id.clone(),
@@ -111,7 +110,7 @@ pub(super) fn my_templates_section(ui: &mut egui::Ui, ctx: &TabCtx, st: &mut Dev
         for name in &ctx.state.lcd.templates {
             let (load, delete) = widgets::chip_closable(ui, name);
             if load {
-                crate::runtime::ipc::send(
+                ipc::send(
                     ctx.cmd,
                     halod_shared::commands::DaemonCommand::LoadLcdTemplate { name: name.clone() },
                 );
@@ -168,7 +167,7 @@ pub(super) fn save_template_modal(ui: &mut egui::Ui, ctx: &TabCtx, st: &mut Devi
     let mut close = cancelled;
     let name = st.lcd.editor.template_name.trim().to_string();
     if save && !name.is_empty() {
-        crate::runtime::ipc::send(
+        ipc::send(
             ctx.cmd,
             DaemonCommand::SaveLcdTemplate {
                 name,
@@ -194,7 +193,7 @@ pub(super) fn delete_template_modal(ui: &mut egui::Ui, ctx: &TabCtx, st: &mut De
         &t!("lcd.delete"),
         &mut st.lcd.editor.confirm_delete,
     ) {
-        crate::runtime::ipc::send(
+        ipc::send(
             ctx.cmd,
             halod_shared::commands::DaemonCommand::DeleteLcdTemplate { name },
         );

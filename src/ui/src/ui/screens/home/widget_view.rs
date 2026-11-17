@@ -15,6 +15,7 @@ use crate::ui::components as widgets;
 use crate::ui::theme;
 
 use super::ellipsize;
+use crate::domain::state::HISTORY_LEN;
 
 pub const CELL_H: f32 = 170.0;
 const PAD: Vec2 = Vec2::new(20.0, 18.0);
@@ -288,10 +289,7 @@ fn chart(
     p.text(
         Pos2::new(inner.right(), y),
         Align2::RIGHT_TOP,
-        t!(
-            "home.widget_window",
-            secs = crate::domain::state::HISTORY_LEN
-        ),
+        t!("home.widget_window", secs = HISTORY_LEN),
         theme::body_sm(),
         theme::TEXT_MUT,
     );

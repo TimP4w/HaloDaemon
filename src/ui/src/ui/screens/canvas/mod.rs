@@ -18,6 +18,11 @@ use base64::{engine::general_purpose::STANDARD as B64, Engine as _};
 use egui::{Pos2, Rect, Vec2};
 use halod_shared::types::{CanvasFrame, EffectParamValue, PlacedZone, RgbColor};
 
+use crate::domain::state::Page;
+use crate::runtime::ipc;
+use crate::runtime::ipc::CommandTx;
+use crate::ui::components;
+use crate::ui::screens::effect_designer::DesignerUi;
 pub(crate) use chrome::chrome;
 pub(crate) use modals::fps_modal;
 use modals::{new_instance_modal, zones_assign_modal};
@@ -139,7 +144,7 @@ fn queue_move(pending: &mut Debouncer, z: &PlacedZone, time: f64) {
 }
 
 /// Send every queued zone move now (drag released), leaving other edits debounced.
-fn flush_moves(pending: &mut Debouncer, cmd: &crate::runtime::ipc::CommandTx, time: f64) {
+fn flush_moves(pending: &mut Debouncer, cmd: &CommandTx, time: f64) {
     for (_, (_, due)) in pending
         .iter_mut()
         .filter(|(k, _)| k.starts_with(MOVE_PREFIX))
@@ -254,11 +259,7 @@ impl CanvasUi {
     /// opened from the Direct tab (where `body` never runs), so that tab drains
     /// the queue through here. Returns true while commands are still pending, so
     /// the caller can keep the frame ticking until the trailing flush fires.
-    pub(crate) fn flush_pending(
-        &mut self,
-        cmd: &crate::runtime::ipc::CommandTx,
-        time: f64,
-    ) -> bool {
+    pub(crate) fn flush_pending(&mut self, cmd: &CommandTx, time: f64) -> bool {
         self.pending.flush(cmd, time);
         !self.pending.is_empty()
     }
@@ -308,13 +309,7 @@ pub fn ingest_frame(ctx: &egui::Context, ui: &mut CanvasUi, frame: &CanvasFrame)
         ui.canvas_aspect = w as f32 / h as f32;
         ui.canvas_size = (frame.canvas_w, frame.canvas_h);
     }
-    ui.texture = Some(crate::ui::components::rgba_texture(
-        ctx,
-        "canvas_frame",
-        &bytes,
-        w,
-        h,
-    ));
+    ui.texture = Some(components::rgba_texture(ctx, "canvas_frame", &bytes, w, h));
     ui.texture_frame_id = frame.frame_id;
 }
 
@@ -325,12 +320,12 @@ pub fn ingest_frame(ctx: &egui::Context, ui: &mut CanvasUi, frame: &CanvasFrame)
 pub(crate) fn body(
     ui: &mut egui::Ui,
     state: &TopicStore,
-    cmd: &crate::runtime::ipc::CommandTx,
+    cmd: &CommandTx,
     canvas_ui: &mut CanvasUi,
     canvas_frame: Option<&CanvasFrame>,
     time: f64,
-    designer_ui: &mut crate::ui::screens::effect_designer::DesignerUi,
-    page: &mut crate::domain::state::Page,
+    designer_ui: &mut DesignerUi,
+    page: &mut Page,
 ) {
     if let Some(frame) = canvas_frame {
         ingest_frame(ui.ctx(), canvas_ui, frame);
@@ -341,7 +336,7 @@ pub(crate) fn body(
     if ui.input(|i| i.key_pressed(egui::Key::Delete) || i.key_pressed(egui::Key::Backspace)) {
         let to_remove: Vec<_> = canvas_ui.selected.drain().collect();
         for (dev, zone) in to_remove {
-            crate::runtime::ipc::send(
+            ipc::send(
                 cmd,
                 halod_shared::commands::DaemonCommand::Device {
                     device_id: dev,

@@ -13,6 +13,7 @@ use halod_shared::types::{ConnectionType, DeviceCapability, VisibilityState, Wri
 use super::header::led_count;
 use super::{DeviceUi, TabCtx};
 use crate::domain::models::device::find_hub_write_rate;
+use crate::runtime::ipc;
 use crate::ui::theme;
 
 /// Chart windows offered by the range selector, in seconds (history is sampled at 1 Hz).
@@ -300,7 +301,7 @@ fn details_card(ui: &mut egui::Ui, ctx: &TabCtx, dbg: Option<&DeviceDebugInfo>) 
 
 pub fn show(ui: &mut egui::Ui, ctx: &TabCtx, st: &mut DeviceUi) {
     if !st.debug_requested {
-        crate::runtime::ipc::send(ctx.cmd, halod_shared::commands::DaemonCommand::GetDebugInfo);
+        ipc::send(ctx.cmd, halod_shared::commands::DaemonCommand::GetDebugInfo);
         st.debug_requested = true;
     }
     let dev = ctx.dev;
@@ -414,7 +415,7 @@ fn full_button(ui: &mut egui::Ui, label: &str, kind: widgets::ButtonKind) -> boo
 }
 
 fn set_visibility(ctx: &TabCtx, state: VisibilityState) {
-    crate::runtime::ipc::send(
+    ipc::send(
         ctx.cmd,
         halod_shared::commands::DaemonCommand::Device {
             device_id: ctx.dev.id.clone(),

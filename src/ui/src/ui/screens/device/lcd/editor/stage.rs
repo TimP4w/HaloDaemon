@@ -15,6 +15,8 @@ use super::sprites::{
     content_bounds, ensure_sprite_textures, request_editor_render, resize_preview_rect,
 };
 use super::{send_def, DeviceUi, ResizePreview, TabCtx};
+use crate::domain::tour;
+use crate::domain::tour::AnchorId;
 use crate::ui::components as widgets;
 use crate::ui::screens::device::lcd::gif::decode_next_thumb;
 use crate::ui::screens::device::lcd::preview::{cover_uv, paint_image_circle, panel_size};
@@ -50,11 +52,7 @@ pub(super) fn stage(ui: &mut egui::Ui, ctx: &TabCtx, st: &mut DeviceUi, id: &str
         .vertical_centered(|ui| ui.allocate_exact_size(size_vec, Sense::click_and_drag()))
         .inner;
     st.lcd.editor.stage_rect = Some(rect);
-    crate::domain::tour::anchor(
-        ui.ctx(),
-        crate::domain::tour::AnchorId::LcdEditorStage,
-        rect,
-    );
+    tour::anchor(ui.ctx(), AnchorId::LcdEditorStage, rect);
     let center = rect.center();
     let radius = rect.width().min(rect.height()) / 2.0;
 

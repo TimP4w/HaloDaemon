@@ -38,6 +38,7 @@ use crate::domain::lifecycle::CloseAction;
 use crate::domain::state::HideState;
 use crate::domain::tray;
 use crate::runtime::ipc;
+use crate::runtime::single_instance::Primary;
 use crate::ui::theme;
 
 /// Wakes the event loop when egui asks for a repaint (from the UI thread or the
@@ -51,7 +52,7 @@ enum UserEvent {
 /// window close with "close to tray" off) exits the loop. `background` starts
 /// tray-only, with no window ever created until the tray "Open" is used (sign-in
 /// autostart via `--background`).
-pub fn run(background: bool, primary: crate::runtime::single_instance::Primary) {
+pub fn run(background: bool, primary: Primary) {
     let event_loop = EventLoop::<UserEvent>::with_user_event()
         .build()
         .expect("failed to build winit event loop");

@@ -11,6 +11,8 @@ use super::super::library::image_picker;
 use super::super::params::render_param;
 use super::super::preview::{display_controls, raw_streaming_row};
 use super::{send_def, DeviceUi, TabCtx};
+use crate::domain::tour;
+use crate::domain::tour::AnchorId;
 use crate::ui::components as widgets;
 use crate::ui::theme;
 
@@ -34,11 +36,7 @@ pub(super) fn empty_selection_card(ui: &mut egui::Ui) {
 /// tour overlay, so omitting the empty-state anchor makes step three time out.
 fn anchor_variant_card(ui: &egui::Ui) {
     let rect = Rect::from_min_size(ui.cursor().min, egui::Vec2::new(ui.available_width(), 28.0));
-    crate::domain::tour::anchor(
-        ui.ctx(),
-        crate::domain::tour::AnchorId::LcdEditorVariant,
-        rect,
-    );
+    tour::anchor(ui.ctx(), AnchorId::LcdEditorVariant, rect);
 }
 
 /// "SELECTED · {type}" caption matching the design's per-variant labels.

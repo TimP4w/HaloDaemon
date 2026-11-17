@@ -22,6 +22,8 @@ use halod_shared::types::{
 
 use crate::domain::models::device as model;
 use crate::domain::state::Page;
+use crate::domain::tour;
+use crate::domain::tour::AnchorId;
 use crate::runtime::ipc::CommandTx;
 use crate::ui::components::rgb_to_color32;
 use crate::ui::screens::canvas::{self, CanvasUi};
@@ -396,11 +398,7 @@ fn global_effect_card(
                 widgets::ButtonKind::Secondary,
                 size,
             );
-            crate::domain::tour::anchor(
-                ui.ctx(),
-                crate::domain::tour::AnchorId::LightingNewEffect,
-                new_btn.rect,
-            );
+            tour::anchor(ui.ctx(), AnchorId::LightingNewEffect, new_btn.rect);
             if new_btn.clicked() {
                 *designer_ui = DesignerUi::new_effect();
                 *page = Page::EffectDesigner;
@@ -411,11 +409,7 @@ fn global_effect_card(
                 widgets::ButtonKind::Secondary,
                 size,
             );
-            crate::domain::tour::anchor(
-                ui.ctx(),
-                crate::domain::tour::AnchorId::LightingImport,
-                import_btn.rect,
-            );
+            tour::anchor(ui.ctx(), AnchorId::LightingImport, import_btn.rect);
             if import_btn.clicked() {
                 effect_designer::spawn_import(ui.ctx(), cmd.clone());
             }
@@ -456,11 +450,7 @@ fn global_effect_card(
                     }
                 });
             }
-            crate::domain::tour::anchor(
-                ui.ctx(),
-                crate::domain::tour::AnchorId::LightingEffects,
-                ui.min_rect(),
-            );
+            tour::anchor(ui.ctx(), AnchorId::LightingEffects, ui.min_rect());
         },
     );
     changed
@@ -778,11 +768,7 @@ fn targets_card(
             }
             ui.add_space(theme::SPACE_4);
         }
-        crate::domain::tour::anchor(
-            ui.ctx(),
-            crate::domain::tour::AnchorId::LightingTargets,
-            ui.min_rect(),
-        );
+        tour::anchor(ui.ctx(), AnchorId::LightingTargets, ui.min_rect());
 
         let on_canvas = canvas_driven(state, &st.sel_ids);
         if !on_canvas.is_empty() {

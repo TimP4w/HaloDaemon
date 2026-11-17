@@ -4,6 +4,7 @@
 
 use egui::{Align2, Color32, Pos2, Rect, Response, Sense, Shape, Stroke, Vec2};
 
+use crate::ui::components;
 use crate::ui::theme;
 
 pub const APP_TILE: f32 = 104.0;
@@ -51,7 +52,7 @@ pub fn app_tile(ui: &mut egui::Ui, label: &str, icon: AppIcon) -> bool {
             );
         }
     }
-    let label = crate::ui::components::truncate_to_width(label, APP_TILE - 16.0, |s| {
+    let label = components::truncate_to_width(label, APP_TILE - 16.0, |s| {
         p.layout_no_wrap(s.to_owned(), theme::body_sm(), theme::TEXT)
             .size()
             .x

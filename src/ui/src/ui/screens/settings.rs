@@ -11,6 +11,9 @@ use halod_shared::commands::{DaemonCommand, EngineKind};
 use halod_shared::debug_info::{DebugInfo, DependencyStatus};
 use halod_shared::types::{DiscoveryPhase, GuiConfig};
 
+use crate::domain::state::Debouncer;
+use crate::domain::tour;
+use crate::domain::tour::AnchorId;
 use crate::runtime::ipc::{self, CommandTx};
 use crate::ui::screens::depcheck::{fix_text, impact_text, title_text};
 use crate::ui::theme;
@@ -35,7 +38,7 @@ pub struct SettingsUi {
     /// Section highlighted in the nav, and one waiting to be scrolled to.
     active: Section,
     scroll_to: Option<Section>,
-    save: crate::domain::state::Debouncer,
+    save: Debouncer,
     /// Slider values being dragged, with when they last moved, so a pending
     /// save doesn't snap back to the last broadcast.
     drafts: std::collections::HashMap<&'static str, (f32, f64)>,
@@ -232,22 +235,14 @@ fn page_body(
             &t!("settings.replay_button"),
         ) {
             ipc::send(cmd, DaemonCommand::ResetToursSeen);
-            crate::domain::tour::request_reset(ui.ctx());
+            tour::request_reset(ui.ctx());
         }
     });
-    crate::domain::tour::anchor(
-        ui.ctx(),
-        crate::domain::tour::AnchorId::SettingsApplication,
-        app,
-    );
+    tour::anchor(ui.ctx(), AnchorId::SettingsApplication, app);
     let engines = group(ui, st, Section::Engines, |ui, st| {
         engine_rows(ui, state, cmd, st);
     });
-    crate::domain::tour::anchor(
-        ui.ctx(),
-        crate::domain::tour::AnchorId::SettingsEngines,
-        engines,
-    );
+    tour::anchor(ui.ctx(), AnchorId::SettingsEngines, engines);
     group(ui, st, Section::Devices, |ui, st| {
         let version = debug.map_or(env!("CARGO_PKG_VERSION"), |d| {
             d.system.daemon_version.as_str()

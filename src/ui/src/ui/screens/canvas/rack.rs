@@ -18,6 +18,10 @@ use crate::ui::theme;
 
 use super::params::{build_instance_params, instance_params, unroll_cmd, upsert_instance_cmd};
 use super::{CanvasUi, DEBOUNCE};
+use crate::domain::state::Page;
+use crate::domain::tour;
+use crate::domain::tour::AnchorId;
+use crate::ui::screens::effect_designer::DesignerUi;
 
 const PANEL_PAD: egui::Margin = egui::Margin::same(16);
 
@@ -27,8 +31,8 @@ pub(super) fn right_panel(
     canvas_ui: &mut CanvasUi,
     cmd: &CommandTx,
     time: f64,
-    designer_ui: &mut crate::ui::screens::effect_designer::DesignerUi,
-    page: &mut crate::domain::state::Page,
+    designer_ui: &mut DesignerUi,
+    page: &mut Page,
 ) {
     let effects = &state.lighting.canvas.effects;
     let mut ids: Vec<String> = effects.keys().cloned().collect();
@@ -49,11 +53,7 @@ pub(super) fn right_panel(
     );
     ui.add_space(theme::SPACE_6);
     let rack = ui.scope(|ui| layers_card(ui, state, canvas_ui, &ids));
-    crate::domain::tour::anchor(
-        ui.ctx(),
-        crate::domain::tour::AnchorId::CanvasInstanceRack,
-        rack.response.rect,
-    );
+    tour::anchor(ui.ctx(), AnchorId::CanvasInstanceRack, rack.response.rect);
     ui.add_space(theme::SPACE_6);
     sampling_card(ui, state, canvas_ui, time);
 }
@@ -406,8 +406,8 @@ fn layer_params(
     time: f64,
     id: &str,
     idx: usize,
-    designer_ui: &mut crate::ui::screens::effect_designer::DesignerUi,
-    page: &mut crate::domain::state::Page,
+    designer_ui: &mut DesignerUi,
+    page: &mut Page,
 ) {
     let Some(def) = state.lighting.canvas.effects.get(id) else {
         return;
@@ -561,13 +561,12 @@ fn layer_params(
             if def.effect_id == DESIGNER_PIXMAP_EFFECT_ID
                 && widgets::button(ui, &t!("canvas.edit_in_designer"), kind, size).clicked()
             {
-                *designer_ui =
-                    crate::ui::screens::effect_designer::DesignerUi::edit_for_canvas_instance(
-                        def,
-                        id.to_string(),
-                        instance_name(&state.lighting.canvas.effects, id).to_string(),
-                    );
-                *page = crate::domain::state::Page::EffectDesigner;
+                *designer_ui = DesignerUi::edit_for_canvas_instance(
+                    def,
+                    id.to_string(),
+                    instance_name(&state.lighting.canvas.effects, id).to_string(),
+                );
+                *page = Page::EffectDesigner;
             }
             ui.with_layout(egui::Layout::right_to_left(egui::Align::Center), |ui| {
                 if widgets::button(

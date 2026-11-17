@@ -11,6 +11,8 @@ use halod_shared::effect_designer::{
 use halod_shared::types::{EffectDef, EffectParamValue};
 
 use crate::domain::state::Page;
+use crate::domain::tour;
+use crate::domain::tour::AnchorId;
 use crate::runtime::ipc::CommandTx;
 use crate::ui::theme;
 
@@ -111,17 +113,9 @@ impl DesignerUi {
                     let ctx_ref = ui.ctx().clone();
                     widgets::split_columns(ui, left_w, gap, |left, right| {
                         let preview = left.scope(|ui| self.preview(ui, t)).response.rect;
-                        crate::domain::tour::anchor(
-                            &ctx_ref,
-                            crate::domain::tour::AnchorId::EffectDesignerPreview,
-                            preview,
-                        );
+                        tour::anchor(&ctx_ref, AnchorId::EffectDesignerPreview, preview);
                         let controls = right.scope(|ui| self.controls(ui)).response.rect;
-                        crate::domain::tour::anchor(
-                            &ctx_ref,
-                            crate::domain::tour::AnchorId::EffectDesignerControls,
-                            controls,
-                        );
+                        tour::anchor(&ctx_ref, AnchorId::EffectDesignerControls, controls);
                     });
                 });
             });
@@ -152,11 +146,7 @@ impl DesignerUi {
                     widgets::ButtonKind::Primary,
                     egui::vec2(0.0, 36.0),
                 );
-                crate::domain::tour::anchor(
-                    ui.ctx(),
-                    crate::domain::tour::AnchorId::EffectDesignerSave,
-                    save_btn.rect,
-                );
+                tour::anchor(ui.ctx(), AnchorId::EffectDesignerSave, save_btn.rect);
                 save = save_btn.clicked();
                 reset = widgets::button(
                     ui,

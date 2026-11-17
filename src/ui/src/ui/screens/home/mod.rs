@@ -15,8 +15,12 @@ use egui::{Align2, Color32, Pos2, Rect, Sense, Stroke, Vec2};
 use halod_shared::types::{ConflictDeviceSource, DeviceCapability, VisibilityState, WireDevice};
 
 use crate::domain::models::device::{self as model};
+use crate::domain::state::Page;
 use crate::domain::state::Rename;
+use crate::domain::tour;
+use crate::domain::tour::AnchorId;
 use crate::runtime::ipc::CommandTx;
+use crate::ui::screens::startup;
 use crate::ui::theme::{self, a};
 
 const GAP: f32 = 12.0;
@@ -52,7 +56,7 @@ pub fn show(
     cmd: &CommandTx,
     home: &mut HomeUi,
     history: &HashMap<String, VecDeque<f32>>,
-    page: &mut crate::domain::state::Page,
+    page: &mut Page,
     time: f64,
     allow_modals: bool,
 ) {
@@ -62,7 +66,7 @@ pub fn show(
         .show(ui, |ui| {
             widgets::page_frame(ui, |ui| {
                 header(ui, state, home);
-                crate::ui::screens::startup::discovery_status(ui, state);
+                startup::discovery_status(ui, state);
                 let conflicts = conflict_group_count(&state.devices);
                 if conflicts > 0 {
                     ui.add_space(theme::SPACE_9);
@@ -727,11 +731,7 @@ fn header(ui: &mut egui::Ui, state: &TopicStore, home: &mut HomeUi) {
             home.widgets.toggle(state);
         }
         let resp = widgets::search_field(ui, &mut home.search, &t!("home.search_devices"), 280.0);
-        crate::domain::tour::anchor(
-            ui.ctx(),
-            crate::domain::tour::AnchorId::HomeSearch,
-            resp.rect,
-        );
+        tour::anchor(ui.ctx(), AnchorId::HomeSearch, resp.rect);
     });
 }
 
@@ -776,7 +776,7 @@ fn grid(
     rename: &mut Option<Rename>,
     confirm_remove: &mut Option<ConfirmRemove>,
     conflict_resolve: &mut Option<Vec<ConflictGroup>>,
-    page: &mut crate::domain::state::Page,
+    page: &mut Page,
     discovering: bool,
 ) {
     let avail = ui.available_width();
@@ -806,11 +806,7 @@ fn grid(
             for d in row {
                 let (rect, resp) = ui.allocate_exact_size(Vec2::new(w, h), Sense::click());
                 if !anchored_a_card {
-                    crate::domain::tour::anchor(
-                        ui.ctx(),
-                        crate::domain::tour::AnchorId::HomeDeviceCard,
-                        rect,
-                    );
+                    tour::anchor(ui.ctx(), AnchorId::HomeDeviceCard, rect);
                     anchored_a_card = true;
                 }
                 let conflict_clicked =
@@ -822,7 +818,7 @@ fn grid(
                     && !conflict_clicked
                     && d.active_state != VisibilityState::Disabled
                 {
-                    *page = crate::domain::state::Page::Device(d.id.clone());
+                    *page = Page::Device(d.id.clone());
                 }
                 resp.context_menu(|ui| card_menu(ui, d, all_devices, cmd, rename, confirm_remove));
             }

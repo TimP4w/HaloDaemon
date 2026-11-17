@@ -10,13 +10,14 @@ use std::sync::atomic::AtomicBool;
 use std::sync::Arc;
 
 use super::{present, quit, render_icon_rgba, TrayModel};
+use crate::domain::state::HideState;
 use crate::runtime::ipc::CommandTx;
 
 pub struct PlatformTray {
     tray: TrayIcon,
     cmd: CommandTx,
     force_quit: Arc<AtomicBool>,
-    hide_state: Arc<crate::domain::state::HideState>,
+    hide_state: Arc<HideState>,
     open_id: MenuId,
     quit_id: MenuId,
     /// (menu id, profile name) for each profile entry in the submenu.
@@ -28,7 +29,7 @@ impl PlatformTray {
         _ctx: &egui::Context,
         cmd: CommandTx,
         force_quit: Arc<AtomicBool>,
-        hide_state: Arc<crate::domain::state::HideState>,
+        hide_state: Arc<HideState>,
     ) -> Self {
         let built = build_menu(&TrayModel::default());
         let tray = TrayIconBuilder::new()

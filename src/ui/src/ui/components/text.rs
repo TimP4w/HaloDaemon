@@ -3,6 +3,8 @@
 
 use egui::{Align2, Color32, Pos2, Sense, Stroke, Vec2};
 
+use crate::domain::tour;
+use crate::domain::tour::AnchorId;
 use crate::ui::theme;
 
 /// A text input with comfortable default padding and font — use this instead of
@@ -76,11 +78,7 @@ pub fn search_field(ui: &mut egui::Ui, buf: &mut String, hint: &str, width: f32)
 
 /// A "‹ label" link for the top of a sub-page, navigating back to the parent
 /// page. Shared by every drill-down page (device detail, Effect Designer, …).
-pub fn back_link(
-    ui: &mut egui::Ui,
-    label: &str,
-    anchor: Option<crate::domain::tour::AnchorId>,
-) -> bool {
+pub fn back_link(ui: &mut egui::Ui, label: &str, anchor: Option<AnchorId>) -> bool {
     // Draw a vector chevron (<) instead of a Unicode arrow so the glyph is
     // guaranteed to render (InterTight doesn't cover U+2190).
     let galley = ui
@@ -91,7 +89,7 @@ pub fn back_link(
     let total_size = Vec2::new(chevron_w + gap + galley.size().x, galley.size().y + 6.0);
     let (rect, resp) = ui.allocate_exact_size(total_size, Sense::click());
     if let Some(anchor) = anchor {
-        crate::domain::tour::anchor(ui.ctx(), anchor, rect);
+        tour::anchor(ui.ctx(), anchor, rect);
     }
     let p = ui.painter();
     let cy = rect.center().y + 0.5;

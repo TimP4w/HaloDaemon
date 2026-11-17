@@ -7,7 +7,9 @@ use halod_shared::commands::{DaemonCommand, DeviceOp};
 use halod_shared::types::{LcdStatus, LcdUploadProgress, ScreenRotation, ScreenShape};
 
 use super::{drive_preview, preview_key, rot_label, DeviceUi, TabCtx};
+use crate::runtime::ipc;
 use crate::ui::components as widgets;
+use crate::ui::screens::device;
 use crate::ui::theme;
 
 /// UV rect that center-crops `tex` to a square, so painting it into the square
@@ -111,7 +113,7 @@ fn preview_pending_cleared(
     device_id: &str,
 ) -> bool {
     (active_image == Some(pending) && tex_ready)
-        || crate::ui::screens::device::is_terminal_upload_for(terminal, device_id)
+        || device::is_terminal_upload_for(terminal, device_id)
 }
 
 pub(super) fn display_card(
@@ -207,7 +209,7 @@ pub(super) fn display_card(
             )
             .clicked()
             {
-                crate::runtime::ipc::send(
+                ipc::send(
                     ctx.cmd,
                     halod_shared::commands::DaemonCommand::Device {
                         device_id: id.to_string(),
@@ -270,7 +272,7 @@ pub(super) fn display_controls(
         },
         |ui| {
             if widgets::segmented(ui, &labels, &mut idx, false) {
-                crate::runtime::ipc::send(
+                ipc::send(
                     ctx.cmd,
                     DaemonCommand::Device {
                         device_id: id.to_string(),
@@ -302,7 +304,7 @@ pub(super) fn raw_streaming_row(ui: &mut egui::Ui, ctx: &TabCtx, id: &str, lcd: 
         |ui| next = widgets::toggle(ui, on),
     );
     if next != on {
-        crate::runtime::ipc::send(
+        ipc::send(
             ctx.cmd,
             halod_shared::commands::DaemonCommand::Device {
                 device_id: id.to_string(),

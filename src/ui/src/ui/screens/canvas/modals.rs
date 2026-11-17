@@ -18,6 +18,7 @@ use crate::ui::theme;
 use super::params::{assign_zone_cmd, upsert_instance_cmd};
 use super::rack::instance_name;
 use super::{CanvasUi, DEBOUNCE};
+use crate::domain::models::device;
 
 type ZoneKey = (String, String);
 
@@ -28,7 +29,7 @@ fn rgb_zone_groups(
     state
         .devices
         .iter()
-        .filter(|d| !crate::domain::models::device::is_hidden(d))
+        .filter(|d| !device::is_hidden(d))
         .filter_map(|d| {
             d.capabilities.iter().find_map(|c| match c {
                 DeviceCapability::Lighting(r) if !r.descriptor.channels.is_empty() => Some((

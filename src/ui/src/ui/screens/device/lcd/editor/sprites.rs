@@ -8,6 +8,8 @@ use halod_shared::commands::DeviceOp;
 use halod_shared::lcd_geometry::MAX_SCALE;
 
 use super::{DeviceUi, TabCtx};
+use crate::runtime::ipc;
+use crate::runtime::ipc::DecodedEditorRender;
 
 const EDITOR_PREVIEW_FPS: f64 = 5.0;
 const EDITOR_PREVIEW_INTERVAL: f64 = 1.0 / EDITOR_PREVIEW_FPS;
@@ -27,7 +29,7 @@ pub(super) fn request_editor_render(ui: &egui::Ui, ctx: &TabCtx, st: &mut Device
     }
     ed.last_render_req = ctx.time;
     let known = known_signatures(&ed.sprite_tex);
-    crate::runtime::ipc::send(
+    ipc::send(
         ctx.cmd,
         halod_shared::commands::DaemonCommand::Device {
             device_id: id.to_string(),
@@ -65,7 +67,7 @@ pub(super) fn retained_sprite_ids(signatures: &[(String, u64)]) -> std::collecti
 pub(super) fn ensure_sprite_textures(
     ui: &egui::Ui,
     st: &mut DeviceUi,
-    render: &crate::runtime::ipc::DecodedEditorRender,
+    render: &DecodedEditorRender,
 ) {
     st.lcd.editor.missing_widgets = render
         .widgets

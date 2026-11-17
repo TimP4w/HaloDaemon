@@ -1,5 +1,7 @@
 // SPDX-License-Identifier: GPL-3.0-or-later
 use super::*;
+use crate::domain::tour;
+use crate::domain::tour::AnchorId;
 
 pub(super) fn permission_label(
     perm: halod_shared::types::Permission,
@@ -123,9 +125,9 @@ pub(super) fn uses_section(ui: &mut egui::Ui, p: &PluginInfo) {
     widgets::section_label(ui, &t!("plugins.uses"));
     ui.add_space(theme::SPACE_4);
     access_list(ui, &rows);
-    crate::domain::tour::anchor(
+    tour::anchor(
         ui.ctx(),
-        crate::domain::tour::AnchorId::PluginsPermissions,
+        AnchorId::PluginsPermissions,
         egui::Rect::from_min_max(top, ui.cursor().min + Vec2::new(ui.available_width(), 0.0)),
     );
 }

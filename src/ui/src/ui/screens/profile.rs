@@ -11,6 +11,8 @@ use halod_shared::capability;
 use halod_shared::types::{Notification, RunningApp, DEFAULT_PROFILE_NAME};
 
 use crate::domain::state::Page;
+use crate::domain::tour;
+use crate::domain::tour::AnchorId;
 use crate::runtime::app_icons::{get_icon, IconCache};
 use crate::runtime::ipc::CommandTx;
 use crate::ui::components::ButtonKind;
@@ -766,11 +768,7 @@ fn profile_header(
         }
         None => {}
     }
-    crate::domain::tour::anchor(
-        ui.ctx(),
-        crate::domain::tour::AnchorId::ProfileHeader,
-        heading.0,
-    );
+    tour::anchor(ui.ctx(), AnchorId::ProfileHeader, heading.0);
     renamed
 }
 
@@ -945,11 +943,7 @@ fn auto_activate_card(
                     }
                 }
                 let add = widgets::add_app_tile(ui, &t!("profile.add_processes"));
-                crate::domain::tour::anchor(
-                    ui.ctx(),
-                    crate::domain::tour::AnchorId::ProfileAddProcess,
-                    add.rect,
-                );
+                tour::anchor(ui.ctx(), AnchorId::ProfileAddProcess, add.rect);
                 if add.clicked() {
                     open_picker = true;
                 }
@@ -1041,11 +1035,7 @@ fn overrides_section(
 
     let mut remove_target = None;
     section(ui, &t!("profile.overrides_title"), None, |ui| {
-        crate::domain::tour::anchor(
-            ui.ctx(),
-            crate::domain::tour::AnchorId::ProfileOverrides,
-            ui.max_rect(),
-        );
+        tour::anchor(ui.ctx(), AnchorId::ProfileOverrides, ui.max_rect());
         if rows.is_empty() {
             ui.label(
                 egui::RichText::new(t!("profile.overrides_empty"))
