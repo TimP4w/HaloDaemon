@@ -256,7 +256,7 @@ impl Registry {
             && self.blocking_requirements_met(manifest)
             && (!require_active_lifecycle
                 || (!state.integrations_disabled.contains(&manifest.plugin_id)
-                    && (manifest.setup.is_none()
+                    && (!manifest.needs_setup()
                         || state.integrations_configured.contains(&manifest.plugin_id))))
     }
 
@@ -1363,7 +1363,7 @@ impl Registry {
             .iter()
             .find(|manifest| manifest.plugin_id == plugin_id)
             .is_some_and(|manifest| {
-                manifest.setup.is_none() || state.integrations_configured.contains(plugin_id)
+                !manifest.needs_setup() || state.integrations_configured.contains(plugin_id)
             })
     }
 }
@@ -1503,7 +1503,7 @@ impl Registry {
         let intent = m.supports_current_platform() && !self.is_disabled(&m.plugin_id);
         let integration_enabled = !self.is_integration_disabled(&m.plugin_id);
         let integration_configured =
-            m.setup.is_none() || state.integrations_configured.contains(&m.plugin_id);
+            !m.needs_setup() || state.integrations_configured.contains(&m.plugin_id);
         let integration_state = if !integration_enabled {
             halod_shared::types::IntegrationLifecycleState::Disabled
         } else if !integration_configured {
@@ -1574,7 +1574,7 @@ impl Registry {
             secret_set,
             integration_enabled,
             integration_configured,
-            integration_requires_setup: m.setup.is_some(),
+            integration_requires_setup: m.needs_setup(),
             integration_state,
             integration_setup: self.integration_setup_status(&m.plugin_id),
             active,

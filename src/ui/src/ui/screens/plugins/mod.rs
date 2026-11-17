@@ -442,6 +442,7 @@ impl PluginsUi {
             let selected = self.selection == Selection::Plugin(p.id.clone());
             let update_available = update_for(p, &cx.state.plugins.available).is_some();
             let needs_action = update_available
+                || crate::ui::screens::plugin_integration::awaits_setup(p)
                 || cx.udev.is_some_and(|status| {
                     status.supported
                         && !status.current
@@ -1015,6 +1016,8 @@ fn list_row(
         )
     } else if p.experimental {
         (t!("plugins.experimental").into_owned(), theme::WARN_TEXT)
+    } else if crate::ui::screens::plugin_integration::awaits_setup(p) {
+        (t!("plugins.not_set_up").into_owned(), theme::WARN_TEXT)
     } else if p.plugin_type == halod_shared::types::PluginKind::Integration
         && !p.integration_configured
     {

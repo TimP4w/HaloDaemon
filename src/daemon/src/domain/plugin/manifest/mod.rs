@@ -1513,6 +1513,21 @@ impl PluginManifest {
     }
 
     /// Every user-editable config field this plugin declares (empty if none).
+    /// Whether the integration's setup asks the user for anything. A manual
+    /// flow without auth whose every field has a default needs no input.
+    pub fn needs_setup(&self) -> bool {
+        self.setup.as_ref().is_some_and(|setup| {
+            setup.auth.kind() != halod_shared::types::IntegrationAuthKind::None
+                || !setup
+                    .modes
+                    .contains(&halod_shared::types::IntegrationSetupMode::Manual)
+                || self
+                    .config_fields()
+                    .iter()
+                    .any(|field| field.secure || field.default.is_empty())
+        })
+    }
+
     pub fn config_fields(&self) -> &[ConfigFieldDef] {
         self.config
             .as_ref()
@@ -4133,6 +4148,24 @@ mod tests {
             setup.auth.kind(),
             halod_shared::types::IntegrationAuthKind::Oauth2Pkce
         );
+    }
+
+    #[test]
+    fn only_a_setup_that_asks_for_something_needs_setup() {
+        let tmp = tempfile::tempdir().unwrap();
+        let manifest = |id: &str, fields: &str| {
+            let dir = write_plugin_dir(
+                tmp.path(),
+                id,
+                &format!("type: integration\ntransports:\n  tcp:\n    host_key: host\n    port_key: port\nsetup:\n  modes: [manual]\nconfig:\n  fields:\n{fields}"),
+                ENTRY_LUA,
+            );
+            parse_manifest_from_dir(&dir).unwrap()
+        };
+        let defaults = "    - { key: host, label: Host, kind: host, default: 127.0.0.1 }\n    - { key: port, label: Port, kind: port, default: '6742' }\n";
+        let missing = "    - { key: host, label: Host, kind: host }\n    - { key: port, label: Port, kind: port, default: '6742' }\n";
+        assert!(!manifest("all_defaults", defaults).needs_setup());
+        assert!(manifest("needs_host", missing).needs_setup());
     }
 
     #[test]

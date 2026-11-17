@@ -18,7 +18,7 @@ const NAV: [Page; 5] = [
     Page::Settings,
 ];
 
-/// Plugins with an issue or an available update.
+/// Plugins with an issue, an available update, or a setup still to do.
 pub fn plugins_needing_action(state: &TopicStore) -> usize {
     state
         .plugins
@@ -26,6 +26,7 @@ pub fn plugins_needing_action(state: &TopicStore) -> usize {
         .iter()
         .filter(|p| {
             p.health.issue.is_some()
+                || crate::ui::screens::plugin_integration::awaits_setup(p)
                 || crate::ui::screens::plugins::update_for(p, &state.plugins.available).is_some()
         })
         .count()
@@ -330,6 +331,20 @@ mod tests {
         state.plugins.plugins = vec![with_issue, plugin("ok", true)];
         assert_eq!(plugins_needing_action(&state), 1);
         assert!(plugins_have_errors(&state));
+    }
+
+    #[test]
+    fn an_enabled_integration_awaiting_setup_needs_action() {
+        let mut waiting = plugin("waiting", true);
+        waiting.plugin_type = halod_shared::types::PluginKind::Integration;
+        waiting.integration_configured = false;
+        let mut off = waiting.clone();
+        off.id = "off".into();
+        off.enabled = false;
+        let mut state = TopicStore::default();
+        state.plugins.plugins = vec![waiting, off];
+        assert_eq!(plugins_needing_action(&state), 1);
+        assert!(!plugins_have_errors(&state));
     }
 
     #[test]

@@ -67,6 +67,13 @@ pub fn integration_status(state: &TopicStore, plugin_id: &str) -> IntegrationSta
     }
 }
 
+/// An enabled integration the user still has to set up.
+pub fn awaits_setup(p: &PluginInfo) -> bool {
+    p.enabled
+        && p.plugin_type == halod_shared::types::PluginKind::Integration
+        && !p.integration_configured
+}
+
 #[derive(Debug, Clone, Copy, PartialEq, Eq)]
 pub enum IntegrationState {
     Disabled,
