@@ -313,20 +313,58 @@ pub(super) fn trust_label(r: &PluginRepoInfo) -> std::borrow::Cow<'static, str> 
     }
 }
 
-pub(super) fn draw_repo_lock(
+fn repo_provenance(r: &PluginRepoInfo) -> PluginProvenance {
+    match (is_local(r), r.trust) {
+        (true, _) => PluginProvenance::Local,
+        (false, RepoTrust::Official) => PluginProvenance::Official,
+        (false, RepoTrust::Signed) => PluginProvenance::Signed,
+        (false, RepoTrust::Unsigned) => PluginProvenance::Unsigned,
+    }
+}
+
+pub(super) fn trust_badges(
+    provenance: PluginProvenance,
+) -> &'static [(icons::Icon, egui::Color32)] {
+    match provenance {
+        PluginProvenance::Local => &[],
+        PluginProvenance::Official => &[
+            (icons::Icon::Lock, theme::ONLINE),
+            (icons::Icon::Verified, theme::ONLINE),
+        ],
+        PluginProvenance::Signed => &[(icons::Icon::Lock, theme::ONLINE)],
+        PluginProvenance::Unsigned => &[(icons::Icon::LockOpen, theme::STAT_AMBER)],
+    }
+}
+
+/// Trust icons starting at `left`, centered on `center_y`, with `hover` as tooltip.
+pub(super) fn draw_trust_badges(
     ui: &mut egui::Ui,
-    rect: Rect,
-    r: &PluginRepoInfo,
-    id: impl std::hash::Hash + std::fmt::Debug,
+    left: f32,
+    center_y: f32,
+    size: f32,
+    provenance: PluginProvenance,
+    hover: &str,
 ) {
-    let color = match (is_local(r), r.trust) {
-        (true, _) => theme::TEXT_MUT,
-        (false, RepoTrust::Official | RepoTrust::Signed) => theme::ONLINE,
-        (false, RepoTrust::Unsigned) => theme::STAT_AMBER,
-    };
-    icons::draw(ui, rect, icons::Icon::Lock, color);
-    ui.interact(rect, ui.scope_id().with(id), Sense::hover())
-        .on_hover_text(trust_label(r));
+    let badges = trust_badges(provenance);
+    if badges.is_empty() {
+        return;
+    }
+    let mut x = left;
+    for &(icon, color) in badges {
+        icons::draw(
+            ui,
+            Rect::from_min_size(Pos2::new(x, center_y - size / 2.0), Vec2::splat(size)),
+            icon,
+            color,
+        );
+        x += size + 3.0;
+    }
+    let area = Rect::from_min_max(
+        Pos2::new(left, center_y - size / 2.0),
+        Pos2::new(x, center_y + size / 2.0),
+    );
+    ui.interact(area, ui.scope_id().with(("trust", hover)), Sense::hover())
+        .on_hover_text(hover);
 }
 
 pub(super) enum RepoRowAction {
@@ -336,11 +374,11 @@ pub(super) enum RepoRowAction {
 }
 
 fn repo_row_subtitle(r: &PluginRepoInfo) -> String {
-    let mut parts = vec![trust_label(r).into_owned()];
-    if let Some(sync) = &r.last_sync {
-        parts.push(t!("plugins.repo_synced", age = format_last_sync(sync)).into_owned());
+    match &r.last_sync {
+        Some(sync) => t!("plugins.repo_synced", age = format_last_sync(sync)).into_owned(),
+        None if is_local(r) => trust_label(r).into_owned(),
+        None => String::new(),
     }
-    parts.join(" · ")
 }
 
 pub(super) fn repo_row(
@@ -373,19 +411,38 @@ pub(super) fn repo_row(
         Pos2::new(right.min_rect().left() - theme::SPACE_6, rect.bottom()),
     );
     let painter = ui.painter().with_clip_rect(clip);
-    painter.text(
-        Pos2::new(rect.left() + 8.0, rect.center().y + 1.0),
-        Align2::LEFT_BOTTOM,
-        repo_name(r),
-        theme::medium(14.0),
-        theme::TEXT,
-    );
-    painter.text(
-        Pos2::new(rect.left() + 8.0, rect.center().y + 2.0),
-        Align2::LEFT_TOP,
-        repo_row_subtitle(r),
-        theme::body_sm(),
-        theme::TEXT_MUT,
+    let subtitle = repo_row_subtitle(r);
+    let name = if subtitle.is_empty() {
+        painter.text(
+            Pos2::new(rect.left() + 8.0, rect.center().y),
+            Align2::LEFT_CENTER,
+            repo_name(r),
+            theme::medium(14.0),
+            theme::TEXT,
+        )
+    } else {
+        painter.text(
+            Pos2::new(rect.left() + 8.0, rect.center().y + 2.0),
+            Align2::LEFT_TOP,
+            subtitle,
+            theme::body_sm(),
+            theme::TEXT_MUT,
+        );
+        painter.text(
+            Pos2::new(rect.left() + 8.0, rect.center().y + 1.0),
+            Align2::LEFT_BOTTOM,
+            repo_name(r),
+            theme::medium(14.0),
+            theme::TEXT,
+        )
+    };
+    draw_trust_badges(
+        ui,
+        name.right() + 6.0,
+        name.center().y,
+        14.0,
+        repo_provenance(r),
+        &trust_label(r),
     );
 
     if refresh {
@@ -544,8 +601,15 @@ pub(super) fn repo_detail_body(
                         .font(theme::bold(18.0))
                         .color(theme::TEXT),
                 );
-                let (lock_rect, _) = ui.allocate_exact_size(Vec2::splat(18.0), Sense::hover());
-                draw_repo_lock(ui, lock_rect, r, ("repo_detail_trust", &r.slug));
+                let (badges, _) = ui.allocate_exact_size(Vec2::new(39.0, 18.0), Sense::hover());
+                draw_trust_badges(
+                    ui,
+                    badges.left(),
+                    badges.center().y,
+                    18.0,
+                    repo_provenance(r),
+                    &trust_label(r),
+                );
             });
             ui.label(
                 egui::RichText::new(repo_location_text(r))
@@ -722,6 +786,26 @@ pub(super) fn spawn_add_folder(ctx: &egui::Context, cmd: CommandTx) {
 mod tests {
     use super::*;
     use crate::ui::screens::plugins::tests::*;
+
+    #[test]
+    fn only_the_official_repo_carries_the_verified_badge_and_unsigned_is_open() {
+        let icons_for = |trust, local: bool| {
+            let mut r = repo("r");
+            r.trust = trust;
+            if local {
+                r.location = PluginRepoLocation::Local("/tmp/r".into());
+            }
+            trust_badges(repo_provenance(&r))
+                .iter()
+                .map(|b| b.0)
+                .collect::<Vec<_>>()
+        };
+        use icons::Icon::*;
+        assert_eq!(icons_for(RepoTrust::Official, false), vec![Lock, Verified]);
+        assert_eq!(icons_for(RepoTrust::Signed, false), vec![Lock]);
+        assert_eq!(icons_for(RepoTrust::Unsigned, false), vec![LockOpen]);
+        assert!(icons_for(RepoTrust::Official, true).is_empty());
+    }
 
     #[test]
     fn add_source_button_registers_both_plugin_tour_steps() {

@@ -371,6 +371,7 @@ impl RgbEngine {
                 let cfg = cfg_rx.current();
                 if !cfg.enabled() {
                     log::info!("Engine disabled, waiting for re-enable");
+                    self.forget_engine_mode_intent().await;
                     if !cfg_rx.changed().await {
                         break;
                     }
@@ -900,6 +901,10 @@ impl RgbEngine {
     // Acts only when a device's desired mode differs from the intent last acted
     // on, so a write that fails every tick (e.g. an unplugged device) is retried
     // once, not forever.
+    async fn forget_engine_mode_intent(&self) {
+        self.engine_mode_intent.lock().await.clear();
+    }
+
     async fn reconcile_engine_mode(&self, canvas_state: &CanvasState) {
         let engine_ids: HashSet<String> = canvas_state
             .placed_zones
@@ -1839,6 +1844,26 @@ mod tests {
             "reverted device must not be driven by the direct pass"
         );
         assert!(engine.live_direct.lock().await.is_empty());
+    }
+
+    #[tokio::test]
+    async fn reenabled_engine_reclaims_devices_blanked_while_stopped() {
+        let dev = MockRgbDevice::new("dev0", "ring", 3, false);
+        let app = app_with(vec![dev.clone()]);
+        let engine = RgbEngine::new(app).await;
+        let mut placed = CanvasState::default();
+        placed.placed_zones.push(make_zone("dev0", "ring"));
+
+        engine.reconcile_engine_mode(&placed).await;
+        assert!(matches!(dev.current_state(), Some(LightingState::Engine)));
+
+        engine.forget_engine_mode_intent().await;
+        *dev.rgb_state.lock() = Some(LightingState::Static {
+            color: RgbColor { r: 0, g: 0, b: 0 },
+        });
+
+        engine.reconcile_engine_mode(&placed).await;
+        assert!(matches!(dev.current_state(), Some(LightingState::Engine)));
     }
 
     #[tokio::test]

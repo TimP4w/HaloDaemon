@@ -520,6 +520,19 @@ impl PluginsUi {
                                 .font(theme::semibold(20.0))
                                 .color(theme::TEXT),
                         );
+                        let n = repo::trust_badges(p.provenance).len() as f32;
+                        if n > 0.0 {
+                            let (badges, _) =
+                                ui.allocate_exact_size(Vec2::new(n * 21.0, 18.0), Sense::hover());
+                            repo::draw_trust_badges(
+                                ui,
+                                badges.left(),
+                                badges.center().y,
+                                18.0,
+                                p.provenance,
+                                &provenance_label(p.provenance),
+                            );
+                        }
                         if p.experimental {
                             widgets::tag(ui, &t!("plugins.experimental"), widgets::TagTone::Warn);
                         }
@@ -1129,7 +1142,9 @@ fn detail_meta(p: &PluginInfo) -> String {
     if !p.version.is_empty() {
         parts.push(p.version.clone());
     }
-    parts.push(provenance_label(p.provenance).into_owned());
+    if repo::trust_badges(p.provenance).is_empty() {
+        parts.push(provenance_label(p.provenance).into_owned());
+    }
     parts.join(" · ")
 }
 

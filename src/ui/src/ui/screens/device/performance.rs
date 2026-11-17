@@ -136,16 +136,18 @@ fn dpi_range(dpi: &DpiStatus) -> (u32, u32) {
 }
 
 fn dpi_t(dpi: f32, lo: f32, hi: f32) -> f32 {
-    ((dpi - lo) / (hi - lo).max(1.0)).clamp(0.0, 1.0)
+    let lo = lo.max(1.0);
+    ((dpi.max(lo) / lo).ln() / (hi / lo).ln().max(f32::EPSILON)).clamp(0.0, 1.0)
 }
 
 fn t_dpi(t: f32, lo: f32, hi: f32) -> f32 {
-    lo + t.clamp(0.0, 1.0) * (hi - lo)
+    let lo = lo.max(1.0);
+    lo * (hi / lo).powf(t.clamp(0.0, 1.0))
 }
 
-/// The five axis labels: the floor, then quarters of the ceiling.
+/// Five axis labels evenly spaced on the log scale.
 fn tick_labels(lo: u32, hi: u32) -> [u32; 5] {
-    [lo, hi / 4, hi / 2, hi * 3 / 4, hi]
+    std::array::from_fn(|k| t_dpi(k as f32 / 4.0, lo as f32, hi as f32).round() as u32)
 }
 
 fn axis(
@@ -186,7 +188,7 @@ fn axis(
     for i in 0..st.perf.dpi.len() {
         let v = st.perf.dpi[i];
         let cx = rect.left() + dpi_t(v as f32, lo as f32, hi as f32) * rect.width();
-        let center = Pos2::new(cx, rect.top() + 36.0);
+        let center = Pos2::new(cx, track.center().y);
         let hit = Rect::from_center_size(center, Vec2::splat(24.0));
         let resp = ui.interact(hit, ui.scope_id().with(("dpi", i)), Sense::drag());
         if resp.dragged() {
@@ -357,5 +359,27 @@ mod tests {
         let ticks = tick_labels(100, 25600);
         assert_eq!((ticks[0], ticks[4]), (100, 25600));
         assert!(ticks.windows(2).all(|w| w[0] < w[1]));
+    }
+
+    #[test]
+    fn axis_is_logarithmic() {
+        assert_eq!(tick_labels(100, 25600), [100, 400, 1600, 6400, 25600]);
+        let (a, b, c) = (
+            dpi_t(400.0, 100.0, 25600.0),
+            dpi_t(1600.0, 100.0, 25600.0),
+            dpi_t(6400.0, 100.0, 25600.0),
+        );
+        assert!((b - a - (c - b)).abs() < 1e-4);
+    }
+
+    proptest::proptest! {
+        #[test]
+        fn dpi_t_is_monotonic_and_bounded(a in 1.0f32..30000.0, b in 1.0f32..30000.0) {
+            let (ta, tb) = (dpi_t(a, 100.0, 25600.0), dpi_t(b, 100.0, 25600.0));
+            proptest::prop_assert!((0.0..=1.0).contains(&ta));
+            if a <= b {
+                proptest::prop_assert!(ta <= tb);
+            }
+        }
     }
 }

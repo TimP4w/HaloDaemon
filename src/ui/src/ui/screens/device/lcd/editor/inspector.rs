@@ -233,7 +233,7 @@ pub(super) fn selected_widget_card(
     {
         let current =
             halod_shared::lcd_custom::param_str(&st.lcd.editor.def.widgets[idx], "filename");
-        if let Some(pick) = image_picker(ui, ctx, st, id, &current) {
+        if let Some(pick) = image_picker(ui, "widget_image", ctx, st, id, &current) {
             st.lcd.editor.def.widgets[idx].params.insert(
                 "filename".to_string(),
                 halod_shared::types::EffectParamValue::Str(pick),
@@ -414,7 +414,7 @@ fn background_image_picker(
     dim: f64,
     changed: &mut bool,
 ) {
-    if let Some(pick) = image_picker(ui, ctx, st, id, filename) {
+    if let Some(pick) = image_picker(ui, "background_image", ctx, st, id, filename) {
         st.lcd.editor.def.style.background = BgKind::Image {
             filename: pick,
             dim,

@@ -90,6 +90,7 @@ misc:
   macro_mouse_forward: Forward
   # widgets.rs
   widget_cancel: Cancel
-  widget_up_to: up to
-  widget_from: from
-  widget_add_step: "+ Add step"
+  widget_add_stop: Add stop
+  widget_remove_stop: Remove
+  widget_stop_value: Value
+  widget_stop_readout: "Stop %{n} · %{value}"

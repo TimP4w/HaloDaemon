@@ -90,6 +90,7 @@ misc:
   macro_mouse_forward: Avanti
   # widgets.rs
   widget_cancel: Annulla
-  widget_up_to: fino a
-  widget_from: da
-  widget_add_step: "+ Aggiungi passaggio"
+  widget_add_stop: Aggiungi
+  widget_remove_stop: Rimuovi
+  widget_stop_value: Valore
+  widget_stop_readout: "Soglia %{n} · %{value}"

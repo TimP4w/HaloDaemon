@@ -96,6 +96,7 @@ pub struct LightingTab {
     pub param_colors: HashMap<String, RgbColor>,
     /// Live Steps effect param values, keyed like `param_strs`.
     pub param_steps: HashMap<String, Vec<halod_shared::types::ColorStep>>,
+    pub color_slot: usize,
 }
 
 /// Per-tab edit state for the Cooling tab.

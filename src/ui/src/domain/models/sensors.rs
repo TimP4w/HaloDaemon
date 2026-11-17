@@ -17,7 +17,7 @@ pub struct SensorView {
 
 /// One device's sensors. Sensors without their own name (e.g. an hwmon channel
 /// with a blank `_label`) fall back to the device name.
-fn views(d: &WireDevice) -> impl Iterator<Item = SensorView> + '_ {
+pub fn views(d: &WireDevice) -> impl Iterator<Item = SensorView> + '_ {
     d.capabilities
         .iter()
         .filter_map(|cap| match cap {

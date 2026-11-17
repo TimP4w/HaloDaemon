@@ -56,6 +56,8 @@ integrations:
   connection: Connection
   devices: Devices
   status: Status
+  sensors: Sensors
+  sensors_title: Sensors from this integration
   devices_title: Devices from this integration
   open_device: Open
   save_reconnect: Save and reconnect

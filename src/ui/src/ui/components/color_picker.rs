@@ -59,6 +59,33 @@ pub fn color_slot_button(
     resp
 }
 
+/// Labelled colours as slot buttons sharing one picker for the active slot.
+/// Returns the slot edited this frame and its new colour.
+pub fn color_slots(
+    ui: &mut egui::Ui,
+    label: &str,
+    colors: &[(&str, RgbColor)],
+    slot: &mut usize,
+) -> Option<(usize, RgbColor)> {
+    if colors.is_empty() {
+        return None;
+    }
+    *slot = (*slot).min(colors.len() - 1);
+    super::field_label(ui, label);
+    let gap = theme::SPACE_4;
+    let w = (ui.available_width() - gap * (colors.len() - 1) as f32) / colors.len() as f32;
+    ui.horizontal(|ui| {
+        ui.spacing_mut().item_spacing.x = gap;
+        for (i, (name, c)) in colors.iter().enumerate() {
+            if color_slot_button(ui, name, rgb_to_color32(*c), i == *slot, w).clicked() {
+                *slot = i;
+            }
+        }
+    });
+    ui.add_space(theme::SPACE_4);
+    color_picker(ui, colors[*slot].1).map(|c| (*slot, c))
+}
+
 /// `#rrggbb` for a swatch/readout label.
 pub fn hex_label(c: RgbColor) -> String {
     format!("#{:02x}{:02x}{:02x}", c.r, c.g, c.b)

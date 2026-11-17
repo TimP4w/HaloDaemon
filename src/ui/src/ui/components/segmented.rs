@@ -250,8 +250,9 @@ pub fn paint_stat_strip(p: &egui::Painter, rect: Rect, items: &[(&str, &str)]) {
         return;
     }
     p.rect_filled(rect, theme::RADIUS_SM, theme::BORDER);
-    for (cell, (key, value)) in stat_cells(rect, items.len()).into_iter().zip(items) {
-        p.rect_filled(cell, theme::RADIUS_SM - 1.0, theme::INNER_BG);
+    let n = items.len();
+    for (i, (cell, (key, value))) in stat_cells(rect, n).into_iter().zip(items).enumerate() {
+        p.rect_filled(cell, stat_cell_corners(i, n), theme::INNER_BG);
         let clip = p.with_clip_rect(cell.shrink(1.0));
         clip.text(
             cell.left_top() + Vec2::new(10.0, 8.0),
@@ -283,15 +284,26 @@ fn stat_cells(rect: Rect, n: usize) -> Vec<Rect> {
         .collect()
 }
 
+fn stat_cell_corners(i: usize, n: usize) -> egui::CornerRadius {
+    let r = theme::RADIUS_SM as u8;
+    let (left, right) = (if i == 0 { r } else { 0 }, if i + 1 == n { r } else { 0 });
+    egui::CornerRadius {
+        nw: left,
+        sw: left,
+        ne: right,
+        se: right,
+    }
+}
+
 pub const STAT_STRIP_H: f32 = 56.0;
 
-/// Two labelled values side by side, laid out in the current flow.
-pub fn stat_pair(ui: &mut egui::Ui, first: (&str, &str), second: (&str, &str)) {
+/// Labelled values side by side, laid out in the current flow.
+pub fn stat_strip(ui: &mut egui::Ui, items: &[(&str, &str)]) {
     let (rect, _) = ui.allocate_exact_size(
         Vec2::new(ui.available_width(), STAT_STRIP_H),
         Sense::hover(),
     );
-    paint_stat_strip(ui.painter(), rect, &[first, second]);
+    paint_stat_strip(ui.painter(), rect, items);
 }
 
 #[cfg(test)]
@@ -309,6 +321,18 @@ mod tests {
             prop_assert!((cells[n - 1].right() - rect.right()).abs() < 0.01);
             for pair in cells.windows(2) {
                 prop_assert!((pair[1].left() - pair[0].right() - 1.0).abs() < 0.01);
+            }
+        }
+    }
+
+    proptest! {
+        #[test]
+        fn only_the_strips_outer_corners_are_rounded(n in 1usize..6) {
+            let corners: Vec<_> = (0..n).map(|i| stat_cell_corners(i, n)).collect();
+            prop_assert!(corners[0].nw > 0 && corners[0].sw > 0);
+            prop_assert!(corners[n - 1].ne > 0 && corners[n - 1].se > 0);
+            for pair in corners.windows(2) {
+                prop_assert_eq!((pair[0].ne, pair[0].se, pair[1].nw, pair[1].sw), (0, 0, 0, 0));
             }
         }
     }

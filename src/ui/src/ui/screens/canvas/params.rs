@@ -280,29 +280,23 @@ fn color_slots(
             (p, c)
         })
         .collect();
-    if colors.is_empty() {
-        return false;
-    }
-    *slot = (*slot).min(colors.len() - 1);
+    let labelled: Vec<(&str, RgbColor)> = colors
+        .iter()
+        .map(|(p, c)| {
+            (
+                if p.label.is_empty() {
+                    p.id.as_str()
+                } else {
+                    p.label.as_str()
+                },
+                *c,
+            )
+        })
+        .collect();
     ui.add_space(theme::SPACE_3);
-    widgets::field_label(ui, &t!("canvas.colors"));
-    let gap = theme::SPACE_4;
-    let w = (ui.available_width() - gap * (colors.len() - 1) as f32) / colors.len() as f32;
-    ui.horizontal(|ui| {
-        ui.spacing_mut().item_spacing.x = gap;
-        for (i, (p, c)) in colors.iter().enumerate() {
-            let label = if p.label.is_empty() { &p.id } else { &p.label };
-            let rgb = widgets::rgb_to_color32(*c);
-            if widgets::color_slot_button(ui, label, rgb, i == *slot, w).clicked() {
-                *slot = i;
-            }
-        }
-    });
-    ui.add_space(theme::SPACE_4);
-    let (p, c) = colors[*slot];
-    match widgets::color_picker(ui, c) {
-        Some(new) => {
-            edits.insert(p.id.clone(), EffectParamValue::Color(new));
+    match widgets::color_slots(ui, &t!("canvas.colors"), &labelled, slot) {
+        Some((i, new)) => {
+            edits.insert(colors[i].0.id.clone(), EffectParamValue::Color(new));
             true
         }
         None => false,

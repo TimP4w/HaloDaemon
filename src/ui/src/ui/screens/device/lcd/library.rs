@@ -182,6 +182,18 @@ pub(super) fn image_section(
 /// built on this.
 pub(super) fn image_picker(
     ui: &mut egui::Ui,
+    scope: &str,
+    ctx: &TabCtx,
+    st: &mut DeviceUi,
+    id: &str,
+    current: &str,
+) -> Option<String> {
+    ui.push_id(scope, |ui| image_picker_body(ui, ctx, st, id, current))
+        .inner
+}
+
+fn image_picker_body(
+    ui: &mut egui::Ui,
     ctx: &TabCtx,
     st: &mut DeviceUi,
     id: &str,

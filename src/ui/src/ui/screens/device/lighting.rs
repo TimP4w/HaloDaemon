@@ -1044,23 +1044,37 @@ fn param_sliders(
                 }
                 changed |= committed;
             }
-            // Master swatch handles the `"color"`-id param; any other Color
-            // param (e.g. a two-stop gradient's second colour) gets its own row.
             ParamKind::Color if d.id != "color" => {
-                let default = match d.default {
-                    EffectParamValue::Color(c) => c,
-                    _ => RgbColor::default(),
-                };
-                let live = current_param_color(rgb, kind, effect_id, &d.id).unwrap_or(default);
-                let current = st.lighting.param_colors.get(&key).copied().unwrap_or(live);
+                let group: Vec<&EffectParamDescriptor> = params
+                    .iter()
+                    .filter(|p| matches!(p.kind, ParamKind::Color) && p.id != "color")
+                    .collect();
+                if group[0].id != d.id {
+                    continue;
+                }
+                let colors: Vec<(&str, RgbColor)> = group
+                    .iter()
+                    .map(|p| {
+                        let default = match p.default {
+                            EffectParamValue::Color(c) => c,
+                            _ => RgbColor::default(),
+                        };
+                        let key = format!("fx:{}:{effect_id}:{}", kind.tag(), p.id);
+                        let live =
+                            current_param_color(rgb, kind, effect_id, &p.id).unwrap_or(default);
+                        let current = st.lighting.param_colors.get(&key).copied().unwrap_or(live);
+                        (p.label.as_str(), current)
+                    })
+                    .collect();
                 ui.add_space(theme::SPACE_7);
-                ui.label(
-                    egui::RichText::new(&d.label)
-                        .font(theme::body_sm())
-                        .color(theme::TEXT_MUT),
-                );
-                if let Some(new_c) = widgets::color_picker(ui, current) {
-                    st.lighting.param_colors.insert(key, new_c);
+                if let Some((i, c)) = widgets::color_slots(
+                    ui,
+                    &t!("canvas.colors"),
+                    &colors,
+                    &mut st.lighting.color_slot,
+                ) {
+                    let key = format!("fx:{}:{effect_id}:{}", kind.tag(), group[i].id);
+                    st.lighting.param_colors.insert(key, c);
                     changed = true;
                 }
             }

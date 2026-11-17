@@ -53,6 +53,7 @@ pub struct LightingUi {
     param_colors: HashMap<String, RgbColor>,
     /// Live Steps param values, keyed the same way as `param_values`.
     param_steps: HashMap<String, Vec<ColorStep>>,
+    color_slot: usize,
     sel_ids: Vec<String>,
     zone_sel: HashMap<String, Vec<String>>,
     expanded_id: Option<String>,
@@ -78,6 +79,7 @@ impl Default for LightingUi {
             param_strs: HashMap::new(),
             param_colors: HashMap::new(),
             param_steps: HashMap::new(),
+            color_slot: 0,
             sel_ids: Vec::new(),
             zone_sel: HashMap::new(),
             expanded_id: None,
@@ -538,17 +540,77 @@ fn effect_settings_card(
                     );
                     return;
                 };
-                for (i, d) in params.iter().enumerate() {
+                for (i, item) in settings_items(&params).into_iter().enumerate() {
                     let col = &mut cols[i % 2];
                     if i >= 2 {
                         col.add_space(theme::SPACE_7);
                     }
-                    changed |= param_control(col, st, &anim.id, d, &sensors);
+                    changed |= match item {
+                        SettingsItem::Param(d) => param_control(col, st, &anim.id, d, &sensors),
+                        SettingsItem::Colors(colors) => color_group(col, st, &anim.id, &colors),
+                    };
                 }
             });
         },
     );
     changed
+}
+
+enum SettingsItem<'a> {
+    Param(&'a EffectParamDescriptor),
+    Colors(Vec<&'a EffectParamDescriptor>),
+}
+
+/// The settings grid's cells: every colour param shares one slot-picker cell
+/// at the first colour's position; the rest keep their own cell.
+fn settings_items<'a>(params: &[&'a EffectParamDescriptor]) -> Vec<SettingsItem<'a>> {
+    let colors: Vec<&EffectParamDescriptor> = params
+        .iter()
+        .copied()
+        .filter(|d| matches!(d.kind, ParamKind::Color))
+        .collect();
+    let mut items = Vec::new();
+    let mut colors = Some(colors).filter(|c| !c.is_empty());
+    for d in params {
+        if matches!(d.kind, ParamKind::Color) {
+            if let Some(group) = colors.take() {
+                items.push(SettingsItem::Colors(group));
+            }
+        } else {
+            items.push(SettingsItem::Param(d));
+        }
+    }
+    items
+}
+
+fn color_group(
+    ui: &mut egui::Ui,
+    st: &mut LightingUi,
+    anim_id: &str,
+    params: &[&EffectParamDescriptor],
+) -> bool {
+    let current: Vec<(&str, RgbColor)> = params
+        .iter()
+        .map(|d| {
+            let default = match d.default {
+                EffectParamValue::Color(c) => c,
+                _ => RgbColor::default(),
+            };
+            let key = format!("{anim_id}:{}", d.id);
+            (
+                d.label.as_str(),
+                st.param_colors.get(&key).copied().unwrap_or(default),
+            )
+        })
+        .collect();
+    match widgets::color_slots(ui, &t!("canvas.colors"), &current, &mut st.color_slot) {
+        Some((i, c)) => {
+            st.param_colors
+                .insert(format!("{anim_id}:{}", params[i].id), c);
+            true
+        }
+        None => false,
+    }
 }
 
 fn percent_slider(ui: &mut egui::Ui, label: &str, v: &mut f32) -> bool {
@@ -669,19 +731,7 @@ fn param_control(
                 );
             }
         }
-        ParamKind::Color => {
-            let default = match d.default {
-                EffectParamValue::Color(c) => c,
-                _ => RgbColor::default(),
-            };
-            let current = st.param_colors.get(&key).copied().unwrap_or(default);
-            widgets::field_label(ui, &d.label);
-            if let Some(new_c) = widgets::color_picker(ui, current) {
-                st.param_colors.insert(key, new_c);
-                changed = true;
-            }
-        }
-        ParamKind::Text | ParamKind::Image => {}
+        ParamKind::Color | ParamKind::Text | ParamKind::Image => {}
     }
     changed
 }
@@ -1486,6 +1536,40 @@ mod tests {
             &HashMap::new(),
         );
         assert_eq!(params["min"], EffectParamValue::Float(35.0));
+    }
+
+    #[test]
+    fn colour_params_share_one_cell_at_the_first_colours_position() {
+        let color = |id| {
+            desc(
+                id,
+                ParamKind::Color,
+                EffectParamValue::Color(RgbColor::default()),
+            )
+        };
+        let (sensor, a, mode, b) = (
+            desc(
+                "sensor",
+                ParamKind::Sensor,
+                EffectParamValue::Str(String::new()),
+            ),
+            color("color_a"),
+            desc("mode", ParamKind::Boolean, EffectParamValue::Bool(false)),
+            color("color_b"),
+        );
+        let items = settings_items(&[&sensor, &a, &mode, &b]);
+        let shape: Vec<String> = items
+            .iter()
+            .map(|i| match i {
+                SettingsItem::Param(d) => d.id.clone(),
+                SettingsItem::Colors(c) => c
+                    .iter()
+                    .map(|d| d.id.as_str())
+                    .collect::<Vec<_>>()
+                    .join("+"),
+            })
+            .collect();
+        assert_eq!(shape, ["sensor", "color_a+color_b", "mode"]);
     }
 
     #[test]

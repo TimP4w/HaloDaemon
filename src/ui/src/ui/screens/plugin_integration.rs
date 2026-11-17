@@ -15,6 +15,7 @@ use halod_shared::types::{
 };
 
 use crate::domain::models::plugin_issues::plugin_issue_detail;
+use crate::domain::models::sensors::{views as sensor_views, SensorView};
 use crate::runtime::ipc::{self, CommandTx};
 use crate::ui::components::{self as widgets, ButtonKind};
 use crate::ui::screens::plugin_config::{
@@ -38,6 +39,7 @@ pub struct IntegrationPanel {
 pub struct IntegrationStatus {
     pub connected: bool,
     pub device_count: usize,
+    pub sensor_count: usize,
 }
 
 /// Devices an integration exposes: children of its root, whose ids carry the
@@ -57,6 +59,17 @@ fn exposed_devices<'a>(
         .filter(move |d| prefix.as_deref().is_some_and(|p| d.id.starts_with(p)))
 }
 
+/// Sensors on the integration's root and on every device it exposes.
+fn exposed_sensors(state: &TopicStore, plugin_id: &str) -> Vec<SensorView> {
+    state
+        .devices
+        .iter()
+        .filter(|d| d.integration_id.as_deref() == Some(plugin_id))
+        .chain(exposed_devices(state, plugin_id))
+        .flat_map(sensor_views)
+        .collect()
+}
+
 pub fn integration_status(state: &TopicStore, plugin_id: &str) -> IntegrationStatus {
     IntegrationStatus {
         connected: state
@@ -64,6 +77,7 @@ pub fn integration_status(state: &TopicStore, plugin_id: &str) -> IntegrationSta
             .iter()
             .any(|d| d.integration_id.as_deref() == Some(plugin_id) && d.connected),
         device_count: exposed_devices(state, plugin_id).count(),
+        sensor_count: exposed_sensors(state, plugin_id).len(),
     }
 }
 
@@ -298,14 +312,17 @@ impl IntegrationPanel {
             }
         }
         ui.add_space(theme::SPACE_9);
-        widgets::stat_pair(
-            ui,
-            (
-                &t!("integrations.devices"),
-                &status.device_count.to_string(),
-            ),
-            (&t!("integrations.status"), &state_label),
-        );
+        let devices = status.device_count.to_string();
+        let sensors = status.sensor_count.to_string();
+        let devices_label = t!("integrations.devices");
+        let sensors_label = t!("integrations.sensors");
+        let status_label = t!("integrations.status");
+        let mut stats = vec![(devices_label.as_ref(), devices.as_str())];
+        if status.sensor_count > 0 {
+            stats.push((sensors_label.as_ref(), sensors.as_str()));
+        }
+        stats.push((status_label.as_ref(), state_label.as_ref()));
+        widgets::stat_strip(ui, &stats);
 
         self.connection_section(ui, p, cmd);
 
@@ -315,6 +332,13 @@ impl IntegrationPanel {
                 if device_link_row(ui, device) {
                     *page = Page::Device(device.id.clone());
                 }
+            }
+        }
+
+        if status.sensor_count > 0 {
+            section_heading(ui, &t!("integrations.sensors_title"));
+            for sensor in exposed_sensors(state, &p.id) {
+                sensor_row(ui, &sensor);
             }
         }
 
@@ -777,6 +801,37 @@ fn device_link_row(ui: &mut egui::Ui, device: &WireDevice) -> bool {
     });
     ui.add_space(theme::SPACE_4);
     open
+}
+
+fn sensor_row(ui: &mut egui::Ui, sensor: &SensorView) {
+    widgets::inset(ui, Margin::symmetric(12, 10), |ui| {
+        egui::Sides::new().show(
+            ui,
+            |ui| {
+                ui.vertical(|ui| {
+                    ui.spacing_mut().item_spacing.y = 0.0;
+                    ui.label(
+                        RichText::new(&sensor.label)
+                            .font(theme::medium(14.0))
+                            .color(theme::TEXT),
+                    );
+                    ui.label(
+                        RichText::new(&sensor.device)
+                            .font(theme::body_sm())
+                            .color(theme::TEXT_MUT),
+                    );
+                });
+            },
+            |ui| {
+                ui.label(
+                    RichText::new(format!("{:.0} {}", sensor.value, sensor.unit))
+                        .font(theme::medium(14.0))
+                        .color(theme::TEXT),
+                );
+            },
+        );
+    });
+    ui.add_space(theme::SPACE_4);
 }
 
 fn rail_step(setup: &halod_shared::types::IntegrationSetupStatus) -> usize {
@@ -1276,6 +1331,7 @@ mod tests {
         let status = IntegrationStatus {
             connected: false,
             device_count: 0,
+            sensor_count: 0,
         };
         assert_eq!(
             integration_state(&plugin("openrgb", false, true), &status),
@@ -1298,6 +1354,7 @@ mod tests {
                 &IntegrationStatus {
                     connected: false,
                     device_count: 0,
+                    sensor_count: 0,
                 }
             ),
             IntegrationState::Configured
@@ -1308,10 +1365,41 @@ mod tests {
                 &IntegrationStatus {
                     connected: true,
                     device_count: 3,
+                    sensor_count: 0,
                 }
             ),
             IntegrationState::Active
         );
+    }
+
+    #[test]
+    fn exposed_sensors_cover_the_root_and_its_children_only() {
+        let with_sensor = |mut d: WireDevice, sensor_id: &str| {
+            d.capabilities = vec![halod_shared::types::DeviceCapability::Sensors(vec![
+                halod_shared::types::Sensor {
+                    id: sensor_id.into(),
+                    name: sensor_id.into(),
+                    value: 40.0,
+                    unit: Default::default(),
+                    sensor_type: Default::default(),
+                },
+            ])];
+            d
+        };
+        let state = TopicStore {
+            devices: vec![
+                with_sensor(device("hw-root", Some("hw"), true), "cpu"),
+                with_sensor(device("hw-root_ctrl_0", None, true), "gpu"),
+                with_sensor(device("other_ctrl_0", None, true), "foreign"),
+            ],
+            ..Default::default()
+        };
+        let ids: Vec<String> = exposed_sensors(&state, "hw")
+            .into_iter()
+            .map(|s| s.id)
+            .collect();
+        assert_eq!(ids, vec!["cpu", "gpu"]);
+        assert_eq!(integration_status(&state, "hw").sensor_count, 2);
     }
 
     #[test]

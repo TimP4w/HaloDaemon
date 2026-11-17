@@ -8,9 +8,11 @@ use halod_shared::types::DeviceType;
 use std::cell::RefCell;
 use std::collections::HashMap;
 
-#[derive(Clone, Copy, PartialEq, Eq, Hash)]
+#[derive(Clone, Copy, Debug, PartialEq, Eq, Hash)]
 pub enum Icon {
     Lock,
+    LockOpen,
+    Verified,
     Check,
 }
 
@@ -18,6 +20,8 @@ impl Icon {
     fn svg(self) -> &'static [u8] {
         match self {
             Icon::Lock => include_bytes!("../../assets/icons/lock.svg"),
+            Icon::LockOpen => include_bytes!("../../assets/icons/lock_open.svg"),
+            Icon::Verified => include_bytes!("../../assets/icons/verified.svg"),
             Icon::Check => include_bytes!("../../assets/icons/check.svg"),
         }
     }
@@ -25,6 +29,8 @@ impl Icon {
     fn key(self) -> &'static str {
         match self {
             Icon::Lock => "lock",
+            Icon::LockOpen => "lock_open",
+            Icon::Verified => "verified",
             Icon::Check => "check",
         }
     }
@@ -203,7 +209,7 @@ mod tests {
     /// wrong include path at build time rather than as a blank sidebar glyph.
     #[test]
     fn every_nav_icon_rasterizes() {
-        for icon in [Icon::Lock, Icon::Check] {
+        for icon in [Icon::Lock, Icon::LockOpen, Icon::Verified, Icon::Check] {
             let img = crate::svg::color_image(icon.svg(), ICON_PX)
                 .unwrap_or_else(|| panic!("{} failed to rasterize", icon.key()));
             assert_eq!(img.width().max(img.height()), ICON_PX as usize);
