@@ -1,62 +1,308 @@
 // SPDX-License-Identifier: GPL-3.0-or-later
-//! Info tab — device metadata, the live `GetDebugInfo` detection/driver state,
-//! a capabilities chip card, and a Copy-JSON button (mirrors the GTK debug
-//! dialog). The debug snapshot is requested once per opened device.
+//! Info tab — throughput chart, device details, capabilities, diagnostics
+//! (`GetDebugInfo` snapshot as JSON) and visibility management.
+
+use halod_shared::commands::{DaemonCommand, DeviceOp};
+use std::collections::VecDeque;
 
 use crate::ui::components as widgets;
+use egui::{Align2, Pos2, Rect, Stroke, Vec2};
 use halod_shared::debug_info::DeviceDebugInfo;
-use halod_shared::types::{ConnectionType, DeviceCapability, WriteRateStatus};
+use halod_shared::types::{ConnectionType, DeviceCapability, VisibilityState, WriteRateStatus};
 
 use super::header::led_count;
 use super::{DeviceUi, TabCtx};
 use crate::domain::models::device::find_hub_write_rate;
+use crate::runtime::ipc;
 use crate::ui::theme;
+use halod_shared::ids::DeviceId;
 
-fn format_write_rate(wr: WriteRateStatus) -> String {
-    let current_kb_s = wr.current_bytes_per_sec / 1024.0;
-    match wr.limit {
-        Some(limit) => format!(
-            "{:.1} / {:.1} KB/s",
-            current_kb_s,
-            limit.max_bytes_per_sec as f32 / 1024.0
-        ),
-        None => format!("{current_kb_s:.1} KB/s"),
+/// Chart windows offered by the range selector, in seconds (history is sampled at 1 Hz).
+const RANGES: [usize; 3] = [60, 600, 3600];
+const CHART_POINTS: usize = 120;
+
+fn kb_s(bytes_per_sec: f32) -> String {
+    format!("{:.1} KB/s", bytes_per_sec / 1024.0)
+}
+
+/// The last `window` 1 Hz samples, bucket-averaged down to at most
+/// [`CHART_POINTS`], each paired with its age as a fraction of the window
+/// (0 = now, 1 = oldest edge).
+fn window_points(history: &VecDeque<f32>, window: usize) -> Vec<(f32, f32)> {
+    let n = history.len().min(window);
+    let bucket = window.div_ceil(CHART_POINTS).max(1);
+    let recent: Vec<f32> = history.iter().skip(history.len() - n).copied().collect();
+    recent
+        .rchunks(bucket)
+        .enumerate()
+        .map(|(i, chunk)| {
+            let avg = chunk.iter().sum::<f32>() / chunk.len() as f32;
+            ((i * bucket) as f32 / window as f32, avg)
+        })
+        .collect()
+}
+
+/// A round axis ceiling `>= peak` that splits evenly into three gridlines.
+fn axis_max(peak: f32) -> f32 {
+    let third = (peak.max(1.0) / 3.0).max(f32::MIN_POSITIVE);
+    let mag = 10f32.powf(third.log10().floor());
+    let step = [1.0, 2.0, 2.5, 5.0, 10.0]
+        .into_iter()
+        .map(|m| m * mag)
+        .find(|s| *s >= third)
+        .unwrap_or(10.0 * mag);
+    step * 3.0
+}
+
+fn axis_tick(v: f32) -> String {
+    if (v - v.round()).abs() < 0.01 {
+        format!("{v:.0}")
+    } else {
+        format!("{v:.1}")
     }
 }
 
-fn write_rate_samples_kb_s(history: &std::collections::VecDeque<f32>) -> Vec<f32> {
-    history.iter().map(|b| b / 1024.0).collect()
+fn range_labels(window: usize) -> [String; 2] {
+    if window < 120 {
+        [format!("−{window} s"), format!("−{} s", window / 2)]
+    } else if window < 3600 {
+        [
+            format!("−{} min", window / 60),
+            format!("−{} min", window / 120),
+        ]
+    } else {
+        [
+            format!("−{} h", window / 3600),
+            format!("−{} min", window / 120),
+        ]
+    }
 }
 
-fn draw_write_rate_graph(
-    ui: &mut egui::Ui,
-    history: &std::collections::VecDeque<f32>,
-    wr: WriteRateStatus,
-) {
-    let samples = write_rate_samples_kb_s(history);
-    if samples.len() < 2 {
-        return;
-    }
-    ui.add_space(theme::SPACE_2);
-    let (rect, _) =
-        ui.allocate_exact_size(egui::vec2(ui.available_width(), 50.0), egui::Sense::hover());
-    let painter = ui.painter();
-    crate::ui::screens::home::sparkline(painter, rect, &samples, theme::STAT_CYAN);
-    if let Some(limit) = wr.limit {
-        let limit_kb_s = limit.max_bytes_per_sec as f32 / 1024.0;
-        let y = crate::ui::screens::home::sparkline_reference_y(rect, limit_kb_s, &samples);
-        painter.hline(
-            rect.x_range(),
-            y,
-            egui::Stroke::new(1.0, theme::TEXT_FAINT2),
+fn throughput_chart(ui: &mut egui::Ui, history: Option<&VecDeque<f32>>, window: usize) {
+    let w = ui.available_width();
+    let (rect, _) = ui.allocate_exact_size(Vec2::new(w, w * 220.0 / 760.0), egui::Sense::hover());
+    let p = ui.painter();
+    p.rect_filled(rect, 8.0, theme::INNER_BG);
+    let scale = rect.height() / 220.0;
+    let plot = Rect::from_min_max(
+        rect.min + Vec2::new(48.0, 30.0 * scale),
+        Pos2::new(rect.right() - 12.0, rect.top() + 180.0 * scale),
+    );
+    let pts = history
+        .map(|h| window_points(h, window))
+        .unwrap_or_default();
+    let top = axis_max(pts.iter().map(|(_, v)| *v / 1024.0).fold(0.0, f32::max));
+    let label = |pos: Pos2, align: Align2, text: String| {
+        p.text(pos, align, text, theme::caption(), theme::TEXT_FAINT);
+    };
+    for i in 0..=3 {
+        let y = plot.bottom() - plot.height() * i as f32 / 3.0;
+        p.hline(plot.x_range(), y, Stroke::new(1.0, theme::BORDER_SOFT));
+        label(
+            Pos2::new(plot.left() - 8.0, y),
+            Align2::RIGHT_CENTER,
+            axis_tick(top * i as f32 / 3.0),
         );
     }
+    label(
+        rect.min + Vec2::new(12.0, 10.0),
+        Align2::LEFT_TOP,
+        "KB/s".into(),
+    );
+    let axis_y = rect.top() + 202.0 * scale;
+    let [oldest, middle] = range_labels(window);
+    label(Pos2::new(plot.left(), axis_y), Align2::LEFT_CENTER, oldest);
+    label(
+        Pos2::new(plot.center().x, axis_y),
+        Align2::CENTER_CENTER,
+        middle,
+    );
+    label(
+        Pos2::new(plot.right(), axis_y),
+        Align2::RIGHT_CENTER,
+        t!("devtabs.axis_now").to_string(),
+    );
+    if pts.len() < 2 {
+        return;
+    }
+    let line: Vec<Pos2> = pts
+        .iter()
+        .rev()
+        .map(|(age, v)| {
+            Pos2::new(
+                plot.right() - age * plot.width(),
+                plot.bottom() - (v / 1024.0 / top).min(1.0) * plot.height(),
+            )
+        })
+        .collect();
+    widgets::fill_under_line(p, &line, plot.bottom(), theme::a(theme::CYAN, 0.12));
+    p.add(egui::Shape::line(
+        line.clone(),
+        Stroke::new(1.8, theme::CYAN),
+    ));
+    if let Some(last) = line.last() {
+        p.circle_filled(*last, 4.0, theme::CYAN);
+    }
+}
+
+fn stat(ui: &mut egui::Ui, label: &str, value: &str, color: egui::Color32) {
+    ui.vertical(|ui| {
+        ui.spacing_mut().item_spacing.y = 0.0;
+        ui.label(
+            egui::RichText::new(label)
+                .font(theme::body_sm())
+                .color(theme::TEXT_MUT),
+        );
+        ui.label(
+            egui::RichText::new(value)
+                .font(theme::semibold(26.0))
+                .color(color),
+        );
+    });
+}
+
+fn throughput_card(ui: &mut egui::Ui, ctx: &TabCtx, wr: WriteRateStatus, via_hub: bool) {
+    let range_key = egui::Id::unique("device_info_range");
+    let mut range = ui
+        .ctx()
+        .data(|d| d.get_temp::<usize>(range_key))
+        .unwrap_or(0);
+    let window = RANGES[range.min(RANGES.len() - 1)];
+    widgets::card_with_margin(ui, egui::Margin::symmetric(20, 18), |ui| {
+        ui.spacing_mut().item_spacing.y = theme::SPACE_7;
+        egui::Sides::new().show(
+            ui,
+            |ui| {
+                let title = if via_hub {
+                    t!("devtabs.write_rate_shared")
+                } else {
+                    t!("devtabs.throughput")
+                };
+                ui.label(
+                    egui::RichText::new(title)
+                        .font(theme::heading())
+                        .color(theme::TEXT),
+                );
+            },
+            |ui| {
+                let opts = [
+                    t!("devtabs.range_1m"),
+                    t!("devtabs.range_10m"),
+                    t!("devtabs.range_1h"),
+                ];
+                let refs: Vec<&str> = opts.iter().map(|s| s.as_ref()).collect();
+                if widgets::segmented(ui, &refs, &mut range, false) {
+                    ui.ctx().data_mut(|d| d.insert_temp(range_key, range));
+                }
+            },
+        );
+        let peak = ctx
+            .write_rate_history
+            .map(|h| h.iter().rev().take(window).copied().fold(0.0, f32::max))
+            .unwrap_or(wr.current_bytes_per_sec)
+            .max(wr.current_bytes_per_sec);
+        ui.horizontal(|ui| {
+            ui.spacing_mut().item_spacing.x = 28.0;
+            stat(
+                ui,
+                &t!("devtabs.now"),
+                &kb_s(wr.current_bytes_per_sec),
+                theme::TEXT,
+            );
+            stat(ui, &t!("devtabs.peak"), &kb_s(peak), theme::TEXT_SOFT);
+            let limit = wr
+                .limit
+                .map(|l| kb_s(l.max_bytes_per_sec as f32))
+                .unwrap_or_else(|| t!("devtabs.write_limit_none").to_string());
+            stat(ui, &t!("devtabs.write_limit"), &limit, theme::TEXT_SOFT);
+            stat(
+                ui,
+                &t!("devtabs.rejected_writes"),
+                &wr.rejected_total.to_string(),
+                theme::TEXT_SOFT,
+            );
+        });
+        throughput_chart(ui, ctx.write_rate_history, window);
+    });
+}
+
+/// `HID 1e71:3012 · interface 0` from the debug snapshot's transport fields.
+fn transport_detail(label: String, dbg: Option<&DeviceDebugInfo>) -> String {
+    let field = |k: &str| {
+        dbg.and_then(|d| d.fields.iter().find(|(key, _)| key == k))
+            .map(|(_, v)| v.as_str())
+    };
+    let mut out = label;
+    if let (Some(vid), Some(pid)) = (field("vid"), field("pid")) {
+        out.push_str(&format!(" {vid}:{pid}"));
+    }
+    if let Some(iface) = field("interface") {
+        out.push_str(&format!(" · {}", t!("devtabs.interface_n", n = iface)));
+    }
+    out
+}
+
+fn provided_by(ctx: &TabCtx, dbg: Option<&DeviceDebugInfo>) -> Option<String> {
+    let id = dbg?
+        .fields
+        .iter()
+        .find(|(k, _)| k == "plugin_id" || k == "integration_id")
+        .map(|(_, v)| v)?;
+    let plugin = ctx.state.plugins.plugins.iter().find(|p| &p.id == id)?;
+    Some(
+        t!(
+            "devtabs.provided_by",
+            name = plugin.localized_name(&rust_i18n::locale()),
+            version = plugin.version
+        )
+        .to_string(),
+    )
+}
+
+fn details_card(ui: &mut egui::Ui, ctx: &TabCtx, dbg: Option<&DeviceDebugInfo>) {
+    let dev = ctx.dev;
+    let link = crate::domain::models::device::transport_label(dev);
+    let connection = match dev.connection_type {
+        Some(ConnectionType::Wireless) => format!("{} · {link}", t!("devtabs.wireless")),
+        _ => format!("{} · {link}", t!("devtabs.wired")),
+    };
+    let leds = led_count(dev);
+    let rows = [
+        (t!("devtabs.info_name"), dev.name.clone()),
+        (t!("devtabs.info_vendor"), dev.vendor.clone()),
+        (t!("devtabs.info_model"), dev.model.clone()),
+        (
+            t!("devtabs.info_type"),
+            crate::domain::models::device::type_label(dev).to_string(),
+        ),
+        (t!("devtabs.info_connection"), connection),
+        (t!("devtabs.info_transport"), transport_detail(link, dbg)),
+        (
+            t!("devtabs.info_serial"),
+            dev.serial_number.clone().unwrap_or_default(),
+        ),
+        (
+            t!("devtabs.info_lighting_leds"),
+            if leds > 0 {
+                leds.to_string()
+            } else {
+                String::new()
+            },
+        ),
+        (t!("devtabs.info_id"), dev.id.to_string()),
+    ];
+    widgets::card_with_margin(ui, egui::Margin::symmetric(20, 6), |ui| {
+        ui.spacing_mut().item_spacing.y = 0.0;
+        let shown: Vec<_> = rows.iter().filter(|(_, v)| !v.is_empty()).collect();
+        for (k, v) in shown {
+            widgets::detail_row(ui, k, v);
+        }
+    });
 }
 
 pub fn show(ui: &mut egui::Ui, ctx: &TabCtx, st: &mut DeviceUi) {
-    // Request a debug snapshot once for this device.
     if !st.debug_requested {
-        crate::runtime::ipc::send(ctx.cmd, halod_shared::commands::DaemonCommand::GetDebugInfo);
+        ipc::send(ctx.cmd, halod_shared::commands::DaemonCommand::GetDebugInfo);
         st.debug_requested = true;
     }
     let dev = ctx.dev;
@@ -64,175 +310,153 @@ pub fn show(ui: &mut egui::Ui, ctx: &TabCtx, st: &mut DeviceUi) {
         .debug
         .and_then(|d| d.devices.iter().find(|x| x.id == dev.id));
 
-    fn row(ui: &mut egui::Ui, label: &str, value: String) {
-        if !value.is_empty() {
-            widgets::value_row(ui, label, &value, theme::TEXT_BRIGHT);
+    const ASIDE_W: f32 = 340.0;
+    let main_w = (ui.available_width() - ASIDE_W - 16.0).max(320.0);
+    widgets::split_columns(ui, main_w, 16.0, |ui, aside| {
+        ui.spacing_mut().item_spacing.y = theme::SPACE_8;
+        let (write_rate, via_hub) = match dev.write_rate {
+            Some(wr) => (Some(wr), false),
+            None => (find_hub_write_rate(ctx.state, &dev.id), true),
+        };
+        if let Some(wr) = write_rate {
+            throughput_card(ui, ctx, wr, via_hub);
         }
-    }
+        details_card(ui, ctx, dbg);
 
-    ui.columns(2, |cols| {
-        // Left: device + detection rows.
-        cols[0].vertical(|ui| {
-            widgets::card(ui, |ui| {
-                row(ui, &t!("devtabs.info_id"), dev.id.clone());
-                row(ui, &t!("devtabs.info_name"), dev.name.clone());
-                row(ui, &t!("devtabs.info_vendor"), dev.vendor.clone());
-                row(ui, &t!("devtabs.info_model"), dev.model.clone());
-                row(
-                    ui,
-                    &t!("devtabs.info_type"),
-                    crate::domain::models::device::type_label(dev).to_string(),
-                );
-                if let Some(sn) = &dev.serial_number {
-                    row(ui, &t!("devtabs.info_serial"), sn.clone());
-                }
-                row(
-                    ui,
-                    &t!("devtabs.info_connection"),
-                    match dev.connection_type {
-                        Some(ConnectionType::Wireless) => t!("devtabs.wireless").to_string(),
-                        Some(ConnectionType::Wired) => t!("devtabs.wired").to_string(),
-                        None => String::new(),
-                    },
-                );
-                let leds = led_count(dev);
-                if leds > 0 {
-                    row(ui, &t!("devtabs.info_lighting_leds"), leds.to_string());
-                }
-                row(
-                    ui,
-                    &t!("devtabs.info_status"),
-                    if dev.connected {
-                        t!("devtabs.connected")
-                    } else {
-                        t!("devtabs.offline")
-                    }
-                    .to_string(),
-                );
-                if let Some(d) = dbg {
-                    row(ui, &t!("devtabs.info_transport"), d.transport.clone());
-                    for (k, v) in &d.fields {
-                        row(ui, k, v.clone());
-                    }
+        let ui = aside;
+        ui.spacing_mut().item_spacing.y = theme::SPACE_8;
+        aside_card(ui, &t!("devtabs.capabilities"), |ui| {
+            ui.horizontal_wrapped(|ui| {
+                ui.spacing_mut().item_spacing = egui::vec2(6.0, 6.0);
+                for c in &dev.capabilities {
+                    widgets::chip(ui, &cap_label_tr(c));
                 }
             });
+            if let Some(by) = provided_by(ctx, dbg) {
+                ui.label(
+                    egui::RichText::new(by)
+                        .font(theme::body_md())
+                        .color(theme::TEXT_DIM),
+                );
+            }
         });
-
-        // Right: capabilities, write rate, copy JSON.
-        cols[1].vertical(|ui| {
-            widgets::card_titled(
-                ui,
-                &t!("devtabs.capabilities"),
-                |_| {},
-                |ui| {
-                    ui.horizontal_wrapped(|ui| {
-                        ui.spacing_mut().item_spacing = egui::vec2(6.0, 6.0);
-                        for c in &dev.capabilities {
-                            widgets::chip(ui, &cap_label_tr(c));
-                        }
-                    });
-                },
+        aside_card(ui, &t!("devtabs.diagnostics"), |ui| {
+            ui.label(
+                egui::RichText::new(t!("devtabs.diagnostics_desc"))
+                    .font(theme::body_md())
+                    .color(theme::TEXT_DIM),
             );
-
-            let sensors = crate::domain::models::sensors::device_sensors(ctx.state, &dev.id);
-            if !sensors.is_empty() {
-                ui.add_space(theme::SPACE_8);
-                widgets::card_titled(
-                    ui,
-                    &t!("devtabs.cap_sensors"),
-                    |_| {},
-                    |ui| {
-                        for s in &sensors {
-                            row(ui, &s.label, format!("{:.1} {}", s.value, s.unit));
-                        }
-                    },
-                );
+            let copied_key = egui::Id::unique("info_diag_copied_at");
+            let now = ui.ctx().input(|i| i.time);
+            let copied_at = ui.ctx().data(|d| d.get_temp::<f64>(copied_key));
+            let copied = super::super::settings::copied_feedback_visible(copied_at, now);
+            if copied {
+                ui.ctx().request_repaint();
             }
-
-            let (write_rate, via_hub) = match dev.write_rate {
-                Some(wr) => (Some(wr), false),
-                None => (find_hub_write_rate(ctx.state, &dev.id), true),
+            let label = if copied {
+                t!("devtabs.copied")
+            } else {
+                t!("devtabs.copy_json")
             };
-            if let Some(wr) = write_rate {
-                ui.add_space(theme::SPACE_8);
-                let wr_title = if via_hub {
-                    t!("devtabs.write_rate_shared")
-                } else {
-                    t!("devtabs.write_rate")
-                };
-                widgets::card_titled(
-                    ui,
-                    &wr_title,
-                    |_| {},
-                    |ui| {
-                        row(ui, &t!("devtabs.throughput"), format_write_rate(wr));
-                        if wr.rejected_total > 0 {
-                            row(
-                                ui,
-                                &t!("devtabs.rejected_writes"),
-                                wr.rejected_total.to_string(),
-                            );
-                        }
-                        if let Some(history) = ctx.write_rate_history {
-                            draw_write_rate_graph(ui, history, wr);
-                        }
-                    },
-                );
+            if full_button(ui, &label, widgets::ButtonKind::Secondary) {
+                let json = match dbg {
+                    Some(d) => serde_json::to_string_pretty(d),
+                    None => serde_json::to_string_pretty(dev),
+                }
+                .unwrap_or_else(|e| format!("serialization error: {e}"));
+                ui.ctx().copy_text(json);
+                ui.ctx().data_mut(|d| d.insert_temp(copied_key, now));
             }
-            ui.add_space(theme::SPACE_8);
-            widgets::card_titled(
-                ui,
-                &t!("devtabs.diagnostics"),
-                |_| {},
-                |ui| {
-                    let json = dbg
-                        .map(|d| {
-                            serde_json::to_string_pretty(d)
-                                .unwrap_or_else(|e| format!("serialization error: {e}"))
-                        })
-                        .unwrap_or_else(|| {
-                            serde_json::to_string_pretty(dev)
-                                .unwrap_or_else(|e| format!("serialization error: {e}"))
-                        });
-                    let copied_key = egui::Id::new("info_diag_copied_at");
-                    ui.horizontal(|ui| {
-                        if widgets::button(
-                            ui,
-                            &t!("devtabs.copy_json"),
-                            widgets::ButtonKind::Ghost,
-                            egui::vec2(110.0, 30.0),
-                        )
-                        .clicked()
-                        {
-                            ui.ctx().copy_text(json);
-                            let now = ui.ctx().input(|i| i.time);
-                            ui.ctx().data_mut(|d| d.insert_temp(copied_key, now));
-                        }
-
-                        let copied_at = ui.ctx().data(|d| d.get_temp::<f64>(copied_key));
-                        let now = ui.ctx().input(|i| i.time);
-                        if super::super::settings::copied_feedback_visible(copied_at, now) {
-                            ui.add_space(theme::SPACE_5);
-                            ui.label(
-                                egui::RichText::new(t!("devtabs.copied"))
-                                    .font(theme::subhead())
-                                    .color(theme::TRAFFIC_GREEN),
-                            );
-                            ui.ctx().request_repaint();
-                        }
-                    });
-                    if ctx.debug.is_none() {
-                        ui.add_space(theme::SPACE_4);
-                        ui.label(
-                            egui::RichText::new(t!("devtabs.fetching_debug"))
-                                .font(theme::caption())
-                                .color(theme::TEXT_FAINT2),
-                        );
-                    }
-                },
-            );
+        });
+        aside_card(ui, &t!("devtabs.manage"), |ui| {
+            ui.spacing_mut().item_spacing.y = theme::SPACE_4;
+            let (label, target) = if dev.active_state == VisibilityState::Hidden {
+                (t!("devtabs.show_on_home"), VisibilityState::Visible)
+            } else {
+                (t!("devtabs.hide_from_home"), VisibilityState::Hidden)
+            };
+            if full_button(ui, &label, widgets::ButtonKind::Secondary) {
+                set_visibility(ctx, target);
+            }
+            let (label, target, kind) = if dev.active_state == VisibilityState::Disabled {
+                (
+                    t!("devtabs.enable_device"),
+                    VisibilityState::Visible,
+                    widgets::ButtonKind::Secondary,
+                )
+            } else {
+                (
+                    t!("devtabs.disable_device"),
+                    VisibilityState::Disabled,
+                    widgets::ButtonKind::Danger,
+                )
+            };
+            if full_button(ui, &label, kind) {
+                if target == VisibilityState::Disabled {
+                    st.pending_disable = Some((dev.id.clone(), dev.name.clone()));
+                } else {
+                    set_visibility(ctx, target);
+                }
+            }
         });
     });
+    if let Some((device_id, _)) = disable_confirm(ui.ctx(), &mut st.pending_disable) {
+        ipc::send(ctx.cmd, disable_command(device_id));
+    }
+}
+
+pub(crate) fn disable_confirm(
+    ctx: &egui::Context,
+    pending: &mut Option<(DeviceId, String)>,
+) -> Option<(DeviceId, String)> {
+    let name = pending
+        .as_ref()
+        .map(|(_, name)| name.clone())
+        .unwrap_or_default();
+    widgets::confirm_delete_dialog(
+        ctx,
+        "device_disable_confirm",
+        &t!("devtabs.disable_device_title", name = name),
+        &t!("devtabs.disable_device_confirm", name = name),
+        &t!("devtabs.disable_device"),
+        pending,
+    )
+}
+
+pub(crate) fn disable_command(device_id: DeviceId) -> DaemonCommand {
+    DaemonCommand::Device {
+        device_id,
+        op: DeviceOp::SetDeviceVisibility {
+            state: VisibilityState::Disabled,
+        },
+    }
+}
+
+fn aside_card(ui: &mut egui::Ui, title: &str, body: impl FnOnce(&mut egui::Ui)) {
+    widgets::card_with_margin(ui, egui::Margin::same(18), |ui| {
+        ui.set_width(ui.available_width());
+        ui.spacing_mut().item_spacing.y = theme::SPACE_6;
+        ui.label(
+            egui::RichText::new(title)
+                .font(theme::heading())
+                .color(theme::TEXT),
+        );
+        body(ui);
+    });
+}
+
+fn full_button(ui: &mut egui::Ui, label: &str, kind: widgets::ButtonKind) -> bool {
+    widgets::button(ui, label, kind, Vec2::new(ui.available_width(), 30.0)).clicked()
+}
+
+fn set_visibility(ctx: &TabCtx, state: VisibilityState) {
+    ipc::send(
+        ctx.cmd,
+        halod_shared::commands::DaemonCommand::Device {
+            device_id: ctx.dev.id.clone(),
+            op: DeviceOp::SetDeviceVisibility { state },
+        },
+    );
 }
 
 /// User-facing translated capability chip label.
@@ -260,38 +484,62 @@ fn cap_label_tr(c: &DeviceCapability) -> std::borrow::Cow<'static, str> {
 
 #[cfg(test)]
 mod tests {
-    use super::{cap_label_tr, format_write_rate, write_rate_samples_kb_s};
-    use halod_shared::types::{DeviceCapability as C, WriteRateLimit, WriteRateStatus};
+    use super::{axis_max, cap_label_tr, disable_command, window_points, CHART_POINTS};
+    use halod_shared::commands::{DaemonCommand, DeviceOp};
+    use halod_shared::types::VisibilityState;
+
+    #[test]
+    fn confirming_a_disable_sends_the_visibility_change_for_that_device() {
+        let command = disable_command("mouse-1".parse().unwrap());
+        assert!(matches!(
+            command,
+            DaemonCommand::Device {
+                device_id,
+                op: DeviceOp::SetDeviceVisibility {
+                    state: VisibilityState::Disabled
+                }
+            } if device_id == "mouse-1"
+        ));
+    }
+    use halod_shared::types::DeviceCapability as C;
     use std::collections::VecDeque;
 
     #[test]
-    fn write_rate_samples_kb_s_converts_bytes_to_kb() {
-        let history: VecDeque<f32> = VecDeque::from([1024.0, 2048.0, 512.0]);
-        assert_eq!(write_rate_samples_kb_s(&history), vec![1.0, 2.0, 0.5]);
+    fn axis_ceiling_covers_peak_and_splits_into_round_thirds() {
+        for peak in [0.0, 0.4, 3.0, 9.6, 41.2, 48.0, 950.0, 12_345.0] {
+            let top = axis_max(peak);
+            assert!(top >= peak, "{top} < {peak}");
+            let third = top / 3.0;
+            let mag = 10f32.powf(third.log10().floor());
+            let m = third / mag;
+            assert!(
+                [1.0, 2.0, 2.5, 5.0, 10.0]
+                    .iter()
+                    .any(|r| (m - r).abs() < 1e-3),
+                "{third} is not a round step"
+            );
+        }
+        assert!(axis_max(10.0) <= axis_max(41.2));
     }
 
     #[test]
-    fn format_write_rate_omits_ceiling_when_unset() {
-        let wr = WriteRateStatus {
-            limit: None,
-            current_writes_per_sec: 5.0,
-            current_bytes_per_sec: 2048.0,
-            rejected_total: 0,
-        };
-        assert_eq!(format_write_rate(wr), "2.0 KB/s");
+    fn window_points_are_bounded_and_ordered_from_now() {
+        let history: VecDeque<f32> = (0..5000).map(|i| i as f32).collect();
+        for window in [60, 600, 3600] {
+            let pts = window_points(&history, window);
+            assert!(pts.len() <= CHART_POINTS);
+            assert_eq!(pts[0].0, 0.0);
+            assert!(pts.windows(2).all(|w| w[0].0 < w[1].0 && w[1].0 <= 1.0));
+            assert!(pts[0].1 > pts[pts.len() - 1].1);
+        }
     }
 
     #[test]
-    fn format_write_rate_shows_ceiling_when_set() {
-        let wr = WriteRateStatus {
-            limit: Some(WriteRateLimit {
-                max_bytes_per_sec: 4096,
-            }),
-            current_writes_per_sec: 5.0,
-            current_bytes_per_sec: 1024.0,
-            rejected_total: 0,
-        };
-        assert_eq!(format_write_rate(wr), "1.0 / 4.0 KB/s");
+    fn short_history_only_spans_its_own_age() {
+        let history: VecDeque<f32> = VecDeque::from(vec![1.0; 30]);
+        let pts = window_points(&history, 60);
+        assert_eq!(pts.len(), 30);
+        assert!(pts.last().unwrap().0 < 0.5);
     }
 
     #[test]

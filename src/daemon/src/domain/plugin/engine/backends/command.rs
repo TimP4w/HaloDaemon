@@ -7,16 +7,23 @@ use halod_shared::types::{Permission, WriteRateLimit};
 use crate::domain::registry::observers::discovery::DiscoveryHandle;
 
 use super::super::manifest::{DeviceSpec, PluginManifest};
-use super::super::transport::{CommandExecutor, PluginIo, PluginTransportDescriptor};
+use super::super::transport::{
+    accept_spec, CommandExecutor, Discovery, PluginIo, PluginTransportDescriptor,
+};
+use crate::domain::plugin::ResolvedConfig;
 
 fn matches(spec: &DeviceSpec, handle: &DiscoveryHandle<'_>) -> bool {
     matches!(handle, DiscoveryHandle::Command { executable } if spec.command().is_some_and(|m| m.command() == *executable))
 }
 
+fn single_instance(_: &DiscoveryHandle<'_>) -> String {
+    "0".to_owned()
+}
+
 fn open(
     manifest: &PluginManifest,
     _: &DiscoveryHandle<'_>,
-    _: &crate::domain::plugin::ResolvedConfig,
+    _: &ResolvedConfig,
     granted: &[Permission],
     _: Option<WriteRateLimit>,
 ) -> Result<PluginIo> {
@@ -32,10 +39,12 @@ fn open(
     )))
 }
 
-pub(super) const DESCRIPTOR: PluginTransportDescriptor = PluginTransportDescriptor {
+pub(super) const DESCRIPTOR: PluginTransportDescriptor = PluginTransportDescriptor::Discovered {
     kind: "command",
-    matches: Some(matches),
     open,
-    id_suffix: None,
-    validate: None,
+    discovery: Discovery {
+        matches,
+        id_suffix: single_instance,
+        validate: accept_spec,
+    },
 };

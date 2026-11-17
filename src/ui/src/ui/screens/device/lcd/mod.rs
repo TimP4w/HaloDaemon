@@ -21,11 +21,12 @@
 //! frame-size ceiling.
 
 pub(super) mod editor;
-mod gif;
+pub(crate) mod gif;
 mod library;
 mod params;
 mod preview;
 
+use halod_shared::commands::DeviceOp;
 use halod_shared::types::{DeviceCapability, LcdMode, LcdStatus, ScreenRotation};
 
 use gif::{advance_gif, clear_gif, rgba_texture};
@@ -33,7 +34,14 @@ use library::{delete_image_modal, media_content, poll_picker, select_image, sele
 use preview::display_card;
 
 use super::{DeviceUi, LcdMediaTab, PickerTarget, TabCtx};
+use crate::domain::tour;
+use crate::domain::tour::AnchorId;
 use crate::ui::components as widgets;
+use crate::ui::theme;
+use crate::ui::theme::SPACE_4;
+use crate::ui::theme::SPACE_6;
+use crate::ui::theme::TEXT_DIM;
+use halod_shared::ids::DeviceId;
 
 /// Cache key for the preview texture. Each mode/image combination maps to a
 /// distinct string so any transition (GIF → none, image → other image) is seen
@@ -132,16 +140,12 @@ pub fn show(ui: &mut egui::Ui, ctx: &TabCtx, st: &mut DeviceUi) {
         }
     }
 
-    ui.add_space(crate::ui::theme::SPACE_7);
+    ui.add_space(SPACE_4);
 
     match st.lcd.media_tab {
         LcdMediaTab::Template => editor::show(ui, ctx, st, &id, lcd),
         _ => {
-            crate::domain::tour::anchor(
-                ui.ctx(),
-                crate::domain::tour::AnchorId::TabLcd,
-                ui.max_rect(),
-            );
+            tour::anchor(ui.ctx(), AnchorId::TabLcd, ui.max_rect());
             ui.columns(2, |cols| {
                 display_card(&mut cols[0], ctx, st, &id, lcd);
                 media_content(&mut cols[1], ctx, st, &id, lcd);
@@ -154,7 +158,7 @@ pub fn show(ui: &mut egui::Ui, ctx: &TabCtx, st: &mut DeviceUi) {
     delete_image_modal(ui, ctx, st);
 }
 
-fn activate_image_mode(ctx: &TabCtx, st: &mut DeviceUi, id: &str, lcd: &LcdStatus) {
+fn activate_image_mode(ctx: &TabCtx, st: &mut DeviceUi, id: &DeviceId, lcd: &LcdStatus) {
     let active_template_id = ctx.state.lcd.engine.device_templates.get(id).cloned();
     match lcd.active_image.clone() {
         Some(filename) => select_image(ctx, st, id, &filename, active_template_id.as_deref()),
@@ -162,15 +166,15 @@ fn activate_image_mode(ctx: &TabCtx, st: &mut DeviceUi, id: &str, lcd: &LcdStatu
     }
 }
 
-fn activate_video_mode(ctx: &TabCtx, id: &str, lcd: &LcdStatus) {
+fn activate_video_mode(ctx: &TabCtx, id: &DeviceId, lcd: &LcdStatus) {
     let Some(path) = lcd.video_path.clone() else {
         return;
     };
     crate::runtime::ipc::send(
         ctx.cmd,
-        halod_shared::commands::DaemonCommand::SetScreenVideo {
-            id: id.to_string(),
-            path,
+        halod_shared::commands::DaemonCommand::Device {
+            device_id: id.clone(),
+            op: DeviceOp::SetScreenVideo { path },
         },
     );
 }
@@ -178,42 +182,63 @@ fn activate_video_mode(ctx: &TabCtx, id: &str, lcd: &LcdStatus) {
 fn mode_header(ui: &mut egui::Ui, ctx: &TabCtx, st: &mut DeviceUi) {
     let hdr_rect =
         egui::Rect::from_min_size(ui.cursor().min, egui::Vec2::new(ui.available_width(), 40.0));
-    crate::domain::tour::anchor(
-        ui.ctx(),
-        crate::domain::tour::AnchorId::LcdModeTabs,
-        hdr_rect,
+    tour::anchor(ui.ctx(), AnchorId::LcdModeTabs, hdr_rect);
+    let tabs = media_tabs(ctx.state.health.ffmpeg_available);
+    let labels: Vec<std::borrow::Cow<'static, str>> = tabs
+        .iter()
+        .map(|tab| match tab {
+            LcdMediaTab::Images => t!("lcd.tab_image"),
+            LcdMediaTab::Template => t!("lcd.tab_editor"),
+            LcdMediaTab::Video => t!("lcd.tab_video"),
+        })
+        .collect();
+    let refs: Vec<&str> = labels.iter().map(|l| l.as_ref()).collect();
+    let mut selected = tabs
+        .iter()
+        .position(|tab| *tab == st.lcd.media_tab)
+        .unwrap_or(usize::MAX);
+    let editing = st.lcd.media_tab == LcdMediaTab::Template;
+    let count = st.lcd.editor.def.widgets.len();
+    let mut save_open = false;
+    egui::Sides::new().show(
+        ui,
+        |ui| {
+            if widgets::segmented(ui, &refs, &mut selected, false) {
+                st.lcd.media_tab = tabs[selected];
+            }
+        },
+        |ui| {
+            if !editing {
+                return;
+            }
+            ui.spacing_mut().item_spacing.x = SPACE_6;
+            if widgets::button(
+                ui,
+                &t!("lcd.save_as_template"),
+                widgets::ButtonKind::Secondary,
+                egui::vec2(0.0, 30.0),
+            )
+            .clicked()
+            {
+                save_open = true;
+            }
+            ui.label(
+                egui::RichText::new(t!("lcd.widget_count", n = count))
+                    .font(theme::body_md())
+                    .color(TEXT_DIM),
+            );
+        },
     );
-    widgets::card_with_margin(ui, egui::Margin::symmetric(8, 6), |ui| {
-        ui.horizontal(|ui| {
-            ui.spacing_mut().item_spacing.x = 7.0;
-            if widgets::pill(
-                ui,
-                &t!("lcd.tab_image"),
-                st.lcd.media_tab == LcdMediaTab::Images,
-            ) {
-                st.lcd.media_tab = LcdMediaTab::Images;
-            }
-            if widgets::pill(
-                ui,
-                &t!("lcd.tab_editor"),
-                st.lcd.media_tab == LcdMediaTab::Template,
-            ) {
-                st.lcd.media_tab = LcdMediaTab::Template;
-            }
-            let video_active = st.lcd.media_tab == LcdMediaTab::Video;
-            if ctx.state.health.ffmpeg_available {
-                if widgets::pill(ui, &t!("lcd.tab_video"), video_active) {
-                    st.lcd.media_tab = LcdMediaTab::Video;
-                }
-            } else {
-                ui.add_enabled_ui(false, |ui| {
-                    let _ = widgets::pill(ui, &t!("lcd.tab_video"), video_active);
-                })
-                .response
-                .on_disabled_hover_text(t!("lcd.ffmpeg_not_installed").to_string());
-            }
-        });
-    });
+    st.lcd.editor.save_open |= save_open;
+}
+
+/// Media sources the user can switch to; video needs ffmpeg on the host.
+fn media_tabs(ffmpeg: bool) -> Vec<LcdMediaTab> {
+    let mut tabs = vec![LcdMediaTab::Images, LcdMediaTab::Template];
+    if ffmpeg {
+        tabs.push(LcdMediaTab::Video);
+    }
+    tabs
 }
 
 /// Refresh `preview_tex` from whichever source the current mode implies.
@@ -252,25 +277,60 @@ fn drive_preview(ui: &mut egui::Ui, ctx: &TabCtx, st: &mut DeviceUi, lcd: &LcdSt
         LcdMode::Image | LcdMode::Default => {
             clear_gif(st);
             let key = preview_key(&lcd.mode, lcd.active_image.as_deref());
-            // Rebuild on a target change, or while we still have no texture (the
-            // config dir may not have arrived on the first frame).
-            if st.lcd.preview_key != key || st.lcd.preview_tex.is_none() {
-                st.lcd.preview_key = key.clone();
-                st.lcd.preview_tex = key
-                    .strip_prefix("img:")
-                    .and_then(|f| gif::load_tex_from_file(ctx, ui.ctx(), f));
-            }
+            refresh_static_preview(ui.ctx(), ctx, st, key);
         }
     }
 }
 
+fn refresh_static_preview(egui_ctx: &egui::Context, ctx: &TabCtx, st: &mut DeviceUi, key: String) {
+    let path = key
+        .strip_prefix("img:")
+        .zip(gif::lcd_images_dir(ctx))
+        .map(|(file, dir)| dir.join(file));
+    if let Some(rx) = &st.lcd.preview_rx {
+        match rx.try_recv() {
+            Err(std::sync::mpsc::TryRecvError::Empty) => {}
+            Ok(Some((rgba, width, height))) if st.lcd.preview_key == key => {
+                st.lcd.preview_tex =
+                    Some(rgba_texture(egui_ctx, "lcd_image", &rgba, width, height));
+                st.lcd.preview_rx = None;
+            }
+            Ok(_) | Err(std::sync::mpsc::TryRecvError::Disconnected) => {
+                st.lcd.preview_rx = None;
+            }
+        }
+    }
+    let changed = st.lcd.preview_key != key;
+    let retry = st.lcd.preview_tex.is_none()
+        && st.lcd.preview_rx.is_none()
+        && path
+            .as_deref()
+            .is_some_and(|path| st.lcd.preview_attempt_len != Some(gif::file_len(path)));
+    if !changed && !retry {
+        return;
+    }
+    if path.is_none() && key.starts_with("img:") {
+        return;
+    }
+    st.lcd.preview_key = key;
+    st.lcd.preview_tex = None;
+    st.lcd.preview_attempt_len = path.as_deref().map(gif::file_len);
+    st.lcd.preview_rx = path.map(|path| gif::spawn_image_decode(egui_ctx, path, None));
+}
+
 #[cfg(test)]
 mod tests {
+    #[test]
+    fn video_source_requires_ffmpeg() {
+        assert!(!super::media_tabs(false).contains(&LcdMediaTab::Video));
+        assert!(super::media_tabs(true).contains(&LcdMediaTab::Video));
+    }
+
     use super::{preview_keepalive_due, preview_key, rot_label, show, wants_engine_preview};
     use crate::domain::topic_store::TopicStore;
     use crate::runtime::ipc::DecodedFrame;
     use crate::ui::screens::device::{DeviceUi, LcdMediaTab, PickerTarget, TabCtx};
-    use halod_shared::commands::DaemonCommand;
+    use halod_shared::commands::{DaemonCommand, DeviceOp};
     use halod_shared::types::LcdUploadProgress;
     use halod_shared::types::{
         DeviceCapability, LcdDescriptor, LcdEngineTemplateDescriptor, LcdMode, LcdStatus,
@@ -364,7 +424,7 @@ mod tests {
         fn new(mode: LcdMode, active_image: Option<&str>) -> Self {
             let (tx, rx) = tokio::sync::mpsc::unbounded_channel();
             let dev = WireDevice {
-                id: "lcd".into(),
+                id: "lcd".parse().unwrap(),
                 connected: true,
                 capabilities: vec![DeviceCapability::Lcd(lcd_status(mode, active_image))],
                 ..Default::default()
@@ -381,7 +441,7 @@ mod tests {
                 config_dir: tmp.path().to_string_lossy().into_owned(),
                 ..Default::default()
             };
-            // The widgets reference custom font families ("semibold", "mono", …);
+            // The widgets reference custom font families ("semibold", "lcd_mono", …);
             // register them or text layout panics.
             let ctx = egui::Context::default();
             crate::ui::theme::install_fonts(&ctx);
@@ -433,7 +493,7 @@ mod tests {
                 rx,
                 ..
             } = self;
-            let _ = ctx.run_ui(input, |ui| {
+            let _ = crate::ui::run_headless(ctx, input, |ui| {
                 egui::CentralPanel::default().show(ui, |ui| {
                     let tab = TabCtx {
                         state,
@@ -481,7 +541,7 @@ mod tests {
     #[test]
     fn first_frame_requests_the_image_library() {
         let mut fx = Fixture::new(LcdMode::Default, None);
-        let mut st = DeviceUi::new("lcd".into());
+        let mut st = DeviceUi::new("lcd".parse().unwrap());
         let cmds = fx.frame(&mut st);
         assert!(
             cmds.iter()
@@ -495,7 +555,7 @@ mod tests {
     #[test]
     fn picked_video_sends_set_screen_video() {
         let mut fx = Fixture::new(LcdMode::Default, None);
-        let mut st = DeviceUi::new("lcd".into());
+        let mut st = DeviceUi::new("lcd".parse().unwrap());
         let (tx, rx) = std::sync::mpsc::channel();
         st.lcd.picker = Some((PickerTarget::Video, rx));
         tx.send(Some(std::path::PathBuf::from("/tmp/movie.mp4")))
@@ -505,7 +565,7 @@ mod tests {
         assert!(
             cmds.iter().any(|c| matches!(
                 c,
-                DaemonCommand::SetScreenVideo { path, .. } if path == "/tmp/movie.mp4"
+                DaemonCommand::Device { op: DeviceOp::SetScreenVideo { path, .. }, .. } if path == "/tmp/movie.mp4"
             )),
             "the picked path must be sent to the daemon: {cmds:?}"
         );
@@ -515,7 +575,7 @@ mod tests {
     #[test]
     fn picked_image_is_uploaded_in_the_background() {
         let mut fx = Fixture::new(LcdMode::Default, None);
-        let mut st = DeviceUi::new("lcd".into());
+        let mut st = DeviceUi::new("lcd".parse().unwrap());
         let path = std::path::Path::new(&fx.state.config_dir).join("up.png");
         std::fs::write(&path, make_png()).unwrap();
         let (tx, rx) = std::sync::mpsc::channel();
@@ -526,10 +586,15 @@ mod tests {
         assert!(st.lcd.picker.is_none(), "the picker slot is cleared");
         assert!(st.lcd.upload_base.is_some(), "the upload spinner is armed");
         let deadline = Instant::now() + Duration::from_secs(5);
-        while !cmds
-            .iter()
-            .any(|c| matches!(c, DaemonCommand::SetScreenImage { .. }))
-        {
+        while !cmds.iter().any(|c| {
+            matches!(
+                c,
+                DaemonCommand::Device {
+                    op: DeviceOp::SetScreenImage { .. },
+                    ..
+                }
+            )
+        }) {
             assert!(Instant::now() < deadline, "upload never sent: {cmds:?}");
             std::thread::sleep(Duration::from_millis(2));
             cmds.extend(fx.frame(&mut st));
@@ -539,7 +604,7 @@ mod tests {
     #[test]
     fn cancelled_pick_clears_without_side_effects() {
         let mut fx = Fixture::new(LcdMode::Default, None);
-        let mut st = DeviceUi::new("lcd".into());
+        let mut st = DeviceUi::new("lcd".parse().unwrap());
         let (tx, rx) = std::sync::mpsc::channel();
         st.lcd.picker = Some((PickerTarget::Image, rx));
         tx.send(None).unwrap();
@@ -550,7 +615,13 @@ mod tests {
         assert!(
             !cmds.iter().any(|c| matches!(
                 c,
-                DaemonCommand::SetScreenImage { .. } | DaemonCommand::SetScreenVideo { .. }
+                DaemonCommand::Device {
+                    op: DeviceOp::SetScreenImage { .. },
+                    ..
+                } | DaemonCommand::Device {
+                    op: DeviceOp::SetScreenVideo { .. },
+                    ..
+                }
             )),
             "no command from a cancelled dialog: {cmds:?}"
         );
@@ -559,7 +630,7 @@ mod tests {
     #[test]
     fn pending_pick_stays_armed_until_the_dialog_resolves() {
         let mut fx = Fixture::new(LcdMode::Default, None);
-        let mut st = DeviceUi::new("lcd".into());
+        let mut st = DeviceUi::new("lcd".parse().unwrap());
         let (_tx, rx) = std::sync::mpsc::channel::<Option<std::path::PathBuf>>();
         st.lcd.picker = Some((PickerTarget::Video, rx));
 
@@ -576,7 +647,7 @@ mod tests {
         let mut fx = Fixture::new(LcdMode::Gif, Some("a.gif"));
         fx.images = vec!["a.gif".into()];
         fx.put_image("a.gif", &make_gif(3));
-        let mut st = DeviceUi::new("lcd".into());
+        let mut st = DeviceUi::new("lcd".parse().unwrap());
 
         fx.pump_until(&mut st, |st| {
             st.lcd.gif_rx.is_none() && !st.lcd.gif_frames.is_empty()
@@ -595,7 +666,7 @@ mod tests {
         fx.images = vec!["a.gif".into(), "b.gif".into()];
         fx.put_image("a.gif", &make_gif(3));
         fx.put_image("b.gif", &make_gif(5));
-        let mut st = DeviceUi::new("lcd".into());
+        let mut st = DeviceUi::new("lcd".parse().unwrap());
 
         fx.pump_until(&mut st, |st| {
             st.lcd.gif_source == "a.gif" && st.lcd.gif_rx.is_none()
@@ -616,7 +687,7 @@ mod tests {
     fn gif_animation_advances_frames_over_time() {
         let mut fx = Fixture::new(LcdMode::Gif, Some("a.gif"));
         fx.put_image("a.gif", &make_gif(3)); // 3 frames @ 100 ms
-        let mut st = DeviceUi::new("lcd".into());
+        let mut st = DeviceUi::new("lcd".parse().unwrap());
         fx.pump_until(&mut st, |st| {
             st.lcd.gif_rx.is_none() && st.lcd.gif_frames.len() == 3
         });
@@ -637,7 +708,7 @@ mod tests {
     fn png_preview_builds_a_texture_from_the_on_disk_file() {
         let mut fx = Fixture::new(LcdMode::Image, Some("p.png"));
         fx.images = vec!["p.png".into()];
-        let mut st = DeviceUi::new("lcd".into());
+        let mut st = DeviceUi::new("lcd".parse().unwrap());
 
         // File not on disk yet → no preview (the read fails, no panic).
         fx.frame(&mut st);
@@ -646,7 +717,7 @@ mod tests {
         // File appears in the library → the preview texture is built from disk
         // even though the preview key was already set on the earlier frame.
         fx.put_image("p.png", &make_png());
-        fx.frame(&mut st);
+        fx.pump_until(&mut st, |st| st.lcd.preview_tex.is_some());
         assert!(
             st.lcd.preview_tex.is_some(),
             "static PNG preview must appear"
@@ -655,11 +726,61 @@ mod tests {
     }
 
     #[test]
+    fn painting_frames_never_decodes_the_shown_or_a_broken_image_again() {
+        let mut fx = Fixture::new(LcdMode::Image, Some("p.png"));
+        fx.images = vec!["p.png".into()];
+        fx.put_image("p.png", &make_png());
+        let mut st = DeviceUi::new("lcd".parse().unwrap());
+        fx.pump_until(&mut st, |st| st.lcd.preview_tex.is_some());
+        let decoded = st.lcd.preview_tex.as_ref().map(|tex| tex.id());
+        for _ in 0..10 {
+            fx.frame(&mut st);
+            assert!(st.lcd.preview_rx.is_none());
+        }
+        assert_eq!(st.lcd.preview_tex.as_ref().map(|tex| tex.id()), decoded);
+
+        fx.put_image("p.png", b"not an image");
+        fx.set_lcd(LcdMode::Image, Some("q.png"));
+        fx.frame(&mut st);
+        fx.set_lcd(LcdMode::Image, Some("p.png"));
+        fx.pump_until(&mut st, |st| st.lcd.preview_rx.is_none());
+        for _ in 0..10 {
+            fx.frame(&mut st);
+            assert!(st.lcd.preview_rx.is_none());
+        }
+        assert!(st.lcd.preview_tex.is_none());
+    }
+
+    #[test]
+    fn decoding_refuses_files_above_the_daemon_upload_cap() {
+        let dir = tempfile::tempdir().unwrap();
+        let path = dir.path().join("huge.png");
+        let file = std::fs::File::create(&path).unwrap();
+        file.set_len(halod_shared::types::MAX_LCD_IMAGE_BYTES + 1)
+            .unwrap();
+        assert!(super::gif::decode_image_file(&path, None).is_none());
+    }
+
+    #[test]
+    fn library_decodes_are_bounded_to_the_thumbnail_side() {
+        let dir = tempfile::tempdir().unwrap();
+        let path = dir.path().join("wide.png");
+        let mut png = Vec::new();
+        image::DynamicImage::ImageRgba8(image::RgbaImage::new(2048, 1024))
+            .write_to(&mut std::io::Cursor::new(&mut png), image::ImageFormat::Png)
+            .unwrap();
+        std::fs::write(&path, png).unwrap();
+        let (_, width, height) =
+            super::gif::decode_image_file(&path, Some(super::gif::LIBRARY_DECODE_SIDE)).unwrap();
+        assert_eq!((width, height), (512, 256));
+    }
+
+    #[test]
     fn video_and_engine_modes_preview_from_pushed_frames() {
         // A GIF is running first so we can prove its state is torn down.
         let mut fx = Fixture::new(LcdMode::Gif, Some("a.gif"));
         fx.put_image("a.gif", &make_gif(3));
-        let mut st = DeviceUi::new("lcd".into());
+        let mut st = DeviceUi::new("lcd".parse().unwrap());
         fx.pump_until(&mut st, |st| !st.lcd.gif_frames.is_empty());
 
         // Daemon switches to Video and pushes a decoded preview frame.
@@ -684,7 +805,7 @@ mod tests {
         let mut fx = Fixture::new(LcdMode::Gif, Some("a.gif"));
         fx.images = vec!["a.gif".into()];
         fx.put_image("a.gif", &make_gif(3));
-        let mut st = DeviceUi::new("lcd".into());
+        let mut st = DeviceUi::new("lcd".parse().unwrap());
         fx.pump_until(&mut st, |st| {
             st.lcd.gif_rx.is_none() && st.lcd.gif_frames.len() == 3
         });
@@ -710,7 +831,7 @@ mod tests {
         // Opened under a profile driving the LCD via the engine → Editor tab.
         let mut fx = Fixture::new(LcdMode::Engine, None);
         fx.state.profiles.active = "A".into();
-        let mut st = DeviceUi::new("lcd".into());
+        let mut st = DeviceUi::new("lcd".parse().unwrap());
         fx.frame(&mut st);
         assert!(st.lcd.media_tab == LcdMediaTab::Template);
         st.lcd.editor.seeded = true;
@@ -741,7 +862,7 @@ mod tests {
     fn template_tab_renders_and_engine_preview_takes_over() {
         let mut fx = Fixture::new(LcdMode::Default, None);
         fx.state.lcd.engine.available_templates = vec![template("clock", "Clock")];
-        let mut st = DeviceUi::new("lcd".into());
+        let mut st = DeviceUi::new("lcd".parse().unwrap());
         st.lcd.media_tab = LcdMediaTab::Template;
         // Renders the template tab (pills + background picker) without panicking.
         fx.frame(&mut st);
@@ -752,7 +873,7 @@ mod tests {
             .lcd
             .engine
             .device_templates
-            .insert("lcd".into(), "clock".into());
+            .insert("lcd".parse().unwrap(), "clock".into());
         fx.preview = Some(DecodedFrame {
             frame_id: 42,
             width: 2,
@@ -768,7 +889,7 @@ mod tests {
     fn select_image_without_active_template_sets_it_directly() {
         let mut fx = Fixture::new(LcdMode::Default, None);
         fx.images = vec!["bg.png".into()];
-        let mut st = DeviceUi::new("lcd".into());
+        let mut st = DeviceUi::new("lcd".parse().unwrap());
         let ctx = TabCtx {
             state: &fx.state,
             dev: &fx.dev,
@@ -785,12 +906,15 @@ mod tests {
             write_rate_history: None,
             plugin_assets: crate::ui::screens::device::empty_plugin_assets(),
         };
-        super::select_image(&ctx, &mut st, "lcd", "bg.png", None);
+        super::select_image(&ctx, &mut st, &"lcd".parse().unwrap(), "bg.png", None);
         assert_eq!(st.lcd.preview_pending.as_deref(), Some("bg.png"));
         let cmd = fx.rx.try_recv().expect("command dispatched");
         assert!(matches!(
             cmd,
-            DaemonCommand::SetScreenImageFromLibrary { .. }
+            DaemonCommand::Device {
+                op: DeviceOp::SetScreenImageFromLibrary { .. },
+                ..
+            }
         ));
     }
 
@@ -798,7 +922,7 @@ mod tests {
     fn select_image_deactivates_a_running_template_first() {
         let mut fx = Fixture::new(LcdMode::Engine, None);
         fx.images = vec!["bg.png".into()];
-        let mut st = DeviceUi::new("lcd".into());
+        let mut st = DeviceUi::new("lcd".parse().unwrap());
         let ctx = TabCtx {
             state: &fx.state,
             dev: &fx.dev,
@@ -815,13 +939,28 @@ mod tests {
             write_rate_history: None,
             plugin_assets: crate::ui::screens::device::empty_plugin_assets(),
         };
-        super::select_image(&ctx, &mut st, "lcd", "bg.png", Some("custom"));
+        super::select_image(
+            &ctx,
+            &mut st,
+            &"lcd".parse().unwrap(),
+            "bg.png",
+            Some("custom"),
+        );
         let first = fx.rx.try_recv().expect("deactivate dispatched");
-        assert!(matches!(first, DaemonCommand::LcdEngineDeactivate { .. }));
+        assert!(matches!(
+            first,
+            DaemonCommand::Device {
+                op: DeviceOp::LcdEngineDeactivate,
+                ..
+            }
+        ));
         let second = fx.rx.try_recv().expect("image command dispatched");
         assert!(matches!(
             second,
-            DaemonCommand::SetScreenImageFromLibrary { .. }
+            DaemonCommand::Device {
+                op: DeviceOp::SetScreenImageFromLibrary { .. },
+                ..
+            }
         ));
     }
 

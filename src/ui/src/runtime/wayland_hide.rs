@@ -38,6 +38,7 @@ use crate::domain::lifecycle::CloseAction;
 use crate::domain::state::HideState;
 use crate::domain::tray;
 use crate::runtime::ipc;
+use crate::runtime::single_instance::Primary;
 use crate::ui::theme;
 
 /// Wakes the event loop when egui asks for a repaint (from the UI thread or the
@@ -51,7 +52,7 @@ enum UserEvent {
 /// window close with "close to tray" off) exits the loop. `background` starts
 /// tray-only, with no window ever created until the tray "Open" is used (sign-in
 /// autostart via `--background`).
-pub fn run(background: bool, primary: crate::runtime::single_instance::Primary) {
+pub fn run(background: bool, primary: Primary) {
     let event_loop = EventLoop::<UserEvent>::with_user_event()
         .build()
         .expect("failed to build winit event loop");
@@ -89,7 +90,7 @@ pub fn run(background: bool, primary: crate::runtime::single_instance::Primary) 
         force_quit.clone(),
         hide_state.clone(),
     );
-    tray.watch_state(ui_rx.state.clone());
+    tray.watch_state(ui_rx.state.subscribe());
     let app = App::new(
         ui_rx,
         sinks,
@@ -187,7 +188,7 @@ impl WaylandApp {
             let app = &mut self.app;
             let egui::FullOutput {
                 platform_output,
-                textures_delta,
+                mut textures_delta,
                 shapes,
                 pixels_per_point,
                 viewport_output,
@@ -225,7 +226,9 @@ impl WaylandApp {
             let action = self.app.close_action(close_requested);
             if action == CloseAction::Stay {
                 for (id, delta) in &textures_delta.set {
-                    painter.set_texture(*id, delta);
+                    for delta in delta {
+                        painter.set_texture(*id, delta);
+                    }
                 }
                 // Skip the GL draw on a zero-sized surface (a 0-sized `Resized`
                 // slips through on some compositors); `resize` no-ops there, so
@@ -248,6 +251,7 @@ impl WaylandApp {
                     painter.free_texture(*id);
                 }
             }
+            textures_delta.clear();
             action
         };
 
@@ -323,7 +327,6 @@ impl WaylandApp {
         let painter =
             egui_glow::Painter::new(Arc::clone(&gl), "", None, true).expect("create glow painter");
         let egui_winit = self.new_egui_state(event_loop, &win.window, painter.max_texture_side());
-        self.app.replay_integrity_native_on_reopen();
         win.window.request_redraw();
         self.painter = Some(painter);
         self.egui_winit = Some(egui_winit);

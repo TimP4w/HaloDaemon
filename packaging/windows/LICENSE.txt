@@ -32,7 +32,7 @@ Bundled components:
   build configuration, source links, and available dependency license files are
   installed under ThirdPartyLicenses\MSYS2.
 
-* Embedded fonts: Noto Sans, JetBrains Mono, and Inter Tight.
+* Embedded fonts: Noto Sans, JetBrains Mono, Inter Tight, and Geist.
   License: SIL Open Font License 1.1 (OFL-1.1).
 
 * Embedded icons from Pictogrammers Material Design Icons and Google Material

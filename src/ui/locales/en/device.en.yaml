@@ -2,59 +2,56 @@ device:
   # keys.rs - Keys/Buttons tab
   keys_tab_buttons: Buttons
   keys_tab_keys: Keys
-  keys_select_button_hint: Select a button to remap it
   keys_reset_all: Reset all
   keys_layer_normal: Normal
   keys_layer_shift: Layer shift
-  keys_assign_action: Assign action
-  keys_editing: EDITING
-  keys_assign_hint: "Choose what the %{button} button does normally and while you hold the layer-shift key."
+  keys_action: Action
+  keys_editor_hint: Choose what this button does normally and while you hold the layer-shift button.
+  keys_restore_default: Restore default
+  keys_chord_record: "Click, then press a key combination"
+  keys_chord_press: "Press a key combination…"
   keys_select_button_prompt: Select a button on the left to configure its action.
-  keys_no_params_native: Sends its default input. No parameters to configure.
-  keys_no_params_disable: This button is disabled and does nothing when you press it.
-  keys_no_params_layer_shift: Activates the shift layer while you hold the button. No parameters to configure.
-  keys_no_params: No parameters to configure.
-  keys_direction: DIRECTION
+  keys_direction: Direction
   keys_dir_up: Up
   keys_dir_down: Down
-  keys_mouse_button: MOUSE BUTTON
+  keys_mouse_button: Mouse button
   keys_mouse_left: Left
   keys_mouse_right: Right
   keys_mouse_middle: Middle
   keys_mouse_back: Back
   keys_mouse_forward: Forward
-  keys_dpi_value: DPI VALUE
+  keys_dpi_value: DPI value
   keys_sniper_dpi: Sniper DPI
-  keys_presets: PRESETS
-  keys_media_key: MEDIA KEY
-  keys_media_play: Play / Pause
+  keys_presets: Presets
+  keys_media_key: Media key
+  keys_media_play: Play / pause
   keys_media_next: Next track
-  keys_media_prev: Prev track
+  keys_media_prev: Previous track
   keys_media_mute: Mute
   keys_media_volume_up: Volume up
   keys_media_volume_down: Volume down
-  keys_axis: AXIS
+  keys_axis: Axis
   keys_axis_vertical: Vertical
   keys_axis_horizontal: Horizontal
-  keys_clicks_per_event: CLICKS PER EVENT
-  keys_application: APPLICATION
+  keys_clicks_per_event: Clicks per event
+  keys_application: Application
   keys_app_hint: App name or path
   keys_browse: "Browse…"
-  keys_command: COMMAND
+  keys_command: Command
   keys_command_hint: command
-  keys_tag_default: DEFAULT
-  keys_tag_disabled: DISABLED
-  keys_tag_mouse_btn: MOUSE BTN
-  keys_tag_scroll: SCROLL
-  keys_tag_key_chord: KEY CHORD
-  keys_tag_media: MEDIA
-  keys_tag_dpi_cycle: DPI CYCLE
-  keys_tag_profile: PROFILE
-  keys_tag_dpi_snap: DPI SNAP
-  keys_tag_layer: LAYER
-  keys_tag_macro: MACRO
-  keys_tag_launch: LAUNCH
-  keys_tag_command: COMMAND
+  keys_tag_default: Default
+  keys_tag_disabled: Disabled
+  keys_tag_mouse_btn: Mouse btn
+  keys_tag_scroll: Scroll
+  keys_tag_key_chord: Key chord
+  keys_tag_media: Media
+  keys_tag_dpi_cycle: DPI cycle
+  keys_tag_profile: Profile
+  keys_tag_dpi_snap: DPI snap
+  keys_tag_layer: Layer
+  keys_tag_macro: Macro
+  keys_tag_launch: Launch
+  keys_tag_command: Command
   keys_type_default: Default
   keys_type_disabled: Disabled
   keys_type_mouse_button: Mouse button
@@ -80,18 +77,18 @@ device:
   chains_topo_grid: Grid
   chains_topo_keyboard: Keyboard
   chains_title: LED chains
-  chains_summary: "%{leds} LEDs · %{headers} headers"
-  chains_subtitle: "Connect addressable components to each header. Automatically detected components are locked, but you can add, rename, and remove your own."
+  chains_summary: "%{leds} LEDs on %{headers} headers"
+  chains_subtitle: "Connect addressable components to each header. Detected components are locked; you can add, rename and remove the others."
   chains_flashing: "Flashing…"
   chains_discover: Discover
   chains_usage: "%{used} / %{max} LEDs"
   chains_no_links: No components connected to this header
-  chains_discovered: DISCOVERED
-  chains_led_count: "%{count} LED"
+  chains_discovered: Detected
+  chains_led_count: "%{count} LEDs"
   chains_add_link: Add link
   chains_new_link: New link
   chains_name: Name
-  chains_type: Type
+  chains_type: Layout
   chains_leds: LEDs
   chains_cancel: Cancel
   chains_add: Add
@@ -99,12 +96,13 @@ device:
   # children.rs - Devices & Pairing tabs
   children_connected_devices: Connected devices
   children_no_child_devices: No child devices
-  children_receiver: RECEIVER
+  children_receiver: Receiver
   children_hold_pair_button: "Hold the device's pair button now…"
   children_cancel: Cancel
   children_slots_in_use: "%{used} of %{max} slots in use"
   children_pair_new_device: Pair new device
   children_paired_slots: Paired slots
   children_unpair: Unpair
-  children_empty_slot: Empty slot
+  children_unpair_title: "Unpair %{name}?"
+  children_unpair_confirm: "%{name} will be removed from the receiver. You will need to pair it again to use it."
   children_available: Available

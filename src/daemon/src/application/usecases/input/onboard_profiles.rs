@@ -5,7 +5,10 @@ use anyhow::{Context, Result};
 use std::sync::Arc;
 
 use crate::application::state::AppState;
+use crate::domain::device::OnboardProfilesCapability;
+use crate::domain::events::Change;
 use crate::domain::registry::require_device_owned_id;
+use halod_shared::ids::DeviceId;
 
 fn validate_slot(slot: u16) -> Result<()> {
     if slot == 0 {
@@ -14,10 +17,7 @@ fn validate_slot(slot: u16) -> Result<()> {
     Ok(())
 }
 
-async fn ensure_writable(
-    cap: &dyn crate::domain::device::OnboardProfilesCapability,
-    slot: u16,
-) -> Result<()> {
+async fn ensure_writable(cap: &dyn OnboardProfilesCapability, slot: u16) -> Result<()> {
     if let Some(halod_shared::types::DeviceCapability::OnboardProfiles(profiles)) =
         cap.to_wire().await
     {
@@ -32,38 +32,33 @@ async fn ensure_writable(
     Ok(())
 }
 
-pub async fn switch_onboard_profile(id: String, slot: u16, app: Arc<AppState>) -> Result<()> {
+pub async fn switch_onboard_profile(id: DeviceId, slot: u16, app: Arc<AppState>) -> Result<()> {
     let device = require_device_owned_id(&id, &app).await?;
     validate_slot(slot)?;
     let cap = device
         .as_onboard_profiles()
         .context("device does not support onboard profiles")?;
-    log::info!(
-        "[OnboardProfile] Switching '{}' to slot {slot}",
-        device.name()
-    );
+    log::info!("Switching '{}' to slot {slot}", device.name());
     cap.switch_profile(slot).await?;
-    app.record_change(crate::domain::events::Change::Device(id))
-        .await;
+    app.record_change(Change::Device(id)).await;
     Ok(())
 }
 
-pub async fn restore_onboard_profile(id: String, slot: u16, app: Arc<AppState>) -> Result<()> {
+pub async fn restore_onboard_profile(id: DeviceId, slot: u16, app: Arc<AppState>) -> Result<()> {
     let device = require_device_owned_id(&id, &app).await?;
     validate_slot(slot)?;
     let cap = device
         .as_onboard_profiles()
         .context("device does not support onboard profiles")?;
     ensure_writable(cap, slot).await?;
-    log::info!("[OnboardProfile] Restoring '{}' slot {slot}", device.name());
+    log::info!("Restoring '{}' slot {slot}", device.name());
     cap.restore_profile(slot).await?;
-    app.record_change(crate::domain::events::Change::Device(id))
-        .await;
+    app.record_change(Change::Device(id)).await;
     Ok(())
 }
 
 pub async fn set_onboard_profile_enabled(
-    id: String,
+    id: DeviceId,
     slot: u16,
     enabled: bool,
     app: Arc<AppState>,
@@ -74,13 +69,9 @@ pub async fn set_onboard_profile_enabled(
         .as_onboard_profiles()
         .context("device does not support onboard profiles")?;
     ensure_writable(cap, slot).await?;
-    log::info!(
-        "[OnboardProfile] '{}' slot {slot} enabled={enabled}",
-        device.name()
-    );
+    log::info!("'{}' slot {slot} enabled={enabled}", device.name());
     cap.set_profile_enabled(slot, enabled).await?;
-    app.record_change(crate::domain::events::Change::Device(id))
-        .await;
+    app.record_change(Change::Device(id)).await;
     Ok(())
 }
 
@@ -111,15 +102,17 @@ mod tests {
         mock.onboard_read_only_slots = vec![0x101];
         let dev = Arc::new(mock);
         let app = app_with(vec![dev.clone()]);
-        switch_onboard_profile("mouse0".into(), 0x101, app.clone())
+        switch_onboard_profile("mouse0".parse().unwrap(), 0x101, app.clone())
             .await
             .unwrap();
         assert_eq!(dev.calls(), ["switch 257"]);
-        assert!(restore_onboard_profile("mouse0".into(), 0x101, app.clone())
-            .await
-            .is_err());
         assert!(
-            set_onboard_profile_enabled("mouse0".into(), 0x101, false, app)
+            restore_onboard_profile("mouse0".parse().unwrap(), 0x101, app.clone())
+                .await
+                .is_err()
+        );
+        assert!(
+            set_onboard_profile_enabled("mouse0".parse().unwrap(), 0x101, false, app)
                 .await
                 .is_err()
         );
@@ -131,7 +124,7 @@ mod tests {
     #[tokio::test]
     async fn switch_onboard_profile_calls_capability() {
         let (dev, app) = setup();
-        switch_onboard_profile("mouse0".into(), 2, app)
+        switch_onboard_profile("mouse0".parse().unwrap(), 2, app)
             .await
             .unwrap();
         assert_eq!(dev.calls(), ["switch 2"]);
@@ -140,7 +133,7 @@ mod tests {
     #[tokio::test]
     async fn switch_onboard_profile_rejects_slot_zero() {
         let (dev, app) = setup();
-        let err = switch_onboard_profile("mouse0".into(), 0, app)
+        let err = switch_onboard_profile("mouse0".parse().unwrap(), 0, app)
             .await
             .unwrap_err();
         assert!(err.to_string().contains("slot"));
@@ -150,7 +143,7 @@ mod tests {
     #[tokio::test]
     async fn restore_onboard_profile_calls_capability() {
         let (dev, app) = setup();
-        restore_onboard_profile("mouse0".into(), 3, app)
+        restore_onboard_profile("mouse0".parse().unwrap(), 3, app)
             .await
             .unwrap();
         assert_eq!(dev.calls(), ["restore 3"]);
@@ -159,7 +152,7 @@ mod tests {
     #[tokio::test]
     async fn set_onboard_profile_enabled_calls_capability() {
         let (dev, app) = setup();
-        set_onboard_profile_enabled("mouse0".into(), 1, false, app)
+        set_onboard_profile_enabled("mouse0".parse().unwrap(), 1, false, app)
             .await
             .unwrap();
         assert_eq!(dev.calls(), ["enable 1 false"]);
@@ -168,7 +161,7 @@ mod tests {
     #[tokio::test]
     async fn switch_onboard_profile_errors_on_missing_device() {
         let app = app_with(vec![]);
-        let err = switch_onboard_profile("ghost".into(), 1, app)
+        let err = switch_onboard_profile("ghost".parse().unwrap(), 1, app)
             .await
             .unwrap_err();
         assert!(err.to_string().contains("ghost"));

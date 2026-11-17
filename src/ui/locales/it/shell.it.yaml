@@ -1,18 +1,19 @@
 shell:
   nav_home: Home
-  nav_lighting: Illuminazione RGB
+  nav_lighting: Illuminazione
   nav_cooling: Raffreddamento
   nav_plugins: Plugin
-  nav_integrations: Integrazioni
   nav_settings: Impostazioni
-  workspace: AREA DI LAVORO
-  my_devices: I MIEI DISPOSITIVI
-  no_devices: Non ci sono ancora dispositivi
-  daemon_running: Daemon in esecuzione
-  daemon_offline: Daemon offline
-  daemon_offline_sub: Non collegato
-  start: Avvia
-  daemon_not_running: Daemon non in esecuzione
-  daemon_unreachable: HaloDaemon non riesce a comunicare con il servizio halod.
-  daemon_start_hint: Avvialo per controllare i tuoi dispositivi.
-  start_daemon: Avvia il daemon
+  daemon_not_running: "HaloDaemon non è in esecuzione"
+  daemon_unreachable: "L’app non riesce a raggiungere il servizio HaloDaemon, quindi i dispositivi non possono essere controllati. Illuminazione, curve delle ventole e profili mantengono l’ultimo stato finché non torna disponibile."
+  daemon_reconnecting: "Tentativo di riconnessione…"
+  open_log: "Apri log"
+  start_daemon: "Avvia HaloDaemon"
+  notifications: "Notifiche"
+  mark_all_read: "Segna tutte come lette"
+  clear: "Cancella"
+  no_notifications: "Ancora nessuna notifica"
+  age_now: "ora"
+  age_min: "%{n} min"
+  age_hour: "%{n} h"
+  age_day: "%{n} g"

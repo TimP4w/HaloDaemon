@@ -2,7 +2,6 @@
 pkgname=halod
 pkgver=0.12.1
 pkgrel=1
-plugin_release=v0.12.1
 pkgdesc="Peripheral control daemon (fan curves, RGB, LCD, audio EQ, DPI)"
 arch=('x86_64')
 url="https://github.com/TimP4w/HaloDaemon"
@@ -14,14 +13,9 @@ optdepends=('ffmpeg: LCD video playback'
             'nvidia-utils: GPU temperature readout via nvidia-smi'
             'i2c-tools: SMBus/DRAM + GPU RGB diagnostics')
 install="$pkgname.install"
-# The daemon source is pinned to its immutable release commit. Plugin content is
-# the exact prebuilt bundle produced from the selected signed plugin release.
-source=("$pkgname-$pkgver::git+https://github.com/TimP4w/HaloDaemon.git#commit=1c4e7e6538d00fc49c5feccc21a38fdc8ec71964"
-        "official-plugins.bundle::https://github.com/TimP4w/HaloDaemon/releases/download/$plugin_release/official-plugins.bundle"
-        "official-plugins-licenses.txt::https://github.com/TimP4w/HaloDaemon/releases/download/$plugin_release/official-plugins-licenses.txt")
-sha256sums=('SKIP'
-            '3f12b625bcfd082a90678710a12e7b6827a5dc4b374a083c64bc47ffccbd1367'
-            '27f9752202181c3b50822f1d208b2e9d0972577701955d41281c2e03187d2236')
+# The daemon source is pinned to its immutable release commit.
+source=("$pkgname-$pkgver::git+https://github.com/TimP4w/HaloDaemon.git#commit=1c4e7e6538d00fc49c5feccc21a38fdc8ec71964")
+sha256sums=('SKIP')
 
 prepare() {
     cd "$srcdir/$pkgname-$pkgver/src"
@@ -40,11 +34,6 @@ build() {
     export PATH="$srcdir/tools/bin:$PATH"
     export HALOD_REQUIRE_LICENSES=1
     export RUSTUP_TOOLCHAIN=stable
-    cp "$srcdir/official-plugins.bundle" official-plugins.bundle
-    cp "$srcdir/official-plugins-licenses.txt" plugin-licenses.txt
-    export HALOD_OFFICIAL_PLUGIN_LICENSES="$PWD/plugin-licenses.txt"
-    export HALOD_REQUIRE_PLUGIN_BUNDLE=1
-    export HALOD_OFFICIAL_PLUGIN_BUNDLE="$PWD/official-plugins.bundle"
     cargo build --release --frozen -p halod -p halod-gui
 }
 
@@ -61,8 +50,4 @@ package() {
     install -Dm644 packaging/systemd/halod.service \
         "$pkgdir/usr/lib/systemd/user/halod.service"
     install -Dm644 LICENSE "$pkgdir/usr/share/licenses/$pkgname/LICENSE"
-    if [[ -f src/plugin-licenses.txt ]]; then
-        install -Dm644 src/plugin-licenses.txt \
-            "$pkgdir/usr/share/licenses/$pkgname/plugins/licenses.txt"
-    fi
 }

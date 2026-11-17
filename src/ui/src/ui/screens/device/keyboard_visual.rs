@@ -16,7 +16,7 @@ use crate::ui::theme;
 pub fn panel(ui: &mut egui::Ui, height: f32, sense: Sense) -> (egui::Response, Rect) {
     let (rect, resp) = ui.allocate_exact_size(Vec2::new(ui.available_width(), height), sense);
     let p = ui.painter();
-    p.rect_filled(rect, theme::RADIUS_MD, theme::hex(0x0a0d13));
+    p.rect_filled(rect, theme::RADIUS_MD, theme::ON_ACCENT);
     p.rect_stroke(
         rect,
         theme::RADIUS_MD,
@@ -403,7 +403,7 @@ pub fn draw_keyboard(
         let stroke = if selected == Some(i) {
             Stroke::new(2.0, theme::CYAN)
         } else {
-            Stroke::new(1.0, theme::hex(0x2a3446))
+            Stroke::new(1.0, theme::BORDER_INNER)
         };
         match iso_enter_lower(k, *r, unit) {
             // One connected inverted-L cap: fill both arms sharp-cornered so they
@@ -426,9 +426,14 @@ pub fn draw_keyboard(
             let text_col = if is_dark(fill) {
                 theme::TEXT_MUT
             } else {
-                theme::hex(0x0a0d13)
+                theme::ON_ACCENT
             };
-            let font = theme::body((r.height() * 0.5).clamp(7.0, 12.0));
+            let size = (r.height() * 0.5).clamp(7.0, 12.0);
+            let natural = painter
+                .layout_no_wrap(label.to_string(), theme::body(size), text_col)
+                .size()
+                .x;
+            let font = theme::body(fit_font_size(size, natural, r.width() - 4.0));
             painter.text(
                 r.center(),
                 egui::Align2::CENTER_CENTER,
@@ -440,9 +445,26 @@ pub fn draw_keyboard(
     }
 }
 
+/// Shrink `size` so a legend `natural` px wide fits in `avail`, never below 5 px.
+fn fit_font_size(size: f32, natural: f32, avail: f32) -> f32 {
+    if natural <= avail || natural <= 0.0 {
+        size
+    } else {
+        (size * avail / natural).max(5.0)
+    }
+}
+
 #[cfg(test)]
 mod tests {
     use super::*;
+
+    #[test]
+    fn fitted_legend_never_grows_and_fits_when_possible() {
+        assert_eq!(fit_font_size(12.0, 20.0, 30.0), 12.0);
+        let fitted = fit_font_size(12.0, 60.0, 30.0);
+        assert!(fitted < 12.0 && (60.0 * fitted / 12.0) <= 30.0 + 1e-3);
+        assert_eq!(fit_font_size(12.0, 600.0, 10.0), 5.0);
+    }
     use halod_shared::keyboard::{KeyCell, StandardLayout};
 
     fn keys_for(layout: StandardLayout) -> Vec<VisualKey> {
@@ -689,8 +711,8 @@ mod tests {
     fn is_dark_uses_luminance_not_per_channel() {
         // The Keys-tab mapped-cap blue (0x28324a) reads as dark → light legend,
         // even though its red channel (0x28 = 40) defeats a naive `< 40` test.
-        assert!(is_dark(theme::hex(0x28324a)));
-        assert!(is_dark(theme::hex(0x141a24)));
+        assert!(is_dark(theme::BORDER_INNER));
+        assert!(is_dark(theme::RAISED_BG));
         // Bright fills want a dark legend.
         assert!(!is_dark(Color32::from_rgb(255, 255, 0)));
         assert!(!is_dark(Color32::from_rgb(90, 209, 232)));

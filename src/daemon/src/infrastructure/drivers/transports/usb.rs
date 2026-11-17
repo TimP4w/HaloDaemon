@@ -1,9 +1,9 @@
 // SPDX-License-Identifier: GPL-3.0-or-later
 //! Endpoint-oriented, scoped USB transport used by plugins.
 
+use parking_lot::Mutex;
 use std::{
     collections::{HashMap, HashSet},
-    sync::Mutex,
     time::Duration,
 };
 
@@ -148,11 +148,8 @@ impl UsbEndpointTransport {
         let policy = self
             .endpoint(endpoint, data.len(), timeout_ms, Direction::Out)?
             .clone();
-        let _guard = self
-            .transfer_lock
-            .lock()
-            .map_err(|_| anyhow!("USB transfer mutex poisoned"))?;
-        let claim = self.io.write_access_blocking(data.len())?;
+        let _guard = self.transfer_lock.lock();
+        let claim = self.io.write_access(data.len())?;
         let timeout = Duration::from_millis(timeout_ms);
         let mut sent = 0;
         while sent < data.len() {
@@ -180,10 +177,7 @@ impl UsbEndpointTransport {
         let policy = self
             .endpoint(endpoint, length, timeout_ms, Direction::In)?
             .clone();
-        let _guard = self
-            .transfer_lock
-            .lock()
-            .map_err(|_| anyhow!("USB transfer mutex poisoned"))?;
+        let _guard = self.transfer_lock.lock();
         let mut data = vec![0; length];
         let claim = self.io.read_access();
         let timeout = Duration::from_millis(timeout_ms);
@@ -210,30 +204,9 @@ impl UsbEndpointTransport {
             .control
             .as_ref()
             .ok_or_else(|| anyhow!("USB control transfers are not declared for this device"))?;
-        let length = bytes.len().max(read_length);
-        if length > policy.max_transfer_size {
-            bail!(
-                "USB control transfer length {length} exceeds bound {}",
-                policy.max_transfer_size
-            );
-        }
-        if timeout_ms == 0 || timeout_ms > policy.max_timeout_ms {
-            bail!(
-                "USB control timeout {timeout_ms}ms exceeds bound {}ms",
-                policy.max_timeout_ms
-            );
-        }
+        policy.check(request_type, request, bytes.len(), read_length, timeout_ms)?;
         let input = request_type & 0x80 != 0;
-        if input && !bytes.is_empty() {
-            bail!("USB control IN transfer cannot include output bytes");
-        }
-        if !input && read_length != 0 {
-            bail!("USB control OUT transfer cannot request input bytes");
-        }
-        let _guard = self
-            .transfer_lock
-            .lock()
-            .map_err(|_| anyhow!("USB transfer mutex poisoned"))?;
+        let _guard = self.transfer_lock.lock();
         let timeout = Duration::from_millis(timeout_ms);
         if input {
             let mut data = vec![0; read_length];
@@ -246,7 +219,7 @@ impl UsbEndpointTransport {
             data.truncate(n.min(data.len()));
             Ok(UsbControlResult::Read(data))
         } else {
-            let claim = self.io.write_access_blocking(bytes.len())?;
+            let claim = self.io.write_access(bytes.len())?;
             let n = claim
                 .handle
                 .write_control(request_type, request, value, index, bytes, timeout)
@@ -496,22 +469,12 @@ pub(crate) const USB_LIVENESS_POLL: Duration = Duration::from_secs(2);
 
 /// Every USB device's live enumeration coordinates, read without opening a
 /// handle (no serial). Cheap enough to poll: it only lists the bus.
-pub(crate) fn present_usb_locations() -> Vec<UsbLocation> {
-    let ctx = match Context::new() {
-        Ok(c) => c,
-        Err(e) => {
-            log::debug!("USB liveness: context init failed: {e}");
-            return Vec::new();
-        }
-    };
-    let devices = match ctx.devices() {
-        Ok(d) => d,
-        Err(e) => {
-            log::debug!("USB liveness: device list failed: {e}");
-            return Vec::new();
-        }
-    };
-    devices
+pub(crate) fn present_usb_locations() -> Option<HashSet<UsbLocation>> {
+    let devices = Context::new()
+        .and_then(|ctx| ctx.devices())
+        .inspect_err(|e| log::debug!("USB liveness: device list failed: {e}"))
+        .ok()?;
+    let locations = devices
         .iter()
         .filter_map(|d| {
             let dd = d.device_descriptor().ok()?;
@@ -523,15 +486,16 @@ pub(crate) fn present_usb_locations() -> Vec<UsbLocation> {
                 port_path: d.port_numbers().unwrap_or_default(),
             })
         })
-        .collect()
+        .collect();
+    Some(locations)
 }
 
 /// Registered device ids whose USB location is no longer on the bus — their
 /// handle is stale and the device must be dropped so a reconnect rebuilds it.
-pub(crate) fn stale_usb_ids(
-    registered: &[(String, UsbLocation)],
+pub(crate) fn stale_usb_ids<Id: Clone>(
+    registered: &[(Id, UsbLocation)],
     present: &HashSet<UsbLocation>,
-) -> Vec<String> {
+) -> Vec<Id> {
     registered
         .iter()
         .filter(|(_, loc)| !present.contains(loc))
@@ -557,7 +521,7 @@ mod liveness_tests {
     fn present_device_is_not_stale() {
         let l = loc(0x2109, 0x8884, 1, 5, &[3]);
         let present = HashSet::from([l.clone()]);
-        assert!(stale_usb_ids(&[("monitor".into(), l)], &present).is_empty());
+        assert!(stale_usb_ids(&[(String::from("monitor"), l)], &present).is_empty());
     }
 
     #[test]
@@ -565,7 +529,7 @@ mod liveness_tests {
         let l = loc(0x2109, 0x8884, 1, 5, &[3]);
         let present = HashSet::new();
         assert_eq!(
-            stale_usb_ids(&[("monitor".into(), l)], &present),
+            stale_usb_ids(&[(String::from("monitor"), l)], &present),
             vec!["monitor".to_owned()]
         );
     }
@@ -593,7 +557,7 @@ mod liveness_tests {
         // An unrelated device sharing the bus must not perturb either decision.
         let mouse = loc(0x046d, 0xc08b, 1, 7, &[2]);
         let present = HashSet::from([l.clone(), mouse.clone()]);
-        assert!(stale_usb_ids(&[("monitor".into(), l)], &present).is_empty());
+        assert!(stale_usb_ids(&[(String::from("monitor"), l)], &present).is_empty());
         let last_present = HashSet::from([mouse, loc(0x2109, 0x8884, 1, 5, &[3])]);
         assert_eq!(present, last_present, "no topology change → no rescan");
     }

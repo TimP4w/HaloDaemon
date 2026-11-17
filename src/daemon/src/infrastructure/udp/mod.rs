@@ -141,8 +141,7 @@ impl UdpRuntime {
 #[cfg(test)]
 mod tests {
     use super::*;
-    use std::sync::Mutex;
-
+    use parking_lot::Mutex;
     struct StubBackend {
         sent: Mutex<Vec<Vec<u8>>>,
         inbound: Mutex<std::collections::VecDeque<Vec<u8>>>,
@@ -150,11 +149,11 @@ mod tests {
 
     impl UdpBackend for StubBackend {
         fn send(&self, data: &[u8]) -> Result<usize> {
-            self.sent.lock().unwrap().push(data.to_vec());
+            self.sent.lock().push(data.to_vec());
             Ok(data.len())
         }
         fn receive(&self, _timeout: Duration, max_bytes: usize) -> Result<Option<Vec<u8>>> {
-            Ok(self.inbound.lock().unwrap().pop_front().map(|mut d| {
+            Ok(self.inbound.lock().pop_front().map(|mut d| {
                 d.truncate(max_bytes);
                 d
             }))
@@ -179,7 +178,7 @@ mod tests {
         let err = rt.send(&[0u8; 9]).unwrap_err().to_string();
         assert!(err.contains("max_datagram_bytes"), "{err}");
         // Only the admitted send reached the backend.
-        assert_eq!(backend.sent.lock().unwrap().len(), 1);
+        assert_eq!(backend.sent.lock().len(), 1);
     }
 
     #[test]

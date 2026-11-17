@@ -104,9 +104,9 @@ sudo udevadm control --reload-rules
 sudo udevadm trigger
 ```
 
-Official release packages generate this file from the exact signed plugin
-bundle embedded in that release. Run the same command again after installing,
-removing, or updating plugins. The Plugins screen reports when the effective
+Release packages ship this file generated from the official plugin catalog at
+release time. Run the same command again after installing, removing, or
+updating plugins. The Plugins screen reports when the effective
 installed file is stale and can copy these manual installation commands.
 
 ## Groups & permissions

@@ -22,6 +22,13 @@ use halod_shared::lcd_custom::{
 use halod_shared::types::{EffectParamValue, LcdEngineTemplateDescriptor, RgbColor};
 
 use super::templates::{dim_color, rgba, Background, TemplateCtx};
+use crate::application::state::AppState;
+use crate::domain::plugin::PluginWidgetHandle;
+use crate::domain::plugin::WidgetAudioInput;
+use crate::domain::plugin::WidgetImageInput;
+use crate::domain::plugin::WidgetRenderInput;
+use crate::util::backoff::FailureStreak;
+use halod_shared::ids::{DeviceId, PluginId};
 
 struct PluginSprite {
     signature: u64,
@@ -79,12 +86,12 @@ pub struct CustomTemplate {
     /// Acquired only when the layout has a `NowPlaying` widget — `None`
     /// renders the "no player" dimmed placeholder.
     media: Option<Arc<MediaHandle>>,
-    plugin_handles: HashMap<String, crate::domain::plugin::PluginWidgetHandle>,
-    plugin_backoff: HashMap<String, crate::util::backoff::FailureStreak>,
+    plugin_handles: HashMap<PluginId, PluginWidgetHandle>,
+    plugin_backoff: HashMap<PluginId, FailureStreak>,
     plugin_sprites: HashMap<String, PluginSprite>,
     composite_cache: RefCell<HashMap<String, CachedComposite>>,
     system_fonts: HashMap<String, ab_glyph::FontArc>,
-    plugin_assets: HashMap<(String, String, u32), crate::domain::plugin::WidgetImageInput>,
+    plugin_assets: HashMap<(String, String, u32), WidgetImageInput>,
     plugin_revision: u64,
     last_plugin_render_t: Option<f64>,
 }
@@ -106,7 +113,7 @@ impl CustomTemplate {
         let def = match params.get(halod_shared::lcd_custom::WIDGETS_JSON_PARAM) {
             Some(EffectParamValue::Str(json)) => serde_json::from_str::<CustomTemplateDef>(json)
                 .unwrap_or_else(|e| {
-                    log::warn!("[LCD custom] invalid widgets_json, using default: {e}");
+                    log::warn!("invalid widgets_json, using default: {e}");
                     CustomTemplateDef::default()
                 }),
             _ => CustomTemplateDef::default(),
@@ -114,7 +121,7 @@ impl CustomTemplate {
         Self::new(def, images_dir)
     }
 
-    pub(super) fn render(&mut self, ctx: &TemplateCtx, buf: &mut RgbaImage) -> Result<(), String> {
+    pub(super) fn render(&mut self, ctx: &TemplateCtx, buf: &mut RgbaImage) {
         let (w, h) = (ctx.width, ctx.height);
         let accent = self.def.style.accent;
 
@@ -142,7 +149,6 @@ impl CustomTemplate {
         // caller reuses the same allocation on the next tick and we drop
         // the old (now-empty) allocation.
         std::mem::swap(buf, &mut img);
-        Ok(())
     }
 
     pub(super) fn content_signature(&self, ctx: &TemplateCtx) -> Option<u64> {
@@ -183,11 +189,7 @@ impl CustomTemplate {
         }
     }
 
-    pub(super) async fn gather_plugin_sprites(
-        &mut self,
-        ctx: &TemplateCtx,
-        app: &crate::application::state::AppState,
-    ) {
+    pub(super) async fn gather_plugin_sprites(&mut self, ctx: &TemplateCtx, app: &AppState) {
         let dt = self
             .last_plugin_render_t
             .map(|last| (ctx.t - last).max(0.0) as f32)
@@ -298,7 +300,8 @@ impl CustomTemplate {
                 Some(handle) => handle.clone(),
                 None => {
                     if let Some(backoff) = self.plugin_backoff.get(&entry.plugin_id) {
-                        if !crate::util::backoff::respawn_due(backoff, std::time::Instant::now()) {
+                        if !crate::util::backoff::respawn_due(backoff, tokio::time::Instant::now())
+                        {
                             continue;
                         }
                     }
@@ -348,7 +351,7 @@ impl CustomTemplate {
                     EffectParamValue::Str(weight.clone()),
                 );
             }
-            let input = crate::domain::plugin::WidgetRenderInput {
+            let input = WidgetRenderInput {
                 widget_id,
                 width,
                 height,
@@ -364,7 +367,7 @@ impl CustomTemplate {
                     .filter(|frame| frame.seq != 0)
                     .map(widget_audio),
                 media_art: media_info.and_then(|info| {
-                    info.art.map(|art| crate::domain::plugin::WidgetImageInput {
+                    info.art.map(|art| WidgetImageInput {
                         width: art.width(),
                         height: art.height(),
                         rgba: art.as_raw().clone(),
@@ -383,7 +386,7 @@ impl CustomTemplate {
                         let frame = decoded.frames.get(index)?;
                         Some((
                             filename,
-                            crate::domain::plugin::WidgetImageInput {
+                            WidgetImageInput {
                                 width: frame.width(),
                                 height: frame.height(),
                                 rgba: frame.as_raw().clone(),
@@ -442,11 +445,11 @@ impl CustomTemplate {
                     if !handle.is_usable() {
                         // A timeout poisons one plugin VM, not the layout. Drop
                         self.plugin_handles.remove(&entry.plugin_id);
-                        let now = std::time::Instant::now();
+                        let now = tokio::time::Instant::now();
                         self.plugin_backoff
                             .entry(entry.plugin_id.clone())
                             .and_modify(|backoff| backoff.record(now))
-                            .or_insert_with(|| crate::util::backoff::FailureStreak::first(now));
+                            .or_insert_with(|| FailureStreak::first(now));
                     }
                 }
             }
@@ -751,15 +754,15 @@ fn y_ratio(w: &WidgetDef) -> f32 {
 /// Cache key for an `Image` widget at on-screen size; shared by render and prune paths.
 fn decode_source_image(images_dir: &Path, filename: &str) -> Option<Arc<DecodedImage>> {
     if halod_shared::types::validate_image_filename(filename).is_err() {
-        log::warn!("[LCD custom] rejected image filename: {filename}");
+        log::warn!("rejected image filename: {filename}");
         return None;
     }
     let path = images_dir.join(filename);
     let data = crate::util::image::read_image_bounded(&path)
-        .map_err(|e| log::warn!("[LCD custom] cannot read {filename}: {e}"))
+        .map_err(|e| log::warn!("cannot read {filename}: {e}"))
         .ok()?;
     let decoded = super::templates::decode_image_frames(&data)
-        .map_err(|e| log::warn!("[LCD custom] decode {filename} failed: {e}"))
+        .map_err(|e| log::warn!("decode {filename} failed: {e}"))
         .ok()?;
     let (frames, delays): (Vec<RgbaImage>, Vec<f64>) = decoded.into_iter().unzip();
     let frames = bound_decoded_bytes(frames, DECODED_IMAGE_MAX_BYTES);
@@ -1029,14 +1032,14 @@ fn editor_sprite_signature(widget: &WidgetDef, cw: u32, ch: u32, dynamic: Option
 /// GIF frames) and fonts survive between the GUI's ~200ms polls instead of
 /// being rebuilt from scratch every tick.
 pub(crate) struct EditorSession {
-    pub(crate) device_id: String,
+    pub(crate) device_id: DeviceId,
     tmpl: CustomTemplate,
-    last_used: std::time::Instant,
+    last_used: tokio::time::Instant,
 }
 
 impl EditorSession {
     /// Whether this session has sat idle longer than `timeout` as of `now`.
-    pub(crate) fn is_idle(&self, now: std::time::Instant, timeout: std::time::Duration) -> bool {
+    pub(crate) fn is_idle(&self, now: tokio::time::Instant, timeout: std::time::Duration) -> bool {
         editor_session_is_idle(self.last_used, now, timeout)
     }
 
@@ -1044,9 +1047,9 @@ impl EditorSession {
     /// well past [`EDITOR_SESSION_IDLE_TIMEOUT`]), so eviction-path tests
     /// don't need a real sleep.
     #[cfg(test)]
-    pub(crate) fn new_idle_for_test(device_id: &str) -> Self {
+    pub(crate) fn new_idle_for_test(device_id: &DeviceId) -> Self {
         Self {
-            device_id: device_id.to_string(),
+            device_id: device_id.clone(),
             tmpl: CustomTemplate::new(
                 CustomTemplateDef {
                     widgets: vec![],
@@ -1054,7 +1057,7 @@ impl EditorSession {
                 },
                 std::path::Path::new("/tmp"),
             ),
-            last_used: std::time::Instant::now() - EDITOR_SESSION_IDLE_TIMEOUT * 2,
+            last_used: tokio::time::Instant::now() - EDITOR_SESSION_IDLE_TIMEOUT * 2,
         }
     }
 
@@ -1063,13 +1066,7 @@ impl EditorSession {
         self.tmpl.invalidate_image_cache();
     }
 
-    pub(crate) async fn gather_plugin_sprites(
-        &mut self,
-        cw: u32,
-        ch: u32,
-        t: f64,
-        app: &crate::application::state::AppState,
-    ) {
+    pub(crate) async fn gather_plugin_sprites(&mut self, cw: u32, ch: u32, t: f64, app: &AppState) {
         let ctx = TemplateCtx {
             width: cw,
             height: ch,
@@ -1080,7 +1077,7 @@ impl EditorSession {
 }
 
 pub(crate) fn prepare_editor_session<'a>(
-    device_id: &str,
+    device_id: &DeviceId,
     def: &CustomTemplateDef,
     images_dir: &Path,
     session: &'a mut Option<EditorSession>,
@@ -1091,9 +1088,9 @@ pub(crate) fn prepare_editor_session<'a>(
             session.insert(existing)
         }
         _ => session.insert(EditorSession {
-            device_id: device_id.to_owned(),
+            device_id: device_id.clone(),
             tmpl: CustomTemplate::new(def.clone(), images_dir),
-            last_used: std::time::Instant::now(),
+            last_used: tokio::time::Instant::now(),
         }),
     }
 }
@@ -1105,8 +1102,8 @@ pub(crate) const EDITOR_SESSION_IDLE_TIMEOUT: std::time::Duration =
     std::time::Duration::from_secs(30);
 
 pub(crate) fn editor_session_is_idle(
-    last_used: std::time::Instant,
-    now: std::time::Instant,
+    last_used: tokio::time::Instant,
+    now: tokio::time::Instant,
     timeout: std::time::Duration,
 ) -> bool {
     now.saturating_duration_since(last_used) > timeout
@@ -1128,7 +1125,7 @@ impl CustomTemplate {
 /// plus the current (id, signature) pair for every widget.
 #[allow(clippy::too_many_arguments)] // editor render request plus reusable session state
 pub(crate) fn render_editor_sprites(
-    device_id: &str,
+    device_id: &DeviceId,
     def: &CustomTemplateDef,
     cw: u32,
     ch: u32,
@@ -1137,7 +1134,7 @@ pub(crate) fn render_editor_sprites(
     session: &mut Option<EditorSession>,
 ) -> (Vec<WidgetSprite>, Vec<(String, u64)>) {
     let s = prepare_editor_session(device_id, def, images_dir, session);
-    s.last_used = std::time::Instant::now();
+    s.last_used = tokio::time::Instant::now();
 
     let ctx = TemplateCtx {
         width: cw,
@@ -1147,8 +1144,8 @@ pub(crate) fn render_editor_sprites(
     s.tmpl.editor_sprites_delta(&ctx, known)
 }
 
-fn widget_audio(frame: &audio::SpectrumFrame) -> crate::domain::plugin::WidgetAudioInput {
-    crate::domain::plugin::WidgetAudioInput {
+fn widget_audio(frame: &audio::SpectrumFrame) -> WidgetAudioInput {
+    WidgetAudioInput {
         level: frame.level,
         flux: frame.flux,
         beat: frame.beat,
@@ -1201,7 +1198,7 @@ mod tests {
 
     #[test]
     fn editor_session_idle_boundary_is_strict() {
-        let start = std::time::Instant::now();
+        let start = tokio::time::Instant::now();
         let timeout = std::time::Duration::from_secs(30);
         assert!(!editor_session_is_idle(start, start + timeout, timeout));
         assert!(editor_session_is_idle(

@@ -5,6 +5,7 @@ use anyhow::Result;
 use std::sync::Arc;
 
 use crate::application::state::AppState;
+use crate::domain::events::Change;
 
 pub async fn set_fan_failsafe_duty(duty: u8, app: Arc<AppState>) -> Result<()> {
     let duty = duty.min(100);
@@ -15,8 +16,7 @@ pub async fn set_fan_failsafe_duty(duty: u8, app: Arc<AppState>) -> Result<()> {
     }
     app.request_config_save();
 
-    app.record_change(crate::domain::events::Change::Cooling)
-        .await;
+    app.record_change(Change::Cooling).await;
 
     Ok(())
 }

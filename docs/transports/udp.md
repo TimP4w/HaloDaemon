@@ -8,7 +8,7 @@ over datagrams, such as a Nanoleaf panel or a WLED controller.
 ## Overview
 
 Like HTTP, UDP is not exposed as `dev.transport` userdata. A plugin that
-declares a `udp` transport and holds the `network` permission gets the
+declares a `udp` transport gets the
 `halod.udp` capability global. The socket is *connected* to the single
 destination named in plugin configuration and bound to an ephemeral local port,
 so the plugin has no free-roaming socket: every datagram goes to and comes from
@@ -42,8 +42,8 @@ peer other than the vetted destination.
 - Unicast to a single connected destination only, no broadcast or multicast.
 - UDP provides no delivery guarantee, ordering, encryption, or peer
   authentication; the plugin's protocol owns any reliability it needs.
-- Service discovery via mDNS/SSDP is a separate integration-setup mechanism, not
-  part of this transport.
+- Service discovery via mDNS, SSDP or a TCP probe is a separate integration-setup
+  mechanism, not part of this transport.
 
 See the plugin repository's manifest reference (`transports.udp`) and Lua API
 (`halod.udp`) for the full authoring contract.

@@ -43,7 +43,7 @@ fn main() -> anyhow::Result<()> {
         return service::uninstall();
     }
     if has("--service") {
-        log::info!("[broker] starting under SCM");
+        log::info!("starting under SCM");
         return service::run();
     }
 
@@ -51,19 +51,19 @@ fn main() -> anyhow::Result<()> {
     // dev-run broker goes away when its daemon does.
     server::configure(server::auth_config_from_args(&args)?)?;
     log::info!(
-        "[broker] starting (foreground); serving {}",
+        "starting (foreground); serving {}",
         halod_hwaccess::proto::PIPE_NAME
     );
     std::thread::spawn(|| {
         if let Err(e) = server::serve_forever() {
-            log::error!("[broker] serve_forever failed: {e:#}");
+            log::error!("serve_forever failed: {e:#}");
             std::process::exit(1);
         }
     });
     server::wait_until_idle(std::time::Duration::from_millis(
         halod_hwaccess::proto::BROKER_IDLE_GRACE_MS,
     ));
-    log::info!("[broker] idle; exiting");
+    log::info!("idle; exiting");
     Ok(())
 }
 

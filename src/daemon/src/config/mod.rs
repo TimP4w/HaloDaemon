@@ -1,8 +1,8 @@
 // SPDX-License-Identifier: GPL-3.0-or-later
 use anyhow::Result;
-use halod_shared::types::{AppRule, PluginAuthority, VisibilityState, DEFAULT_PROFILE_NAME};
+use halod_shared::types::{AppRule, VisibilityState, DEFAULT_PROFILE_NAME};
 pub use halod_shared::types::{
-    CanvasState, CoolingConfig, GuiConfig, LcdConfig, PlacedZone, PluginReleasePolicy, RgbConfig,
+    CanvasState, CoolingConfig, GuiConfig, LcdConfig, PlacedZone, RgbConfig,
 };
 use halod_shared::zone_transform::ZoneContentTransform;
 use serde::de::DeserializeOwned;
@@ -11,7 +11,10 @@ use std::collections::{HashMap, HashSet};
 use std::path::{Path, PathBuf};
 
 use crate::domain::profiles::model::Profile;
+use crate::domain::profiles::validate;
 use crate::domain::registry::model::{DeviceLayout, DeviceRecord};
+use crate::util::fs;
+use halod_shared::ids::{DeviceId, PluginId};
 use halod_shared::keyboard::KeyboardLayoutSelection;
 
 // ── On-disk layout ───────────────────────────────────────────────────────────
@@ -32,14 +35,14 @@ pub fn load() -> Result<Config> {
     }
     let devices: DevicesFile = load_file(&devices_config_path(), "devices.yaml")?;
     let app_rules: AppRulesFile = load_file(&app_rules_config_path(), "app_rules.yaml")?;
-    let plugins: PluginPolicy = load_file(&plugins_config_path(), "plugins.yaml")?;
+    let plugins: PluginPolicy = load_file(&plugins_config_path(), "plugin_state.yaml")?;
     let mut profiles = load_profiles()?;
     if profiles.is_empty() {
         profiles.insert(DEFAULT_PROFILE_NAME.to_string(), Profile::default());
     }
 
     let mut cooling = main.cooling;
-    cooling.fan_failsafe_duty = cooling.fan_failsafe_duty.min(100);
+    cooling.sanitize();
 
     Ok(Config {
         active_profile: main.active_profile,
@@ -59,7 +62,7 @@ pub fn load() -> Result<Config> {
 }
 
 pub fn save(cfg: &Config) -> Result<()> {
-    crate::util::fs::atomic_write(
+    fs::atomic_write(
         &main_config_path(),
         &serde_yaml::to_string(&MainFile {
             active_profile: cfg.active_profile.clone(),
@@ -69,7 +72,7 @@ pub fn save(cfg: &Config) -> Result<()> {
             gui: cfg.gui.clone(),
         })?,
     )?;
-    crate::util::fs::atomic_write(
+    fs::atomic_write(
         &devices_config_path(),
         &serde_yaml::to_string(&DevicesFile {
             known_devices: cfg.known_devices.clone(),
@@ -79,13 +82,13 @@ pub fn save(cfg: &Config) -> Result<()> {
             keyboard_layouts: cfg.keyboard_layouts.clone(),
         })?,
     )?;
-    crate::util::fs::atomic_write(
+    fs::atomic_write(
         &app_rules_config_path(),
         &serde_yaml::to_string(&AppRulesFile {
             app_rules: cfg.app_rules.clone(),
         })?,
     )?;
-    crate::util::fs::atomic_write(
+    fs::atomic_write(
         &plugins_config_path(),
         &serde_yaml::to_string(&cfg.plugins)?,
     )?;
@@ -149,7 +152,7 @@ fn load_profiles() -> Result<HashMap<String, Profile>> {
         let raw = read_bounded(&path, "profile")?;
         let mut file: ProfileFile = serde_yaml::from_str(&raw)
             .map_err(|e| anyhow::anyhow!("Failed to parse profile at {}: {e}", path.display()))?;
-        crate::domain::profiles::validate::validate_profile(&file.name, &file.profile)?;
+        validate::validate_profile(&file.name, &file.profile)?;
         if let Some(canvas) = file.profile.lighting.canvas.as_mut() {
             canvas.sanitize();
         }
@@ -171,7 +174,7 @@ fn save_profiles(profiles: &HashMap<String, Profile>) -> Result<()> {
             name: name.clone(),
             profile: profile.clone(),
         })?;
-        crate::util::fs::atomic_write(&dir.join(&filename), &yaml)?;
+        fs::atomic_write(&dir.join(&filename), &yaml)?;
         expected.insert(filename);
     }
 
@@ -241,7 +244,7 @@ fn app_rules_config_path() -> PathBuf {
 }
 
 fn plugins_config_path() -> PathBuf {
-    config_dir().join("plugins.yaml")
+    config_dir().join("plugin_state.yaml")
 }
 
 fn profiles_dir() -> PathBuf {
@@ -254,22 +257,10 @@ pub fn lcd_images_dir() -> PathBuf {
     config_dir().join(halod_shared::types::LCD_IMAGES_SUBDIR)
 }
 
-/// Directory holding standalone plugin packages (`plugin.yaml` plus entry
-/// source), read at startup.
+/// Installed plugins live at `plugins/<repo-slug>/<id>`, beside each remote
+/// repository's cached `catalog.yaml`.
 pub fn plugins_dir() -> PathBuf {
     config_dir().join("plugins")
-}
-
-/// Directory holding installed plugin release revisions, grouped by source.
-pub fn plugin_repos_dir() -> PathBuf {
-    config_dir().join("plugin_repos")
-}
-
-/// Immutable revisions materialized from the daemon's release-embedded plugin
-/// bundle. Kept outside managed release roots so a later download can use
-/// the normal mutable repository location unchanged.
-pub fn embedded_plugin_revisions_dir() -> PathBuf {
-    config_dir().join("embedded_plugin_revisions")
 }
 
 #[derive(Debug, Clone, Serialize, Deserialize)]
@@ -303,15 +294,15 @@ impl Default for MainFile {
 #[derive(Debug, Clone, Default, Serialize, Deserialize)]
 struct DevicesFile {
     #[serde(default)]
-    known_devices: HashMap<String, DeviceRecord>,
+    known_devices: HashMap<DeviceId, DeviceRecord>,
     #[serde(default, skip_serializing_if = "HashMap::is_empty")]
-    device_layouts: HashMap<String, DeviceLayout>,
+    device_layouts: HashMap<DeviceId, DeviceLayout>,
     #[serde(default, skip_serializing_if = "HashMap::is_empty")]
-    channel_visibility: HashMap<String, HashMap<String, VisibilityState>>,
+    channel_visibility: HashMap<DeviceId, HashMap<String, VisibilityState>>,
     #[serde(default, skip_serializing_if = "HashMap::is_empty")]
-    device_transforms: HashMap<String, HashMap<String, ZoneContentTransform>>,
+    device_transforms: HashMap<DeviceId, HashMap<String, ZoneContentTransform>>,
     #[serde(default, skip_serializing_if = "HashMap::is_empty")]
-    keyboard_layouts: HashMap<String, KeyboardLayoutSelection>,
+    keyboard_layouts: HashMap<DeviceId, KeyboardLayoutSelection>,
 }
 
 #[derive(Debug, Clone, Default, Serialize, Deserialize)]
@@ -323,93 +314,38 @@ struct AppRulesFile {
 #[derive(Debug, Clone, Default, Serialize, Deserialize)]
 #[serde(deny_unknown_fields)]
 pub struct PluginPolicy {
-    /// Authority snapshots accepted through the enable modal.  They are kept
-    /// separately from the runtime permission projection so repository updates
-    /// can decide whether a changed manifest expands authority.
-    #[serde(default, skip_serializing_if = "HashMap::is_empty")]
-    pub accepted_authorities: HashMap<String, PluginAuthority>,
-    /// Plugin ids explicitly enabled through the authority confirmation flow.
-    /// An absent id is inert, which makes a fresh consent decision required.
     #[serde(default, skip_serializing_if = "Vec::is_empty")]
-    pub enabled: Vec<String>,
-    /// Non-secure user-editable config values per plugin id (key -> value).
-    /// Fields declared `secure = true` never appear here — see the encrypted
-    /// secret store instead.
+    pub enabled: Vec<PluginId>,
+    /// Non-secure values only; `secure` fields live in the secret store.
     #[serde(default, skip_serializing_if = "HashMap::is_empty")]
-    pub config: HashMap<String, HashMap<String, String>>,
-    /// Integration ids explicitly enabled independently of package activation.
+    pub config: HashMap<PluginId, HashMap<String, String>>,
     #[serde(default, skip_serializing_if = "Vec::is_empty")]
-    pub integrations_enabled: Vec<String>,
-    /// Integrations that completed their host-owned setup flow. This marker is
-    /// separate from retained config values so manifest defaults do not make a
-    /// never-configured integration appear ready.
+    pub integrations_enabled: Vec<PluginId>,
+    /// Separate from config values so manifest defaults cannot make a
+    /// never-configured integration look ready.
     #[serde(default, skip_serializing_if = "Vec::is_empty")]
-    pub integrations_configured: Vec<String>,
-    /// Stable discovery identity selected for each configured integration.
+    pub integrations_configured: Vec<PluginId>,
     #[serde(default, skip_serializing_if = "HashMap::is_empty")]
-    pub integration_devices: HashMap<String, String>,
-    /// Content hash (hex SHA-256) of the installed plugin package, keyed by
-    /// plugin id. This identifies updates and modified checkouts; it is never
-    /// used as a consent gate.
-    #[serde(default, skip_serializing_if = "HashMap::is_empty")]
-    pub installed_hashes: HashMap<String, String>,
-    /// Registered release sources. See `PluginRepoRecord`.
+    pub integration_devices: HashMap<PluginId, String>,
     #[serde(default, skip_serializing_if = "Vec::is_empty")]
     pub repos: Vec<PluginRepoRecord>,
 }
 
-/// A registered immutable release source.
-#[derive(Debug, Clone, Serialize, Deserialize)]
+#[derive(Debug, Clone, PartialEq, Eq, Serialize, Deserialize)]
 #[serde(deny_unknown_fields)]
 pub struct PluginRepoRecord {
-    pub url: String,
-    /// Directory name under `plugin_repos_dir()`, derived from the URL at `add_repo` time
-    /// (fixed to `constants::OFFICIAL_PLUGIN_REPO_SLUG` for the seeded official repo).
     pub slug: String,
-    /// Stable identity declared by `release.yaml`. Pinning this prevents a
-    /// URL from silently becoming a different release pack.
-    #[serde(default)]
-    pub repository_id: Option<String>,
-    /// Publisher key pinned on first successful signed import. A later
-    /// revision must verify with this exact key (TOFU continuity).
+    pub source: PluginRepoSource,
+    /// Pinned on first signed fetch; later catalogs must verify with it.
     #[serde(default, skip_serializing_if = "Option::is_none")]
     pub trusted_key: Option<halod_plugin_signing::RepositorySigningKey>,
-    #[serde(default)]
-    pub source_kind: PluginRepoSourceKind,
-    /// GitHub release tag currently active.
-    #[serde(default, skip_serializing_if = "Option::is_none")]
-    pub release_tag: Option<String>,
-    #[serde(default)]
-    pub release_policy: PluginReleasePolicy,
-    /// Immutable revision directory currently selected for execution. `None`
-    /// means the source is registered but has not installed a revision yet.
-    #[serde(default)]
-    pub active_revision: Option<String>,
-    /// Storage backing the active revision.
-    #[serde(default)]
-    pub active_source: PluginRevisionSource,
-    /// Previously active release tag retained for rollback diagnostics.
-    #[serde(default)]
-    pub previous_release_tag: Option<String>,
-    /// Last successful release synchronization (RFC 3339).
-    #[serde(default)]
-    pub last_sync: Option<String>,
 }
 
-#[derive(Debug, Clone, Copy, Default, PartialEq, Eq, Serialize, Deserialize)]
+#[derive(Debug, Clone, PartialEq, Eq, Serialize, Deserialize)]
 #[serde(rename_all = "snake_case")]
-pub enum PluginRepoSourceKind {
-    #[default]
-    Release,
-    Archive,
-}
-
-#[derive(Debug, Clone, Copy, Default, PartialEq, Eq, Serialize, Deserialize)]
-#[serde(rename_all = "snake_case")]
-pub enum PluginRevisionSource {
-    Embedded,
-    #[default]
-    Managed,
+pub enum PluginRepoSource {
+    Url(String),
+    Local(PathBuf),
 }
 
 #[derive(Debug, Clone, Serialize, Deserialize)]
@@ -426,7 +362,7 @@ pub struct Config {
     #[serde(default)]
     pub profiles: HashMap<String, Profile>,
     #[serde(default)]
-    pub known_devices: HashMap<String, DeviceRecord>,
+    pub known_devices: HashMap<DeviceId, DeviceRecord>,
     #[serde(default)]
     pub cooling: CoolingConfig,
     #[serde(default)]
@@ -436,16 +372,16 @@ pub struct Config {
     #[serde(default)]
     pub gui: GuiConfig,
     #[serde(default, skip_serializing_if = "HashMap::is_empty")]
-    pub device_layouts: HashMap<String, DeviceLayout>,
+    pub device_layouts: HashMap<DeviceId, DeviceLayout>,
     /// device_id → `ChannelKind::key(channel_id)` → state. Absent = Visible.
     #[serde(default, skip_serializing_if = "HashMap::is_empty")]
-    pub channel_visibility: HashMap<String, HashMap<String, VisibilityState>>,
+    pub channel_visibility: HashMap<DeviceId, HashMap<String, VisibilityState>>,
     #[serde(default, skip_serializing_if = "HashMap::is_empty")]
-    pub device_transforms: HashMap<String, HashMap<String, ZoneContentTransform>>,
+    pub device_transforms: HashMap<DeviceId, HashMap<String, ZoneContentTransform>>,
     /// device_id → keyboard layout selection. Absent = Auto/Auto (both axes
     /// resolve from the firmware-detected language).
     #[serde(default, skip_serializing_if = "HashMap::is_empty")]
-    pub keyboard_layouts: HashMap<String, KeyboardLayoutSelection>,
+    pub keyboard_layouts: HashMap<DeviceId, KeyboardLayoutSelection>,
     #[serde(default, skip_serializing_if = "Vec::is_empty")]
     pub app_rules: Vec<AppRule>,
     pub plugins: PluginPolicy,
@@ -482,7 +418,7 @@ impl Config {
     /// UI; `Disabled` means hands off the hardware.
     pub fn channel_enabled(
         &self,
-        device_id: &str,
+        device_id: &DeviceId,
         kind: halod_shared::types::ChannelKind,
         channel_id: &str,
     ) -> bool {
@@ -501,17 +437,20 @@ mod tests {
     fn only_a_disabled_channel_is_kept_from_the_engines() {
         use halod_shared::types::ChannelKind;
         let mut cfg = Config::default();
-        assert!(cfg.channel_enabled("dev", ChannelKind::Cooling, "fan1"));
+        assert!(cfg.channel_enabled(&"dev".parse().unwrap(), ChannelKind::Cooling, "fan1"));
 
-        let entry = cfg.channel_visibility.entry("dev".into()).or_default();
+        let entry = cfg
+            .channel_visibility
+            .entry("dev".parse().unwrap())
+            .or_default();
         entry.insert(ChannelKind::Cooling.key("fan1"), VisibilityState::Disabled);
         entry.insert(ChannelKind::Cooling.key("fan2"), VisibilityState::Hidden);
         // Same id, different capability — the key must not collide.
         entry.insert(ChannelKind::Lighting.key("fan1"), VisibilityState::Disabled);
 
-        assert!(!cfg.channel_enabled("dev", ChannelKind::Cooling, "fan1"));
-        assert!(cfg.channel_enabled("dev", ChannelKind::Cooling, "fan2"));
-        assert!(cfg.channel_enabled("other", ChannelKind::Cooling, "fan1"));
+        assert!(!cfg.channel_enabled(&"dev".parse().unwrap(), ChannelKind::Cooling, "fan1"));
+        assert!(cfg.channel_enabled(&"dev".parse().unwrap(), ChannelKind::Cooling, "fan2"));
+        assert!(cfg.channel_enabled(&"other".parse().unwrap(), ChannelKind::Cooling, "fan1"));
     }
 
     #[test]
@@ -524,11 +463,7 @@ mod tests {
 
     #[test]
     fn load_handles_missing_valid_and_malformed_config() {
-        let dir = tempfile::tempdir().unwrap();
-        let _guard = crate::test_support::HALOD_CONFIG_DIR_LOCK
-            .lock()
-            .unwrap_or_else(|e| e.into_inner());
-        unsafe { std::env::set_var("HALOD_CONFIG_DIR", dir.path()) };
+        let dir = crate::test_support::tmp_config_dir();
 
         // Missing files -> defaults.
         let cfg = load().unwrap();
@@ -548,33 +483,28 @@ mod tests {
         .unwrap();
         let err = load().unwrap_err();
         assert!(err.to_string().contains("devices.yaml"));
-
-        unsafe { std::env::remove_var("HALOD_CONFIG_DIR") };
     }
 
     #[test]
     fn save_then_load_round_trips_every_section() {
-        let dir = tempfile::tempdir().unwrap();
-        let _guard = crate::test_support::HALOD_CONFIG_DIR_LOCK
-            .lock()
-            .unwrap_or_else(|e| e.into_inner());
-        unsafe { std::env::set_var("HALOD_CONFIG_DIR", dir.path()) };
+        let _dir = crate::test_support::tmp_config_dir();
 
         let mut cfg = Config {
             active_profile: "Gäming Setup".to_string(),
             ..Config::default()
         };
         let mut gaming = Profile::default();
-        gaming
-            .device_states
-            .insert("dev1".into(), serde_json::json!({ "fan_curve": {"a": 1} }));
+        gaming.device_states.insert(
+            "dev1".parse().unwrap(),
+            serde_json::json!({ "fan_curve": {"a": 1} }),
+        );
         gaming.lighting.canvas = Some(CanvasState {
             sample_radius: 9.0,
             ..Default::default()
         });
         cfg.profiles.insert("Gäming Setup".to_string(), gaming);
         cfg.known_devices.insert(
-            "dev1".into(),
+            "dev1".parse().unwrap(),
             DeviceRecord {
                 name: "Dev One".into(),
                 vendor: "Acme".into(),
@@ -583,13 +513,13 @@ mod tests {
             },
         );
         cfg.device_layouts.insert(
-            "hub1".into(),
+            "hub1".parse().unwrap(),
             DeviceLayout {
                 channels: HashMap::new(),
             },
         );
         cfg.keyboard_layouts.insert(
-            "kbd1".into(),
+            "kbd1".parse().unwrap(),
             KeyboardLayoutSelection {
                 variant: Some(halod_shared::keyboard::KeyVariant::Iso),
                 language: Some(halod_shared::types::KeyboardLayout::CH),
@@ -604,39 +534,22 @@ mod tests {
         cfg.cooling.fan_failsafe_duty = 60;
         cfg.rgb.canvas_fps = 45;
         cfg.lcd.enabled = false;
-        cfg.plugins.enabled.push("wled_udp".into());
-        cfg.plugins.accepted_authorities.insert(
-            "wled_udp".into(),
-            PluginAuthority {
-                permissions: vec![halod_shared::types::Permission::Network],
-                transport_scopes: vec![],
-                data_reads: vec![],
-            },
-        );
+        cfg.plugins.enabled.push("wled_udp".parse().unwrap());
         cfg.plugins.config.insert(
-            "openrgb".into(),
+            "openrgb".parse().unwrap(),
             HashMap::from([("host".to_string(), "127.0.0.1".to_string())]),
         );
-        cfg.plugins
-            .installed_hashes
-            .insert("wled_udp".into(), "abc123".into());
+        cfg.plugins.repos.push(PluginRepoRecord {
+            slug: "local-dev".into(),
+            source: PluginRepoSource::Local("/src/plugins".into()),
+            trusted_key: None,
+        });
 
         save(&cfg).unwrap();
         let reloaded = load().unwrap();
 
         assert_eq!(reloaded.plugins.enabled, vec!["wled_udp".to_string()]);
-        assert_eq!(
-            reloaded
-                .plugins
-                .accepted_authorities
-                .get("wled_udp")
-                .map(|authority| &authority.permissions),
-            Some(&vec![halod_shared::types::Permission::Network])
-        );
-        assert_eq!(
-            reloaded.plugins.installed_hashes.get("wled_udp"),
-            Some(&"abc123".to_string())
-        );
+        assert_eq!(reloaded.plugins.repos, cfg.plugins.repos);
         assert_eq!(
             reloaded
                 .plugins
@@ -672,17 +585,11 @@ mod tests {
         assert_eq!(reloaded.cooling.fan_failsafe_duty, 60);
         assert_eq!(reloaded.rgb.canvas_fps, 45);
         assert!(!reloaded.lcd.enabled);
-
-        unsafe { std::env::remove_var("HALOD_CONFIG_DIR") };
     }
 
     #[test]
     fn save_prunes_a_removed_profiles_file() {
-        let dir = tempfile::tempdir().unwrap();
-        let _guard = crate::test_support::HALOD_CONFIG_DIR_LOCK
-            .lock()
-            .unwrap_or_else(|e| e.into_inner());
-        unsafe { std::env::set_var("HALOD_CONFIG_DIR", dir.path()) };
+        let dir = crate::test_support::tmp_config_dir();
 
         let mut cfg = Config::default();
         cfg.profiles.insert("Gaming".into(), Profile::default());
@@ -697,8 +604,6 @@ mod tests {
             .join("profiles")
             .join(profile_filename(DEFAULT_PROFILE_NAME))
             .exists());
-
-        unsafe { std::env::remove_var("HALOD_CONFIG_DIR") };
     }
 
     #[test]
@@ -749,47 +654,58 @@ mod tests {
     fn plugin_policy_rejects_retired_fields() {
         let current: PluginPolicy = serde_yaml::from_str("enabled: [foo]\n").unwrap();
         assert_eq!(current.enabled, ["foo"]);
-        assert!(serde_yaml::from_str::<PluginPolicy>("disabled: [foo]\n").is_err());
-        assert!(serde_yaml::from_str::<PluginPolicy>("acknowledged: {}\n").is_err());
+        for retired in [
+            "disabled: [foo]\n",
+            "accepted_authorities: {}\n",
+            "installed_hashes: {}\n",
+        ] {
+            assert!(
+                serde_yaml::from_str::<PluginPolicy>(retired).is_err(),
+                "{retired}"
+            );
+        }
     }
 
     #[test]
-    fn plugin_repos_round_trip_through_save_and_load() {
-        let dir = tempfile::tempdir().unwrap();
-        let _guard = crate::test_support::HALOD_CONFIG_DIR_LOCK
-            .lock()
-            .unwrap_or_else(|e| e.into_inner());
-        unsafe { std::env::set_var("HALOD_CONFIG_DIR", dir.path()) };
+    fn a_legacy_plugins_yaml_is_ignored() {
+        let dir = crate::test_support::tmp_config_dir();
+        std::fs::write(
+            dir.path().join("plugins.yaml"),
+            "accepted_authorities: {}\nrepos: [{url: x, slug: y}]\n",
+        )
+        .unwrap();
 
-        let mut cfg = Config::default();
-        cfg.plugins.repos.push(PluginRepoRecord {
-            url: "https://github.com/example/foo".into(),
-            slug: "foo".into(),
-            repository_id: None,
-            trusted_key: None,
-            source_kind: PluginRepoSourceKind::Release,
-            release_tag: Some("v1.0.0".into()),
-            release_policy: PluginReleasePolicy::Latest,
-            active_revision: Some("v1.0.0".into()),
-            active_source: PluginRevisionSource::Managed,
-            previous_release_tag: None,
-            last_sync: None,
-        });
-        save(&cfg).unwrap();
-        let reloaded = load().unwrap();
+        let loaded = load().unwrap();
+        assert!(loaded.plugins.repos.is_empty());
+    }
 
-        assert_eq!(reloaded.plugins.repos.len(), 1);
-        assert_eq!(reloaded.plugins.repos[0].slug, "foo");
+    #[test]
+    fn config_files_written_with_string_ids_load_typed_and_save_unchanged() {
+        let dir = crate::test_support::tmp_config_dir();
+        let plugin_state = "enabled:\n- nzxt_kraken\nconfig:\n  nzxt_kraken:\n    pump: '50'\nintegrations_enabled:\n- openrgb\nintegrations_configured:\n- openrgb\nintegration_devices:\n  openrgb: candidate-1\n";
+        let devices = "known_devices:\n  nzxt_kraken-8EC3:\n    name: Kraken\n    vendor: NZXT\n    model: Elite\nchannel_visibility:\n  nzxt_kraken-8EC3:\n    lighting:ring: hidden\nkeyboard_layouts:\n  logitech_4136BFCF: {}\n";
+        std::fs::write(dir.path().join("plugin_state.yaml"), plugin_state).unwrap();
+        std::fs::write(dir.path().join("devices.yaml"), devices).unwrap();
+
+        let loaded = load().unwrap();
+        assert_eq!(loaded.plugins.enabled, ["nzxt_kraken"]);
+        assert_eq!(loaded.plugins.config["nzxt_kraken"]["pump"], "50");
+        assert_eq!(loaded.known_devices["nzxt_kraken-8EC3"].name, "Kraken");
+        save(&loaded).unwrap();
+
+        let yaml = |name: &str| -> serde_yaml::Value {
+            serde_yaml::from_str(&std::fs::read_to_string(dir.path().join(name)).unwrap()).unwrap()
+        };
+        let original = |text: &str| -> serde_yaml::Value { serde_yaml::from_str(text).unwrap() };
+        assert_eq!(yaml("plugin_state.yaml"), original(plugin_state));
+        let saved_devices = yaml("devices.yaml");
+        let expected_devices = original(devices);
+        for key in ["channel_visibility", "keyboard_layouts"] {
+            assert_eq!(saved_devices[key], expected_devices[key], "{key}");
+        }
         assert_eq!(
-            reloaded.plugins.repos[0].release_tag.as_deref(),
-            Some("v1.0.0")
+            saved_devices["known_devices"]["nzxt_kraken-8EC3"]["name"],
+            expected_devices["known_devices"]["nzxt_kraken-8EC3"]["name"]
         );
-        assert_eq!(
-            reloaded.plugins.repos[0].source_kind,
-            PluginRepoSourceKind::Release
-        );
-        assert!(reloaded.plugins.repos[0].trusted_key.is_none());
-
-        unsafe { std::env::remove_var("HALOD_CONFIG_DIR") };
     }
 }

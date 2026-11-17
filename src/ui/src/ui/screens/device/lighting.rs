@@ -12,7 +12,7 @@ use crate::ui::components as widgets;
 use std::collections::HashMap;
 
 use egui::{Color32, Pos2, Rect, Sense, Stroke, Vec2};
-use halod_shared::commands::DaemonCommand;
+use halod_shared::commands::{DaemonCommand, DeviceOp};
 use halod_shared::effect_designer::DESIGNER_EFFECT_ID;
 use halod_shared::types::{
     Animation, ColorStep, DeviceCapability, EffectParamDescriptor, EffectParamValue,
@@ -22,6 +22,10 @@ use halod_shared::types::{
 use halod_shared::zone_transform::ZoneContentTransform;
 
 use super::{DeviceUi, TabCtx};
+use crate::domain::models::device;
+use crate::domain::tour;
+use crate::domain::tour::AnchorId;
+use crate::runtime::ipc;
 use crate::ui::components::rgb_to_color32;
 use crate::ui::theme;
 
@@ -31,6 +35,8 @@ const DEFAULT_PAINT_COLOR: RgbColor = RgbColor {
     g: 0xd1,
     b: 0xe8,
 };
+
+const EFFECT_PANEL_W: f32 = 396.0;
 
 /// The active lighting mode, derived from the device's `LightingState`.
 #[derive(Clone, Debug, PartialEq)]
@@ -95,20 +101,15 @@ fn fill_for<'a>(
 }
 
 pub fn show(ui: &mut egui::Ui, ctx: &TabCtx, st: &mut DeviceUi) {
-    crate::domain::tour::anchor(
-        ui.ctx(),
-        crate::domain::tour::AnchorId::TabLighting,
-        ui.max_rect(),
-    );
+    tour::anchor(ui.ctx(), AnchorId::TabLighting, ui.max_rect());
     let Some(rgb) = ctx.dev.capabilities.iter().find_map(|c| match c {
         DeviceCapability::Lighting(r) => Some(r),
         _ => None,
     }) else {
         return;
     };
-    let channels = crate::domain::models::device::plain_channels(ctx.dev);
-    let Some(zone) = crate::domain::models::device::resolve_zone(&channels, &st.lighting.zone)
-    else {
+    let channels = device::plain_channels(ctx.dev);
+    let Some(zone) = device::resolve_zone(&channels, &st.lighting.zone) else {
         widgets::empty_state(
             ui,
             &t!("lighting.no_zones_title"),
@@ -138,9 +139,9 @@ pub fn show(ui: &mut egui::Ui, ctx: &TabCtx, st: &mut DeviceUi) {
 
     let mode = current_mode(&rgb.state);
 
-    // 60/40 preview-vs-panel split (design), not the even `ui.columns` split.
-    let gap = 18.0;
-    let left_w = (ui.available_width() - gap) * 1.5 / 2.5;
+    let gap = theme::SPACE_8;
+    let left_w =
+        (ui.available_width() - gap - EFFECT_PANEL_W).max((ui.available_width() - gap) * 0.55);
     widgets::split_columns(ui, left_w, gap, |left, right| {
         preview(left, ctx, st, rgb, &mode);
         right_panel(right, ctx, st, rgb, &mode);
@@ -181,7 +182,7 @@ fn leave_canvas_modal(ui: &mut egui::Ui, ctx: &TabCtx, st: &mut DeviceUi) {
             if widgets::button(
                 ui,
                 &t!("lighting.cancel"),
-                widgets::ButtonKind::Ghost,
+                widgets::ButtonKind::Secondary,
                 egui::vec2(96.0, 32.0),
             )
             .clicked()
@@ -195,161 +196,161 @@ fn leave_canvas_modal(ui: &mut egui::Ui, ctx: &TabCtx, st: &mut DeviceUi) {
         confirm,
         cancel || dismissed,
     ) {
-        crate::runtime::ipc::send(ctx.cmd, cmd);
+        ipc::send(ctx.cmd, cmd);
     }
 }
 
 fn preview(ui: &mut egui::Ui, ctx: &TabCtx, st: &mut DeviceUi, rgb: &LightingStatus, mode: &Mode) {
-    let channels = crate::domain::models::device::plain_channels(ctx.dev);
+    let channels = device::plain_channels(ctx.dev);
     if channels.is_empty() {
         return;
     }
-    widgets::card_titled(
-        ui,
-        &t!("lighting.lighting_preview"),
-        |ui| {
-            ui.label(
-                egui::RichText::new(match mode {
-                    Mode::Solid => t!("lighting.mode_static"),
-                    Mode::Paint => t!("lighting.mode_paint"),
-                    Mode::Effect(_) => t!("lighting.mode_effect"),
-                    Mode::Direct(_) => t!("lighting.mode_software"),
-                    Mode::Engine => t!("lighting.mode_canvas_engine"),
-                    Mode::None => "\u{2014}".into(),
-                })
-                .font(theme::semibold(11.0))
-                .color(theme::CYAN),
-            );
-        },
-        |ui| {
-            // Zone selector
-            ui.horizontal_wrapped(|ui| {
-                ui.spacing_mut().item_spacing = egui::vec2(6.0, 6.0);
-                widgets::caps_label_inline(ui, &t!("lighting.zone_caps"));
+    widgets::card_with_margin(ui, egui::Margin::same(18), |ui| {
+        ui.set_width(ui.available_width());
+        egui::Sides::new().height(36.0).show(
+            ui,
+            |ui| {
+                ui.label(
+                    egui::RichText::new(t!("lighting.preview"))
+                        .font(theme::heading())
+                        .color(theme::TEXT),
+                );
+            },
+            |ui| {
                 if matches!(mode, Mode::Solid | Mode::Direct(_)) {
-                    let _ = widgets::pill(ui, &t!("lighting.all_zones"), true);
+                    let _ = widgets::segmented(ui, &[&t!("lighting.all_zones")], &mut 0, false);
                 } else {
-                    for z in &channels {
-                        if widgets::pill(ui, &z.name, z.id == st.lighting.zone) {
-                            st.lighting.zone = z.id.clone();
-                        }
+                    let names: Vec<&str> = channels.iter().map(|z| z.name.as_str()).collect();
+                    let mut idx = channels
+                        .iter()
+                        .position(|z| z.id == st.lighting.zone)
+                        .unwrap_or(0);
+                    if widgets::segmented(ui, &names, &mut idx, false) {
+                        st.lighting.zone = channels[idx].id.clone();
                     }
                 }
-            });
+            },
+        );
+        ui.add_space(theme::SPACE_8);
+
+        let kbd_status = ctx.dev.keyboard_layout();
+        if let Some(status) = kbd_status {
+            layout_selector(ui, ctx, status);
             ui.add_space(theme::SPACE_6);
+        }
 
-            let kbd_status = ctx.dev.keyboard_layout();
-            if let Some(status) = kbd_status {
-                layout_selector(ui, ctx, status);
-                ui.add_space(theme::SPACE_6);
-            }
+        let zone = channels
+            .iter()
+            .find(|z| z.id == st.lighting.zone)
+            .copied()
+            .unwrap_or(channels[0]);
+        let painting = matches!(mode, Mode::Paint);
+        let live = ctx.led_colors.get(&(ctx.dev.id.clone(), zone.id.clone()));
+        let fill = fill_for(
+            mode,
+            &rgb.descriptor.native_effects,
+            st.lighting.paint_color,
+            live,
+        );
+        // A keyboard zone with a resolved key grid renders as real key caps;
+        // everything else (rings, strips, keyless boards) keeps the LED dots.
+        let as_keyboard = matches!(zone.topology, ZoneTopology::Keyboard { .. })
+            && kbd_status.is_some_and(|s| !s.keys.is_empty());
+        let dirty = if as_keyboard {
+            keyboard_canvas(ui, st, zone, painting, &fill, kbd_status.unwrap())
+        } else {
+            led_canvas(ui, st, zone, painting, &fill)
+        };
+        if dirty {
+            let cmd = paint_cmd(ctx, st);
+            st.queue("rgb", cmd, ctx.time);
+        }
 
-            let zone = channels
-                .iter()
-                .find(|z| z.id == st.lighting.zone)
-                .copied()
-                .unwrap_or(channels[0]);
-            let painting = matches!(mode, Mode::Paint);
-            let live = ctx.led_colors.get(&(ctx.dev.id.clone(), zone.id.clone()));
-            let fill = fill_for(
-                mode,
-                &rgb.descriptor.native_effects,
-                st.lighting.paint_color,
-                live,
+        ui.add_space(theme::SPACE_8);
+        transform_controls(ui, ctx, st, rgb);
+
+        if painting {
+            ui.add_space(theme::SPACE_6);
+            egui::Sides::new().show(
+                ui,
+                |ui| {
+                    ui.label(
+                        egui::RichText::new(t!("lighting.paint_hint"))
+                            .font(theme::body_sm())
+                            .color(theme::TEXT_MUT),
+                    );
+                },
+                |ui| {
+                    if widgets::button(
+                        ui,
+                        &t!("lighting.clear"),
+                        widgets::ButtonKind::Secondary,
+                        egui::vec2(0.0, 30.0),
+                    )
+                    .clicked()
+                    {
+                        st.lighting.paint_buf.remove(&zone.id);
+                        ipc::send(ctx.cmd, paint_cmd(ctx, st));
+                    }
+                    if widgets::button(
+                        ui,
+                        &t!("lighting.fill_zone"),
+                        widgets::ButtonKind::Secondary,
+                        egui::vec2(0.0, 30.0),
+                    )
+                    .clicked()
+                    {
+                        let c = st.lighting.paint_color.unwrap_or_default();
+                        let m: HashMap<u32, RgbColor> =
+                            zone.leds.iter().map(|l| (l.id, c)).collect();
+                        st.lighting.paint_buf.insert(zone.id.clone(), m);
+                        ipc::send(ctx.cmd, paint_cmd(ctx, st));
+                    }
+                },
             );
-            // A keyboard zone with a resolved key grid renders as real key caps;
-            // everything else (rings, strips, keyless boards) keeps the LED dots.
-            let as_keyboard = matches!(zone.topology, ZoneTopology::Keyboard { .. })
-                && kbd_status.is_some_and(|s| !s.keys.is_empty());
-            let dirty = if as_keyboard {
-                keyboard_canvas(ui, st, zone, painting, &fill, kbd_status.unwrap())
-            } else {
-                led_canvas(ui, st, zone, painting, &fill)
-            };
-            if dirty {
-                let cmd = paint_cmd(ctx, st);
+        }
+    });
+}
+
+/// The active effect's parameter controls (speed, brightness, direction, …).
+fn effect_params(
+    ui: &mut egui::Ui,
+    ctx: &TabCtx,
+    st: &mut DeviceUi,
+    rgb: &LightingStatus,
+    mode: &Mode,
+) {
+    if let Mode::Effect(eid) = mode {
+        if let Some(eff) = rgb.descriptor.native_effects.iter().find(|e| &e.id == eid) {
+            if param_sliders(ui, ctx, st, rgb, EffectSource::Native, &eff.id, &eff.params) {
+                let cmd = effect_cmd(ctx, st, rgb, eff);
                 st.queue("rgb", cmd, ctx.time);
             }
-
-            // Zone transform controls
-            ui.add_space(theme::SPACE_5);
-            transform_controls(ui, ctx, st, rgb);
-
-            if painting {
-                ui.add_space(theme::SPACE_6);
-                egui::Sides::new().show(
-                    ui,
-                    |ui| {
-                        ui.label(
-                            egui::RichText::new(t!("lighting.paint_hint"))
-                                .font(theme::body_sm())
-                                .color(theme::TEXT_MUT),
-                        );
-                    },
-                    |ui| {
-                        if widgets::button(
-                            ui,
-                            &t!("lighting.clear"),
-                            widgets::ButtonKind::Ghost,
-                            egui::vec2(64.0, 28.0),
-                        )
-                        .clicked()
-                        {
-                            st.lighting.paint_buf.remove(&zone.id);
-                            crate::runtime::ipc::send(ctx.cmd, paint_cmd(ctx, st));
-                        }
-                        if widgets::button(
-                            ui,
-                            &t!("lighting.fill_zone"),
-                            widgets::ButtonKind::Ghost,
-                            egui::vec2(82.0, 28.0),
-                        )
-                        .clicked()
-                        {
-                            let c = st.lighting.paint_color.unwrap_or_default();
-                            let m: HashMap<u32, RgbColor> =
-                                zone.leds.iter().map(|l| (l.id, c)).collect();
-                            st.lighting.paint_buf.insert(zone.id.clone(), m);
-                            crate::runtime::ipc::send(ctx.cmd, paint_cmd(ctx, st));
-                        }
-                    },
-                );
+        }
+    }
+    if let Mode::Direct(eid) = mode {
+        if let Some(anim) = ctx
+            .state
+            .lighting
+            .canvas
+            .available_direct_effects
+            .iter()
+            .find(|a| &a.id == eid)
+        {
+            if param_sliders(
+                ui,
+                ctx,
+                st,
+                rgb,
+                EffectSource::Direct,
+                &anim.id,
+                &anim.params,
+            ) {
+                let cmd = direct_cmd(ctx, st, rgb, anim);
+                st.queue("rgb", cmd, ctx.time);
             }
-
-            // Effect Range params (brightness/speed/…) when an effect is active.
-            if let Mode::Effect(eid) = mode {
-                if let Some(eff) = rgb.descriptor.native_effects.iter().find(|e| &e.id == eid) {
-                    if param_sliders(ui, ctx, st, rgb, EffectSource::Native, &eff.id, &eff.params) {
-                        let cmd = effect_cmd(ctx, st, rgb, eff);
-                        st.queue("rgb", cmd, ctx.time);
-                    }
-                }
-            }
-            if let Mode::Direct(eid) = mode {
-                if let Some(anim) = ctx
-                    .state
-                    .lighting
-                    .canvas
-                    .available_direct_effects
-                    .iter()
-                    .find(|a| &a.id == eid)
-                {
-                    if param_sliders(
-                        ui,
-                        ctx,
-                        st,
-                        rgb,
-                        EffectSource::Direct,
-                        &anim.id,
-                        &anim.params,
-                    ) {
-                        let cmd = direct_cmd(ctx, st, rgb, anim);
-                        st.queue("rgb", cmd, ctx.time);
-                    }
-                }
-            }
-        },
-    );
+        }
+    }
 }
 
 /// Zone transform controls: flip H/V for flat layouts, reverse + rotate for rings.
@@ -377,68 +378,80 @@ fn transform_controls(ui: &mut egui::Ui, ctx: &TabCtx, st: &mut DeviceUi, rgb: &
     );
     let is_rings = matches!(zone.topology, ZoneTopology::Rings { .. });
 
-    let mut changed_tx: Option<ZoneContentTransform> = None;
-
-    crate::domain::tour::anchor(
+    let n = zone.leds.len() as i32;
+    let size = egui::vec2(0.0, 30.0);
+    let button = |ui: &mut egui::Ui, label: &str| {
+        widgets::button(ui, label, widgets::ButtonKind::Secondary, size).clicked()
+    };
+    tour::anchor(
         ui.ctx(),
-        crate::domain::tour::AnchorId::LightingTransform,
-        Rect::from_min_size(ui.cursor().min, Vec2::new(ui.available_width(), 32.0)),
+        AnchorId::LightingTransform,
+        Rect::from_min_size(ui.cursor().min, Vec2::new(ui.available_width(), 30.0)),
     );
-    ui.horizontal_wrapped(|ui| {
-        ui.spacing_mut().item_spacing = egui::vec2(6.0, 6.0);
-        widgets::caps_label_inline(ui, &t!("lighting.transform_caps"));
-
-        if is_ring {
-            if widgets::pill(ui, &t!("lighting.reverse"), live_tx.reverse) {
-                changed_tx = Some(ZoneContentTransform {
-                    reverse: !live_tx.reverse,
-                    ..live_tx
-                });
+    let (picked, reset) = egui::Sides::new().height(30.0).show(
+        ui,
+        |ui| {
+            ui.spacing_mut().item_spacing.x = theme::SPACE_4;
+            ui.label(
+                egui::RichText::new(t!("lighting.transform"))
+                    .font(theme::body_sm())
+                    .color(theme::TEXT_MUT),
+            );
+            ui.add_space(theme::SPACE_2);
+            let mut picked = None;
+            if is_ring {
+                if button(ui, &t!("lighting.reverse")) {
+                    picked = Some(ZoneContentTransform {
+                        reverse: !live_tx.reverse,
+                        ..live_tx
+                    });
+                }
+                if button(ui, &t!("lighting.rotate")) {
+                    picked = Some(ZoneContentTransform {
+                        led_offset: wrap_offset(live_tx.led_offset, 1, n),
+                        ..live_tx
+                    });
+                }
+                if is_rings && button(ui, &t!("lighting.swap")) {
+                    picked = Some(ZoneContentTransform {
+                        swap_rings: !live_tx.swap_rings,
+                        ..live_tx
+                    });
+                }
+            } else {
+                if button(ui, &t!("lighting.flip_h")) {
+                    picked = Some(ZoneContentTransform {
+                        flip_h: !live_tx.flip_h,
+                        ..live_tx
+                    });
+                }
+                if button(ui, &t!("lighting.flip_v")) {
+                    picked = Some(ZoneContentTransform {
+                        flip_v: !live_tx.flip_v,
+                        ..live_tx
+                    });
+                }
             }
-            if is_rings && widgets::pill(ui, &t!("lighting.swap"), live_tx.swap_rings) {
-                changed_tx = Some(ZoneContentTransform {
-                    swap_rings: !live_tx.swap_rings,
-                    ..live_tx
-                });
-            }
-        } else {
-            if widgets::pill(ui, &t!("lighting.flip_h"), live_tx.flip_h) {
-                changed_tx = Some(ZoneContentTransform {
-                    flip_h: !live_tx.flip_h,
-                    ..live_tx
-                });
-            }
-            if widgets::pill(ui, &t!("lighting.flip_v"), live_tx.flip_v) {
-                changed_tx = Some(ZoneContentTransform {
-                    flip_v: !live_tx.flip_v,
-                    ..live_tx
-                });
-            }
-        }
-
-        if !live_tx.is_identity() && widgets::pill(ui, &t!("lighting.reset"), false) {
-            changed_tx = Some(ZoneContentTransform::default());
-        }
-    });
+            picked
+        },
+        |ui| {
+            widgets::button_enabled(
+                ui,
+                &t!("lighting.reset"),
+                widgets::ButtonKind::Ghost,
+                size,
+                !live_tx.is_identity(),
+            )
+        },
+    );
+    let changed_tx = if reset {
+        Some(ZoneContentTransform::default())
+    } else {
+        picked
+    };
 
     if let Some(new_tx) = changed_tx {
-        crate::runtime::ipc::send(ctx.cmd, tx_cmd(ctx, &zone.id, new_tx));
-    }
-
-    // Rotation stepper for ring topologies — steps the content by whole LEDs.
-    if is_ring {
-        let n = zone.leds.len() as i32;
-        let offset = live_tx.led_offset.rem_euclid(n);
-        ui.add_space(theme::SPACE_4);
-        let readout = format!("{offset} / {n}");
-        let delta = widgets::stepper_row(ui, &t!("lighting.rotate"), &readout);
-        if delta != 0 {
-            let new_tx = ZoneContentTransform {
-                led_offset: wrap_offset(live_tx.led_offset, delta, n),
-                ..live_tx
-            };
-            crate::runtime::ipc::send(ctx.cmd, tx_cmd(ctx, &zone.id, new_tx));
-        }
+        ipc::send(ctx.cmd, tx_cmd(ctx, &zone.id, new_tx));
     }
 }
 
@@ -457,118 +470,115 @@ fn right_panel(
     rgb: &LightingStatus,
     mode: &Mode,
 ) {
-    // Effect grid — uniform cells, 2 per row.
-    widgets::card_titled(
-        ui,
-        &t!("lighting.effect"),
-        |_| {},
-        |ui| {
-            let gap = 9.0;
-            let cell_w = ((ui.available_width() - gap) / 2.0).max(60.0);
-            let solid_color = st.lighting.paint_color.map(rgb_to_color32);
-            let mut entries: Vec<(String, EffectPick, Option<Color32>)> = vec![
-                (
-                    t!("lighting.static").to_string(),
-                    EffectPick::Solid,
-                    solid_color,
-                ),
-                (t!("lighting.paint").to_string(), EffectPick::Paint, None),
-            ];
-            for e in &rgb.descriptor.native_effects {
-                entries.push((
-                    format!("\u{2699} {}", e.name),
-                    EffectPick::Effect(e.id.clone()),
-                    None,
-                ));
+    widgets::card_with_margin(ui, egui::Margin::same(18), |ui| {
+        ui.set_width(ui.available_width());
+        ui.label(
+            egui::RichText::new(t!("lighting.effect"))
+                .font(theme::heading())
+                .color(theme::TEXT),
+        );
+        ui.add_space(theme::SPACE_8);
+        let gap = theme::SPACE_4;
+        let cell_h = 64.0;
+        let cell_w = ((ui.available_width() - gap) / 2.0).max(60.0);
+        let solid_color = st.lighting.paint_color.map_or(theme::CYAN, rgb_to_color32);
+        let effects = &rgb.descriptor.native_effects;
+        let mut entries: Vec<(String, EffectPick, widgets::CellPreview)> = vec![
+            (
+                t!("lighting.static").to_string(),
+                EffectPick::Solid,
+                widgets::CellPreview::Solid(solid_color),
+            ),
+            (
+                t!("lighting.paint").to_string(),
+                EffectPick::Paint,
+                widgets::CellPreview::Segments(vec![
+                    theme::TRAFFIC_RED,
+                    theme::CYAN,
+                    theme::TRAFFIC_GREEN,
+                ]),
+            ),
+        ];
+        for e in effects {
+            let preview = if is_off(&e.id, effects) {
+                widgets::CellPreview::Solid(theme::STAGE_BG)
+            } else {
+                widgets::CellPreview::Spectrum
+            };
+            entries.push((e.name.clone(), EffectPick::Effect(e.id.clone()), preview));
+        }
+        // The raw `designer` id is a parameter bag whose generic Range/Enum
+        // controls make a poor stand-in for the actual Effect Designer page
+        // — only its saved custom instances (below) belong in the grid.
+        for a in &ctx.state.lighting.canvas.available_direct_effects {
+            if !is_selectable_direct_effect(&a.id) {
+                continue;
             }
-            // The raw `designer` id is a parameter bag whose generic Range/Enum
-            // controls make a poor stand-in for the actual Effect Designer page
-            // — only its saved custom instances (below) belong in the grid.
-            for a in &ctx.state.lighting.canvas.available_direct_effects {
-                if !is_selectable_direct_effect(&a.id) {
-                    continue;
-                }
-                entries.push((
-                    format!("\u{2605} {}", a.name),
-                    EffectPick::Direct(a.id.clone()),
-                    None,
-                ));
+            entries.push((
+                a.name.clone(),
+                EffectPick::Direct(a.id.clone()),
+                widgets::CellPreview::Spectrum,
+            ));
+        }
+        let mut entries = entries.into_iter().peekable();
+        let mut first_row = true;
+        while entries.peek().is_some() {
+            let chunk: Vec<_> = entries.by_ref().take(2).collect();
+            if !first_row {
+                ui.add_space(gap);
             }
-            for (i, chunk) in entries.chunks(2).enumerate() {
-                if i > 0 {
-                    ui.add_space(gap);
-                }
-                let row_cursor = ui.cursor().min;
-                if i == 0 {
-                    // Anchor the first effect row (Static + Paint) for the tour.
-                    let row_rect =
-                        Rect::from_min_size(row_cursor, Vec2::new(ui.available_width(), 56.0));
-                    crate::domain::tour::anchor(
-                        ui.ctx(),
-                        crate::domain::tour::AnchorId::LightingEffectsGrid,
-                        row_rect,
-                    );
-                    // The paint cell is the second cell in the first row.
-                    let paint_rect = Rect::from_min_size(
+            let row_cursor = ui.cursor().min;
+            if first_row {
+                // Anchor the first effect row (Static + Paint) for the tour.
+                tour::anchor(
+                    ui.ctx(),
+                    AnchorId::LightingEffectsGrid,
+                    Rect::from_min_size(row_cursor, Vec2::new(ui.available_width(), cell_h)),
+                );
+                tour::anchor(
+                    ui.ctx(),
+                    AnchorId::LightingPaintCell,
+                    Rect::from_min_size(
                         egui::pos2(row_cursor.x + cell_w + gap, row_cursor.y),
-                        Vec2::new(cell_w, 56.0),
-                    );
-                    crate::domain::tour::anchor(
-                        ui.ctx(),
-                        crate::domain::tour::AnchorId::LightingPaintCell,
-                        paint_rect,
-                    );
-                }
-                ui.horizontal(|ui| {
-                    ui.spacing_mut().item_spacing.x = gap;
-                    for (label, pick, preview) in chunk {
-                        let active = pick.is_active(mode);
-                        let cell_preview = match preview {
-                            Some(c) => widgets::CellPreview::Solid(*c),
-                            None => widgets::CellPreview::Spectrum,
-                        };
-                        let clicked = widgets::effect_cell(
-                            ui,
-                            label,
-                            active,
-                            cell_preview,
-                            cell_w,
-                            56.0,
-                            18.0,
-                            false,
-                        );
-                        let Some(cmd) = clicked.then(|| pick_cmd(ctx, st, rgb, pick)).flatten()
-                        else {
-                            continue;
-                        };
-                        // On-canvas devices are mutually exclusive with
-                        // per-device effects: confirm before yanking one off the canvas.
-                        if matches!(mode, Mode::Engine) {
-                            st.lighting.confirm_leave_canvas = Some(cmd);
-                        } else {
-                            crate::runtime::ipc::send(ctx.cmd, cmd);
-                        }
+                        Vec2::new(cell_w, cell_h),
+                    ),
+                );
+                first_row = false;
+            }
+            ui.horizontal(|ui| {
+                ui.spacing_mut().item_spacing.x = gap;
+                for (label, pick, preview) in chunk {
+                    let active = pick.is_active(mode);
+                    let clicked =
+                        widgets::effect_cell(ui, &label, active, preview, cell_w, cell_h, 18.0);
+                    let Some(cmd) = clicked.then(|| pick_cmd(ctx, st, rgb, &pick)).flatten() else {
+                        continue;
+                    };
+                    // On-canvas devices are mutually exclusive with
+                    // per-device effects: confirm before yanking one off the canvas.
+                    if matches!(mode, Mode::Engine) {
+                        st.lighting.confirm_leave_canvas = Some(cmd);
+                    } else {
+                        ipc::send(ctx.cmd, cmd);
                     }
-                });
-            }
+                }
+            });
+        }
 
-            ui.add_space(gap);
-            let canvas_btn = widgets::button(
-                ui,
-                &t!("lighting.place_on_canvas"),
-                widgets::ButtonKind::Ghost,
-                egui::vec2(ui.available_width(), 30.0),
-            );
-            crate::domain::tour::anchor(
-                ui.ctx(),
-                crate::domain::tour::AnchorId::LightingPlaceCanvas,
-                canvas_btn.rect,
-            );
-            if canvas_btn.clicked() {
-                crate::runtime::ipc::send(ctx.cmd, place_on_canvas_cmd(ctx, st));
-            }
-        },
-    );
+        effect_params(ui, ctx, st, rgb, mode);
+
+        ui.add_space(theme::SPACE_8);
+        let canvas_btn = widgets::button(
+            ui,
+            &t!("lighting.place_on_canvas"),
+            widgets::ButtonKind::Secondary,
+            egui::vec2(ui.available_width(), 36.0),
+        );
+        tour::anchor(ui.ctx(), AnchorId::LightingPlaceCanvas, canvas_btn.rect);
+        if canvas_btn.clicked() {
+            ipc::send(ctx.cmd, place_on_canvas_cmd(ctx, st));
+        }
+    });
 
     // Colour picker — only when the mode actually uses a colour.
     if show_color(
@@ -600,7 +610,7 @@ fn right_panel(
                             if let Some(eff) =
                                 rgb.descriptor.native_effects.iter().find(|e| &e.id == id)
                             {
-                                crate::runtime::ipc::send(ctx.cmd, effect_cmd(ctx, st, rgb, eff));
+                                ipc::send(ctx.cmd, effect_cmd(ctx, st, rgb, eff));
                             }
                         }
                         Mode::Direct(id) => {
@@ -612,7 +622,7 @@ fn right_panel(
                                 .iter()
                                 .find(|a| &a.id == id)
                             {
-                                crate::runtime::ipc::send(ctx.cmd, direct_cmd(ctx, st, rgb, anim));
+                                ipc::send(ctx.cmd, direct_cmd(ctx, st, rgb, anim));
                             }
                         }
                         _ => {}
@@ -709,16 +719,17 @@ fn led_canvas(
     fill: &LedFill,
 ) -> bool {
     let (rect, resp) = ui.allocate_exact_size(
-        Vec2::new(ui.available_width(), 220.0),
+        Vec2::new(ui.available_width(), 340.0),
         Sense::click_and_drag(),
     );
     let p = ui.painter();
-    p.rect_filled(rect, theme::RADIUS_MD, theme::hex(0x0a0d13));
-    p.rect_stroke(
-        rect,
-        theme::RADIUS_MD,
-        Stroke::new(1.0, theme::BORDER_INNER),
-        egui::StrokeKind::Middle,
+    p.rect_filled(rect, theme::RADIUS_SM + 1.0, theme::STAGE_BG);
+    p.text(
+        rect.center(),
+        egui::Align2::CENTER_CENTER,
+        t!("devtabs.led_count", n = zone.leds.len()),
+        theme::body_sm(),
+        theme::TEXT_FAINT,
     );
     let inner = rect.shrink(18.0);
 
@@ -736,13 +747,10 @@ fn led_canvas(
     let painter = ui.painter();
     for (i, (led, c, r)) in pts.iter().enumerate() {
         let col = key_fill(fill, buf, *led, i as f32 / n as f32);
-        let dark = col == theme::hex(0x1b2230) || col == theme::hex(0x14181f);
-        if !dark {
-            theme::glow(painter, *c, r * 2.4, col, 0.09);
-        }
+        let dark = col == theme::TILE_BG || col == theme::RAISED_BG;
         painter.circle_filled(*c, *r, col);
         if dark {
-            painter.circle_stroke(*c, *r, Stroke::new(1.0, theme::hex(0x2a3446)));
+            painter.circle_stroke(*c, *r, Stroke::new(1.0, theme::BORDER_INNER));
         }
     }
     changed
@@ -753,7 +761,7 @@ fn led_canvas(
 fn live_led_color32(m: &HashMap<u32, RgbColor>, led: u32) -> Color32 {
     match m.get(&led) {
         Some(c) if *c != (RgbColor { r: 0, g: 0, b: 0 }) => rgb_to_color32(*c),
-        _ => theme::hex(0x14181f),
+        _ => theme::RAISED_BG,
     }
 }
 
@@ -769,9 +777,9 @@ fn key_fill(
         LedFill::Buffer => buf
             .and_then(|m| m.get(&led_id))
             .map(|rc| rgb_to_color32(*rc))
-            .unwrap_or(theme::hex(0x1b2230)),
+            .unwrap_or(theme::TILE_BG),
         LedFill::Solid(rc) => rgb_to_color32(*rc),
-        LedFill::Off => theme::hex(0x14181f),
+        LedFill::Off => theme::RAISED_BG,
         LedFill::Rainbow => rainbow(frac),
         LedFill::Live(m) => live_led_color32(m, led_id),
     }
@@ -809,7 +817,7 @@ fn keyboard_canvas(
         .enumerate()
         .map(|(i, k)| (k.led_id, key_fill(fill, buf, k.led_id, i as f32 / n)))
         .collect();
-    let off = theme::hex(0x14181f);
+    let off = theme::RAISED_BG;
     kbv::draw_keyboard(
         ui,
         keys,
@@ -833,14 +841,14 @@ fn layout_selector(
 
     let opts = kbv::layout_options(status);
     let emit = |sel: KeyboardLayoutSelection| {
-        let _ = ctx.cmd.send(DaemonCommand::SetKeyboardLayout {
-            id: ctx.dev.id.clone(),
-            selection: sel,
+        let _ = ctx.cmd.send(DaemonCommand::Device {
+            device_id: ctx.dev.id.clone(),
+            op: DeviceOp::SetKeyboardLayout { selection: sel },
         });
     };
     ui.horizontal_wrapped(|ui| {
         ui.spacing_mut().item_spacing = egui::vec2(8.0, 6.0);
-        widgets::caps_label_inline(ui, &t!("lighting.layout_caps"));
+        widgets::section_label_inline(ui, &t!("lighting.layout"));
 
         if opts.show_variant {
             if let Some(idx) = widgets::combo_indexed(
@@ -917,7 +925,7 @@ fn led_layout(zone: &LightingChannel, rect: Rect) -> Vec<(u32, Pos2, f32)> {
                 .map(|(i, l)| {
                     let a =
                         i as f32 / n as f32 * std::f32::consts::TAU - std::f32::consts::FRAC_PI_2;
-                    (l.id, center + Vec2::new(a.cos() * rad, a.sin() * rad), 9.0)
+                    (l.id, center + Vec2::new(a.cos() * rad, a.sin() * rad), 8.0)
                 })
                 .collect()
         }
@@ -1036,23 +1044,37 @@ fn param_sliders(
                 }
                 changed |= committed;
             }
-            // Master swatch handles the `"color"`-id param; any other Color
-            // param (e.g. a two-stop gradient's second colour) gets its own row.
             ParamKind::Color if d.id != "color" => {
-                let default = match d.default {
-                    EffectParamValue::Color(c) => c,
-                    _ => RgbColor::default(),
-                };
-                let live = current_param_color(rgb, kind, effect_id, &d.id).unwrap_or(default);
-                let current = st.lighting.param_colors.get(&key).copied().unwrap_or(live);
+                let group: Vec<&EffectParamDescriptor> = params
+                    .iter()
+                    .filter(|p| matches!(p.kind, ParamKind::Color) && p.id != "color")
+                    .collect();
+                if group[0].id != d.id {
+                    continue;
+                }
+                let colors: Vec<(&str, RgbColor)> = group
+                    .iter()
+                    .map(|p| {
+                        let default = match p.default {
+                            EffectParamValue::Color(c) => c,
+                            _ => RgbColor::default(),
+                        };
+                        let key = format!("fx:{}:{effect_id}:{}", kind.tag(), p.id);
+                        let live =
+                            current_param_color(rgb, kind, effect_id, &p.id).unwrap_or(default);
+                        let current = st.lighting.param_colors.get(&key).copied().unwrap_or(live);
+                        (p.label.as_str(), current)
+                    })
+                    .collect();
                 ui.add_space(theme::SPACE_7);
-                ui.label(
-                    egui::RichText::new(&d.label)
-                        .font(theme::body_sm())
-                        .color(theme::TEXT_MUT),
-                );
-                if let Some(new_c) = widgets::color_picker(ui, current) {
-                    st.lighting.param_colors.insert(key, new_c);
+                if let Some((i, c)) = widgets::color_slots(
+                    ui,
+                    &t!("canvas.colors"),
+                    &colors,
+                    &mut st.lighting.color_slot,
+                ) {
+                    let key = format!("fx:{}:{effect_id}:{}", kind.tag(), group[i].id);
+                    st.lighting.param_colors.insert(key, c);
                     changed = true;
                 }
             }
@@ -1219,10 +1241,12 @@ fn pick_cmd(
 }
 
 fn solid_cmd(ctx: &TabCtx, st: &DeviceUi) -> DaemonCommand {
-    DaemonCommand::LightingApply {
-        id: ctx.dev.id.clone(),
-        state: LightingState::Static {
-            color: st.lighting.paint_color.unwrap_or_default(),
+    DaemonCommand::Device {
+        device_id: ctx.dev.id.clone(),
+        op: DeviceOp::LightingApply {
+            state: LightingState::Static {
+                color: st.lighting.paint_color.unwrap_or_default(),
+            },
         },
     }
 }
@@ -1237,9 +1261,11 @@ fn paint_cmd(ctx: &TabCtx, st: &DeviceUi) -> DaemonCommand {
             (z.clone(), m)
         })
         .collect();
-    DaemonCommand::LightingApply {
-        id: ctx.dev.id.clone(),
-        state: LightingState::PerLed { channels },
+    DaemonCommand::Device {
+        device_id: ctx.dev.id.clone(),
+        op: DeviceOp::LightingApply {
+            state: LightingState::PerLed { channels },
+        },
     }
 }
 
@@ -1328,11 +1354,13 @@ fn effect_cmd(
     rgb: &LightingStatus,
     eff: &NativeEffect,
 ) -> DaemonCommand {
-    DaemonCommand::LightingApply {
-        id: ctx.dev.id.clone(),
-        state: LightingState::NativeEffect {
-            id: eff.id.clone(),
-            params: collect_effect_params(st, rgb, EffectSource::Native, &eff.id, &eff.params),
+    DaemonCommand::Device {
+        device_id: ctx.dev.id.clone(),
+        op: DeviceOp::LightingApply {
+            state: LightingState::NativeEffect {
+                id: eff.id.clone(),
+                params: collect_effect_params(st, rgb, EffectSource::Native, &eff.id, &eff.params),
+            },
         },
     }
 }
@@ -1343,34 +1371,46 @@ fn direct_cmd(
     rgb: &LightingStatus,
     anim: &Animation,
 ) -> DaemonCommand {
-    DaemonCommand::LightingApply {
-        id: ctx.dev.id.clone(),
-        state: LightingState::DirectEffect {
-            id: anim.id.clone(),
-            params: collect_effect_params(st, rgb, EffectSource::Direct, &anim.id, &anim.params),
+    DaemonCommand::Device {
+        device_id: ctx.dev.id.clone(),
+        op: DeviceOp::LightingApply {
+            state: LightingState::DirectEffect {
+                id: anim.id.clone(),
+                params: collect_effect_params(
+                    st,
+                    rgb,
+                    EffectSource::Direct,
+                    &anim.id,
+                    &anim.params,
+                ),
+            },
         },
     }
 }
 
 fn place_on_canvas_cmd(ctx: &TabCtx, st: &DeviceUi) -> DaemonCommand {
-    DaemonCommand::CanvasPlaceZone {
+    DaemonCommand::Device {
         device_id: ctx.dev.id.clone(),
-        channel_id: st.lighting.zone.clone(),
-        x: None,
-        y: None,
-        w: None,
-        h: None,
-        rotation: None,
-        effect: None,
-        sampling_mode: None,
+        op: DeviceOp::CanvasPlaceZone {
+            channel_id: st.lighting.zone.clone(),
+            x: None,
+            y: None,
+            w: None,
+            h: None,
+            rotation: None,
+            effect: None,
+            sampling_mode: None,
+        },
     }
 }
 
 fn tx_cmd(ctx: &TabCtx, channel_id: &str, transform: ZoneContentTransform) -> DaemonCommand {
-    DaemonCommand::LightingSetChannelTransform {
-        id: ctx.dev.id.clone(),
-        channel_id: channel_id.to_string(),
-        transform,
+    DaemonCommand::Device {
+        device_id: ctx.dev.id.clone(),
+        op: DeviceOp::LightingSetChannelTransform {
+            channel_id: channel_id.to_string(),
+            transform,
+        },
     }
 }
 
@@ -1399,6 +1439,7 @@ fn rainbow(t: f32) -> Color32 {
 #[cfg(test)]
 mod tests {
     use super::*;
+
     use halod_shared::types::LedPosition;
 
     fn zone(topology: ZoneTopology, n: u32) -> LightingChannel {
@@ -1431,7 +1472,7 @@ mod tests {
         );
         assert_eq!(
             key_fill(&LedFill::Buffer, Some(&buf), 6, 0.0),
-            theme::hex(0x1b2230)
+            theme::TILE_BG
         );
         // Solid paints every key the same colour.
         assert_eq!(
@@ -1439,7 +1480,7 @@ mod tests {
             rgb_to_color32(red)
         );
         // Off is the unlit cap.
-        assert_eq!(key_fill(&LedFill::Off, None, 9, 0.5), theme::hex(0x14181f));
+        assert_eq!(key_fill(&LedFill::Off, None, 9, 0.5), theme::RAISED_BG);
         // Live mirrors live_led_color32 (a black/missing LED is unlit).
         let mut live = HashMap::new();
         live.insert(9u32, red);
@@ -1449,7 +1490,7 @@ mod tests {
         );
         assert_eq!(
             key_fill(&LedFill::Live(&live), None, 1, 0.0),
-            theme::hex(0x14181f)
+            theme::RAISED_BG
         );
     }
 
@@ -1532,14 +1573,18 @@ mod tests {
             write_rate_history: None,
             plugin_assets: crate::ui::screens::device::empty_plugin_assets(),
         };
-        let mut st = DeviceUi::new("dev1".into());
+        let mut st = DeviceUi::new("dev1".parse().unwrap());
         st.lighting.paint_color = Some(violet);
 
         let cmd = pick_cmd(&ctx, &st, &rgb, &EffectPick::Solid)
             .expect("an active pick must still produce an apply");
         match cmd {
-            DaemonCommand::LightingApply {
-                state: LightingState::Static { color },
+            DaemonCommand::Device {
+                op:
+                    DeviceOp::LightingApply {
+                        state: LightingState::Static { color },
+                        ..
+                    },
                 ..
             } => assert_eq!(color, violet),
             other => panic!("unexpected command: {other:?}"),

@@ -174,7 +174,12 @@ fn status_at_paths<'a>(
     match installed {
         Some((path, contents)) => halod_shared::types::UdevRulesStatus {
             supported: true,
-            current: contents == rules.as_bytes(),
+            current: {
+                let installed = String::from_utf8_lossy(&contents);
+                generated_device_rules(rules)
+                    .iter()
+                    .all(|rule| installed.lines().any(|line| line == *rule))
+            },
             installed_path: Some(path),
             generated_rule_count,
             plugins_requiring_update,
@@ -183,7 +188,7 @@ fn status_at_paths<'a>(
         },
         None => halod_shared::types::UdevRulesStatus {
             supported: true,
-            current: false,
+            current: generated_rule_count == 0,
             installed_path: None,
             generated_rule_count,
             plugins_requiring_update,
@@ -221,7 +226,11 @@ mod tests {
     fn plugin(root: &std::path::Path, id: &str, manifest: &str) -> PluginManifest {
         let dir = root.join(id);
         std::fs::create_dir(&dir).unwrap();
-        std::fs::write(dir.join("plugin.yaml"), format!("id: {id}\n{manifest}")).unwrap();
+        std::fs::write(
+            dir.join("plugin.yaml"),
+            format!("id: {id}\nversion: 1.0.0\napi: \"3.0\"\n{manifest}"),
+        )
+        .unwrap();
         std::fs::write(dir.join("main.lua"), "return {}").unwrap();
         parse_manifest_from_dir(&dir).unwrap()
     }
@@ -232,7 +241,7 @@ mod tests {
         let manifest = plugin(
             temp.path(),
             "cooler",
-            "name: Cooler\npermissions: [hid, usb]\ndevices:\n  - vendor: Acme\n    model: One\n    match: { hid: { vid: 0x1234, pids: [0x0002, 0x0001] } }\ntransports:\n  hid: {}\n  usb:\n    devices:\n      - { id: primary, control: {} }\n      - { id: screen, vid: 0xabcd, pid: 0x0102, control: {} }\n",
+            "name: Cooler\ndevices:\n  - vendor: Acme\n    model: One\n    match: { hid: { vid: 0x1234, pids: [0x0002, 0x0001] } }\ntransports:\n  hid: {}\n  usb:\n    devices:\n      - { id: primary, control: {} }\n      - { id: screen, vid: 0xabcd, pid: 0x0102, control: {} }\n",
         );
 
         let output = assemble(&[manifest]);
@@ -251,7 +260,7 @@ mod tests {
         let manifest = plugin(
             temp.path(),
             "usb_family",
-            "permissions: [usb]\ndevices:\n  - vendor: Acme\n    model: Family\n    match: { usb: { vid: 0x1234, pids: [0xAAAA, 0xBBBB] } }\n",
+            "devices:\n  - vendor: Acme\n    model: Family\n    match: { usb: { vid: 0x1234, pids: [0xAAAA, 0xBBBB] } }\n",
         );
 
         let output = assemble(&[manifest]);
@@ -268,17 +277,17 @@ mod tests {
         let linux = plugin(
             temp.path(),
             "linux_device",
-            "permissions: [hid]\ndevices:\n  - vendor: Acme\n    model: One\n    match: { hid: { vid: 1, pid: 2 } }\ntransports: { hid: {} }\n",
+            "devices:\n  - vendor: Acme\n    model: One\n    match: { hid: { vid: 1, pid: 2 } }\ntransports: { hid: {} }\n",
         );
         let also_linux = plugin(
             temp.path(),
             "also_linux_device",
-            "permissions: [hid]\ndevices:\n  - vendor: Acme\n    model: Two\n    match: { hid: { vid: 1, pid: 2 } }\ntransports: { hid: {} }\n",
+            "devices:\n  - vendor: Acme\n    model: Two\n    match: { hid: { vid: 1, pid: 2 } }\ntransports: { hid: {} }\n",
         );
         let windows = plugin(
             temp.path(),
             "windows_device",
-            "platforms: [windows]\npermissions: [hid]\ndevices:\n  - vendor: Acme\n    model: Win\n    match: { hid: { vid: 3, pid: 4 } }\ntransports: { hid: {} }\n",
+            "platforms: [windows]\ndevices:\n  - vendor: Acme\n    model: Win\n    match: { hid: { vid: 3, pid: 4 } }\ntransports: { hid: {} }\n",
         );
 
         let output = assemble(&[windows, also_linux, linux]);
@@ -301,7 +310,7 @@ mod tests {
         let manifest = plugin(
             temp.path(),
             "smbus_rgb",
-            "permissions: [smbus]\ndevices:\n  - vendor: Acme\n    model: DRAM\n    match:\n      smbus: { bus: chipset, addresses: [0x70] }\n  - vendor: Acme\n    model: GPU\n    match:\n      smbus:\n        bus: gpu\n        addresses: [0x67]\n        pci_match:\n          - { vendor: 0x10de, sub_vendor: 0x1043 }\n          - { vendor: 0x1002, sub_vendor: 0x1043 }\n          - { vendor: 0x10de, sub_vendor: 0x19da }\n",
+            "devices:\n  - vendor: Acme\n    model: DRAM\n    match:\n      smbus: { bus: chipset, addresses: [0x70] }\n  - vendor: Acme\n    model: GPU\n    match:\n      smbus:\n        bus: gpu\n        addresses: [0x67]\n        pci_match:\n          - { vendor: 0x10de, sub_vendor: 0x1043 }\n          - { vendor: 0x1002, sub_vendor: 0x1043 }\n          - { vendor: 0x10de, sub_vendor: 0x19da }\n",
         );
 
         let output = assemble(&[manifest]);
@@ -325,20 +334,34 @@ mod tests {
     }
 
     #[test]
-    fn status_uses_first_installed_file_and_detects_drift() {
+    fn status_uses_first_installed_file_and_accepts_a_catalog_wide_superset() {
         let temp = tempfile::tempdir().unwrap();
+        let first = plugin(
+            temp.path(),
+            "first",
+            "devices:\n  - vendor: Acme\n    model: One\n    match: { hid: { vid: 1, pid: 2 } }\ntransports: { hid: {} }\n",
+        );
+        let second = plugin(
+            temp.path(),
+            "second",
+            "devices:\n  - vendor: Acme\n    model: Two\n    match: { hid: { vid: 3, pid: 4 } }\ntransports: { hid: {} }\n",
+        );
         let override_path = temp.path().join("etc.rules");
         let vendor_path = temp.path().join("usr.rules");
-        std::fs::write(&override_path, "stale").unwrap();
-        std::fs::write(&vendor_path, "current").unwrap();
+        let catalog_wide = assemble(&[first.clone(), second.clone()]);
+        std::fs::write(&override_path, assemble(&[])).unwrap();
+        std::fs::write(&vendor_path, &catalog_wide).unwrap();
 
+        let installed = [first];
+        let rules = assemble(&installed);
         let paths = [override_path.as_path(), vendor_path.as_path()];
-        let stale = status_at_paths("current", &[], paths);
+        let stale = status_at_paths(&rules, &installed, paths);
         assert!(!stale.current);
         assert_eq!(stale.installed_path.as_deref(), override_path.to_str());
 
-        std::fs::write(&override_path, "current").unwrap();
-        assert!(status_at_paths("current", &[], paths).current);
+        std::fs::write(&override_path, &catalog_wide).unwrap();
+        assert!(status_at_paths(&rules, &installed, paths).current);
+        assert!(status_at_paths(&assemble(&[]), &[], paths).current);
     }
 
     #[test]
@@ -347,12 +370,12 @@ mod tests {
         let first = plugin(
             temp.path(),
             "first",
-            "permissions: [hid]\ndevices:\n  - vendor: Acme\n    model: One\n    match: { hid: { vid: 1, pid: 2 } }\ntransports: { hid: {} }\n",
+            "devices:\n  - vendor: Acme\n    model: One\n    match: { hid: { vid: 1, pid: 2 } }\ntransports: { hid: {} }\n",
         );
         let second = plugin(
             temp.path(),
             "second",
-            "permissions: [hid]\ndevices:\n  - vendor: Acme\n    model: Two\n    match: { hid: { vid: 3, pid: 4 } }\ntransports: { hid: {} }\n",
+            "devices:\n  - vendor: Acme\n    model: Two\n    match: { hid: { vid: 3, pid: 4 } }\ntransports: { hid: {} }\n",
         );
         let installed_path = temp.path().join("installed.rules");
         std::fs::write(&installed_path, assemble(std::slice::from_ref(&first))).unwrap();

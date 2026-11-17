@@ -19,6 +19,8 @@ use windows::Win32::UI::WindowsAndMessaging::{
     IsWindowVisible, HICON, ICONINFO,
 };
 
+use crate::config;
+use crate::domain::profiles::observers::active_window;
 use halod_shared::types::RunningApp;
 
 struct AccItem {
@@ -69,7 +71,7 @@ unsafe extern "system" fn enum_proc(hwnd: HWND, lparam: LPARAM) -> BOOL {
         let proc_name = exe_path
             .file_name()
             .and_then(|f| f.to_str())
-            .map(crate::domain::profiles::observers::active_window::normalize_name)
+            .map(active_window::normalize_name)
             .unwrap_or_default();
         if proc_name.is_empty() {
             return BOOL(1);
@@ -124,8 +126,9 @@ fn process_icon_map_path() -> Option<PathBuf> {
 
 /// In-process `process_name -> icon_path` cache, seeded from disk on first use
 /// so `resolve_icons` (called per broadcast) avoids re-parsing the JSON file.
-fn process_icon_cache() -> &'static std::sync::Mutex<std::collections::HashMap<String, String>> {
-    use std::sync::{Mutex, OnceLock};
+fn process_icon_cache() -> &'static parking_lot::Mutex<std::collections::HashMap<String, String>> {
+    use parking_lot::Mutex;
+    use std::sync::OnceLock;
     static CACHE: OnceLock<Mutex<std::collections::HashMap<String, String>>> = OnceLock::new();
     CACHE.get_or_init(|| {
         let map = process_icon_map_path()
@@ -139,7 +142,7 @@ fn process_icon_cache() -> &'static std::sync::Mutex<std::collections::HashMap<S
 /// Upsert non-empty process -> icon entries into the in-memory cache, persisting
 /// to disk only when something changed.
 fn cache_process_icons(apps: &[RunningApp]) {
-    let mut map = process_icon_cache().lock().unwrap();
+    let mut map = process_icon_cache().lock();
     let mut changed = false;
     for a in apps {
         if a.icon_name.is_empty() {
@@ -159,7 +162,7 @@ fn cache_process_icons(apps: &[RunningApp]) {
 
 /// Resolve icons for the given process names from the in-memory cache.
 pub(super) fn resolve_icons(process_names: &[String]) -> std::collections::HashMap<String, String> {
-    let map = process_icon_cache().lock().unwrap();
+    let map = process_icon_cache().lock();
     process_names
         .iter()
         .filter_map(|name| map.get(name).map(|icon| (name.clone(), icon.clone())))
@@ -182,10 +185,7 @@ fn icon_path_for_exe(exe_path: &Path) -> Option<String> {
         .file_stem()
         .and_then(|s| s.to_str())
         .unwrap_or("app");
-    let cache_file = cache_dir.join(format!(
-        "{stem}-{:016x}.png",
-        crate::config::fnv1a64(&key_bytes)
-    ));
+    let cache_file = cache_dir.join(format!("{stem}-{:016x}.png", config::fnv1a64(&key_bytes)));
     if cache_file.exists() {
         return cache_file.to_str().map(|s| s.to_string());
     }

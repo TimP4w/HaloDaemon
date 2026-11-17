@@ -7,26 +7,32 @@ pub mod widget_row;
 mod widget_view;
 
 use crate::ui::components as widgets;
+use halod_shared::commands::DeviceOp;
 use std::collections::{HashMap, HashSet, VecDeque};
 
 use crate::domain::topic_store::TopicStore;
 use egui::{Align2, Color32, Pos2, Rect, Sense, Stroke, Vec2};
-use halod_shared::types::{
-    ConflictDeviceSource, DeviceCapability, DeviceType, VisibilityState, WireDevice,
-};
+use halod_shared::types::{ConflictDeviceSource, DeviceCapability, VisibilityState, WireDevice};
 
-use crate::domain::models::device::{self as model, Metric};
-use crate::domain::state::{Rename, Variant};
+use crate::domain::models::device::{self as model};
+use crate::domain::state::Page;
+use crate::domain::state::Rename;
+use crate::domain::tour;
+use crate::domain::tour::AnchorId;
 use crate::runtime::ipc::CommandTx;
+use crate::ui::screens::startup;
 use crate::ui::theme::{self, a};
+use halod_shared::ids::DeviceId;
 
-const GAP: f32 = 16.0;
+const GAP: f32 = 12.0;
+const SECTION_GAP: f32 = 20.0;
+const CONFLICT_STRIP_H: f32 = 30.0;
+const CONFLICT_STRIP_GAP: f32 = 12.0;
 
 /// Everything the Home screen owns across frames.
 #[derive(Default)]
 pub struct HomeUi {
     pub show_hidden: bool,
-    pub variant: Variant,
     /// Device-list filter text (matches name or vendor).
     pub search: String,
     pub rename: Option<Rename>,
@@ -35,7 +41,17 @@ pub struct HomeUi {
     /// Open duplicate-device resolve dialog: every conflict group with the
     /// owner the user has picked to keep. `None` when the dialog is closed.
     pub conflict_resolve: Option<Vec<ConflictGroup>>,
+    pub pending_disable: Option<(DeviceId, String)>,
     pub widgets: widget_row::EditState,
+}
+
+impl HomeUi {
+    /// Open the resolve dialog on every current conflict group, if any.
+    #[cfg(all(test, feature = "screenshots"))]
+    pub fn open_conflicts(&mut self, devices: &[WireDevice]) {
+        let groups = conflict_groups(devices);
+        self.conflict_resolve = (!groups.is_empty()).then_some(groups);
+    }
 }
 
 pub fn show(
@@ -44,7 +60,7 @@ pub fn show(
     cmd: &CommandTx,
     home: &mut HomeUi,
     history: &HashMap<String, VecDeque<f32>>,
-    page: &mut crate::domain::state::Page,
+    page: &mut Page,
     time: f64,
     allow_modals: bool,
 ) {
@@ -52,80 +68,72 @@ pub fn show(
     egui::ScrollArea::vertical()
         .auto_shrink([false, false])
         .show(ui, |ui| {
-            egui::Frame::NONE
-                .inner_margin(egui::Margin {
-                    left: 36,
-                    right: 36,
-                    top: 30,
-                    bottom: 30,
-                })
-                .show(ui, |ui| {
-                    header(ui, state, home);
-                    let conflicts = conflict_group_count(&state.devices);
-                    if conflicts > 0 {
-                        ui.add_space(theme::SPACE_9);
-                        if attention_banner(ui, conflicts) {
-                            home.conflict_resolve = Some(conflict_groups(&state.devices));
-                        }
+            widgets::page_frame(ui, |ui| {
+                header(ui, state, home);
+                startup::discovery_status(ui, state);
+                let conflicts = conflict_group_count(&state.devices);
+                if conflicts > 0 {
+                    ui.add_space(theme::SPACE_9);
+                    if attention_banner(ui, conflicts) {
+                        home.conflict_resolve = Some(conflict_groups(&state.devices));
                     }
-                    let has_row = home.widgets.customizing() || !state.gui.home_widgets.is_empty();
-                    ui.add_space(if has_row { 24.0 } else { 14.0 });
-                    widget_row::show(
+                }
+                let has_row = home.widgets.customizing() || !state.gui.home_widgets.is_empty();
+                widget_row::show(
+                    ui,
+                    &mut home.widgets,
+                    widget_row::RowCtx {
+                        state,
+                        cmd,
+                        history,
+                        sensors: &sensors,
+                        time,
+                    },
+                );
+                if has_row {
+                    ui.add_space(SECTION_GAP - theme::SPACE_4);
+                }
+
+                let discovering = matches!(
+                    state.discovery.phase,
+                    halod_shared::types::DiscoveryPhase::Discovering
+                );
+                let devices: Vec<&WireDevice> = state
+                    .devices
+                    .iter()
+                    .filter(|d| {
+                        model::listable(d)
+                            && (home.show_hidden || !model::is_hidden(d))
+                            && model::matches_query(d, &home.search)
+                    })
+                    .collect();
+
+                if devices.is_empty() {
+                    empty(ui, !home.search.trim().is_empty());
+                } else {
+                    grid(
                         ui,
-                        &mut home.widgets,
-                        widget_row::RowCtx {
-                            state,
-                            cmd,
-                            history,
-                            sensors: &sensors,
-                            time,
-                        },
+                        &devices,
+                        &state.devices,
+                        cmd,
+                        &mut home.rename,
+                        &mut home.confirm_remove,
+                        &mut home.pending_disable,
+                        &mut home.conflict_resolve,
+                        page,
+                        discovering,
                     );
-                    if has_row {
-                        ui.add_space(26.0);
-                    }
-
-                    let devices: Vec<&WireDevice> = state
-                        .devices
-                        .iter()
-                        .filter(|d| {
-                            model::listable(d)
-                                && (home.show_hidden || !model::is_hidden(d))
-                                && model::matches_query(d, &home.search)
-                        })
-                        .collect();
-
-                    if devices.is_empty() {
-                        empty(ui, !home.search.trim().is_empty());
-                    } else {
-                        match home.variant {
-                            Variant::Grid => grid(
-                                ui,
-                                &devices,
-                                &state.devices,
-                                cmd,
-                                &mut home.rename,
-                                &mut home.confirm_remove,
-                                &mut home.conflict_resolve,
-                                page,
-                            ),
-                            Variant::List => list(
-                                ui,
-                                &devices,
-                                &state.devices,
-                                cmd,
-                                &mut home.rename,
-                                &mut home.confirm_remove,
-                                &mut home.conflict_resolve,
-                                page,
-                            ),
-                        }
-                    }
-                });
+                }
+            });
         });
 
     if allow_modals {
         remove_confirm_modal(ui.ctx(), cmd, &mut home.confirm_remove);
+        if let Some((id, _)) =
+            crate::ui::screens::device::info::disable_confirm(ui.ctx(), &mut home.pending_disable)
+        {
+            crate::runtime::ipc::send(cmd, crate::ui::screens::device::info::disable_command(id));
+        }
         conflict_modal(ui.ctx(), cmd, &mut home.conflict_resolve);
     }
 }
@@ -133,9 +141,9 @@ pub fn show(
 /// A pending "remove chained device" confirmation: the child to unlink plus the
 /// parent device and channel that host it.
 pub struct ConfirmRemove {
-    pub child_id: String,
+    pub child_id: DeviceId,
     pub child_name: String,
-    pub parent_id: String,
+    pub parent_id: DeviceId,
     pub channel_id: String,
 }
 
@@ -144,15 +152,14 @@ pub struct ConfirmRemove {
 /// stays stable while the live list refreshes.
 pub struct ConflictGroup {
     pub devices: Vec<ConflictChoiceDevice>,
-    pub recommended_id: String,
+    pub recommended_id: DeviceId,
     /// The device id currently selected to keep; defaults to `recommended_id`.
-    pub pick: String,
+    pub pick: DeviceId,
 }
 
 pub struct ConflictChoiceDevice {
-    pub id: String,
+    pub id: DeviceId,
     pub name: String,
-    pub device_type: DeviceType,
     pub source: ConflictDeviceSource,
 }
 
@@ -167,7 +174,6 @@ fn conflict_group_for(d: &WireDevice, all_devices: &[WireDevice]) -> Option<Conf
                 .map(|candidate| ConflictChoiceDevice {
                     id: candidate.id.clone(),
                     name: candidate.name.clone(),
-                    device_type: candidate.device_type,
                     source: conflict
                         .participants
                         .iter()
@@ -189,6 +195,7 @@ fn conflict_key(d: &WireDevice) -> Option<String> {
     let mut ids = conflict.peer_ids.clone();
     ids.push(d.id.clone());
     ids.sort();
+    let ids: Vec<&str> = ids.iter().map(|id| id.as_str()).collect();
     Some(format!("{:?}:{}", conflict.confidence, ids.join("\u{1f}")))
 }
 
@@ -223,18 +230,18 @@ fn conflict_group_count(all_devices: &[WireDevice]) -> usize {
         .count()
 }
 
-fn ids_to_disable(group: &ConflictGroup, kept_id: &str) -> Vec<String> {
+fn ids_to_disable(group: &ConflictGroup, kept_id: &DeviceId) -> Vec<DeviceId> {
     group
         .devices
         .iter()
-        .filter(|device| device.id != kept_id)
+        .filter(|device| device.id != *kept_id)
         .map(|device| device.id.clone())
         .collect()
 }
 
 /// Every device id to disable when the whole resolution is applied: for each
 /// group, all participants except the one the user kept.
-fn disables_for(groups: &[ConflictGroup]) -> Vec<String> {
+fn disables_for(groups: &[ConflictGroup]) -> Vec<DeviceId> {
     groups
         .iter()
         .flat_map(|group| ids_to_disable(group, &group.pick))
@@ -279,14 +286,14 @@ fn attention_banner(ui: &mut egui::Ui, count: usize) -> bool {
             Align2::LEFT_CENTER,
             title,
             theme::heading(),
-            theme::hex(0xf0dca0),
+            theme::STAT_AMBER,
         );
         p.text(
             Pos2::new(tx, rect.center().y + 9.0),
             Align2::LEFT_CENTER,
             t!("home.conflict_banner_sub"),
             theme::body_sm(),
-            theme::hex(0xb39f6a),
+            theme::a(theme::STAT_AMBER, 0.75),
         );
     }
     let btn = Rect::from_min_size(
@@ -296,7 +303,7 @@ fn attention_banner(ui: &mut egui::Ui, count: usize) -> bool {
     widgets::button_at(
         ui,
         btn,
-        egui::Id::new("conflict_banner_resolve"),
+        egui::Id::unique("conflict_banner_resolve"),
         &t!("home.conflict_resolve"),
         widgets::ButtonKind::Warn,
     )
@@ -326,9 +333,9 @@ fn warning_glyph(p: &egui::Painter, c: Pos2, size: f32, color: Color32) {
     p.circle_filled(Pos2::new(c.x, c.y + h * 0.46), 1.1, color);
 }
 
-/// The revised resolve dialog: every conflict group at once, each with radio
-/// owner options. Applying keeps the picked owner per group and disables the
-/// rest in a single pass.
+/// The resolve dialog: every conflict group at once, each with radio owner
+/// options. Applying keeps the picked owner per group and disables the rest in
+/// a single pass.
 fn conflict_modal(
     ctx: &egui::Context,
     cmd: &CommandTx,
@@ -344,34 +351,31 @@ fn conflict_modal(
     let count = groups.len();
     let mut apply = false;
     let mut cancel = false;
-    let dismissed = widgets::dialog(
+    let dismissed = widgets::dialog_with_subtitle(
         ctx,
         "home_conflict_resolve",
         &t!("home.conflict_modal_title"),
+        &t!("home.conflict_modal_intro"),
         560.0,
         |ui| {
-            ui.label(
-                egui::RichText::new(t!("home.conflict_modal_intro"))
-                    .font(theme::body_md())
-                    .color(theme::TEXT_MUT),
-            );
-            ui.add_space(theme::SPACE_7);
-            for group in groups.iter_mut() {
+            ui.add_space(theme::SPACE_5);
+            for (i, group) in groups.iter_mut().enumerate() {
+                if i > 0 {
+                    ui.add_space(theme::SPACE_7);
+                }
                 conflict_group_card(ui, group);
-                ui.add_space(theme::SPACE_6);
             }
-            ui.label(
-                egui::RichText::new(t!("home.conflict_modal_note"))
-                    .font(theme::body_sm())
-                    .color(theme::TEXT_FAINT),
-            );
         },
         |ui| {
             if widgets::button(
                 ui,
-                &t!("home.conflict_keep_selected", count = count),
-                widgets::ButtonKind::Warn,
-                egui::vec2(150.0, 34.0),
+                &if count == 1 {
+                    t!("home.conflict_keep_selected_one")
+                } else {
+                    t!("home.conflict_keep_selected", count = count)
+                },
+                widgets::ButtonKind::Primary,
+                egui::vec2(0.0, 36.0),
             )
             .clicked()
             {
@@ -382,7 +386,7 @@ fn conflict_modal(
                 ui,
                 &t!("home.conflict_decide_later"),
                 widgets::ButtonKind::Ghost,
-                egui::vec2(110.0, 34.0),
+                egui::vec2(0.0, 36.0),
             )
             .clicked()
             {
@@ -395,9 +399,11 @@ fn conflict_modal(
         for id in disables_for(&groups) {
             crate::runtime::ipc::send(
                 cmd,
-                halod_shared::commands::DaemonCommand::SetDeviceVisibility {
+                halod_shared::commands::DaemonCommand::Device {
                     device_id: id,
-                    state: VisibilityState::Disabled,
+                    op: DeviceOp::SetDeviceVisibility {
+                        state: VisibilityState::Disabled,
+                    },
                 },
             );
         }
@@ -406,70 +412,38 @@ fn conflict_modal(
     }
 }
 
-/// One conflict group inside the resolve dialog: the contested device, a
-/// "N sources" tally, and the radio owner options. Updates `group.pick`.
+/// One conflict group: the contested device's name over its radio owner
+/// options. Updates `group.pick`.
 fn conflict_group_card(ui: &mut egui::Ui, group: &mut ConflictGroup) {
+    let head = group
+        .devices
+        .iter()
+        .find(|d| d.id == group.recommended_id)
+        .unwrap_or(&group.devices[0])
+        .name
+        .clone();
     egui::Frame::NONE
-        .fill(theme::INNER_BG)
         .stroke(Stroke::new(1.0, theme::BORDER))
-        .corner_radius(theme::RADIUS_LG)
-        .inner_margin(egui::Margin {
-            left: 15,
-            right: 15,
-            top: 13,
-            bottom: 14,
-        })
+        .corner_radius(theme::RADIUS_MD)
+        .inner_margin(egui::Margin::same(14))
         .show(ui, |ui| {
             ui.set_width(ui.available_width());
-            let head = group
-                .devices
-                .iter()
-                .find(|d| d.id == group.recommended_id)
-                .unwrap_or(&group.devices[0]);
-            let dev_name = head.name.clone();
-            let dev_type = head.device_type;
-            let sources = group.devices.len();
-            ui.horizontal(|ui| {
-                let (badge, _) = ui.allocate_exact_size(Vec2::new(40.0, 30.0), Sense::hover());
-                widgets::device_badge(ui.painter(), badge, dev_type);
-                ui.add_space(theme::SPACE_6);
-                ui.vertical(|ui| {
-                    ui.add_space(theme::SPACE_1);
-                    ui.label(
-                        egui::RichText::new(&dev_name)
-                            .font(theme::heading())
-                            .color(theme::TEXT),
-                    );
-                    ui.label(
-                        egui::RichText::new(model::device_type_label(dev_type))
-                            .font(theme::caption())
-                            .color(theme::TEXT_MUT),
-                    );
-                });
-                ui.with_layout(egui::Layout::right_to_left(egui::Align::Center), |ui| {
-                    sources_pill(ui, sources);
-                });
-            });
-            ui.add_space(theme::SPACE_6);
-            let gap = 9.0;
-            let side = ((ui.available_width() - gap) / 2.0).max(120.0);
+            ui.spacing_mut().item_spacing.y = theme::SPACE_4;
+            ui.label(
+                egui::RichText::new(head)
+                    .font(theme::semibold(14.0))
+                    .color(theme::TEXT),
+            );
             let mut picked = None;
-            for chunk in group.devices.chunks(2) {
-                ui.horizontal(|ui| {
-                    ui.spacing_mut().item_spacing.x = gap;
-                    for dev in chunk {
-                        if owner_option(
-                            ui,
-                            dev,
-                            dev.id == group.pick,
-                            dev.id == group.recommended_id,
-                            side,
-                        ) {
-                            picked = Some(dev.id.clone());
-                        }
-                    }
-                });
-                ui.add_space(gap);
+            for dev in &group.devices {
+                if owner_option(
+                    ui,
+                    dev,
+                    dev.id == group.pick,
+                    dev.id == group.recommended_id,
+                ) {
+                    picked = Some(dev.id.clone());
+                }
             }
             if let Some(id) = picked {
                 group.pick = id;
@@ -477,129 +451,64 @@ fn conflict_group_card(ui: &mut egui::Ui, group: &mut ConflictGroup) {
         });
 }
 
-/// The amber "N sources" tally chip (dot + mono count) in a group header.
-fn sources_pill(ui: &mut egui::Ui, sources: usize) {
-    let text = t!("home.conflict_sources", count = sources);
-    let font = theme::mono(10.0);
-    let text_w = ui
-        .painter()
-        .layout_no_wrap(text.to_string(), font.clone(), theme::STAT_AMBER)
-        .rect
-        .width();
-    let (rect, _) = ui.allocate_exact_size(Vec2::new(text_w + 21.0, 18.0), Sense::hover());
-    let p = ui.painter();
-    p.circle_filled(
-        Pos2::new(rect.left() + 5.0, rect.center().y),
-        3.0,
-        theme::STAT_AMBER,
-    );
-    p.text(
-        Pos2::new(rect.left() + 13.0, rect.center().y),
-        Align2::LEFT_CENTER,
-        text,
-        font,
-        theme::STAT_AMBER,
-    );
-}
-
-/// A single radio owner option inside a conflict group card. Returns `true`
-/// when clicked (the caller then makes this device the group's pick).
+/// A single radio owner option. Returns `true` when clicked.
 fn owner_option(
     ui: &mut egui::Ui,
     device: &ConflictChoiceDevice,
     selected: bool,
     recommended: bool,
-    width: f32,
 ) -> bool {
-    let (rect, response) = ui.allocate_exact_size(Vec2::new(width, 58.0), Sense::click());
+    let (rect, response) =
+        ui.allocate_exact_size(Vec2::new(ui.available_width(), 56.0), Sense::click());
     if response.hovered() {
         ui.ctx().set_cursor_icon(egui::CursorIcon::PointingHand);
     }
     let p = ui.painter();
-    let fill = if selected {
-        a(theme::CYAN, 0.10)
+    let (fill, border) = if selected {
+        (theme::CHECKED_BG, theme::SELECTED_BORDER)
     } else if response.hovered() {
-        a(Color32::WHITE, 0.03)
+        (theme::INNER_BG, theme::BORDER_INNER)
     } else {
-        theme::CARD_BG
+        (theme::INNER_BG, theme::BORDER)
     };
-    p.rect_filled(rect, theme::RADIUS_MD, fill);
-    p.rect_stroke(
-        rect,
-        theme::RADIUS_MD,
-        Stroke::new(
-            if selected { 1.5 } else { 1.0 },
-            if selected { theme::CYAN } else { theme::BORDER },
-        ),
-        egui::StrokeKind::Middle,
-    );
-    let radio = Pos2::new(rect.left() + 18.0, rect.center().y);
-    p.circle_stroke(
-        radio,
-        6.5,
-        Stroke::new(
-            1.5,
-            if selected {
-                theme::CYAN
-            } else {
-                theme::TEXT_FAINT
-            },
-        ),
-    );
+    theme::paint_surface(p, rect, theme::RADIUS_SM + 1.0, fill, border);
+    let radio = Pos2::new(rect.left() + 24.0, rect.center().y);
     if selected {
-        p.circle_filled(radio, 3.3, theme::CYAN);
+        p.circle_filled(radio, 6.5, theme::CYAN);
+        p.circle_filled(radio, 2.8, theme::TEXT_BRIGHT);
+    } else {
+        p.circle_filled(radio, 6.5, theme::TEXT);
     }
-    let tx = rect.left() + 34.0;
-    let max_w = (rect.right() - 12.0 - tx).max(20.0);
-    let name_font = theme::semibold(12.5);
-    let tag_w = if recommended { 74.0 } else { 0.0 };
-    let name = ellipsize(p, &device.name, &name_font, (max_w - tag_w).max(20.0));
-    let nr = p.text(
+    let tx = rect.left() + 46.0;
+    let note = if recommended {
+        p.text(
+            Pos2::new(rect.right() - 12.0, rect.center().y),
+            Align2::RIGHT_CENTER,
+            t!("home.conflict_tag_recommended"),
+            theme::body_sm(),
+            theme::ACCENT_TEXT,
+        )
+        .left()
+    } else {
+        rect.right()
+    };
+    let max_w = (note - 12.0 - tx).max(20.0);
+    let name_font = theme::medium(14.0);
+    p.text(
         Pos2::new(tx, rect.center().y - 8.0),
         Align2::LEFT_CENTER,
-        name,
+        ellipsize(p, &conflict_source_label(&device.source), &name_font, max_w),
         name_font,
         theme::TEXT,
-    );
-    if recommended {
-        tag_pill(
-            p,
-            Pos2::new(nr.right() + 7.0, rect.center().y - 8.0),
-            &t!("home.conflict_tag_recommended"),
-            theme::CYAN,
-        );
-    }
-    let source_font = theme::caption();
-    let source = ellipsize(
-        p,
-        &conflict_source_label(&device.source),
-        &source_font,
-        max_w,
     );
     p.text(
         Pos2::new(tx, rect.center().y + 9.0),
         Align2::LEFT_CENTER,
-        source,
-        source_font,
+        ellipsize(p, &device.name, &theme::body_sm(), max_w),
+        theme::body_sm(),
         theme::TEXT_MUT,
     );
     response.clicked()
-}
-
-/// A small filled tag pill (label on a tinted rounded rect) centered vertically
-/// at `left_center`.
-fn tag_pill(p: &egui::Painter, left_center: Pos2, text: &str, color: Color32) {
-    let font = theme::body(9.5);
-    let text_w = p
-        .layout_no_wrap(text.to_owned(), font.clone(), color)
-        .rect
-        .width();
-    let rect = Rect::from_min_size(
-        Pos2::new(left_center.x, left_center.y - 7.5),
-        Vec2::new(text_w + 12.0, 15.0),
-    );
-    p.rect_filled(rect, 5.0, a(color, 0.14));
-    p.text(rect.center(), Align2::CENTER_CENTER, text, font, color);
 }
 
 pub(super) fn ellipsize(
@@ -632,7 +541,7 @@ fn conflict_source_label(source: &ConflictDeviceSource) -> String {
 /// returns that parent device id and the hosting channel id. Hardware-detected
 /// (`locked`) links are controlled by the hardware and can't be removed, so
 /// they yield `None`.
-fn chain_parent(devices: &[WireDevice], child_id: &str) -> Option<(String, String)> {
+fn chain_parent(devices: &[WireDevice], child_id: &DeviceId) -> Option<(DeviceId, String)> {
     devices.iter().find_map(|p| {
         p.capabilities.iter().find_map(|c| match c {
             DeviceCapability::Lighting(r) => r.descriptor.channels.iter().find_map(|channel| {
@@ -671,10 +580,12 @@ fn remove_confirm_modal(
     ) {
         crate::runtime::ipc::send(
             cmd,
-            halod_shared::commands::DaemonCommand::LightingRemoveSegment {
-                id: target.parent_id,
-                channel_id: target.channel_id,
-                device_id: target.child_id,
+            halod_shared::commands::DaemonCommand::Device {
+                device_id: target.parent_id,
+                op: DeviceOp::LightingRemoveSegment {
+                    channel_id: target.channel_id,
+                    segment_id: target.child_id.clone(),
+                },
             },
         );
     }
@@ -690,6 +601,7 @@ fn card_menu(
     cmd: &CommandTx,
     rename: &mut Option<Rename>,
     confirm_remove: &mut Option<ConfirmRemove>,
+    pending_disable: &mut Option<(DeviceId, String)>,
 ) {
     // Fix (not min) the width — a min-width menu here would grow every frame.
     ui.set_width(186.0);
@@ -711,16 +623,16 @@ fn card_menu(
             let bw = egui::vec2((inner_w - 6.0) / 2.0, 28.0);
             save |=
                 widgets::button(ui, &t!("home.save"), widgets::ButtonKind::Primary, bw).clicked();
-            cancel =
-                widgets::button(ui, &t!("home.cancel"), widgets::ButtonKind::Ghost, bw).clicked();
+            cancel = widgets::button(ui, &t!("home.cancel"), widgets::ButtonKind::Secondary, bw)
+                .clicked();
         });
         let trimmed = r.buf.trim().to_string();
         if save && !trimmed.is_empty() {
             crate::runtime::ipc::send(
                 cmd,
-                halod_shared::commands::DaemonCommand::SetDeviceName {
+                halod_shared::commands::DaemonCommand::Device {
                     device_id: d.id.clone(),
-                    name: trimmed,
+                    op: DeviceOp::SetDeviceName { name: trimmed },
                 },
             );
             *rename = None;
@@ -747,7 +659,8 @@ fn card_menu(
             if widgets::context_menu_item(ui, &t!("home.disable_device"), theme::OFFLINE_TEXT)
                 .clicked()
             {
-                set_vis(ui, cmd, &d.id, VisibilityState::Disabled);
+                *pending_disable = Some((d.id.clone(), d.name.clone()));
+                ui.close();
             }
         }
         VisibilityState::Hidden => {
@@ -757,7 +670,8 @@ fn card_menu(
             if widgets::context_menu_item(ui, &t!("home.disable_device"), theme::OFFLINE_TEXT)
                 .clicked()
             {
-                set_vis(ui, cmd, &d.id, VisibilityState::Disabled);
+                *pending_disable = Some((d.id.clone(), d.name.clone()));
+                ui.close();
             }
         }
         VisibilityState::Disabled => {
@@ -780,198 +694,65 @@ fn card_menu(
     }
 }
 
-fn set_vis(ui: &mut egui::Ui, cmd: &CommandTx, id: &str, state: VisibilityState) {
+fn set_vis(ui: &mut egui::Ui, cmd: &CommandTx, id: &DeviceId, state: VisibilityState) {
     crate::runtime::ipc::send(
         cmd,
-        halod_shared::commands::DaemonCommand::SetDeviceVisibility {
-            device_id: id.to_string(),
-            state,
+        halod_shared::commands::DaemonCommand::Device {
+            device_id: id.clone(),
+            op: DeviceOp::SetDeviceVisibility { state },
         },
     );
     ui.close();
 }
 
+fn device_counts(devices: &[WireDevice]) -> (usize, usize) {
+    let listed = devices.iter().filter(|d| model::listable(d));
+    let total = listed.clone().count();
+    let attention = listed
+        .filter(|d| !model::is_hidden(d) && !d.connected)
+        .count();
+    (total, attention)
+}
+
 fn header(ui: &mut egui::Ui, state: &TopicStore, home: &mut HomeUi) {
-    let total = state.devices.iter().filter(|d| model::listable(d)).count();
-    let online = state
-        .devices
-        .iter()
-        .filter(|d| model::listable(d) && d.connected)
-        .count();
-    let attention = total - online;
-    let hidden = state
-        .devices
-        .iter()
-        .filter(|d| model::listable(d) && model::is_hidden(d))
-        .count();
+    let (total, attention) = device_counts(&state.devices);
 
-    ui.horizontal(|ui| {
-        ui.vertical(|ui| {
-            let sub = if attention > 0 {
-                t!(
-                    "home.devices_connected_attention",
-                    online = online,
-                    total = total,
-                    attention = attention
-                )
-            } else {
-                t!("home.devices_connected", online = online, total = total)
-            };
-            ui.label(
-                egui::RichText::new(sub)
-                    .font(theme::body_lg())
-                    .color(theme::TEXT_MUT),
-            );
-        });
-
-        ui.with_layout(egui::Layout::right_to_left(egui::Align::Center), |ui| {
-            segmented(ui, &mut home.variant);
-            ui.add_space(theme::SPACE_5);
-            if hidden > 0 {
-                let label = if home.show_hidden {
-                    t!("home.hide_hidden")
-                } else {
-                    t!("home.show_hidden")
-                };
-                let clicked = widgets::pill(ui, &label, home.show_hidden);
-                crate::domain::tour::anchor(
-                    ui.ctx(),
-                    crate::domain::tour::AnchorId::HomeShowHidden,
-                    ui.min_rect(),
-                );
-                if clicked {
-                    home.show_hidden = !home.show_hidden;
-                }
-                ui.add_space(theme::SPACE_5);
-            }
-            let customizing = home.widgets.customizing();
-            let label = if customizing {
-                t!("home.customize_done")
-            } else {
-                t!("home.customize")
-            };
-            if widgets::pill(ui, &label, customizing) {
-                home.widgets.toggle(state);
-            }
-            ui.add_space(theme::SPACE_5);
-            search_box(ui, &mut home.search);
-        });
+    let sub = if matches!(
+        state.discovery.phase,
+        halod_shared::types::DiscoveryPhase::Discovering
+    ) {
+        t!("home.devices_found_so_far", total = total)
+    } else if attention > 0 {
+        t!(
+            "home.devices_count_attention",
+            total = total,
+            attention = attention
+        )
+    } else {
+        t!("home.devices_count", total = total)
+    };
+    widgets::page_title(ui, &t!("home.title"), &sub, |ui| {
+        let label = if home.widgets.customizing() {
+            t!("home.customize_done")
+        } else {
+            t!("home.customize")
+        };
+        if widgets::button(
+            ui,
+            &label,
+            widgets::ButtonKind::Secondary,
+            Vec2::new(0.0, 36.0),
+        )
+        .clicked()
+        {
+            home.widgets.toggle(state);
+        }
+        let resp = widgets::search_field(ui, &mut home.search, &t!("home.search_devices"), 280.0);
+        tour::anchor(ui.ctx(), AnchorId::HomeSearch, resp.rect);
     });
 }
 
-/// A rounded search field that filters the device list by name or vendor.
-fn search_box(ui: &mut egui::Ui, search: &mut String) {
-    let (rect, _) = ui.allocate_exact_size(Vec2::new(190.0, 33.0), Sense::hover());
-    crate::domain::tour::anchor(ui.ctx(), crate::domain::tour::AnchorId::HomeSearch, rect);
-    theme::paint_card_rect(ui.painter(), rect, theme::RADIUS_MD);
-    // Magnifier glyph.
-    let icon = Pos2::new(rect.left() + 13.0, rect.center().y);
-    ui.painter()
-        .circle_stroke(icon, 4.0, Stroke::new(1.3, theme::TEXT_FAINT));
-    ui.painter().line_segment(
-        [
-            Pos2::new(icon.x + 3.0, icon.y + 3.0),
-            Pos2::new(icon.x + 6.5, icon.y + 6.5),
-        ],
-        Stroke::new(1.3, theme::TEXT_FAINT),
-    );
-    let field = Rect::from_min_max(
-        Pos2::new(rect.left() + 24.0, rect.top()),
-        Pos2::new(rect.right() - 8.0, rect.bottom()),
-    );
-    let mut field_ui = ui.new_child(
-        egui::UiBuilder::new()
-            .max_rect(field)
-            .layout(egui::Layout::left_to_right(egui::Align::Center)),
-    );
-    field_ui.add(
-        egui::TextEdit::singleline(search)
-            .frame(egui::Frame::NONE)
-            .desired_width(f32::INFINITY)
-            .font(theme::body_md())
-            .hint_text(t!("home.search_devices")),
-    );
-}
-
-/// Grid/List segmented control, drawn on a single allocated rect so it never
-/// wraps regardless of the surrounding layout.
-fn segmented(ui: &mut egui::Ui, variant: &mut Variant) {
-    let (rect, _) = ui.allocate_exact_size(Vec2::new(108.0, 33.0), Sense::hover());
-    let p = ui.painter();
-    theme::paint_card_rect(p, rect, theme::RADIUS_MD);
-    for (i, (v, label)) in [
-        (Variant::Grid, t!("home.grid")),
-        (Variant::List, t!("home.list")),
-    ]
-    .into_iter()
-    .enumerate()
-    {
-        let chip = Rect::from_min_size(
-            Pos2::new(rect.left() + 4.0 + i as f32 * 50.0, rect.top() + 4.0),
-            Vec2::new(48.0, 25.0),
-        );
-        let active = *variant == v;
-        let resp = ui.interact(chip, ui.id().with(("seg", i)), Sense::click());
-        if active {
-            ui.painter()
-                .rect_filled(chip, theme::RADIUS_SM, theme::CYAN);
-        } else {
-            let t =
-                ui.ctx()
-                    .animate_bool_with_time(ui.id().with(("seg_h", i)), resp.hovered(), 0.12);
-            if t > 0.001 {
-                ui.painter()
-                    .rect_filled(chip, theme::RADIUS_SM, a(Color32::WHITE, 0.05 * t));
-            }
-            if resp.hovered() {
-                ui.ctx().set_cursor_icon(egui::CursorIcon::PointingHand);
-            }
-        }
-        ui.painter().text(
-            chip.center(),
-            Align2::CENTER_CENTER,
-            label,
-            if active {
-                theme::subhead()
-            } else {
-                theme::body_md()
-            },
-            if active {
-                theme::hex(0x0a0d13)
-            } else {
-                theme::TEXT_DIM
-            },
-        );
-        if resp.clicked() {
-            *variant = v;
-        }
-    }
-}
-
-/// Signed change across the history window, suffixed with the sensor's unit —
-/// e.g. `"+3°C"`, `"-1%"`, `"+150MHz"`.
-fn trend_label(samples: &[f32], unit: &str) -> Option<String> {
-    if samples.len() < 2 {
-        return None;
-    }
-    let delta = (samples[samples.len() - 1] - samples[0]).round() as i32;
-    Some(match delta {
-        0 => format!("0{unit}"),
-        d if d > 0 => format!("+{d}{unit}"),
-        d => format!("{d}{unit}"),
-    })
-}
-
-/// Draw a filled sparkline across the bottom band of `card`.
-pub(crate) fn sparkline(p: &egui::Painter, card: Rect, samples: &[f32], color: Color32) {
-    let pts = sparkline_points(card, samples);
-    if pts.len() < 2 {
-        return;
-    }
-    widgets::fill_under_line(p, &pts, card.bottom(), a(color, 0.13));
-    p.add(egui::Shape::line(pts, Stroke::new(1.5, color)));
-}
-
+/// The change across the history window in words, e.g. `"Up 4 °C"`.
 /// Min/max of `samples`, the auto-scale range the sparkline band maps onto.
 fn sparkline_scale(samples: &[f32]) -> (f32, f32) {
     samples
@@ -999,19 +780,6 @@ pub(crate) fn sparkline_points(card: Rect, samples: &[f32]) -> Vec<Pos2> {
         .collect()
 }
 
-/// The y coordinate `value` maps to under `samples`' auto-scale, using the
-/// same band mapping as [`sparkline_points`]. Lets a caller draw a reference
-/// line (e.g. a declared ceiling) consistent with the plotted series.
-/// Clamped to the band so a reference far outside the current sample range
-/// (e.g. a ceiling well above recent usage) still draws at the band's edge
-/// instead of off-screen.
-pub(crate) fn sparkline_reference_y(card: Rect, value: f32, samples: &[f32]) -> f32 {
-    let (mn, mx) = sparkline_scale(samples);
-    let band = 50.0;
-    let top = card.bottom() - band;
-    sparkline_value_y(top, band, value, mn, mx).clamp(top, card.bottom())
-}
-
 fn sparkline_value_y(top: f32, band: f32, value: f32, mn: f32, mx: f32) -> f32 {
     let rng = (mx - mn).max(1.0);
     top + (band - 6.0) - ((value - mn) / rng) * (band - 14.0)
@@ -1024,26 +792,44 @@ fn grid(
     cmd: &CommandTx,
     rename: &mut Option<Rename>,
     confirm_remove: &mut Option<ConfirmRemove>,
+    pending_disable: &mut Option<(halod_shared::ids::DeviceId, String)>,
     conflict_resolve: &mut Option<Vec<ConflictGroup>>,
-    page: &mut crate::domain::state::Page,
+    page: &mut Page,
+    discovering: bool,
 ) {
     let avail = ui.available_width();
-    let cols = (((avail + GAP) / (236.0 + GAP)).floor() as usize).clamp(1, 4);
+    let cols = (((avail + GAP) / (300.0 + GAP)).floor() as usize).clamp(1, 3);
     let w = (avail - GAP * (cols - 1) as f32) / cols as f32;
-    let h = 178.0;
+    let row_h = |row: &[&WireDevice], partial: bool| {
+        let base = if partial || row.iter().any(|d| !model::metrics(d).is_empty()) {
+            138.0
+        } else {
+            68.0
+        };
+        if row.iter().any(|d| d.conflict.is_some()) {
+            base + CONFLICT_STRIP_GAP + CONFLICT_STRIP_H
+        } else {
+            base
+        }
+    };
 
     let mut anchored_a_card = false;
-    for row in devices.chunks(cols) {
+    ui.spacing_mut().item_spacing.y = 0.0;
+    let placeholders = if discovering {
+        cols - devices.len() % cols
+    } else {
+        0
+    };
+    let rows = (devices.len() + placeholders).div_ceil(cols);
+    for r in 0..rows {
+        let row = &devices[(r * cols).min(devices.len())..((r + 1) * cols).min(devices.len())];
+        let h = row_h(row, row.len() < cols);
         ui.horizontal(|ui| {
             ui.spacing_mut().item_spacing.x = GAP;
             for d in row {
                 let (rect, resp) = ui.allocate_exact_size(Vec2::new(w, h), Sense::click());
                 if !anchored_a_card {
-                    crate::domain::tour::anchor(
-                        ui.ctx(),
-                        crate::domain::tour::AnchorId::HomeDeviceCard,
-                        rect,
-                    );
+                    tour::anchor(ui.ctx(), AnchorId::HomeDeviceCard, rect);
                     anchored_a_card = true;
                 }
                 let conflict_clicked =
@@ -1055,68 +841,73 @@ fn grid(
                     && !conflict_clicked
                     && d.active_state != VisibilityState::Disabled
                 {
-                    *page = crate::domain::state::Page::Device(d.id.clone());
+                    *page = Page::Device(d.id.clone());
                 }
-                resp.context_menu(|ui| card_menu(ui, d, all_devices, cmd, rename, confirm_remove));
+                resp.context_menu(|ui| {
+                    card_menu(
+                        ui,
+                        d,
+                        all_devices,
+                        cmd,
+                        rename,
+                        confirm_remove,
+                        pending_disable,
+                    )
+                });
+            }
+            for _ in row.len()..cols.min(devices.len() + placeholders - r * cols) {
+                let (rect, _) = ui.allocate_exact_size(Vec2::new(w, h), Sense::hover());
+                skeleton_card(ui.painter(), rect);
             }
         });
         ui.add_space(GAP);
     }
 }
 
-fn draw_card_glow(ui: &egui::Ui, rect: Rect, d: &WireDevice, color: Color32, t: f32) {
-    let p = ui.painter();
-    let glow_rx = egui::lerp(rect.width() * 0.32..=rect.width() * 0.52, t);
-    let glow_ry = egui::lerp(44.0..=80.0, t);
-    let glow_s = egui::lerp(0.088..=0.22, t);
-    let badge_r = egui::lerp(16.0..=30.0, t);
-    let badge_s = egui::lerp(0.154..=0.36, t);
-
-    p.rect_filled(rect, theme::RADIUS_XL, theme::CARD_BG);
-    let anchor = Pos2::new(rect.right(), rect.top());
-    let animating = t > 0.002;
-    let time = ui.input(|i| i.time) as f32;
-    {
-        let clip = p.with_clip_rect(rect);
-        theme::glow_ellipse(&clip, anchor, glow_rx, glow_ry, color, glow_s);
-        // On hover the glow comes alive: hue-shifted blobs drift around the
-        // top-right corner like an aurora.
-        if animating {
-            theme::aurora(
-                &clip,
-                anchor,
-                glow_rx * 0.72,
-                glow_ry * 0.92,
-                rect.width(),
-                color,
-                t,
-                time,
-            );
-        }
-    }
-
-    let chip = Rect::from_min_size(
-        Pos2::new(rect.left() + 16.0, rect.top() + 16.0),
-        Vec2::new(44.0, 32.0),
+/// A device card still loading during discovery.
+fn skeleton_card(p: &egui::Painter, rect: Rect) {
+    theme::paint_surface(p, rect, theme::RADIUS_MD, theme::CARD_BG, theme::BORDER);
+    let inner = rect.shrink(16.0);
+    p.rect_filled(
+        Rect::from_min_size(inner.min, Vec2::splat(36.0)),
+        theme::RADIUS_SM + 1.0,
+        theme::TILE_BG,
     );
-    theme::glow(p, chip.center(), badge_r, color, badge_s);
-    if animating {
-        let clip = p.with_clip_rect(chip.expand(badge_r));
-        theme::aurora(
-            &clip,
-            chip.center(),
-            badge_r * 0.9,
-            badge_r * 0.9,
-            badge_r * 1.6,
-            color,
-            t,
-            time,
-        );
-    }
-    widgets::device_badge(p, chip, d.device_type);
+    let x = inner.left() + 48.0;
+    let text_w = inner.right() - x;
+    p.rect_filled(
+        Rect::from_min_size(
+            Pos2::new(x, inner.top() + 6.0),
+            Vec2::new(text_w * 0.6, 12.0),
+        ),
+        3.0,
+        theme::ROW_ACTIVE,
+    );
+    p.rect_filled(
+        Rect::from_min_size(
+            Pos2::new(x, inner.top() + 24.0),
+            Vec2::new(text_w * 0.35, 10.0),
+        ),
+        3.0,
+        theme::RAISED_BG,
+    );
+    p.rect_filled(
+        Rect::from_min_max(
+            Pos2::new(inner.left(), inner.bottom() - widgets::STAT_STRIP_H),
+            inner.max,
+        ),
+        theme::RADIUS_SM,
+        theme::INNER_BG,
+    );
+}
 
-    if animating {
-        ui.ctx().request_repaint();
+fn device_status_tag(d: &WireDevice) -> (String, widgets::TagTone) {
+    if d.active_state == VisibilityState::Disabled {
+        (t!("home.disabled").into_owned(), widgets::TagTone::Neutral)
+    } else if d.connected {
+        (model::transport_label(d), widgets::TagTone::Neutral)
+    } else {
+        (t!("home.offline").into_owned(), widgets::TagTone::Danger)
     }
 }
 
@@ -1128,327 +919,173 @@ fn device_card(
     conflict_resolve: &mut Option<Vec<ConflictGroup>>,
     hovered: bool,
 ) -> bool {
-    let color = theme::device_color(d);
-    // Smoothly animate hover state in [0,1] for halo growth + lift.
     let t = ui
         .ctx()
-        .animate_bool_with_time(egui::Id::new(("card", &d.id)), hovered, 0.18);
-
-    // Hover lifts the card by up to 2px (design: translateY(-2px)).
-    let rect = rect.translate(Vec2::new(0.0, -2.0 * t));
-    // Offline, hidden and disabled devices are greyed out (via a scrim below).
-    let dimmed = !d.connected || d.active_state != VisibilityState::Visible;
-
-    draw_card_glow(ui, rect, d, color, t);
+        .animate_bool_with_time(egui::Id::unique(("card", &d.id)), hovered, 0.12);
     let p = ui.painter();
-
-    // Top-right: battery hint when present, otherwise a status dot + label.
-    let chip_cy = rect.top() + 22.0;
-    if d.connected {
-        if let Some((level, charging)) = model::battery(d) {
-            battery_hint(p, rect.right() - 16.0, chip_cy, level, charging);
-        } else {
-            // Non-battery devices show their transport (HID / SMBus / …).
-            status_chip(
-                p,
-                rect.right() - 16.0,
-                chip_cy,
-                theme::ONLINE,
-                &model::transport_label(d),
-                theme::TEXT,
-            );
-        }
-    } else {
-        status_chip(
-            p,
-            rect.right() - 16.0,
-            chip_cy,
-            theme::OFFLINE,
-            &t!("home.offline"),
-            theme::OFFLINE_TEXT,
-        );
-    }
-
-    // Metrics (bottom), then type + name above them.
-    let metrics = model::metrics(d);
-    let mini_h = 50.0;
-    let metrics_top = rect.bottom() - 16.0 - mini_h;
-    if !metrics.is_empty() {
-        metric_row(p, rect, metrics_top, mini_h, &metrics);
-    }
-    let type_y = if metrics.is_empty() {
-        rect.bottom() - 16.0 - 13.0
-    } else {
-        metrics_top - 13.0 - 5.0
-    };
-    p.text(
-        Pos2::new(rect.left() + 16.0, type_y),
-        Align2::LEFT_TOP,
-        model::type_label(d),
-        theme::body_sm(),
-        theme::TEXT_MUT,
+    p.rect_filled(rect, theme::RADIUS_MD, theme::CARD_BG);
+    p.rect_stroke(
+        rect,
+        theme::RADIUS_MD,
+        Stroke::new(
+            1.0,
+            theme::lerp_color(theme::BORDER, theme::BORDER_INNER, t),
+        ),
+        egui::StrokeKind::Inside,
     );
-    let name_font = theme::heading();
-    let display_name = ellipsize(p, &d.name, &name_font, rect.width() - 32.0);
+
+    let inner = rect.shrink(16.0);
+    let tile = Rect::from_min_size(inner.min, Vec2::splat(36.0));
+    p.rect_filled(tile, theme::RADIUS_SM + 1.0, theme::TILE_BG);
+    widgets::device_badge(p, tile, d.device_type);
+
+    let (status, tone) = device_status_tag(d);
+    let tag_rect = widgets::paint_tag(p, Pos2::new(inner.right(), tile.center().y), &status, tone);
+
+    let text_left = tile.right() + 12.0;
+    let text_w = (tag_rect.left() - 8.0 - text_left).max(20.0);
+    let name_font = theme::medium(14.0);
     p.text(
-        Pos2::new(rect.left() + 16.0, type_y - 6.0 - 16.0),
-        Align2::LEFT_BOTTOM,
-        display_name,
+        Pos2::new(text_left, tile.top() + 1.0),
+        Align2::LEFT_TOP,
+        ellipsize(p, &d.name, &name_font, text_w),
         name_font,
         theme::TEXT,
     );
+    p.text(
+        Pos2::new(text_left, tile.bottom() - 1.0),
+        Align2::LEFT_BOTTOM,
+        model::type_label(d),
+        theme::body_sm(),
+        theme::TEXT_DIM,
+    );
 
-    // Grey out hidden/disabled/offline devices with a uniform scrim.
-    if dimmed {
-        p.rect_filled(rect, theme::RADIUS_XL, a(theme::MAIN_BG, 0.5));
+    let metrics = model::metrics(d);
+    if !metrics.is_empty() {
+        let strip = Rect::from_min_size(
+            Pos2::new(inner.left(), tile.bottom() + 14.0),
+            Vec2::new(inner.width(), widgets::STAT_STRIP_H),
+        );
+        let items: Vec<(&str, &str)> = metrics
+            .iter()
+            .map(|m| (m.label.as_str(), m.value.as_str()))
+            .collect();
+        widgets::paint_stat_strip(p, strip, &items);
     }
 
-    // Restore the rounded silhouette (the clipped glow filled the corners),
-    // then stroke the border — accent on hover, animated.
-    theme::round_corners(p, rect, 14.0, theme::MAIN_BG);
-    let border = theme::lerp_color(theme::BORDER, a(color, 0.55), t);
-    p.rect_stroke(
-        rect,
-        theme::RADIUS_XL,
-        Stroke::new(1.0, border),
-        egui::StrokeKind::Middle,
-    );
-    conflict_control(ui, rect, d, all_devices, conflict_resolve)
+    if !d.connected || d.active_state != VisibilityState::Visible {
+        p.rect_filled(rect, theme::RADIUS_MD, a(theme::MAIN_BG, 0.5));
+    }
+    conflict_control(ui, inner, d, all_devices, conflict_resolve)
 }
 
 fn conflict_control(
     ui: &mut egui::Ui,
-    rect: Rect,
+    inner: Rect,
     d: &WireDevice,
     all_devices: &[WireDevice],
     conflict_resolve: &mut Option<Vec<ConflictGroup>>,
 ) -> bool {
+    use halod_shared::types::ConflictConfidence;
     let Some(conflict) = model::conflict_presentation(d, all_devices) else {
         return false;
     };
-    let label = if conflict.is_recommended {
-        t!("home.conflict_recommended").into_owned()
-    } else if conflict.confidence == halod_shared::types::ConflictConfidence::Confirmed {
-        t!("home.conflict_confirmed").into_owned()
+    let peers = conflict.peer_names.join(", ");
+    let (label, action, fill, border, ink, action_ink) = if conflict.is_recommended {
+        (
+            t!("home.conflict_recommended"),
+            t!("home.conflict_review"),
+            theme::OK_FILL,
+            theme::OK_BORDER,
+            theme::ONLINE_TEXT,
+            theme::ONLINE_TEXT,
+        )
+    } else if conflict.confidence == ConflictConfidence::Confirmed {
+        (
+            t!("home.conflict_duplicate_of", name = peers),
+            t!("home.conflict_resolve"),
+            a(theme::STAT_AMBER, 0.09),
+            a(theme::STAT_AMBER, 0.34),
+            theme::WARN_TEXT,
+            theme::STAT_AMBER,
+        )
     } else {
-        t!("home.conflict_possible").into_owned()
+        (
+            t!("home.conflict_possibly", name = peers),
+            t!("home.conflict_check"),
+            theme::INNER_BG,
+            theme::BORDER_STRONG,
+            theme::TEXT_SOFT,
+            theme::LINK,
+        )
     };
-    let y = rect.top() + 43.0;
-    let chip = Rect::from_min_size(
-        Pos2::new(rect.right() - 106.0, y - 9.0),
-        Vec2::new(96.0, 18.0),
+
+    let strip = Rect::from_min_max(
+        Pos2::new(inner.left(), inner.bottom() - CONFLICT_STRIP_H),
+        inner.max,
     );
-    let response = ui.interact(chip, egui::Id::new(("conflict", &d.id)), Sense::click());
-    let color = if conflict.confidence == halod_shared::types::ConflictConfidence::Confirmed {
-        theme::OFFLINE_TEXT
+    let response = ui.interact(strip, egui::Id::unique(("conflict", &d.id)), Sense::click());
+    let hover = ui
+        .ctx()
+        .animate_bool_with_time(response.id, response.hovered(), 0.12);
+    let p = ui.painter();
+    p.rect_filled(strip, theme::RADIUS_SM, fill);
+    p.rect_stroke(
+        strip,
+        theme::RADIUS_SM,
+        Stroke::new(1.0, theme::lerp_color(border, action_ink, hover * 0.5)),
+        egui::StrokeKind::Inside,
+    );
+
+    let icon = Rect::from_center_size(
+        Pos2::new(strip.left() + 17.0, strip.center().y),
+        Vec2::splat(13.0),
+    );
+    if conflict.is_recommended {
+        crate::ui::icons::draw(ui, icon, crate::ui::icons::Icon::Check, ink);
+    } else if conflict.confidence == ConflictConfidence::Confirmed {
+        warning_glyph(p, icon.center(), 13.0, ink);
     } else {
-        theme::TEXT_MUT
-    };
-    ui.painter().text(
-        chip.right_top(),
-        Align2::RIGHT_TOP,
-        &label,
-        theme::micro(),
-        color,
+        p.circle_stroke(icon.center(), 6.0, Stroke::new(1.3, ink));
+        p.text(
+            icon.center(),
+            Align2::CENTER_CENTER,
+            "?",
+            theme::micro(),
+            ink,
+        );
+    }
+
+    let action_galley = p.layout_no_wrap(action.into_owned(), theme::medium(12.0), action_ink);
+    let action_pos = Pos2::new(
+        strip.right() - 10.0 - action_galley.size().x,
+        strip.center().y - action_galley.size().y / 2.0,
     );
+    let text_left = icon.right() + 8.0;
+    let text_w = (action_pos.x - 10.0 - text_left).max(20.0);
+    let font = theme::body_sm();
+    p.text(
+        Pos2::new(text_left, strip.center().y),
+        Align2::LEFT_CENTER,
+        ellipsize(p, &label, &font, text_w),
+        font,
+        ink,
+    );
+    p.galley(action_pos, action_galley, action_ink);
+
+    if response.hovered() {
+        ui.ctx().set_cursor_icon(egui::CursorIcon::PointingHand);
+    }
     let clicked = response.clicked();
     response.on_hover_text(if conflict.is_recommended {
         t!("home.conflict_owner", name = conflict.recommended_name)
     } else {
-        t!("home.conflict_with", name = conflict.peer_names.join(", "))
+        t!("home.conflict_with", name = peers)
     });
     if clicked {
         *conflict_resolve = Some(conflict_groups(all_devices));
     }
     clicked
-}
-
-fn metric_row(p: &egui::Painter, rect: Rect, top: f32, h: f32, metrics: &[Metric]) {
-    let n = metrics.len();
-    let inner = rect.width() - 32.0;
-    let gap = 8.0;
-    let w = (inner - gap * (n as f32 - 1.0)) / n as f32;
-    for (i, m) in metrics.iter().enumerate() {
-        let x = rect.left() + 16.0 + (w + gap) * i as f32;
-        let mr = Rect::from_min_size(Pos2::new(x, top), Vec2::new(w, h));
-        p.rect_filled(mr, 8.0, theme::INNER_BG);
-        p.rect_stroke(
-            mr,
-            8.0,
-            Stroke::new(1.0, theme::BORDER_INNER),
-            egui::StrokeKind::Middle,
-        );
-        p.text(
-            Pos2::new(mr.left() + 9.0, mr.top() + 9.0),
-            Align2::LEFT_TOP,
-            &m.label,
-            theme::body(9.5),
-            theme::TEXT_MUT,
-        );
-        p.text(
-            Pos2::new(mr.left() + 9.0, mr.top() + 23.0),
-            Align2::LEFT_TOP,
-            &m.value,
-            theme::mono_semibold(12.5),
-            theme::TEXT_BRIGHT,
-        );
-    }
-}
-
-/// Status dot + label, right-aligned with its right edge at `right`.
-fn status_chip(p: &egui::Painter, right: f32, cy: f32, dot: Color32, text: &str, color: Color32) {
-    let st = p.text(
-        Pos2::new(right, cy),
-        Align2::RIGHT_CENTER,
-        text,
-        theme::caption(),
-        color,
-    );
-    p.circle_filled(Pos2::new(st.left() - 8.0, cy), 3.0, dot);
-}
-
-/// A small battery glyph (outlined cell + fill + terminal nub) followed by the
-/// percentage, right-aligned with its right edge at `right`.
-fn battery_hint(p: &egui::Painter, right: f32, cy: f32, level: u8, charging: bool) {
-    let color = theme::battery_color(level, charging);
-    let pct = format!("{level}%");
-    let txt = p.text(
-        Pos2::new(right, cy),
-        Align2::RIGHT_CENTER,
-        &pct,
-        theme::mono_semibold(11.0),
-        theme::hex(0xcfd6e4),
-    );
-
-    let body = Rect::from_min_size(
-        Pos2::new(txt.left() - 6.0 - 2.0 - 20.0, cy - 5.0),
-        Vec2::new(20.0, 10.0),
-    );
-    widgets::battery_glyph(p, body, level, color);
-}
-
-fn list(
-    ui: &mut egui::Ui,
-    devices: &[&WireDevice],
-    all_devices: &[WireDevice],
-    cmd: &CommandTx,
-    rename: &mut Option<Rename>,
-    confirm_remove: &mut Option<ConfirmRemove>,
-    conflict_resolve: &mut Option<Vec<ConflictGroup>>,
-    page: &mut crate::domain::state::Page,
-) {
-    egui::Frame::NONE
-        .fill(theme::CARD_BG)
-        .stroke(Stroke::new(1.0, theme::BORDER))
-        .corner_radius(theme::RADIUS_XL)
-        .show(ui, |ui| {
-            ui.set_width(ui.available_width());
-            for (i, d) in devices.iter().enumerate() {
-                let (rect, resp) =
-                    ui.allocate_exact_size(Vec2::new(ui.available_width(), 58.0), Sense::click());
-                if i == 0 {
-                    crate::domain::tour::anchor(
-                        ui.ctx(),
-                        crate::domain::tour::AnchorId::HomeDeviceCard,
-                        rect,
-                    );
-                }
-                let conflict_clicked = list_row(
-                    ui,
-                    rect,
-                    d,
-                    all_devices,
-                    conflict_resolve,
-                    i + 1 < devices.len(),
-                    resp.hovered(),
-                );
-                if resp.hovered() {
-                    ui.ctx().set_cursor_icon(egui::CursorIcon::PointingHand);
-                }
-                if resp.clicked()
-                    && !conflict_clicked
-                    && d.active_state != VisibilityState::Disabled
-                {
-                    *page = crate::domain::state::Page::Device(d.id.clone());
-                }
-                resp.context_menu(|ui| card_menu(ui, d, all_devices, cmd, rename, confirm_remove));
-            }
-        });
-}
-
-fn list_row(
-    ui: &mut egui::Ui,
-    rect: Rect,
-    d: &WireDevice,
-    all_devices: &[WireDevice],
-    conflict_resolve: &mut Option<Vec<ConflictGroup>>,
-    divider: bool,
-    hovered: bool,
-) -> bool {
-    let p = ui.painter();
-    if hovered {
-        p.rect_filled(rect, 0.0, a(Color32::WHITE, 0.025));
-    }
-    if divider {
-        p.line_segment(
-            [
-                Pos2::new(rect.left() + 18.0, rect.bottom()),
-                Pos2::new(rect.right() - 18.0, rect.bottom()),
-            ],
-            Stroke::new(1.0, theme::BORDER_SOFT),
-        );
-    }
-    let chip = Rect::from_min_size(
-        Pos2::new(rect.left() + 18.0, rect.center().y - 16.0),
-        Vec2::new(46.0, 32.0),
-    );
-    widgets::device_badge(p, chip, d.device_type);
-
-    p.text(
-        Pos2::new(chip.right() + 14.0, rect.center().y - 8.0),
-        Align2::LEFT_CENTER,
-        &d.name,
-        theme::heading(),
-        theme::TEXT,
-    );
-    p.text(
-        Pos2::new(chip.right() + 14.0, rect.center().y + 9.0),
-        Align2::LEFT_CENTER,
-        model::type_label(d),
-        theme::body_sm(),
-        theme::TEXT_MUT,
-    );
-
-    // Metrics, mid.
-    let mut mx = chip.right() + 220.0;
-    for m in model::metrics(d) {
-        p.text(
-            Pos2::new(mx, rect.center().y - 8.0),
-            Align2::LEFT_CENTER,
-            &m.label,
-            theme::caption(),
-            theme::TEXT_MUT,
-        );
-        p.text(
-            Pos2::new(mx, rect.center().y + 9.0),
-            Align2::LEFT_CENTER,
-            &m.value,
-            theme::mono_semibold(12.5),
-            theme::TEXT_BRIGHT,
-        );
-        mx += 110.0;
-    }
-
-    if !d.connected {
-        p.rect_filled(rect, 0.0, a(theme::MAIN_BG, 0.35));
-    }
-    conflict_control(
-        ui,
-        rect.translate(Vec2::new(0.0, 16.0)),
-        d,
-        all_devices,
-        conflict_resolve,
-    )
 }
 
 fn empty(ui: &mut egui::Ui, filtered: bool) {
@@ -1467,7 +1104,7 @@ mod tests {
     fn hub_with_links(links: Vec<halod_shared::types::LightingSegmentInfo>) -> WireDevice {
         use halod_shared::types::*;
         WireDevice {
-            id: "hub1".into(),
+            id: "hub1".parse().unwrap(),
             name: "Hub".into(),
             vendor: "v".into(),
             model: "m".into(),
@@ -1506,7 +1143,7 @@ mod tests {
     fn link(child: &str, locked: bool) -> halod_shared::types::LightingSegmentInfo {
         use halod_shared::types::*;
         LightingSegmentInfo {
-            device_id: child.into(),
+            device_id: child.parse().unwrap(),
             channel_id: "lighting".into(),
             name: "Strip".into(),
             topology: ZoneTopology::Linear,
@@ -1517,11 +1154,24 @@ mod tests {
     }
 
     #[test]
+    fn a_disabled_device_is_tagged_disabled_not_offline() {
+        let mut d = WireDevice {
+            connected: false,
+            active_state: VisibilityState::Disabled,
+            ..Default::default()
+        };
+        assert_eq!(device_status_tag(&d).0, t!("home.disabled"));
+        d.active_state = VisibilityState::Visible;
+        assert_eq!(device_status_tag(&d).0, t!("home.offline"));
+        assert_eq!(device_status_tag(&d).1, widgets::TagTone::Danger);
+    }
+
+    #[test]
     fn chain_parent_finds_unlocked_link_parent_and_channel() {
         let devices = vec![hub_with_links(vec![link("child1", false)])];
         assert_eq!(
-            chain_parent(&devices, "child1"),
-            Some(("hub1".into(), "h1".into()))
+            chain_parent(&devices, &"child1".parse().unwrap()),
+            Some(("hub1".parse().unwrap(), "h1".into()))
         );
     }
 
@@ -1529,9 +1179,9 @@ mod tests {
     fn chain_parent_ignores_locked_and_unknown_children() {
         let devices = vec![hub_with_links(vec![link("child1", true)])];
         // Hardware-detected (locked) links are not removable.
-        assert_eq!(chain_parent(&devices, "child1"), None);
+        assert_eq!(chain_parent(&devices, &"child1".parse().unwrap()), None);
         // A device that is nobody's child yields nothing.
-        assert_eq!(chain_parent(&devices, "stranger"), None);
+        assert_eq!(chain_parent(&devices, &"stranger".parse().unwrap()), None);
     }
 
     fn group(ids: &[(&str, &str)], recommended: &str) -> ConflictGroup {
@@ -1539,14 +1189,13 @@ mod tests {
             devices: ids
                 .iter()
                 .map(|(id, name)| ConflictChoiceDevice {
-                    id: (*id).into(),
+                    id: (*id).parse().unwrap(),
                     name: (*name).into(),
-                    device_type: DeviceType::Mouse,
                     source: ConflictDeviceSource::Builtin,
                 })
                 .collect(),
-            recommended_id: recommended.into(),
-            pick: recommended.into(),
+            recommended_id: recommended.parse().unwrap(),
+            pick: recommended.parse().unwrap(),
         }
     }
 
@@ -1554,11 +1203,11 @@ mod tests {
     fn dev_with_conflict(id: &str, peers: &[&str], recommended: &str) -> WireDevice {
         use halod_shared::types::*;
         let mut d = hub_with_links(vec![]);
-        d.id = id.into();
+        d.id = id.parse().unwrap();
         d.name = id.to_uppercase();
         d.conflict = Some(DeviceConflictSummary {
-            peer_ids: peers.iter().map(|p| (*p).to_string()).collect(),
-            recommended_id: recommended.into(),
+            peer_ids: peers.iter().map(|p| (*p).parse().unwrap()).collect(),
+            recommended_id: recommended.parse().unwrap(),
             confidence: ConflictConfidence::Confirmed,
             participants: vec![],
         });
@@ -1571,8 +1220,28 @@ mod tests {
             &[("builtin", "Built-in host device"), ("openrgb", "OpenRGB")],
             "builtin",
         );
-        assert_eq!(ids_to_disable(&group, "builtin"), vec!["openrgb"]);
-        assert_eq!(ids_to_disable(&group, "openrgb"), vec!["builtin"]);
+        assert_eq!(
+            ids_to_disable(&group, &"builtin".parse().unwrap()),
+            vec!["openrgb"]
+        );
+        assert_eq!(
+            ids_to_disable(&group, &"openrgb".parse().unwrap()),
+            vec!["builtin"]
+        );
+    }
+
+    #[test]
+    fn hidden_and_disabled_devices_never_need_attention() {
+        let mut devices: Vec<WireDevice> = ["a", "b", "c", "d"]
+            .iter()
+            .map(|id| dev_with_conflict(id, &[], id))
+            .collect();
+        for d in &mut devices[1..] {
+            d.connected = false;
+        }
+        devices[2].active_state = VisibilityState::Hidden;
+        devices[3].active_state = VisibilityState::Disabled;
+        assert_eq!(device_counts(&devices), (4, 1));
     }
 
     #[test]
@@ -1598,34 +1267,11 @@ mod tests {
     fn disables_for_keeps_each_groups_pick_and_disables_the_rest() {
         let groups = vec![group(&[("a", "A"), ("b", "B")], "a"), {
             let mut g = group(&[("c", "C"), ("d", "D")], "c");
-            g.pick = "d".into(); // user overrode the recommendation here
+            g.pick = "d".parse().unwrap(); // user overrode the recommendation here
             g
         }];
         // Group 1 keeps its recommended 'a'; group 2 keeps the overridden 'd'.
         assert_eq!(disables_for(&groups), vec!["b", "c"]);
-    }
-
-    #[test]
-    fn trend_label_needs_two_samples() {
-        assert_eq!(trend_label(&[], "°C"), None);
-        assert_eq!(trend_label(&[42.0], "°C"), None);
-    }
-
-    #[test]
-    fn trend_label_signs_and_rounding() {
-        // Uses first..last delta, rounded to the nearest integer, suffixed with unit.
-        assert_eq!(trend_label(&[20.0, 23.4], "°C").as_deref(), Some("+3°C"));
-        assert_eq!(trend_label(&[20.0, 23.6], "°C").as_deref(), Some("+4°C"));
-        assert_eq!(trend_label(&[25.0, 24.0], "°C").as_deref(), Some("-1°C"));
-        assert_eq!(trend_label(&[25.0, 25.2], "°C").as_deref(), Some("0°C"));
-        assert_eq!(trend_label(&[25.0, 25.0], "°C").as_deref(), Some("0°C"));
-        // Only endpoints matter, not the spread between them.
-        assert_eq!(
-            trend_label(&[20.0, 99.0, 22.0], "°C").as_deref(),
-            Some("+2°C")
-        );
-        // Non-temperature units carry their own suffix.
-        assert_eq!(trend_label(&[10.0, 15.0], "%").as_deref(), Some("+5%"));
     }
 
     #[test]
@@ -1655,25 +1301,5 @@ mod tests {
         let pts = sparkline_points(card, &[7.0, 7.0, 7.0]);
         assert_eq!(pts.len(), 3);
         assert!(pts.iter().all(|p| p.y.is_finite()));
-    }
-
-    #[test]
-    fn sparkline_reference_y_matches_plotted_point_at_same_value() {
-        let card = Rect::from_min_size(Pos2::new(10.0, 5.0), Vec2::new(120.0, 82.0));
-        let samples = [0.0, 10.0, 5.0, 20.0];
-        let pts = sparkline_points(card, &samples);
-        // The reference y for a value equal to an existing sample must land
-        // on that sample's own plotted y (same scale, same mapping).
-        let y = sparkline_reference_y(card, samples[1], &samples);
-        assert!((y - pts[1].y).abs() < 1e-3);
-    }
-
-    #[test]
-    fn sparkline_reference_y_above_max_stays_within_the_band() {
-        let card = Rect::from_min_size(Pos2::ZERO, Vec2::new(100.0, 82.0));
-        let samples = [1.0, 2.0, 3.0];
-        let y = sparkline_reference_y(card, 100.0, &samples);
-        assert!(y.is_finite());
-        assert!(y >= card.bottom() - 50.0 && y <= card.bottom());
     }
 }

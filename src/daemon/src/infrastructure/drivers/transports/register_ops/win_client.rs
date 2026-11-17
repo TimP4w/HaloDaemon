@@ -7,16 +7,19 @@
 //! started via the SCM (no UAC); a dev run with no service installed falls back
 //! to a single `runas` UAC prompt.
 
+use parking_lot::Mutex;
 use std::fs::{File, OpenOptions};
 use std::sync::atomic::{AtomicBool, Ordering};
-use std::sync::{Mutex, OnceLock};
-use std::time::{Duration, Instant};
+use std::sync::OnceLock;
+use std::time::Duration;
+use tokio::time::Instant;
 
 use anyhow::{anyhow, bail, Context, Result};
 
+use crate::infrastructure::platform::elevation;
 use halod_hwaccess::proto::{
-    self, CapabilityScope, Request, Response, BROKER_IDLE_GRACE_MS, BROKER_SERVICE_NAME,
-    MAX_OPERATIONS_PER_CAPABILITY, MAX_OPERATIONS_PER_SECOND, PIPE_NAME,
+    self, BrokerError, CapabilityScope, Request, Response, BROKER_IDLE_GRACE_MS,
+    BROKER_SERVICE_NAME, MAX_OPERATIONS_PER_CAPABILITY, MAX_OPERATIONS_PER_SECOND, PIPE_NAME,
 };
 use halod_hwaccess::smbus::{BusInfo, SmBusSyncOps};
 
@@ -109,30 +112,20 @@ fn try_start_broker_service(auth: &BrokerAuth) -> Result<()> {
 /// isn't installed, this is a dev run — spawn it via one UAC prompt.
 fn ensure_broker_running(auth: &BrokerAuth) {
     match try_start_broker_service(auth) {
-        Ok(()) => log::info!("[register_ops] started the {BROKER_SERVICE_NAME} service"),
+        Ok(()) => log::info!("started the {BROKER_SERVICE_NAME} service"),
         Err(e) => {
-            log::debug!(
-                "[register_ops] broker service unavailable ({e}); trying dev-run UAC spawn"
-            );
+            log::debug!("broker service unavailable ({e}); trying dev-run UAC spawn");
             if !BROKER_SPAWN_REQUESTED.swap(true, Ordering::SeqCst) {
-                match crate::infrastructure::platform::elevation::spawn_broker_elevated(
-                    &auth.token,
-                    &auth.sid,
-                    auth.session,
-                ) {
-                    Ok(()) => log::info!("[register_ops] requested elevated halod-broker (dev)"),
+                match elevation::spawn_broker_elevated(&auth.token, &auth.sid, auth.session) {
+                    Ok(()) => log::info!("requested elevated halod-broker (dev)"),
                     Err(se) => log::warn!(
-                        "[register_ops] could not launch halod-broker ({se}); \
+                        "could not launch halod-broker ({se}); \
                          register-bus devices will be unavailable"
                     ),
                 }
             }
         }
     }
-}
-
-fn is_stale_broker_token_error(error: &str) -> bool {
-    error.contains("invalid broker bootstrap token")
 }
 
 /// A demand-start service that is already running ignores new start arguments,
@@ -149,7 +142,7 @@ fn wait_for_stale_broker_exit() -> Result<()> {
         Ok(manager) => manager,
         Err(error) => {
             log::debug!(
-                "[register_ops] cannot query stale broker service ({error}); waiting for dev broker idle exit"
+                "cannot query stale broker service ({error}); waiting for dev broker idle exit"
             );
             std::thread::sleep(fallback);
             return Ok(());
@@ -159,7 +152,7 @@ fn wait_for_stale_broker_exit() -> Result<()> {
         Ok(service) => service,
         Err(error) => {
             log::debug!(
-                "[register_ops] cannot query stale broker service ({error}); waiting for dev broker idle exit"
+                "cannot query stale broker service ({error}); waiting for dev broker idle exit"
             );
             std::thread::sleep(fallback);
             return Ok(());
@@ -192,7 +185,7 @@ fn connect_or_spawn(scope: &CapabilityScope) -> Result<AuthorizedPipe> {
                     scope: scope.clone(),
                 };
                 if let Err(e) = proto::write_frame(&mut pipe, &request) {
-                    log::debug!("[register_ops] broker authentication send failed: {e}");
+                    log::debug!("broker authentication send failed: {e}");
                 } else {
                     match proto::read_frame(&mut pipe) {
                         Ok(Response::Authorized {
@@ -207,28 +200,25 @@ fn connect_or_spawn(scope: &CapabilityScope) -> Result<AuthorizedPipe> {
                             return Ok(AuthorizedPipe {
                                 pipe,
                                 capability,
-                                renew_at: Instant::now()
-                                    + Duration::from_millis(expires_in_ms / 2),
+                                renew_at: Instant::now() + Duration::from_millis(expires_in_ms / 2),
                             });
                         }
+                        Ok(Response::Error(BrokerError::InvalidBootstrapToken)) => {
+                            drop(pipe);
+                            log::info!(
+                                "found a broker from the previous daemon; waiting for it to exit"
+                            );
+                            wait_for_stale_broker_exit()?;
+                            ensure_broker_running(auth);
+                            continue;
+                        }
                         Ok(Response::Error(error)) => {
-                            if is_stale_broker_token_error(&error) {
-                                drop(pipe);
-                                log::info!(
-                                    "[register_ops] found a broker from the previous daemon; waiting for it to exit"
-                                );
-                                wait_for_stale_broker_exit()?;
-                                ensure_broker_running(auth);
-                                continue;
-                            }
                             bail!("halod-broker rejected this daemon's bootstrap token: {error}");
                         }
-                        Ok(other) => log::debug!(
-                            "[register_ops] broker authentication attempt {attempt} failed: {other:?}"
-                        ),
-                        Err(e) => log::debug!(
-                            "[register_ops] broker authentication receive failed: {e}"
-                        ),
+                        Ok(other) => {
+                            log::debug!("broker authentication attempt {attempt} failed: {other:?}")
+                        }
+                        Err(e) => log::debug!("broker authentication receive failed: {e}"),
                     }
                 }
             }
@@ -236,7 +226,7 @@ fn connect_or_spawn(scope: &CapabilityScope) -> Result<AuthorizedPipe> {
                 if attempt == 0 {
                     ensure_broker_running(auth);
                 }
-                log::debug!("[register_ops] broker connect attempt {attempt} failed: {e}");
+                log::debug!("broker connect attempt {attempt} failed: {e}");
             }
         }
         std::thread::sleep(CONNECT_BACKOFF);
@@ -356,7 +346,7 @@ impl BrokerBus {
             }
             Err(error) => {
                 log::debug!(
-                    "[register_ops] broker pipe could not be reauthenticated ({error:#}); \
+                    "broker pipe could not be reauthenticated ({error:#}); \
                      opening a new connection"
                 );
                 let (pipe, bus_id, supports_block) = connect_broker_bus(&self.scope, &self.info)?;
@@ -371,14 +361,14 @@ impl BrokerBus {
     fn request(&mut self, make_request: impl Fn(u32) -> Request) -> Result<Response> {
         let first = self.pipe.request(&make_request(self.bus_id));
         let reason = match first {
-            Ok(Response::Error(ref error)) if error == "capability expired" => {
-                format!("broker capability expired: {error}")
+            Ok(Response::Error(BrokerError::CapabilityExpired)) => {
+                "broker capability expired".to_owned()
             }
             Err(ref error) if error.is::<BrokerSessionLost>() => format!("{error:#}"),
             _ => return first,
         };
 
-        log::info!("[register_ops] SMBus broker session lost; reconnecting ({reason})");
+        log::info!("SMBus broker session lost; reconnecting ({reason})");
         self.reconnect()
             .with_context(|| format!("recover SMBus broker session after {reason}"))?;
         self.pipe
@@ -483,7 +473,7 @@ fn open_bus_on_pipe(pipe: &mut AuthorizedPipe, info: &BusInfo) -> Result<(u32, b
     let supports_block = match pipe.request(&Request::SupportsBlockWrite { bus: bus_id })? {
         Response::Bool(b) => b,
         other => {
-            log::debug!("[register_ops] supports_block_write reply {other:?}; assuming false");
+            log::debug!("supports_block_write reply {other:?}; assuming false");
             false
         }
     };
@@ -500,7 +490,7 @@ pub struct AmdSmnBrokerClient {
 
 impl AmdSmnBrokerClient {
     pub fn read_smn(&self, offset: u32) -> Result<u32> {
-        let mut pipe = self.pipe.lock().unwrap_or_else(|e| e.into_inner());
+        let mut pipe = self.pipe.lock();
         match pipe.request(&Request::ReadSmn {
             handle: self.handle,
             offset,
@@ -532,10 +522,7 @@ pub struct LpcIoBrokerClient {
 
 impl LpcIoBrokerClient {
     fn request(&self, request: Request) -> Result<Response> {
-        self.pipe
-            .lock()
-            .unwrap_or_else(|e| e.into_inner())
-            .request(&request)
+        self.pipe.lock().request(&request)
     }
 
     fn unit(&self, request: Request) -> Result<()> {
@@ -612,18 +599,4 @@ pub fn open_lpc_io() -> Result<LpcIoBrokerClient> {
         pipe: Mutex::new(pipe),
         handle,
     })
-}
-
-#[cfg(test)]
-mod tests {
-    use super::is_stale_broker_token_error;
-
-    #[test]
-    fn recognizes_only_the_stale_bootstrap_session_error() {
-        assert!(is_stale_broker_token_error(
-            "invalid broker bootstrap token"
-        ));
-        assert!(!is_stale_broker_token_error("invalid capability"));
-        assert!(!is_stale_broker_token_error("capability expired"));
-    }
 }

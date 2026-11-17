@@ -1,9 +1,10 @@
 // SPDX-License-Identifier: GPL-3.0-or-later
 //! Bounded, namespaced latest-value snapshots shared by plugin runtimes.
 
+use parking_lot::Mutex;
 use std::collections::{BTreeMap, HashMap, VecDeque};
 use std::hash::{DefaultHasher, Hash, Hasher};
-use std::sync::{Arc, Mutex};
+use std::sync::Arc;
 use std::time::{Duration, Instant, SystemTime, UNIX_EPOCH};
 
 use anyhow::{anyhow, bail, ensure, Context, Result};
@@ -13,6 +14,7 @@ use halod_shared::bus::{
     matches_prefixes, BusEvent, BusEventPayload, BusEventReplay, BusRecord, BusRecordStatus,
     BusSnapshot, BusTransaction, BusValue, EVENT_RING_CAPACITY,
 };
+use halod_shared::ids::DeviceId;
 use halod_shared::types::{Sensor, SensorType, SensorUnit};
 
 pub const MAX_PLUGIN_RECORD_BYTES: usize = 32 * 1024;
@@ -312,10 +314,8 @@ pub struct DataBus {
 }
 
 #[derive(Clone, Debug)]
-#[allow(dead_code)] // `revision` is only asserted by tests.
 pub struct DataChange {
     pub key: String,
-    pub revision: u64,
 }
 
 impl Default for DataBus {
@@ -339,7 +339,7 @@ impl DataBus {
         upserts: Vec<(String, BusValue)>,
         tombstones: Vec<String>,
     ) -> Result<BusTransaction> {
-        let mut inner = self.inner.lock().unwrap_or_else(|error| error.into_inner());
+        let mut inner = self.inner.lock();
         for (key, _) in &upserts {
             ensure!(!key.is_empty(), "state topic is empty");
             if let Some(record) = inner.state_records.get(key) {
@@ -390,7 +390,7 @@ impl DataBus {
     }
 
     pub fn state_snapshot(&self, prefixes: &[String]) -> BusSnapshot {
-        let inner = self.inner.lock().unwrap_or_else(|error| error.into_inner());
+        let inner = self.inner.lock();
         let mut records: Vec<_> = inner
             .state_records
             .iter()
@@ -413,7 +413,7 @@ impl DataBus {
         &self,
         keys: impl IntoIterator<Item = &'a str>,
     ) -> HashMap<String, BusValue> {
-        let inner = self.inner.lock().unwrap_or_else(|error| error.into_inner());
+        let inner = self.inner.lock();
         keys.into_iter()
             .filter_map(|key| {
                 inner
@@ -427,14 +427,13 @@ impl DataBus {
     pub fn state_revision(&self, key: &str) -> Option<u64> {
         self.inner
             .lock()
-            .unwrap_or_else(|error| error.into_inner())
             .state_records
             .get(key)
             .map(|record| record.revision)
     }
 
     pub fn publish_event(&self, payload: BusEventPayload) -> BusEvent {
-        let mut inner = self.inner.lock().unwrap_or_else(|error| error.into_inner());
+        let mut inner = self.inner.lock();
         inner.next_event_id = inner.next_event_id.wrapping_add(1).max(1);
         let event = BusEvent {
             id: inner.next_event_id,
@@ -450,7 +449,7 @@ impl DataBus {
     }
 
     pub fn replay_events(&self, last_event_id: Option<u64>) -> BusEventReplay {
-        let inner = self.inner.lock().unwrap_or_else(|error| error.into_inner());
+        let inner = self.inner.lock();
         BusEventReplay {
             session_id: inner.event_session_id,
             oldest_available_id: inner.events.front().map(|event| event.id),
@@ -473,8 +472,8 @@ impl DataBus {
 
     pub fn replace_host_sensors(
         &self,
-        mut sensors: Vec<(String, Sensor)>,
-    ) -> std::collections::HashSet<String> {
+        mut sensors: Vec<(DeviceId, Sensor)>,
+    ) -> std::collections::HashSet<DeviceId> {
         let mut changed_devices = std::collections::HashSet::new();
         sensors.sort_by(|(left_owner, left), (right_owner, right)| {
             left.id
@@ -492,8 +491,8 @@ impl DataBus {
                 && !expected.contains(&key)
             {
                 if let Some(DataValue::Map(old)) = self.read(&key).value {
-                    if let Some(device_id) = data_string(&old, "device_id") {
-                        changed_devices.insert(device_id.to_owned());
+                    if let Some(Ok(device_id)) = data_string(&old, "device_id").map(str::parse) {
+                        changed_devices.insert(device_id);
                     }
                 }
                 self.remove("host", &key);
@@ -504,7 +503,7 @@ impl DataBus {
         for (device_id, sensor) in sensors {
             let key = sensor_key(&sensor.id);
             let mut value = BTreeMap::new();
-            value.insert("device_id".into(), DataValue::String(device_id.clone()));
+            value.insert("device_id".into(), DataValue::String(device_id.to_string()));
             value.insert("id".into(), DataValue::String(sensor.id.clone()));
             value.insert("label".into(), DataValue::String(sensor.name.clone()));
             value.insert("value".into(), DataValue::Number(sensor.value));
@@ -523,7 +522,7 @@ impl DataBus {
             let _ = self.publish("host", &key, next, policy);
 
             let mut item = BTreeMap::new();
-            item.insert("device_id".into(), DataValue::String(device_id));
+            item.insert("device_id".into(), DataValue::String(device_id.to_string()));
             item.insert("id".into(), DataValue::String(sensor.id));
             item.insert("key".into(), DataValue::String(key));
             catalog.push(DataValue::Map(item));
@@ -544,10 +543,10 @@ impl DataBus {
             .collect()
     }
 
-    pub fn sensors_for_device(&self, device_id: &str) -> Vec<Sensor> {
+    pub fn sensors_for_device(&self, device_id: &DeviceId) -> Vec<Sensor> {
         self.sensor_entries()
             .into_iter()
-            .filter_map(|(owner, sensor)| (owner == device_id).then_some(sensor))
+            .filter_map(|(owner, sensor)| (owner == *device_id).then_some(sensor))
             .collect()
     }
 
@@ -590,7 +589,7 @@ impl DataBus {
     /// bounded `host.sensors.*` scope.
     pub fn scope_state(&self, scope: &str) -> (u64, bool) {
         let mut keys = {
-            let inner = self.inner.lock().unwrap_or_else(|error| error.into_inner());
+            let inner = self.inner.lock();
             inner
                 .records
                 .keys()
@@ -636,7 +635,7 @@ impl DataBus {
         );
         let value_bytes = value.validate()?;
         let now = Instant::now();
-        let mut inner = self.inner.lock().unwrap_or_else(|error| error.into_inner());
+        let mut inner = self.inner.lock();
         if let Some(record) = inner.records.get(key) {
             ensure!(
                 record.owner == owner,
@@ -755,7 +754,6 @@ impl DataBus {
         if notify {
             let _ = self.changes.send(DataChange {
                 key: key.to_owned(),
-                revision,
             });
         } else if let Some(delay) = schedule_after {
             self.schedule_coalesced_notification(key.to_owned(), delay);
@@ -769,7 +767,7 @@ impl DataBus {
             !key.is_empty() && key.len() <= MAX_RECORD_KEY_BYTES,
             "data record key is empty or exceeds {MAX_RECORD_KEY_BYTES} bytes"
         );
-        let mut inner = self.inner.lock().unwrap_or_else(|error| error.into_inner());
+        let mut inner = self.inner.lock();
         if let Some(record) = inner.records.get(key) {
             ensure!(
                 record.owner == owner,
@@ -816,7 +814,6 @@ impl DataBus {
         drop(inner);
         let _ = self.changes.send(DataChange {
             key: key.to_owned(),
-            revision,
         });
         Ok(revision)
     }
@@ -825,7 +822,6 @@ impl DataBus {
         let keys: Vec<String> = self
             .inner
             .lock()
-            .unwrap_or_else(|error| error.into_inner())
             .records
             .iter()
             .filter(|(_, record)| record.owner == owner)
@@ -837,8 +833,8 @@ impl DataBus {
     }
 
     fn remove(&self, owner: &str, key: &str) {
-        let revision = {
-            let mut inner = self.inner.lock().unwrap_or_else(|error| error.into_inner());
+        {
+            let mut inner = self.inner.lock();
             if inner
                 .records
                 .get(key)
@@ -859,11 +855,9 @@ impl DataBus {
                 }
             }
             inner.revision = inner.revision.wrapping_add(1).max(1);
-            inner.revision
-        };
+        }
         let _ = self.changes.send(DataChange {
             key: key.to_owned(),
-            revision,
         });
     }
 
@@ -875,8 +869,8 @@ impl DataBus {
         let changes = self.changes.clone();
         runtime.spawn(async move {
             tokio::time::sleep(delay).await;
-            let revision = {
-                let mut inner = inner.lock().unwrap_or_else(|error| error.into_inner());
+            {
+                let mut inner = inner.lock();
                 let Some(record) = inner.records.get_mut(&key) else {
                     return;
                 };
@@ -885,9 +879,8 @@ impl DataBus {
                 }
                 record.pending_notification = false;
                 record.last_notification = Some(Instant::now());
-                record.revision
-            };
-            let _ = changes.send(DataChange { key, revision });
+            }
+            let _ = changes.send(DataChange { key });
         });
     }
 
@@ -906,8 +899,8 @@ impl DataBus {
         let task_key = key.clone();
         let task = runtime.spawn(async move {
             tokio::time::sleep(delay).await;
-            let stale_revision = {
-                let mut inner = inner.lock().unwrap_or_else(|error| error.into_inner());
+            {
+                let mut inner = inner.lock();
                 let should_notify = inner.records.get(&task_key).is_some_and(|record| {
                     record.revision == revision
                         && record.value.is_some()
@@ -924,15 +917,11 @@ impl DataBus {
                     record.revision = stale_revision;
                     record.stale_task = None;
                 }
-                stale_revision
-            };
-            let _ = changes.send(DataChange {
-                key: task_key,
-                revision: stale_revision,
-            });
+            }
+            let _ = changes.send(DataChange { key: task_key });
         });
         let abort = task.abort_handle();
-        let mut inner = self.inner.lock().unwrap_or_else(|error| error.into_inner());
+        let mut inner = self.inner.lock();
         if let Some(record) = inner.records.get_mut(&key) {
             if record.revision == revision && record.published_instant == Some(published) {
                 record.stale_task = Some(abort);
@@ -943,7 +932,7 @@ impl DataBus {
     }
 
     pub fn read(&self, key: &str) -> DataSnapshot {
-        let inner = self.inner.lock().unwrap_or_else(|error| error.into_inner());
+        let inner = self.inner.lock();
         let Some(record) = inner.records.get(key) else {
             return DataSnapshot {
                 status: SnapshotStatus::Unavailable,
@@ -979,7 +968,6 @@ impl DataBus {
         let keys: Vec<String> = self
             .inner
             .lock()
-            .unwrap_or_else(|error| error.into_inner())
             .records
             .iter()
             .filter(|(_, record)| record.owner == owner)
@@ -1130,7 +1118,7 @@ pub fn publish_environment(bus: &DataBus) {
     );
     value.insert(
         "timezone".into(),
-        DataValue::String(chrono::Local::now().format("%Z").to_string()),
+        DataValue::String(jiff::Zoned::now().strftime("%:z").to_string()),
     );
     value.insert(
         "platform".into(),
@@ -1270,7 +1258,7 @@ mod tests {
             sensor_type: SensorType::Temperature,
         };
         let key = sensor_key(&sensor.id);
-        bus.replace_host_sensors(vec![("device".into(), sensor)]);
+        bus.replace_host_sensors(vec![("device".parse().unwrap(), sensor)]);
         assert_eq!(bus.read(&key).status, SnapshotStatus::Fresh);
         bus.replace_host_sensors(Vec::new());
         assert_eq!(bus.read(&key).status, SnapshotStatus::Unavailable);
@@ -1294,7 +1282,7 @@ mod tests {
         .unwrap();
         changes.recv().await.unwrap();
         // Keep Tokio's notification timer deterministic while advancing the
-        // std::time::Instant used by the publication rate limit.
+        // tokio::time::Instant used by the publication rate limit.
         tokio::time::pause();
         std::thread::sleep(Duration::from_millis(20));
         bus.publish(
@@ -1326,7 +1314,8 @@ mod tests {
             .await
             .unwrap()
             .unwrap();
-        assert_eq!(change.revision, final_revision);
+        assert_eq!(change.key, "telemetry.current");
+        assert_eq!(bus.read("telemetry.current").revision, final_revision);
     }
 
     #[tokio::test]
@@ -1349,7 +1338,8 @@ mod tests {
             .await
             .unwrap()
             .unwrap();
-        assert!(change.revision > initial_revision);
+        assert_eq!(change.key, "telemetry.current");
+        assert!(bus.read("telemetry.current").revision > initial_revision);
         assert_eq!(bus.read("telemetry.current").status, SnapshotStatus::Stale);
     }
 

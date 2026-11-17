@@ -1,12 +1,13 @@
 cooling:
+  rpm_duty: "rpm · %{duty}% duty"
+  now_summary: "%{sensor} %{temp} °C → %{duty}% duty"
   title: Cooling
-  subtitle: "Fan curves and pump control across %{count} devices"
+  subtitle: "%{channels} channels on %{devices} devices"
   empty_title: No cooling devices connected
   empty_subtitle: Connect a fan or pump controller to manage your cooling system
   curve_sensor: Curve sensor
-  curve_sensor_caps: CURVE SENSOR
+  sensor: Sensor
   no_sensor: No sensor
-  rpm_vs: "RPM vs %{sensor}"
   open_device: Open device
   fan_curve: Fan curve
   celsius_now: "°C now"
@@ -14,7 +15,6 @@ cooling:
   fan_duty: Fan duty
   rpm: "%{v} RPM"
   percent: "%{v}%"
-  preset: "Preset…"
   preset_name:
     balanced: Balanced
     silent: Silent
@@ -33,4 +33,5 @@ cooling:
   enable_channel: Enable channel
   disable_channel: Disable channel
   show_disabled: Show disabled
+  show_disabled_channels: Show disabled channels
   hide_disabled: Hide disabled

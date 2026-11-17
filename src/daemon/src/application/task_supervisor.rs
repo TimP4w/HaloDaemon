@@ -1,22 +1,19 @@
 // SPDX-License-Identifier: GPL-3.0-or-later
+use parking_lot::Mutex;
 use std::future::Future;
 use std::pin::Pin;
-use std::sync::{Arc, Mutex};
+use std::sync::Arc;
 use std::time::Duration;
+use tokio::time::Instant;
 
 use tokio::sync::watch;
 
+use crate::application::notifications;
 use crate::application::state::AppState;
+use crate::util::backoff::{respawn_wait, FailureStreak};
+use crate::util::task::TaskHandle;
 
-pub(crate) struct TaskHandle(pub tokio::task::JoinHandle<()>);
-
-impl Drop for TaskHandle {
-    fn drop(&mut self) {
-        // Tokio detaches a bare JoinHandle on drop. Supervised work must never
-        // outlive its manager, including when the manager itself is aborted.
-        self.0.abort();
-    }
-}
+const MAX_FAILURES: u32 = 3;
 
 type StartFuture = Pin<Box<dyn Future<Output = TaskHandle> + Send>>;
 type StartTask = Arc<dyn Fn() -> StartFuture + Send + Sync>;
@@ -78,7 +75,7 @@ impl TaskSupervisor {
         let manager_state = Arc::clone(&state);
         let app = Arc::clone(&self.app);
         let manager = tokio::spawn(async move {
-            let mut failures = 0u32;
+            let mut streak: Option<FailureStreak> = None;
             loop {
                 if *shutdown_rx.borrow() {
                     set_state(&manager_state, TaskState::Stopped);
@@ -121,11 +118,11 @@ impl TaskSupervisor {
                     Err(error) if error.is_panic() => format!("panicked: {error}"),
                     Err(error) => format!("was cancelled unexpectedly: {error}"),
                 };
-                failures += 1;
+                let streak = FailureStreak::record_in(&mut streak, Instant::now());
                 set_state(&manager_state, TaskState::Failed(reason.clone()));
                 log::error!("{name} {reason}");
                 if !failure_detail.is_empty() {
-                    crate::application::notifications::send(
+                    notifications::send(
                         &app,
                         halod_shared::types::NotificationCode::EngineStopped {
                             detail: failure_detail.to_owned(),
@@ -134,11 +131,11 @@ impl TaskSupervisor {
                     .await;
                 }
 
-                if failures >= 3 {
+                if streak.failures() >= MAX_FAILURES {
                     return;
                 }
                 set_state(&manager_state, TaskState::Restarting);
-                let delay = Duration::from_secs(1 << (failures - 1));
+                let delay = respawn_wait(streak);
                 tokio::select! {
                     _ = tokio::time::sleep(delay) => {}
                     changed = shutdown_rx.changed() => {
@@ -180,9 +177,7 @@ impl TaskSupervisor {
 
 fn set_state(state: &Mutex<TaskState>, next: TaskState) {
     log::trace!("task supervisor transition -> {}", next.summary());
-    *state
-        .lock()
-        .unwrap_or_else(|poisoned| poisoned.into_inner()) = next;
+    *state.lock() = next;
 }
 
 #[cfg(test)]
@@ -218,7 +213,34 @@ mod tests {
         }
         assert!(starts.load(Ordering::SeqCst) >= 2);
         supervisor.shutdown().await;
-        assert!(matches!(*state.lock().unwrap(), TaskState::Stopped));
+        assert!(matches!(*state.lock(), TaskState::Stopped));
+    }
+
+    #[tokio::test(start_paused = true)]
+    async fn a_task_that_keeps_failing_is_given_up_after_the_failure_cap() {
+        let app = Arc::new(AppState::new(crate::config::Config::default()));
+        let mut supervisor = TaskSupervisor::new(app);
+        let starts = Arc::new(AtomicUsize::new(0));
+        let starts_for_task = Arc::clone(&starts);
+        let state = supervisor.register(
+            "failing test",
+            "",
+            move || {
+                let starts = Arc::clone(&starts_for_task);
+                Box::pin(async move {
+                    starts.fetch_add(1, Ordering::SeqCst);
+                    TaskHandle(tokio::spawn(async {}))
+                })
+            },
+            || {},
+        );
+        for _ in 0..200 {
+            tokio::time::advance(Duration::from_secs(1)).await;
+            tokio::task::yield_now().await;
+        }
+        assert_eq!(starts.load(Ordering::SeqCst), MAX_FAILURES as usize);
+        assert!(matches!(*state.lock(), TaskState::Failed(_)));
+        supervisor.shutdown().await;
     }
 
     #[tokio::test]
@@ -242,6 +264,6 @@ mod tests {
         );
         tokio::task::yield_now().await;
         supervisor.shutdown().await;
-        assert!(matches!(*state.lock().unwrap(), TaskState::Stopped));
+        assert!(matches!(*state.lock(), TaskState::Stopped));
     }
 }

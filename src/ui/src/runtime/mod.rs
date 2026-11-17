@@ -3,6 +3,7 @@
 //! backend that pumps it. Both are OS/daemon boundary code, not domain logic
 //! or presentation.
 
+pub mod app_icons;
 pub mod ipc;
 pub mod single_instance;
 #[cfg(target_os = "linux")]

@@ -4,8 +4,11 @@
 //! `domain::device` so domain services depend on abstractions rather than drivers.
 
 use super::*;
+use crate::config::PlacedZone;
+use crate::domain::cooling::model::FanCurveRecord;
 use anyhow::Result;
 use async_trait::async_trait;
+use halod_shared::ids::DeviceId;
 use halod_shared::keyboard::{
     is_iso_language, KeyVariant, KeyboardLayoutSelection, KeyboardLayoutStatus,
 };
@@ -34,8 +37,8 @@ pub trait Controller: Send + Sync {
     /// `(added, gone)`. `Err` means the backing connection dropped. Default no-op.
     async fn resync_children(
         &self,
-        _existing: &std::collections::HashSet<String>,
-    ) -> Result<(Vec<Arc<dyn Device>>, Vec<String>)> {
+        _existing: &std::collections::HashSet<DeviceId>,
+    ) -> Result<(Vec<Arc<dyn Device>>, Vec<DeviceId>)> {
         Ok((vec![], vec![]))
     }
 
@@ -99,13 +102,13 @@ pub trait CoolingCapability: Send + Sync {
         Vec::new()
     }
 
-    fn curves(&self) -> HashMap<String, crate::domain::cooling::model::FanCurveRecord> {
+    fn curves(&self) -> HashMap<String, FanCurveRecord> {
         self.cooling_state().curves()
     }
-    fn curve(&self, channel_id: &str) -> Option<crate::domain::cooling::model::FanCurveRecord> {
+    fn curve(&self, channel_id: &str) -> Option<FanCurveRecord> {
         self.cooling_state().curve(channel_id)
     }
-    fn set_curve(&self, channel_id: String, curve: crate::domain::cooling::model::FanCurveRecord) {
+    fn set_curve(&self, channel_id: String, curve: FanCurveRecord) {
         self.cooling_state().set_curve(channel_id, curve);
     }
     fn clear_curve(&self, channel_id: &str) {
@@ -169,10 +172,10 @@ pub trait LightingCapability: Send + Sync {
         self.lighting_state().current_state()
     }
 
-    fn placed_channels(&self) -> Vec<crate::config::PlacedZone> {
+    fn placed_channels(&self) -> Vec<PlacedZone> {
         self.lighting_state().placed_channels()
     }
-    fn set_canvas_zones(&self, channels: Vec<crate::config::PlacedZone>) {
+    fn set_canvas_zones(&self, channels: Vec<PlacedZone>) {
         self.lighting_state().set_canvas_zones(channels);
     }
 
@@ -247,7 +250,7 @@ pub trait LightingCapability: Send + Sync {
         if let Some(s) = v.get("state") {
             if let Ok(state) = serde_json::from_value(s.clone()) {
                 if let Err(e) = self.apply(state).await {
-                    log::warn!("[rgb restore_state] apply failed: {e:#}");
+                    log::debug!("apply failed: {e:#}");
                     ok = false;
                 }
             }
@@ -284,7 +287,7 @@ pub trait RangeCapability: Send + Sync {
                 continue;
             }
             if let Err(e) = self.set_range(&key, value).await {
-                log::warn!("[range restore_state] set_range({key}) failed: {e:#}");
+                log::debug!("set_range({key}) failed: {e:#}");
                 ok = false;
             }
         }
@@ -311,7 +314,7 @@ pub trait ChoiceCapability: Send + Sync {
         let mut ok = true;
         for (key, selected) in self.choice_cache().load_pairs(v) {
             if let Err(e) = self.set_choice(&key, selected).await {
-                log::warn!("[choice restore_state] set_choice({key}) failed: {e:#}");
+                log::debug!("set_choice({key}) failed: {e:#}");
                 ok = false;
             }
         }
@@ -335,7 +338,7 @@ pub trait BooleanCapability: Send + Sync {
 
     async fn to_wire(&self) -> Option<DeviceCapability> {
         let booleans = self.get_booleans().await.unwrap_or_else(|e| {
-            log::trace!("[BooleanCapability::to_wire] {e}");
+            log::trace!("{e}");
             Default::default()
         });
         if booleans.is_empty() {
@@ -361,7 +364,7 @@ pub trait BooleanCapability: Send + Sync {
                     continue;
                 }
                 if let Err(e) = self.set_boolean(&key, value).await {
-                    log::warn!("[boolean restore_state] set_boolean({key}) failed: {e:#}");
+                    log::debug!("set_boolean({key}) failed: {e:#}");
                     ok = false;
                 }
             }
@@ -385,7 +388,7 @@ pub trait BatteryCapability: Send + Sync {
 
     async fn to_wire(&self) -> Option<DeviceCapability> {
         let batteries = self.get_batteries().await.unwrap_or_else(|e| {
-            log::debug!("[BatteryCapability::to_wire] {e}");
+            log::debug!("{e}");
             Default::default()
         });
         if batteries.is_empty() {
@@ -442,7 +445,7 @@ pub trait EqualizerCapability: Send + Sync {
         let mut ok = true;
         if let Some(preset) = v["preset"].as_u64() {
             if let Err(e) = self.set_eq_preset(preset as usize).await {
-                log::warn!("[eq restore_state] set_eq_preset failed: {e:#}");
+                log::debug!("set_eq_preset failed: {e:#}");
                 ok = false;
             }
         }
@@ -453,7 +456,7 @@ pub trait EqualizerCapability: Send + Sync {
                 .collect();
             if values.len() == 10 {
                 if let Err(e) = self.set_eq_bands(&values).await {
-                    log::warn!("[eq restore_state] set_eq_bands failed: {e:#}");
+                    log::debug!("set_eq_bands failed: {e:#}");
                     ok = false;
                 }
             }
@@ -469,7 +472,7 @@ pub trait SensorCapability: Send + Sync {
     async fn to_wire(&self) -> Option<DeviceCapability> {
         Some(DeviceCapability::Sensors(
             self.get_sensors().await.unwrap_or_else(|e| {
-                log::debug!("[SensorCapability::to_wire] {e}");
+                log::debug!("{e}");
                 Default::default()
             }),
         ))
@@ -663,11 +666,11 @@ pub trait LcdCapability: Send + Sync {
         let mut failure = None;
         if let Some(b) = v["brightness"].as_u64() {
             let b = u8::try_from(b).unwrap_or_else(|_| {
-                log::warn!("[lcd restore_state] brightness {b} out of range, clamping to 0");
+                log::warn!("brightness {b} out of range, clamping to 0");
                 0
             });
             if let Err(e) = self.set_brightness(b).await {
-                log::warn!("[lcd restore_state] set_brightness failed: {e:#}");
+                log::debug!("set_brightness failed: {e:#}");
                 failure = Some(format!("restoring brightness failed: {e}"));
             }
         }
@@ -677,13 +680,13 @@ pub trait LcdCapability: Send + Sync {
             let degrees = match rotation {
                 Ok(rotation) => Some(rotation.degrees()),
                 Err(error) => {
-                    log::warn!("[lcd restore_state] invalid rotation {value}: {error}");
+                    log::warn!("invalid rotation {value}: {error}");
                     None
                 }
             };
             if let Some(degrees) = degrees {
                 if let Err(e) = self.set_rotation(degrees).await {
-                    log::warn!("[lcd restore_state] set_rotation failed: {e:#}");
+                    log::debug!("set_rotation failed: {e:#}");
                     failure.get_or_insert_with(|| format!("restoring rotation failed: {e}"));
                 }
             }

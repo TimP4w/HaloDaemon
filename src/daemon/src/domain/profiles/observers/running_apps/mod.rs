@@ -1,5 +1,4 @@
 // SPDX-License-Identifier: GPL-3.0-or-later
-use crate::application::ipc::ClientHandle;
 use anyhow::Result;
 use std::collections::HashMap;
 
@@ -37,8 +36,8 @@ fn resolve_process_icons_uncached(process_names: &[String]) -> HashMap<String, S
     }
 }
 
-pub async fn list(client: ClientHandle) -> Result<()> {
-    let apps = tokio::task::spawn_blocking(|| {
+pub async fn scan() -> Result<Vec<halod_shared::types::RunningApp>> {
+    tokio::task::spawn_blocking(|| {
         #[cfg(target_os = "linux")]
         return linux::build_apps();
         #[cfg(target_os = "windows")]
@@ -47,12 +46,7 @@ pub async fn list(client: ClientHandle) -> Result<()> {
         Vec::<halod_shared::types::RunningApp>::new()
     })
     .await
-    .map_err(|error| anyhow::anyhow!("running-app scan panicked: {error}"))?;
-    client.send_json(&serde_json::json!({
-        "type": "running_apps_list",
-        "apps": apps,
-    }));
-    Ok(())
+    .map_err(|error| anyhow::anyhow!("running-app scan panicked: {error}"))
 }
 
 #[cfg(test)]

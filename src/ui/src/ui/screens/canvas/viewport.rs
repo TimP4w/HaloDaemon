@@ -2,24 +2,28 @@
 //! Canvas viewport: the interactive zone stage — drag/marquee/rotate/resize
 //! input handling, zone + LED rendering, and hit-testing.
 
+use halod_shared::commands::DeviceOp;
 use std::collections::HashSet;
 
 use crate::domain::topic_store::TopicStore;
 use egui::{Align2, Color32, Pos2, Rect, Sense, Stroke, Vec2};
-use halod_shared::types::{DeviceCapability, PlacedZone, SamplingMode, ZoneTopology};
+use halod_shared::types::{PlacedZone, SamplingMode, ZoneTopology};
 
 use crate::runtime::ipc::CommandTx;
 use crate::ui::components as widgets;
 use crate::ui::theme::{self, a};
 
 use super::geometry::{
-    apply_drag, body_move, fill_coords, led_bounds, led_screen_pos, letterbox, norm_to_screen,
-    point_in_zone, rounded_zone_outline_sc, screen_to_norm, zone_corners, zone_corners_sc,
-    zone_key, zones_in_marquee,
+    apply_drag, body_move, fill_coords, led_bounds, led_screen_pos, norm_to_screen, point_in_zone,
+    rounded_zone_outline_sc, screen_to_norm, zone_corners, zone_corners_sc, zone_key,
+    zones_in_marquee,
 };
-use super::rack::{instance_color, instance_indices, rgb_zone_descriptor, ring_zone_context_menu};
-use super::{CanvasUi, DragState, Handle, LedMode, MarqueeState, DEBOUNCE, HANDLE_HIT_R, HANDLE_R};
+use super::rack::{rgb_zone_descriptor, ring_zone_context_menu};
+use super::{CanvasUi, DragState, Handle, LedMode, MarqueeState, HANDLE_HIT_R, HANDLE_R};
 
+use crate::domain::tour;
+use crate::domain::tour::AnchorId;
+use halod_shared::ids::DeviceId;
 /// Screen position of the rotation handle — delegated to the shared widget helper.
 use widgets::rotation_handle_pos;
 
@@ -32,38 +36,23 @@ pub(super) fn canvas_view(
     time: f64,
     outer: Rect,
 ) {
-    crate::domain::tour::anchor(ui.ctx(), crate::domain::tour::AnchorId::CanvasStage, outer);
-    let canvas_rect = letterbox(outer, canvas_ui.canvas_aspect);
-    const ROUND: f32 = 16.0;
+    tour::anchor(ui.ctx(), AnchorId::CanvasStage, outer);
+    let canvas_rect = outer;
     let p = ui.painter();
-    p.rect_filled(canvas_rect, ROUND, theme::hex(0x070a0f));
-
-    let gp = p.with_clip_rect(canvas_rect);
-    let grid_col = a(Color32::WHITE, 0.04);
-    let step = 34.0_f32;
-    let mut x = canvas_rect.left() + (canvas_rect.left() % step + step) % step;
-    while x < canvas_rect.right() {
-        gp.line_segment(
-            [
-                Pos2::new(x, canvas_rect.top()),
-                Pos2::new(x, canvas_rect.bottom()),
-            ],
-            Stroke::new(1.0, grid_col),
-        );
+    p.rect_filled(outer, theme::RADIUS_LG, theme::STAGE_BG);
+    let gp = p.with_clip_rect(outer.shrink(1.0));
+    let grid = Stroke::new(1.0, theme::STAGE_GRID);
+    let step = 32.0_f32;
+    let mut x = outer.left() + step;
+    while x < outer.right() {
+        gp.vline(x, outer.y_range(), grid);
         x += step;
     }
-    let mut y = canvas_rect.top() + (canvas_rect.top() % step + step) % step;
-    while y < canvas_rect.bottom() {
-        gp.line_segment(
-            [
-                Pos2::new(canvas_rect.left(), y),
-                Pos2::new(canvas_rect.right(), y),
-            ],
-            Stroke::new(1.0, grid_col),
-        );
+    let mut y = outer.top() + step;
+    while y < outer.bottom() {
+        gp.hline(outer.x_range(), y, grid);
         y += step;
     }
-
     if canvas_ui.led_mode == LedMode::Frame {
         if let Some(tex) = &canvas_ui.texture {
             p.image(
@@ -74,17 +63,38 @@ pub(super) fn canvas_view(
             );
         }
     }
-    theme::round_corners(p, canvas_rect, ROUND, theme::MAIN_BG);
-
-    p.text(
-        Pos2::new(canvas_rect.left() + 14.0, canvas_rect.bottom() - 12.0),
-        Align2::LEFT_BOTTOM,
-        t!("canvas.drag_hint"),
-        theme::body(10.0),
-        theme::TEXT_FAINT,
+    theme::round_corners(p, outer, theme::RADIUS_LG, theme::MAIN_BG);
+    p.rect_stroke(
+        outer,
+        theme::RADIUS_LG,
+        Stroke::new(1.0, theme::BORDER),
+        egui::StrokeKind::Inside,
     );
 
-    let resp = ui.interact(outer, egui::Id::new("canvas_area"), Sense::click_and_drag());
+    let foot = outer.bottom() - 12.0;
+    p.text(
+        Pos2::new(outer.left() + 14.0, foot),
+        Align2::LEFT_BOTTOM,
+        t!("canvas.drag_hint"),
+        theme::body_sm(),
+        theme::TEXT_FAINT,
+    );
+    let (cw, ch) = canvas_ui.canvas_size;
+    if cw > 0 {
+        p.text(
+            Pos2::new(outer.right() - 14.0, foot),
+            Align2::RIGHT_BOTTOM,
+            format!("{cw} × {ch}"),
+            theme::body_sm(),
+            theme::TEXT_FAINT,
+        );
+    }
+
+    let resp = ui.interact(
+        outer,
+        egui::Id::unique("canvas_area"),
+        Sense::click_and_drag(),
+    );
     let ptr_norm = resp
         .interact_pointer_pos()
         .map(|pp| screen_to_norm(pp, canvas_rect));
@@ -183,7 +193,7 @@ pub(super) fn canvas_view(
                     canvas_ui
                         .drag_zones
                         .insert(zone_key(&u.device_id, &u.channel_id), u.clone());
-                    canvas_ui.pending.queue_move(&u, time + DEBOUNCE);
+                    super::queue_move(&mut canvas_ui.pending, &u, time);
                 }
             }
         } else if let Some(norm) = ptr_norm {
@@ -199,9 +209,7 @@ pub(super) fn canvas_view(
 
     if resp.drag_stopped() {
         if canvas_ui.drag.is_some() {
-            for (_, (c, _)) in canvas_ui.pending.move_zones.drain() {
-                crate::runtime::ipc::send(cmd, c);
-            }
+            super::flush_moves(&mut canvas_ui.pending, cmd, time);
             // Keep drag_zones as an optimistic override; prune_drag_zones drops
             // it once the daemon broadcast reflects the new position.
             canvas_ui.drag = None;
@@ -215,9 +223,9 @@ pub(super) fn canvas_view(
             if let Some((d, z)) = badge_hit(canvas_ui, state, norm, canvas_rect) {
                 crate::runtime::ipc::send(
                     cmd,
-                    halod_shared::commands::DaemonCommand::CanvasRemoveZone {
+                    halod_shared::commands::DaemonCommand::Device {
                         device_id: d,
-                        channel_id: z,
+                        op: DeviceOp::CanvasRemoveZone { channel_id: z },
                     },
                 );
                 canvas_ui.selected.clear();
@@ -264,9 +272,9 @@ pub(super) fn canvas_view(
             .canvas
             .placed_zones
             .iter()
-            .find(|p| &p.device_id == dev_id && &p.channel_id == channel_id);
+            .find(|p| p.device_id == dev_id && &p.channel_id == channel_id);
         if let Some(z) = placed {
-            egui::Area::new("canvas_zone_context_menu".into())
+            egui::Area::new(egui::Id::unique("canvas_zone_context_menu"))
                 .order(egui::Order::Foreground)
                 .pivot(egui::Align2::LEFT_TOP)
                 .default_pos(ui.ctx().pointer_latest_pos().unwrap_or_default())
@@ -282,7 +290,7 @@ pub(super) fn canvas_view(
         }
     }
 
-    mode_toggle(ui, canvas_rect, canvas_ui);
+    mode_toggle(ui, outer, canvas_ui);
 
     if let Some(mq) = &canvas_ui.marquee {
         let r = Rect::from_two_pos(
@@ -304,68 +312,29 @@ pub(super) fn canvas_view(
     }
 }
 
-// ── LED render-mode toggle ──────────────────────────────────────────────────────
-/// Per-segment width for the mode toggle: at least `MODE_SEG_MIN`, but widened so
-/// the widest label fits with padding (localized labels — "Fotogramma" — are far
-/// wider than the English "Frame" the minimum was sized for).
-fn mode_seg_width(max_label_w: f32) -> f32 {
-    const MODE_SEG_MIN: f32 = 60.0;
-    const MODE_SEG_PAD: f32 = 16.0;
-    MODE_SEG_MIN.max(max_label_w + MODE_SEG_PAD * 2.0)
-}
-
-fn mode_toggle(ui: &mut egui::Ui, canvas_rect: Rect, canvas_ui: &mut CanvasUi) {
-    const H: f32 = 26.0;
-    let font = theme::body_sm();
-    let segments = [
-        (t!("canvas.mode_frame"), LedMode::Frame),
-        (t!("canvas.mode_leds"), LedMode::Leds),
-    ];
-    let max_label_w = segments
+fn mode_toggle(ui: &mut egui::Ui, outer: Rect, canvas_ui: &mut CanvasUi) {
+    let modes = [LedMode::Frame, LedMode::Leds];
+    let labels = [t!("canvas.mode_frame"), t!("canvas.mode_leds")];
+    let refs: Vec<&str> = labels.iter().map(|l| l.as_ref()).collect();
+    let mut selected = modes
         .iter()
-        .map(|(label, _)| {
-            ui.painter()
-                .layout_no_wrap(label.to_string(), font.clone(), Color32::WHITE)
-                .size()
-                .x
-        })
-        .fold(0.0_f32, f32::max);
-    let seg_w = mode_seg_width(max_label_w);
-
-    let origin = Pos2::new(canvas_rect.left() + 12.0, canvas_rect.top() + 12.0);
-    let bg = Rect::from_min_size(origin, Vec2::new(seg_w * 2.0, H));
-    let p = ui.painter();
-    p.rect_filled(bg, 8.0, a(theme::hex(0x0b0e14), 0.85));
-    p.rect_stroke(
-        bg,
-        8.0,
-        Stroke::new(1.0, theme::BORDER),
-        egui::StrokeKind::Middle,
+        .position(|m| *m == canvas_ui.led_mode)
+        .unwrap_or(0);
+    let area = Rect::from_min_size(
+        outer.left_top() + Vec2::splat(14.0),
+        Vec2::new(outer.width() - 28.0, 40.0),
     );
-
-    for (i, (label, mode)) in segments.into_iter().enumerate() {
-        let seg = Rect::from_min_size(
-            Pos2::new(origin.x + i as f32 * seg_w, origin.y),
-            Vec2::new(seg_w, H),
-        );
-        let resp = ui.interact(seg, egui::Id::new(("led_mode", i)), Sense::click());
-        let active = canvas_ui.led_mode == mode;
-        if active {
-            p.rect_filled(seg.shrink(3.0), 6.0, a(theme::CYAN, 0.18));
-        } else if resp.hovered() {
-            p.rect_filled(seg.shrink(3.0), 6.0, a(Color32::WHITE, 0.05));
-            ui.ctx().set_cursor_icon(egui::CursorIcon::PointingHand);
-        }
-        p.text(
-            seg.center(),
-            Align2::CENTER_CENTER,
-            label,
-            font.clone(),
-            if active { theme::CYAN } else { theme::TEXT_DIM },
-        );
-        if resp.clicked() {
-            canvas_ui.led_mode = mode;
-        }
+    let mut child = ui.new_child(
+        egui::UiBuilder::new()
+            .max_rect(area)
+            .layout(egui::Layout::left_to_right(egui::Align::Min)),
+    );
+    let raised = widgets::SegmentedStyle {
+        raised: true,
+        md: false,
+    };
+    if widgets::segmented_styled(&mut child, &refs, &mut selected, false, raised) {
+        canvas_ui.led_mode = modes[selected];
     }
 }
 
@@ -376,7 +345,8 @@ fn draw_zones(p: &egui::Painter, state: &TopicStore, canvas_ui: &CanvasUi, canva
     } else {
         None
     };
-    let idx_map = instance_indices(state);
+    let focus = canvas_ui.selected_instance.as_deref();
+    let default_effect = state.lighting.canvas.default_effect.as_deref();
 
     for zone in &state.lighting.canvas.placed_zones {
         let key = zone_key(&zone.device_id, &zone.channel_id);
@@ -384,119 +354,75 @@ fn draw_zones(p: &egui::Painter, state: &TopicStore, canvas_ui: &CanvasUi, canva
         let selected = canvas_ui
             .selected
             .contains(&(zone.device_id.clone(), zone.channel_id.clone()));
+        let in_layer = focus.is_some_and(|f| zone.effect.as_deref().or(default_effect) == Some(f));
+        let dimmed = focus.is_some() && !in_layer;
+        let fade = |c: Color32| if dimmed { c.gamma_multiply(0.45) } else { c };
         let angle = display.rotation.to_radians();
         let (sin, cos) = angle.sin_cos();
         let corners = zone_corners_sc(display, canvas_rect, sin, cos);
 
-        let fill = if selected {
-            a(theme::CYAN, 0.18)
+        let outline = rounded_zone_outline_sc(display, canvas_rect, 6.0, sin, cos);
+        if canvas_ui.led_mode == LedMode::Leds {
+            p.add(egui::Shape::convex_polygon(
+                outline.clone(),
+                fade(theme::INNER_BG),
+                Stroke::NONE,
+            ));
+        }
+        let (border_w, border_col) = if selected || in_layer {
+            (2.0, theme::CYAN)
         } else {
-            a(Color32::WHITE, 0.07)
+            (1.0, fade(theme::BORDER_INNER))
         };
-        let border_col = if selected {
-            theme::CYAN
-        } else {
-            theme::hex(0x2e3a50)
-        };
-        let outline = rounded_zone_outline_sc(display, canvas_rect, 7.0, sin, cos);
-        p.add(egui::Shape::convex_polygon(
+        p.add(egui::Shape::closed_line(
             outline,
-            fill,
-            Stroke::new(1.5, border_col),
+            Stroke::new(border_w, border_col),
         ));
 
         let device = state.devices.iter().find(|d| d.id == zone.device_id);
-        if let Some(dev) = device {
-            let led_key = (zone.device_id.clone(), zone.channel_id.clone());
-            let zone_leds = canvas_ui.led_colors.get(&led_key);
-            for cap in &dev.capabilities {
-                if let DeviceCapability::Lighting(rgb) = cap {
-                    if let Some(rz) = rgb
-                        .descriptor
-                        .channels
-                        .iter()
-                        .find(|z| z.id == zone.channel_id)
-                    {
-                        let unrolled = display.sampling_mode == SamplingMode::Unrolled
-                            && matches!(
-                                rz.topology,
-                                ZoneTopology::Ring | ZoneTopology::Rings { .. }
-                            );
-                        let bounds = led_bounds(&rz.leds);
-                        for (i, led) in rz.leds.iter().enumerate() {
-                            let (fx, fy) = if unrolled {
-                                halod_shared::zone_transform::unrolled_led_pos(i, rz.leds.len())
-                            } else {
-                                // Normalize each LED against the cloud's own extent so
-                                // the outermost LEDs reach the box edge on every axis,
-                                // instead of inheriting whatever margin the descriptor
-                                // baked in.
-                                fill_coords(led, bounds)
-                            };
-                            let pos = led_screen_pos(fx, fy, display, canvas_rect);
-                            let col = match canvas_ui.led_mode {
-                                LedMode::Frame => a(theme::TEXT_BRIGHT, 0.9),
-                                LedMode::Leds => zone_leds
-                                    .and_then(|m| m.get(&led.id))
-                                    .map(|c| Color32::from_rgb(c.r, c.g, c.b))
-                                    .unwrap_or(a(theme::TEXT_FAINT, 0.6)),
-                            };
-                            if canvas_ui.led_mode == LedMode::Leds {
-                                // Glow halo so lit LEDs read clearly on the dark canvas.
-                                theme::glow(p, pos, 5.0, col, 0.5);
-                            }
-                            p.circle_filled(pos, 2.5, col);
-                        }
-                    }
+        if let Some(rz) = rgb_zone_descriptor(state, &zone.device_id, &zone.channel_id) {
+            let zone_leds = canvas_ui
+                .led_colors
+                .get(&(zone.device_id.clone(), zone.channel_id.clone()));
+            let unrolled = display.sampling_mode == SamplingMode::Unrolled
+                && matches!(rz.topology, ZoneTopology::Ring | ZoneTopology::Rings { .. });
+            let bounds = led_bounds(&rz.leds);
+            for (i, led) in rz.leds.iter().enumerate() {
+                let (fx, fy) = if unrolled {
+                    halod_shared::zone_transform::unrolled_led_pos(i, rz.leds.len())
+                } else {
+                    // Normalize against the cloud's own extent so the
+                    // outermost LEDs reach the box edge on every axis.
+                    fill_coords(led, bounds)
+                };
+                let pos = led_screen_pos(fx, fy, display, canvas_rect);
+                let sampled = zone_leds
+                    .and_then(|m| m.get(&led.id))
+                    .map(|c| Color32::from_rgb(c.r, c.g, c.b));
+                let dot = led_dot(canvas_ui.led_mode, sampled);
+                if dot.glow {
+                    theme::glow(p, pos, 5.0, fade(dot.color), 0.5);
                 }
+                p.circle_filled(pos, dot.radius, fade(dot.color));
             }
         }
 
         let dev_name = device.map(|d| d.name.as_str()).unwrap_or(&zone.device_id);
-        let anchor = Pos2::new(
-            corners[0].x + 5.0 * cos - 4.0 * sin,
-            corners[0].y + 5.0 * sin + 4.0 * cos,
-        );
+        let label_col = if in_layer {
+            theme::ACCENT_INK
+        } else {
+            fade(theme::TEXT_DIM)
+        };
         let galley = p.layout_no_wrap(
-            format!("{dev_name} / {}", zone.channel_id),
-            theme::semibold(8.5),
-            theme::TEXT_DIM,
+            format!(
+                "{dev_name} · {}",
+                super::rack::zone_name(state, &zone.device_id, &zone.channel_id)
+            ),
+            theme::body_sm(),
+            label_col,
         );
-        p.add(egui::epaint::TextShape::new(anchor, galley, theme::TEXT_DIM).with_angle(angle));
-
-        // Badge showing which effect instance this zone belongs to.
-        if let Some(inst) = zone
-            .effect
-            .as_deref()
-            .or(state.lighting.canvas.default_effect.as_deref())
-            .filter(|id| state.lighting.canvas.effects.contains_key(*id))
-        {
-            let col = idx_map
-                .get(inst)
-                .map(|&i| instance_color(i))
-                .unwrap_or(theme::hex(0x39414f));
-            let label = super::rack::instance_name(&state.lighting.canvas.effects, inst);
-            let bx = corners.iter().map(|c| c.x).fold(f32::MAX, f32::min);
-            let by = corners.iter().map(|c| c.y).fold(f32::MAX, f32::min);
-            let g = p.layout_no_wrap(label.to_string(), theme::semibold(8.5), col);
-            let rect =
-                Rect::from_min_size(Pos2::new(bx, by - 17.0), Vec2::new(g.size().x + 22.0, 14.0));
-            p.rect_filled(rect, theme::RADIUS_XS, a(theme::hex(0x0b0e14), 0.92));
-            p.rect_stroke(
-                rect,
-                theme::RADIUS_XS,
-                Stroke::new(1.0, a(col, 0.5)),
-                egui::StrokeKind::Middle,
-            );
-            p.circle_filled(Pos2::new(rect.left() + 7.0, rect.center().y), 3.0, col);
-            p.text(
-                Pos2::new(rect.left() + 14.0, rect.center().y),
-                Align2::LEFT_CENTER,
-                label,
-                theme::semibold(8.5),
-                col,
-            );
-        }
+        let (anchor, label_angle) = zone_label_placement(corners[0], corners[1], galley.size().y);
+        p.add(egui::epaint::TextShape::new(anchor, galley, label_col).with_angle(label_angle));
 
         if single_sel
             .as_ref()
@@ -530,7 +456,7 @@ fn hit_test(
     norm: Pos2,
     channels: &[PlacedZone],
     canvas_rect: Rect,
-) -> Option<(String, String, Handle)> {
+) -> Option<(DeviceId, String, Handle)> {
     let norm_screen = norm_to_screen(norm, canvas_rect);
     for zone in channels.iter().rev() {
         let corners = zone_corners(zone, canvas_rect);
@@ -572,7 +498,7 @@ fn badge_hit(
     state: &TopicStore,
     norm: Pos2,
     canvas_rect: Rect,
-) -> Option<(String, String)> {
+) -> Option<(DeviceId, String)> {
     if canvas_ui.selected.len() != 1 {
         return None;
     }
@@ -582,12 +508,45 @@ fn badge_hit(
         .canvas
         .placed_zones
         .iter()
-        .find(|p| &p.device_id == d && &p.channel_id == z)?;
+        .find(|p| p.device_id == d && &p.channel_id == z)?;
     let corners = zone_corners(zone, canvas_rect);
     let screen = norm_to_screen(norm, canvas_rect);
     widgets::remove_badge_rect(&corners)
         .contains(screen)
         .then(|| (d.clone(), z.clone()))
+}
+
+const ZONE_LABEL_GAP: f32 = 6.0;
+
+#[derive(Debug, Clone, Copy, PartialEq)]
+struct LedDot {
+    color: Color32,
+    radius: f32,
+    glow: bool,
+}
+
+fn led_dot(mode: LedMode, sampled: Option<Color32>) -> LedDot {
+    match mode {
+        LedMode::Frame => LedDot {
+            color: a(theme::TEXT_BRIGHT, 0.9),
+            radius: 2.0,
+            glow: false,
+        },
+        LedMode::Leds => LedDot {
+            color: sampled.unwrap_or(a(theme::TEXT_FAINT, 0.6)),
+            radius: 2.5,
+            glow: true,
+        },
+    }
+}
+
+fn zone_label_placement(top_left: Pos2, top_right: Pos2, label_height: f32) -> (Pos2, f32) {
+    let edge = (top_right - top_left).normalized();
+    let outward = Vec2::new(edge.y, -edge.x);
+    (
+        top_left + outward * (ZONE_LABEL_GAP + label_height),
+        edge.y.atan2(edge.x),
+    )
 }
 
 #[cfg(test)]
@@ -597,16 +556,34 @@ mod tests {
 
     const ROTATE_DIST: f32 = 20.0;
 
-    #[test]
-    fn mode_seg_width_holds_minimum_for_short_labels() {
-        // A short label ("Frame") stays at the 60px minimum.
-        assert_eq!(mode_seg_width(24.0), 60.0);
+    proptest::proptest! {
+        #[test]
+        fn a_zone_label_keeps_its_place_on_the_rotated_top_edge(rotation in 0.0f32..360.0, label_height in 8.0f32..24.0) {
+            let zone = PlacedZone { rotation, ..z(0.3, 0.4, 0.3, 0.1) };
+            let (sin, cos) = rotation.to_radians().sin_cos();
+            let corners = super::super::geometry::zone_corners_sc(&zone, r(), sin, cos);
+            let (anchor, angle) = zone_label_placement(corners[0], corners[1], label_height);
+            let along = Vec2::angled(angle);
+            let label_down = Vec2::new(-along.y, along.x);
+            let baseline_start = anchor + label_down * label_height;
+            proptest::prop_assert!((along - (corners[1] - corners[0]).normalized()).length() < 1e-3);
+            proptest::prop_assert!((baseline_start - corners[0]).dot(along).abs() < 1e-3);
+            proptest::prop_assert!(((corners[0] - baseline_start).dot(label_down) - ZONE_LABEL_GAP).abs() < 1e-3);
+            proptest::prop_assert!((corners[3] - corners[0]).dot(label_down) > 0.0);
+        }
     }
 
     #[test]
-    fn mode_seg_width_grows_for_a_wide_label() {
-        // A wide label ("Fotogramma") widens the segment to fit it plus padding.
-        assert_eq!(mode_seg_width(70.0), 70.0 + 16.0 * 2.0);
+    fn frame_view_draws_every_led_monochrome_and_led_view_shows_its_colour() {
+        let red = Color32::from_rgb(255, 0, 0);
+        let frame = led_dot(LedMode::Frame, Some(red));
+        assert_eq!(frame, led_dot(LedMode::Frame, None));
+        assert!(!frame.glow);
+        assert_ne!(frame.color, red);
+        let leds = led_dot(LedMode::Leds, Some(red));
+        assert_eq!(leds.color, red);
+        assert!(leds.glow);
+        assert_ne!(led_dot(LedMode::Leds, None).color, red);
     }
 
     #[test]

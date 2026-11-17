@@ -139,37 +139,57 @@ pub fn show(
     let Some(info) = debug else { return };
     let failing = failing(info);
 
+    let passed = info.dependencies.len() - failing.len();
     let mut confirmed = false;
-    let closed = widgets::dialog(
+    let closed = widgets::dialog_with_subtitle(
         ctx,
         "healthcheck",
         &t!("depcheck.title"),
-        560.0,
+        &t!("depcheck.intro"),
+        640.0,
         |ui| {
-            ui.label(
-                RichText::new(t!("depcheck.intro"))
-                    .font(theme::body_md())
-                    .color(theme::TEXT_MUT),
-            );
             ui.add_space(theme::SPACE_6);
             for dep in &failing {
                 issue_card(ui, dep);
                 ui.add_space(theme::SPACE_5);
             }
-            ui.add_space(theme::SPACE_1);
-            ui.checkbox(&mut st.dont_show_again, t!("depcheck.dont_show_again"));
+            if passed > 0 {
+                ui.label(
+                    RichText::new(t!("depcheck.passed", n = passed))
+                        .font(theme::body_md())
+                        .color(theme::TEXT_MUT),
+                );
+            }
         },
         |ui| {
+            let size = egui::vec2(0.0, 36.0);
             if widgets::button(
                 ui,
-                &t!("depcheck.got_it"),
+                &t!("depcheck.continue"),
                 widgets::ButtonKind::Primary,
-                egui::vec2(120.0, 34.0),
+                size,
             )
             .clicked()
             {
                 confirmed = true;
             }
+            if widgets::button(
+                ui,
+                &t!("depcheck.check_again"),
+                widgets::ButtonKind::Secondary,
+                size,
+            )
+            .clicked()
+            {
+                crate::runtime::ipc::send(cmd, halod_shared::commands::DaemonCommand::GetDebugInfo);
+            }
+            ui.with_layout(egui::Layout::left_to_right(egui::Align::Center), |ui| {
+                if widgets::checkbox(ui, &t!("depcheck.dont_show_again"), st.dont_show_again)
+                    .clicked()
+                {
+                    st.dont_show_again = !st.dont_show_again;
+                }
+            });
         },
     );
 
@@ -207,7 +227,7 @@ pub(crate) fn fix_text(dep: &DependencyStatus) -> String {
 }
 
 pub(crate) fn issue_card(ui: &mut egui::Ui, dep: &DependencyStatus) {
-    issue_card_with_surface(ui, dep, theme::CARD_BG, theme::BORDER);
+    issue_card_with_surface(ui, dep, theme::INNER_BG, theme::BORDER);
 }
 
 pub(crate) fn issue_card_with_surface(
@@ -216,49 +236,43 @@ pub(crate) fn issue_card_with_surface(
     fill: egui::Color32,
     border: egui::Color32,
 ) {
-    widgets::card_with_surface(ui, theme::PAD_CARD, fill, border, |ui| {
-        ui.set_width(ui.available_width());
-        egui::Sides::new().show(
-            ui,
-            |ui| {
-                ui.label(
-                    RichText::new(title_text(dep))
-                        .font(theme::heading())
-                        .color(theme::TEXT),
-                );
-            },
-            |ui| {
-                let (tag, color) = if dep.required {
-                    (t!("depcheck.required"), theme::OFFLINE)
-                } else {
-                    (t!("depcheck.optional"), theme::STAT_AMBER)
-                };
-                ui.label(RichText::new(tag).font(theme::caption()).color(color));
-            },
-        );
-        ui.add_space(theme::SPACE_3);
-        caption(ui, &t!("depcheck.impact"));
-        body_text(ui, &impact_text(dep));
-        ui.add_space(theme::SPACE_3);
-        caption(ui, &t!("depcheck.how_to_fix"));
-        body_text(ui, &fix_text(dep));
-    });
-}
-
-fn caption(ui: &mut egui::Ui, text: &str) {
-    ui.label(
-        RichText::new(text)
-            .font(theme::semibold(9.5))
-            .color(theme::TEXT_FAINT),
-    );
-}
-
-fn body_text(ui: &mut egui::Ui, text: &str) {
-    ui.label(
-        RichText::new(text)
-            .font(theme::body_sm())
-            .color(theme::TEXT_MUT),
-    );
+    egui::Frame::NONE
+        .fill(fill)
+        .stroke(egui::Stroke::new(1.0, border))
+        .corner_radius(theme::RADIUS_MD)
+        .inner_margin(egui::Margin::same(14))
+        .show(ui, |ui| {
+            ui.set_width(ui.available_width());
+            ui.spacing_mut().item_spacing.y = theme::SPACE_3;
+            egui::Sides::new().show(
+                ui,
+                |ui| {
+                    ui.label(
+                        RichText::new(title_text(dep))
+                            .font(theme::heading())
+                            .color(theme::TEXT),
+                    );
+                },
+                |ui| {
+                    let (tag, tone) = if dep.required {
+                        (t!("depcheck.required"), widgets::TagTone::Warn)
+                    } else {
+                        (t!("depcheck.optional"), widgets::TagTone::Neutral)
+                    };
+                    widgets::tag(ui, &tag, tone);
+                },
+            );
+            ui.label(
+                RichText::new(t!("depcheck.affects", impact = impact_text(dep)))
+                    .font(theme::body_md())
+                    .color(theme::TEXT_SOFT),
+            );
+            ui.label(
+                RichText::new(fix_text(dep))
+                    .font(theme::body_md())
+                    .color(theme::TEXT_DIM),
+            );
+        });
 }
 
 #[cfg(test)]

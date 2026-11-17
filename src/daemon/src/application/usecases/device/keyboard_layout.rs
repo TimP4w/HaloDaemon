@@ -6,6 +6,8 @@ use anyhow::{anyhow, Result};
 use std::sync::Arc;
 
 use crate::application::state::AppState;
+use crate::domain::events::Change;
+use halod_shared::ids::DeviceId;
 use halod_shared::keyboard::KeyboardLayoutSelection;
 
 /// Apply a keyboard's layout selection in place: update the live slot, persist
@@ -14,7 +16,7 @@ use halod_shared::keyboard::KeyboardLayoutSelection;
 /// GUI legends/grid) recompute from the slot on the next serialize. Avoids the
 /// full re-discovery a device drop would trigger.
 pub async fn set_keyboard_layout(
-    id: String,
+    id: DeviceId,
     selection: KeyboardLayoutSelection,
     app: Arc<AppState>,
 ) -> Result<()> {
@@ -47,8 +49,7 @@ pub async fn set_keyboard_layout(
         }
     }
 
-    app.record_change(crate::domain::events::Change::Device(id))
-        .await;
+    app.record_change(Change::Device(id)).await;
     Ok(())
 }
 
@@ -68,7 +69,7 @@ mod tests {
             variant: Some(KeyVariant::Iso),
             language: Some(KeyboardLayout::CH),
         };
-        set_keyboard_layout("kbd".into(), sel, app.clone())
+        set_keyboard_layout("kbd".parse().unwrap(), sel, app.clone())
             .await
             .unwrap();
 
@@ -102,7 +103,7 @@ mod tests {
         let device = Arc::new(MockDevice::new("kbd").with_keyboard_layout());
         let app = app_with(vec![device]);
         app.config.write().await.keyboard_layouts.insert(
-            "kbd".into(),
+            "kbd".parse().unwrap(),
             KeyboardLayoutSelection {
                 variant: Some(KeyVariant::Iso),
                 language: None,
@@ -110,7 +111,7 @@ mod tests {
         );
 
         set_keyboard_layout(
-            "kbd".into(),
+            "kbd".parse().unwrap(),
             KeyboardLayoutSelection::default(),
             app.clone(),
         )
@@ -125,7 +126,7 @@ mod tests {
         let app = app_with(vec![Arc::new(MockDevice::new("plain"))]);
 
         let err = set_keyboard_layout(
-            "plain".into(),
+            "plain".parse().unwrap(),
             KeyboardLayoutSelection {
                 variant: Some(KeyVariant::Ansi),
                 language: None,

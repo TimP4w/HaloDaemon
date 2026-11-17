@@ -19,7 +19,7 @@ The workspace (`src/Cargo.toml`) has six members:
 | `halod-broker` | [src/broker/](../src/broker/) | **Windows-only** privileged helper: runs as LocalSystem and performs the hardware access the per-user daemon can't. |
 | `halod` | [src/daemon/](../src/daemon/) | The **daemon**: device I/O, discovery, engine loops, config persistence, IPC server. Runs **per-user** (not elevated); on Windows privileged hardware access is delegated to the `halod-broker` process. |
 | `halod-gui` | [src/ui/](../src/ui/) | **GUI** (eframe/egui on a glow/OpenGL renderer) with a system tray. Talks to the daemon over IPC; holds no device logic. |
-| `halod-plugin-signing` | [src/plugin-signing/](../src/plugin-signing/) | Plugin-repository index, hashing, signature, and bundle logic shared by the daemon and the release tool (`index`/`validate` CLI). |
+| `halod-plugin-signing` | [src/plugin-signing/](../src/plugin-signing/) | Plugin API versions, catalog signing and verification, package archives, and HTTPS fetching, shared by the daemon and the `catalog`/`sign`/`verify` CLI. |
 
 The cardinal rule (`AGENTS.md` → *Keep layers separate*): protocol (wire
 encode/decode) ↔ device (`Device` trait + capabilities) ↔ transport (byte
@@ -49,9 +49,9 @@ just `write(&[u8])` and `read(size)`, with default-implemented conveniences
 (`write_then_read`, `write_many`) that transports may override with
 hardware-backed versions. HID feature reports, companion collections, nonblocking
 reads, and event delivery live on the `HidTransport` sub-trait and are reached
-through an explicit capability downcast. Available transports: `hid`, `smbus`,
-endpoint-oriented `usb`, `hwmon` (Linux), `lpcio`/`pawnio` (Windows SuperIO),
-and `mock` (for tests). Hwmon and LPCIO expose narrow typed operations rather
+through an explicit capability downcast. Plugin transports: `hid`, `smbus`,
+endpoint-oriented `usb`, `serial`, `tcp`, `hwmon` (Linux), `command`, and on
+Windows `lpcio` (SuperIO) and `amd_smn`; tests use `mock`. Hwmon and LPCIO expose narrow typed operations rather
 than raw paths or broker handles; transports still know nothing about colors,
 fans, or vendors.
 
@@ -77,10 +77,9 @@ metered and receive the plugin/device write-rate limit.
 
 ### Protocol: speaking the vendor's wire format
 
-A protocol module sits on top of a transport and turns intent ("set zone 2 to
-red", "read fan RPM") into the exact byte sequences the chip expects, and parses
-replies back. Protocols hold a transport (often `Mutex<Option<T>>` so it can be
-opened/closed) and expose typed methods. See the
+A protocol turns intent ("set zone 2 to red", "read fan RPM") into the exact
+byte sequences the chip expects, and parses replies back. Protocols now live in
+plugin Lua packages, not in Rust; see the
 [Logitech HID++ plugin](https://github.com/TimP4w/HaloDaemon-plugins/tree/main/logitech)
 for an example. When you port a wire format from third-party code, add the
 SPDX attribution header (`AGENTS.md` → *Licensing and attribution*) and document the
@@ -116,6 +115,9 @@ and optional hooks (`debug_info_extra`). **Controllers** host
 child devices (wireless receivers, fan hubs) via `discover_children()`; chainable
 ARGB hubs expose a chain host so the canvas engine can compose per-zone frames
 (see [domain/device/](../src/daemon/src/domain/device/)).
+
+A device's health is a set of flags, not a single status, because several
+health conditions can hold at the same time.
 
 ### Discovery: how a device gets constructed
 
@@ -171,19 +173,24 @@ privileged hardware access behind a separate broker (as already used for
 Windows), so a misbehaving plugin can be terminated without taking the daemon
 down and never touches privileged hardware directly.
 
-**Sources.** Release builds embed a signed official plugin bundle
-(`HALOD_OFFICIAL_PLUGIN_BUNDLE`, staged by `daemon/build.rs`). At startup the
-daemon seeds the non-removable **official repo** record and extracts and
-verifies that bundle, so official plugins are available offline. When the user
-allows downloads, the latest official release is fetched in the background;
-failure leaves the embedded revision active. Other sources are GitHub release
-sources or imported release archives. Every source installs as a complete,
-verified, immutable revision that is selected atomically; update checks never
-modify installed files, and a failed update keeps the previous revision.
-Official plugins use the same enable-confirmation gate as all other sources.
-A plugin id is owned by whichever source loads it first (official repo, then
-other sources in config order), so a community source can never shadow an
-existing id; a collision is rejected and surfaced as a load warning.
+**Sources.** A repository is a catalog URL or a local folder. At startup the
+daemon seeds the non-removable **official repo** record, loads plugins from
+local folders and from `plugins/<repo>/<id>`, and refreshes every catalog in
+the background. Installing or updating a plugin downloads its archive, checks
+it against the signed catalog, and swaps the directory atomically; a package
+that fails to load is rolled back. Local folders load first and win id
+collisions, so a checkout can shadow an installed copy during development.
+Each package declares the plugin `api` it targets; an incompatible package is
+listed but never loaded. See [plugins.md](plugins.md).
+
+**Enabling and updating.** Every plugin, including one loaded from a local
+folder, lists what it uses and asks for confirmation before it is enabled.
+When an update needs more permissions than the installed version, the GUI asks
+before installing it, and an enabled plugin stays enabled once the new version
+is loaded.
+An update the daemon applies without that confirmation (for example from the
+CLI) disables the plugin and notifies the user, who confirms the new
+permissions by enabling it again.
 
 ## IPC and usecases: the daemon's public API
 
@@ -198,11 +205,13 @@ the serde discriminator), and `dispatch()` matches the variant to a usecase unde
 [application/usecases/](../src/daemon/src/application/usecases/) (one directory
 per domain: `lighting/`, `cooling/`, `lcd/`, `registry/`, …) **with
 already-parsed typed arguments**. Usecases never re-parse raw JSON. The usecase
-layer *is* the daemon's public API surface. Before dispatch, `command_target()`
-maps device-scoped commands to the device id whose per-device lock serializes
-them (commands to different devices run concurrently), and
-`command_writes_device()` marks commands whose failure means a hardware write did
-not land.
+layer *is* the daemon's public API surface. Device commands are nested as
+`DaemonCommand::Device { device_id, op: DeviceOp }` and integration commands as
+`DaemonCommand::Integration { plugin_id, op: IntegrationOp }`. Before dispatch,
+`command_target()` maps each of them to a `CommandTarget` (the device id or the
+plugin id) whose lock serializes commands to the same target while commands to
+different targets run concurrently, and `command_writes_device()` marks device
+ops whose failure means a hardware write did not land.
 
 **High-frequency push path:** state that changes constantly (canvas preview, LCD
 frames, sensor readings) is *not* request/response. The router runs
@@ -212,10 +221,11 @@ by recording a `Change` (see [application/bus/](../src/daemon/src/application/bu
 
 So **adding a command is a four-part change**:
 
-1. Add a `DaemonCommand` variant in [shared/src/commands.rs](../src/shared/src/commands.rs).
-2. In the router, add a `dispatch()` arm and, if the command targets a device,
-   list it in `command_target()` (and in `command_writes_device()` if it writes
-   hardware).
+1. Add a `DeviceOp` or `IntegrationOp` variant (or a global `DaemonCommand`
+   variant) in [shared/src/commands.rs](../src/shared/src/commands.rs).
+2. In the router, add a `dispatch()` arm; device and integration ops are locked
+   by their target already, and a device op that writes hardware is listed in
+   `DeviceOp::writes_device()`.
 3. Write/extend the usecase in the owning domain's `application/usecases/` directory (talking to devices through capability accessors).
 4. Call it from the GUI.
 
@@ -247,7 +257,10 @@ The set (full internals in [engines.md](engines.md)):
 
 A usecase reconfigures an engine by updating config and recording a `Change`,
 which republishes the engine-config topic, rather than calling the engine
-directly.
+directly. Retries with backoff anywhere in the daemon go through
+`util::backoff::schedule`.
+
+The daemon shuts down in ordered phases, one step per phase.
 
 ## State and config
 
@@ -262,10 +275,10 @@ directly.
   [daemon/src/config/mod.rs](../src/daemon/src/config/mod.rs): `config.yaml`
   (global settings + active profile), `devices.yaml` (known devices, chain
   layouts, zone transforms), `app_rules.yaml`, one
-  `profiles/<name>.yaml` per profile, and `lcd/<name>.yaml` for saved custom
-  LCD templates. Each file is saved via tmp-file + rename, fsync'd on Unix (a
-  fully durable cross-platform atomic-replace is still being unified); the
-  in-memory `Config` struct stays unified, so usecases read/write it exactly
+  `profiles/<name>.yaml` per profile, `plugin_state.yaml` (enabled plugins,
+  their config, and repositories), and `lcd/<name>.yaml` for saved custom
+  LCD templates. Every file goes through the single durable atomic-write
+  helper in `util/fs.rs`; the in-memory `Config` struct stays unified, so usecases read/write it exactly
   as before. A device's persistent capability state flows through
   `save_state`/`load_state` on the `Device` trait, keyed by each capability's
   `state_key()`, and lands in the active profile's `device_states` map.
@@ -324,9 +337,8 @@ new command:
 1. If X is a new *kind* of control, add a `CapabilityRef` variant + trait +
    accessor in [domain/device/](../src/daemon/src/domain/device/) (and classify it
    in `capability_dispatch!`), then implement it on the relevant device(s).
-2. Add the `DaemonCommand` variant, the `dispatch()` arm (plus its
-   `command_target()`/`command_writes_device()` entries), and the usecase
-   (see *IPC and usecases* above).
+2. Add the `DeviceOp` variant, the `dispatch()` arm (plus its
+   `writes_device()` entry), and the usecase (see *IPC and usecases* above).
 3. Register a GUI panel for the capability (capability-driven device page) or wire
    the command into an existing view.
 4. If X needs to evolve over time (effects, curves), it belongs in an engine, fed

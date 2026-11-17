@@ -12,14 +12,16 @@
 //!
 //! See `docs/chainable-argb.md` for the end-to-end walkthrough.
 
+use parking_lot::Mutex;
 use std::collections::{HashMap, HashSet};
-use std::sync::{Arc, Mutex};
+use std::sync::Arc;
 use std::time::Duration;
 
 use anyhow::Result;
 use async_trait::async_trait;
 use tokio::sync::Mutex as TokioMutex;
 
+use halod_shared::ids::DeviceId;
 use halod_shared::types::{
     ColorOrder, DeviceCapability, LightingChannel, LightingDivision, LightingSegmentInfo, RgbColor,
     ZoneTopology,
@@ -30,7 +32,7 @@ use super::{ChainLinkSpec, Device};
 
 #[derive(Debug, Clone)]
 pub struct ChainLinkRuntime {
-    pub child_id: String,
+    pub child_id: DeviceId,
     /// The child's own lighting channel id, which differs by leaf kind
     /// (`"strip"` for a user-added segment, `"ring"` for a detected accessory).
     pub lighting_channel_id: String,
@@ -44,7 +46,7 @@ pub struct ChainLinkRuntime {
 
 impl ChainLinkRuntime {
     pub fn new(
-        child_id: String,
+        child_id: DeviceId,
         lighting_channel_id: String,
         name: String,
         topology: ZoneTopology,
@@ -86,11 +88,11 @@ impl ChannelChainState {
         self.links.iter().map(|l| l.led_count).sum()
     }
 
-    pub fn find_index(&self, child_id: &str) -> Option<usize> {
+    pub fn find_index(&self, child_id: &DeviceId) -> Option<usize> {
         self.links.iter().position(|l| l.child_id == child_id)
     }
 
-    pub fn update_slot(&mut self, child_id: &str, colors: &[RgbColor]) -> bool {
+    pub fn update_slot(&mut self, child_id: &DeviceId, colors: &[RgbColor]) -> bool {
         match self.find_index(child_id) {
             Some(i) => {
                 self.links[i].last_colors = colors.to_vec();
@@ -116,7 +118,7 @@ impl ChannelChainState {
         self.links.push(link);
     }
 
-    pub fn remove(&mut self, child_id: &str) -> Result<(), &'static str> {
+    pub fn remove(&mut self, child_id: &DeviceId) -> Result<(), &'static str> {
         let Some(i) = self.find_index(child_id) else {
             return Err("chain link not found");
         };
@@ -127,7 +129,7 @@ impl ChannelChainState {
         Ok(())
     }
 
-    pub fn rename(&mut self, child_id: &str, new_name: &str) -> Result<(), &'static str> {
+    pub fn rename(&mut self, child_id: &DeviceId, new_name: &str) -> Result<(), &'static str> {
         let Some(i) = self.find_index(child_id) else {
             return Err("chain link not found");
         };
@@ -138,7 +140,7 @@ impl ChannelChainState {
         Ok(())
     }
 
-    pub fn reorder(&mut self, child_id: &str, new_index: usize) -> Result<(), &'static str> {
+    pub fn reorder(&mut self, child_id: &DeviceId, new_index: usize) -> Result<(), &'static str> {
         let Some(i) = self.find_index(child_id) else {
             return Err("chain link not found");
         };
@@ -175,7 +177,7 @@ pub struct ChannelDescriptor {
 /// shared CRUD lives in [`LightingDivisionHost`].
 #[async_trait]
 pub trait LightingDivisionAdapter: Send + Sync + 'static {
-    fn parent_id(&self) -> String;
+    fn parent_id(&self) -> DeviceId;
 
     /// Enumerate every chainable channel this parent exposes, in stable order.
     fn channels(&self) -> Vec<ChannelDescriptor>;
@@ -192,7 +194,7 @@ pub trait LightingDivisionHub: Send + Sync + 'static {
     async fn write_chain_slice(
         &self,
         channel_id: &str,
-        child_device_id: &str,
+        child_device_id: &DeviceId,
         colors: &[RgbColor],
     ) -> Result<()>;
 
@@ -200,7 +202,7 @@ pub trait LightingDivisionHub: Send + Sync + 'static {
     /// `serialize()` so a `set_device_name` IPC (routed via
     /// the owning `LightingDivisionHost` for external-name devices) reaches
     /// the wire device label without per-child name storage.
-    fn link_name(&self, channel_id: &str, child_device_id: &str) -> Option<String>;
+    fn link_name(&self, channel_id: &str, child_device_id: &DeviceId) -> Option<String>;
 }
 
 /// Shared chain runtime. Owns state + adapter + the Arc handles to spawned
@@ -208,7 +210,7 @@ pub trait LightingDivisionHub: Send + Sync + 'static {
 /// [`super::Device::chain_host`].
 pub struct LightingDivisionHost {
     adapter: Arc<dyn LightingDivisionAdapter>,
-    /// `std::sync::Mutex`: operations never cross `.await` while holding it.
+    /// `parking_lot::Mutex`: operations never cross `.await` while holding it.
     pub(crate) state: Mutex<HashMap<String, ChannelChainState>>,
     /// Every device the host knows about; `TokioMutex` since `serialize()` reads it async.
     children: TokioMutex<Vec<Arc<dyn Device>>>,
@@ -239,7 +241,7 @@ impl LightingDivisionHost {
     /// called from the device serializer.
     pub fn lighting_channels(&self) -> Vec<LightingChannel> {
         let channels = self.adapter.channels();
-        let state = self.state.lock().unwrap_or_else(|e| e.into_inner());
+        let state = self.state.lock();
         channels
             .into_iter()
             .map(|d| {
@@ -264,7 +266,7 @@ impl LightingDivisionHost {
     /// Snapshot only user-created links. Hardware-discovered links are probed
     /// again on startup and must not be written to configuration.
     pub fn persistent_links(&self) -> HashMap<String, Vec<ChainLinkRuntime>> {
-        let state = self.state.lock().unwrap_or_else(|e| e.into_inner());
+        let state = self.state.lock();
         state
             .iter()
             .filter_map(|(channel_id, chain)| {
@@ -282,7 +284,7 @@ impl LightingDivisionHost {
     /// Chain channels that currently hold a hardware-detected link. A parent
     /// uses this to tell which of its cooling channels a child has taken over.
     pub fn detected_channels(&self) -> HashSet<String> {
-        let state = self.state.lock().unwrap_or_else(|e| e.into_inner());
+        let state = self.state.lock();
         state
             .iter()
             .filter(|(_, chain)| chain.links.iter().any(|link| link.locked))
@@ -303,21 +305,18 @@ impl LightingDivisionHost {
             return;
         };
         let link = ChainLinkRuntime::new(
-            child.id().to_owned(),
+            child.id().clone(),
             zone.id.clone(),
             child.name().to_string(),
             zone.topology.clone(),
             u32::try_from(zone.leds.len()).unwrap_or_else(|_| {
-                log::warn!(
-                    "[chain] LED count {} truncated to u32::MAX",
-                    zone.leds.len()
-                );
+                log::warn!("LED count {} truncated to u32::MAX", zone.leds.len());
                 u32::MAX
             }),
             /* locked */ true,
         );
         let displaced = {
-            let mut state = self.state.lock().unwrap_or_else(|e| e.into_inner());
+            let mut state = self.state.lock();
             let chain = state.entry(channel_id.to_string()).or_default();
             if chain.links.first().map(|l| l.locked).unwrap_or(false) {
                 let old = chain.links[0].child_id.clone();
@@ -331,7 +330,7 @@ impl LightingDivisionHost {
         // Drop any Arc displaced by a replace so `children()` stays in sync with link state.
         let mut children = self.children.lock().await;
         let cid = child.id().to_owned();
-        children.retain(|c| c.id() != cid && Some(c.id()) != displaced.as_deref());
+        children.retain(|c| *c.id() != cid && displaced.as_deref() != Some(c.id().as_str()));
         children.push(child);
     }
 
@@ -361,12 +360,12 @@ impl LightingDivisionHost {
         self: &Arc<Self>,
         channel_id: &str,
         spec: ChainLinkSpec,
-    ) -> Result<(String, Arc<dyn Device>)> {
-        let new_id = format!(
+    ) -> Result<(DeviceId, Arc<dyn Device>)> {
+        let new_id = DeviceId::sanitized(&format!(
             "{}_chain_{channel_id}_{}",
             self.adapter.parent_id(),
             uuid::Uuid::new_v4()
-        );
+        ));
         let device = self
             .spawn_link(
                 channel_id,
@@ -383,11 +382,11 @@ impl LightingDivisionHost {
     pub async fn restore_link(
         self: &Arc<Self>,
         channel_id: &str,
-        child_id: &str,
+        child_id: &DeviceId,
         spec: ChainLinkSpec,
     ) -> Result<Arc<dyn Device>> {
         {
-            let state = self.state.lock().unwrap_or_else(|e| e.into_inner());
+            let state = self.state.lock();
             if state
                 .get(channel_id)
                 .and_then(|chain| chain.find_index(child_id))
@@ -411,12 +410,12 @@ impl LightingDivisionHost {
     async fn spawn_link(
         self: &Arc<Self>,
         channel_id: &str,
-        child_id: &str,
+        child_id: &DeviceId,
         name: String,
         topology: ZoneTopology,
         led_count: u32,
     ) -> Result<Arc<dyn Device>> {
-        validate_led_count(&topology, led_count).map_err(|e| anyhow::anyhow!("{e}"))?;
+        validate_led_count(&topology, led_count)?;
         let max_leds = self
             .max_leds(channel_id)
             .ok_or_else(|| anyhow::anyhow!("unknown chainable channel: {channel_id}"))?;
@@ -433,7 +432,7 @@ impl LightingDivisionHost {
         child.initialize().await?;
 
         {
-            let mut state = self.state.lock().unwrap_or_else(|e| e.into_inner());
+            let mut state = self.state.lock();
             let chain = state.entry(channel_id.to_string()).or_default();
             let used = chain.used_leds();
             if used.saturating_add(led_count) > max_leds {
@@ -442,7 +441,7 @@ impl LightingDivisionHost {
                 );
             }
             chain.append(ChainLinkRuntime::new(
-                child_id.to_string(),
+                child_id.into(),
                 super::lighting_segment::SEGMENT_CHANNEL_ID.to_string(),
                 name,
                 topology,
@@ -456,9 +455,9 @@ impl LightingDivisionHost {
         Ok(device)
     }
 
-    pub async fn remove_link(&self, channel_id: &str, child_id: &str) -> Result<String> {
+    pub async fn remove_link(&self, channel_id: &str, child_id: &DeviceId) -> Result<String> {
         {
-            let mut state = self.state.lock().unwrap_or_else(|e| e.into_inner());
+            let mut state = self.state.lock();
             let chain = state
                 .get_mut(channel_id)
                 .ok_or_else(|| anyhow::anyhow!("unknown channel: {channel_id}"))?;
@@ -468,8 +467,8 @@ impl LightingDivisionHost {
         Ok(child_id.to_string())
     }
 
-    pub fn rename_link(&self, channel_id: &str, child_id: &str, new_name: &str) -> Result<()> {
-        let mut state = self.state.lock().unwrap_or_else(|e| e.into_inner());
+    pub fn rename_link(&self, channel_id: &str, child_id: &DeviceId, new_name: &str) -> Result<()> {
+        let mut state = self.state.lock();
         let chain = state
             .get_mut(channel_id)
             .ok_or_else(|| anyhow::anyhow!("unknown channel: {channel_id}"))?;
@@ -479,8 +478,13 @@ impl LightingDivisionHost {
         Ok(())
     }
 
-    pub fn reorder_link(&self, channel_id: &str, child_id: &str, new_index: usize) -> Result<()> {
-        let mut state = self.state.lock().unwrap_or_else(|e| e.into_inner());
+    pub fn reorder_link(
+        &self,
+        channel_id: &str,
+        child_id: &DeviceId,
+        new_index: usize,
+    ) -> Result<()> {
+        let mut state = self.state.lock();
         let chain = state
             .get_mut(channel_id)
             .ok_or_else(|| anyhow::anyhow!("unknown channel: {channel_id}"))?;
@@ -499,7 +503,7 @@ impl LightingDivisionHost {
             .ok_or_else(|| anyhow::anyhow!("unknown channel: {channel_id}"))?;
 
         let saved = {
-            let mut state = self.state.lock().unwrap_or_else(|e| e.into_inner());
+            let mut state = self.state.lock();
             let chain = state.entry(channel_id.to_string()).or_default();
             let saved = chain.composed_frame();
             chain.discovery_active = true;
@@ -509,7 +513,7 @@ impl LightingDivisionHost {
         let result = self.run_detect_flash(channel_id, max_leds, &saved).await;
 
         {
-            let mut state = self.state.lock().unwrap_or_else(|e| e.into_inner());
+            let mut state = self.state.lock();
             if let Some(chain) = state.get_mut(channel_id) {
                 chain.discovery_active = false;
             }
@@ -557,14 +561,14 @@ impl LightingDivisionHost {
     fn spawn_child(
         self: &Arc<Self>,
         channel_id: &str,
-        child_id: &str,
+        child_id: &DeviceId,
         name: String,
         topology: ZoneTopology,
         led_count: u32,
     ) -> Arc<LightingSegmentDevice> {
         let hub: Arc<dyn LightingDivisionHub> = self.clone();
         Arc::new(LightingSegmentDevice::new(
-            child_id.to_string(),
+            child_id.clone(),
             channel_id.to_string(),
             name,
             topology,
@@ -619,11 +623,11 @@ impl LightingDivisionHub for LightingDivisionHost {
     async fn write_chain_slice(
         &self,
         channel_id: &str,
-        child_device_id: &str,
+        child_device_id: &DeviceId,
         colors: &[RgbColor],
     ) -> Result<()> {
         let outcome = {
-            let mut state = self.state.lock().unwrap_or_else(|e| e.into_inner());
+            let mut state = self.state.lock();
             let chain = state
                 .get_mut(channel_id)
                 .ok_or_else(|| anyhow::anyhow!("unknown channel: {channel_id}"))?;
@@ -649,8 +653,8 @@ impl LightingDivisionHub for LightingDivisionHost {
             .await
     }
 
-    fn link_name(&self, channel_id: &str, child_device_id: &str) -> Option<String> {
-        let state = self.state.lock().unwrap_or_else(|e| e.into_inner());
+    fn link_name(&self, channel_id: &str, child_device_id: &DeviceId) -> Option<String> {
+        let state = self.state.lock();
         let chain = state.get(channel_id)?;
         let idx = chain.find_index(child_device_id)?;
         Some(chain.links[idx].name.clone())
@@ -665,21 +669,21 @@ fn encode_frame(order: ColorOrder, colors: &[RgbColor]) -> Vec<u8> {
 }
 
 /// Returns a user-facing reason on failure.
-pub fn validate_led_count(topology: &ZoneTopology, led_count: u32) -> Result<(), String> {
+pub fn validate_led_count(topology: &ZoneTopology, led_count: u32) -> anyhow::Result<()> {
     if led_count == 0 {
-        return Err("LED count must be at least 1".to_string());
+        return Err(anyhow::anyhow!("LED count must be at least 1"));
     }
     match topology {
         ZoneTopology::Linear | ZoneTopology::Ring | ZoneTopology::Grid => Ok(()),
         ZoneTopology::Rings { count } => {
             let n = *count as u32;
             if n == 0 {
-                return Err("Rings count must be at least 1".to_string());
+                return Err(anyhow::anyhow!("Rings count must be at least 1"));
             }
             if !led_count.is_multiple_of(n) {
                 let prev = (led_count / n).saturating_mul(n);
                 let next = (led_count / n).saturating_add(1).saturating_mul(n);
-                Err(format!(
+                Err(anyhow::anyhow!(
                     "Rings ×{n} requires the LED count to be a multiple of {n} \
                      (you have {led_count}; closest valid values are {prev} or {next})",
                 ))
@@ -687,9 +691,9 @@ pub fn validate_led_count(topology: &ZoneTopology, led_count: u32) -> Result<(),
                 Ok(())
             }
         }
-        ZoneTopology::Keyboard { .. } => {
-            Err("keyboard topology is not valid for a chain link".to_string())
-        }
+        ZoneTopology::Keyboard { .. } => Err(anyhow::anyhow!(
+            "keyboard topology is not valid for a chain link"
+        )),
     }
 }
 
@@ -699,7 +703,7 @@ mod tests {
 
     fn link(id: &str, count: u32, locked: bool) -> ChainLinkRuntime {
         ChainLinkRuntime::new(
-            id.to_string(),
+            id.parse().unwrap(),
             "strip".to_string(),
             id.to_string(),
             ZoneTopology::Linear,
@@ -713,7 +717,7 @@ mod tests {
         let mut state = ChannelChainState::default();
         state.append(link("a", 3, false));
         state.append(link("b", 2, false));
-        assert!(state.update_slot("b", &[RgbColor { r: 1, g: 2, b: 3 }; 2]));
+        assert!(state.update_slot(&"b".parse().unwrap(), &[RgbColor { r: 1, g: 2, b: 3 }; 2]));
         assert_eq!(state.links[1].last_colors.len(), 2);
     }
 
@@ -722,7 +726,7 @@ mod tests {
         let mut state = ChannelChainState::default();
         state.append(link("a", 2, false));
         state.append(link("b", 3, false));
-        state.update_slot("a", &[RgbColor { r: 10, g: 0, b: 0 }; 2]);
+        state.update_slot(&"a".parse().unwrap(), &[RgbColor { r: 10, g: 0, b: 0 }; 2]);
         let frame = state.composed_frame();
         assert_eq!(frame.len(), 5);
         assert_eq!(frame[0], RgbColor { r: 10, g: 0, b: 0 });
@@ -734,7 +738,7 @@ mod tests {
     fn remove_locked_link_returns_err() {
         let mut state = ChannelChainState::default();
         state.append(link("a", 4, true));
-        let err = state.remove("a").unwrap_err();
+        let err = state.remove(&"a".parse().unwrap()).unwrap_err();
         assert!(err.contains("locked"));
     }
 
@@ -744,7 +748,7 @@ mod tests {
         state.append(link("locked", 4, true));
         state.append(link("u1", 4, false));
         state.append(link("u2", 4, false));
-        state.reorder("u2", 0).unwrap();
+        state.reorder(&"u2".parse().unwrap(), 0).unwrap();
         assert_eq!(state.links[0].child_id, "locked");
         assert_eq!(state.links[1].child_id, "u2");
     }
@@ -764,8 +768,8 @@ mod tests {
         state.append(link("ring", 8, false));
         let red = RgbColor { r: 255, g: 0, b: 0 };
         let blue = RgbColor { r: 0, g: 0, b: 255 };
-        state.update_slot("strip", &[red; 30]);
-        state.update_slot("ring", &[blue; 8]);
+        state.update_slot(&"strip".parse().unwrap(), &[red; 30]);
+        state.update_slot(&"ring".parse().unwrap(), &[blue; 8]);
         let frame = state.composed_frame();
         assert_eq!(frame.len(), 38);
         assert!(frame[..30].iter().all(|c| *c == red));
@@ -779,9 +783,9 @@ mod tests {
         state.append(link("b", 3, false));
         let ca = RgbColor { r: 1, g: 0, b: 0 };
         let cb = RgbColor { r: 0, g: 1, b: 0 };
-        state.update_slot("a", &[ca; 2]);
-        state.update_slot("b", &[cb; 3]);
-        state.reorder("b", 0).unwrap();
+        state.update_slot(&"a".parse().unwrap(), &[ca; 2]);
+        state.update_slot(&"b".parse().unwrap(), &[cb; 3]);
+        state.reorder(&"b".parse().unwrap(), 0).unwrap();
         let frame = state.composed_frame();
         assert_eq!(frame.len(), 5);
         assert_eq!(&frame[..3], &[cb; 3]);
@@ -792,7 +796,7 @@ mod tests {
     fn rename_rejects_locked_link() {
         let mut state = ChannelChainState::default();
         state.append(link("locked", 4, true));
-        let err = state.rename("locked", "new").unwrap_err();
+        let err = state.rename(&"locked".parse().unwrap(), "new").unwrap_err();
         assert!(err.contains("locked"));
     }
 
@@ -800,7 +804,7 @@ mod tests {
     fn rename_updates_unlocked_link() {
         let mut state = ChannelChainState::default();
         state.append(link("a", 4, false));
-        state.rename("a", "Top Strip").unwrap();
+        state.rename(&"a".parse().unwrap(), "Top Strip").unwrap();
         assert_eq!(state.links[0].name, "Top Strip");
     }
 
@@ -808,7 +812,7 @@ mod tests {
     fn validate_rings_count_rejects_non_divisible() {
         let topology = ZoneTopology::Rings { count: 3 };
         let err = validate_led_count(&topology, 8).unwrap_err();
-        assert!(err.contains("multiple of 3"), "got: {err}");
+        assert!(err.to_string().contains("multiple of 3"), "got: {err}");
     }
 
     #[test]
@@ -846,14 +850,14 @@ mod tests {
     }
 
     struct StubAdapter {
-        parent_id: String,
+        parent_id: DeviceId,
         channels: Vec<ChannelDescriptor>,
         last_written: Mutex<Vec<(String, Vec<u8>)>>,
     }
 
     #[async_trait]
     impl LightingDivisionAdapter for StubAdapter {
-        fn parent_id(&self) -> String {
+        fn parent_id(&self) -> DeviceId {
             self.parent_id.clone()
         }
         fn channels(&self) -> Vec<ChannelDescriptor> {
@@ -862,7 +866,6 @@ mod tests {
         async fn write_divided_frame(&self, channel_id: &str, composed: &[u8]) -> Result<()> {
             self.last_written
                 .lock()
-                .unwrap()
                 .push((channel_id.to_string(), composed.to_vec()));
             Ok(())
         }
@@ -870,7 +873,7 @@ mod tests {
 
     fn stub_parts() -> (Arc<LightingDivisionHost>, Arc<StubAdapter>) {
         let adapter = Arc::new(StubAdapter {
-            parent_id: "parent_x".to_string(),
+            parent_id: "parent_x".parse().unwrap(),
             channels: vec![ChannelDescriptor {
                 channel_id: "a".to_string(),
                 display_name: "Channel A".to_string(),
@@ -911,10 +914,7 @@ mod tests {
         }
         task.await.unwrap();
 
-        let written = adapter
-            .last_written
-            .lock()
-            .unwrap_or_else(|e| e.into_inner());
+        let written = adapter.last_written.lock();
         // 3 on + 3 off = 6 writes; no restore (no links → saved frame is empty)
         assert_eq!(written.len(), 6);
         for (i, (ch, colors)) in written.iter().enumerate() {
@@ -944,7 +944,7 @@ mod tests {
         // so a channel the user never linked to has no state-map entry. Detect
         // must still work (it did `unknown channel` before).
         let (host, adapter) = stub_parts();
-        host.state.lock().unwrap_or_else(|e| e.into_inner()).clear();
+        host.state.lock().clear();
 
         let task = tokio::spawn({
             let host = host.clone();
@@ -958,14 +958,7 @@ mod tests {
             .unwrap()
             .expect("detect on empty channel succeeds");
 
-        assert_eq!(
-            adapter
-                .last_written
-                .lock()
-                .unwrap_or_else(|e| e.into_inner())
-                .len(),
-            6
-        );
+        assert_eq!(adapter.last_written.lock().len(), 6);
     }
 
     #[test]
@@ -973,11 +966,11 @@ mod tests {
         let (host, adapter) = stub_parts();
 
         {
-            let mut state = host.state.lock().unwrap_or_else(|e| e.into_inner());
+            let mut state = host.state.lock();
             let chain = state.get_mut("a").unwrap();
             chain.discovery_active = true;
             chain.links.push(ChainLinkRuntime::new(
-                "x".into(),
+                "x".parse().unwrap(),
                 "strip".into(),
                 "x".into(),
                 ZoneTopology::Linear,
@@ -988,16 +981,16 @@ mod tests {
 
         let rt = tokio::runtime::Runtime::new().unwrap();
         rt.block_on(async {
-            host.write_chain_slice("a", "x", &[RgbColor { r: 1, g: 2, b: 3 }; 4])
-                .await
-                .unwrap();
+            host.write_chain_slice(
+                "a",
+                &"x".parse().unwrap(),
+                &[RgbColor { r: 1, g: 2, b: 3 }; 4],
+            )
+            .await
+            .unwrap();
         });
 
-        assert!(adapter
-            .last_written
-            .lock()
-            .unwrap_or_else(|e| e.into_inner())
-            .is_empty());
+        assert!(adapter.last_written.lock().is_empty());
     }
 
     #[tokio::test]
@@ -1030,13 +1023,13 @@ mod tests {
         // Exactly one locked link, and `children()` must mirror it — not the
         // stale first Arc, not both.
         {
-            let state = host.state.lock().unwrap_or_else(|e| e.into_inner());
+            let state = host.state.lock();
             let links = &state.get("a").unwrap().links;
             assert_eq!(links.len(), 1);
             assert_eq!(links[0].child_id, "hw_b");
         }
 
-        let child_ids: Vec<String> = host
+        let child_ids: Vec<DeviceId> = host
             .children()
             .await
             .iter()

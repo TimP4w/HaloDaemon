@@ -1,80 +1,48 @@
 plugins:
+  not_set_up: Non configurato
+  paused: In pausa
+  repo_signed: Firmato
+  repo_unsigned: Non firmato
+  repo_synced: "sincronizzato %{age}"
+  repo_official: Ufficiale
+  enable: Abilita
+  disable: Disabilita
+  search: Cerca plugin
   title: Plugin
-  subtitle: I pacchetti dei repository aggiungono il supporto a nuovi dispositivi senza ricompilare il daemon.
-  counts: "%{count} pacchetti · %{active} attivi"
+  counts: "%{count} pacchetti · %{enabled} abilitati"
   empty_title: Nessun plugin installato
   empty_hint: Aggiungi un repository di plugin per estendere HaloDaemon con nuovi dispositivi.
-  add: Aggiungi repository
   # Repository dei plugin
   repos_title: Repository
-  repos_check_updates: Controlla aggiornamenti
-  repos_checking: Controllo aggiornamenti…
-  repos_updates_disabled: Il controllo aggiornamenti è disattivato. Attiva il download dei plugin nelle Impostazioni per cercare aggiornamenti.
-  repos_url_hint: URL Git (https://...)
-  repos_branch_hint: Branch (opzionale)
-  repos_branch_label: BRANCH
-  repos_branch_default: Branch predefinito
-  repos_branch_loading: Caricamento branch…
-  repos_branch_enter_url: Inserisci prima un URL
+  repos_url_hint: URL del catalogo (https://…/catalog.yaml)
   repos_add: Aggiungi
   repos_add_title: Aggiungi repository
-  repos_add_sub: Collega HaloDaemon a un repository Git remoto per esplorare, installare e aggiornare i plugin disponibili.
-  repos_import_folder: Cartella Git locale
-  repos_import_archive: Archivio tar
+  repos_add_sub: Incolla l’URL di un catalogo di plugin oppure aggiungi una cartella locale di pacchetti per lo sviluppo.
   repos_empty: Nessun repository di plugin registrato.
-  repos_update: Aggiorna
-  repos_update_repo: Aggiorna il repository
-  repos_move_pin: "Aggiorna a %{tag}"
-  repo_pinned: FISSATO
-  repo_pinned_hint: Questo repository resta sulla release selezionata. Le nuove release vengono segnalate ma non installate automaticamente.
-  repo_pinned_update_title: "La release %{tag} è disponibile"
-  repo_pinned_update_body: "Questo repository è fissato a %{pinned}. L'aggiornamento sposta il vincolo a %{tag}."
-  repos_repair: Pull forzato
-  repos_repair_title: Riparare il repository?
-  repos_repair_body: Questa operazione ripristina la revisione attiva del repository dalla sua sorgente verificata. Tutte le modifiche locali nel repository andranno perse.
-  repos_resolve: Risolvi problema
-  repos_remove_reimport: Rimuovi e reimporta
-  integrity_ok: Il contenuto del repository corrisponde al relativo indice dei pacchetti.
-  integrity_failed: La verifica del contenuto del repository non è riuscita. I plugin interessati sono stati disattivati.
-  integrity_banner_title: Controllo di integrità del repository non riuscito
-  integrity_banner_signed: "I file in '%{repository}' sono cambiati sul disco o non corrispondono più allo SHA-256 previsto. Ripristina il repository dalla sorgente verificata."
-  integrity_banner_unsigned: "I file nel repository non firmato '%{repository}' sono cambiati sul disco o non corrispondono più allo SHA-256 previsto. HaloDaemon non può ripristinare in sicurezza una sorgente non autenticata: rimuovi il repository e reimportalo."
-  integrity_restore: Ripristina dal repository
   repos_remove: Rimuovi repository
   repos_remove_title: Vuoi rimuovere il repository?
   repos_remove_body: In questo modo rimuoverai %{name} e disinstallerai tutti i plugin forniti dal repository.
-  repo_source: ORIGINE
-  repo_source_remote_git: Git remoto
-  repo_source_local_git: Git locale
-  repo_source_local_archive: Archivio locale
   repo_signing_fingerprint: "Chiave dell'autore: %{fingerprint}"
-  repo_last_sync: ULTIMA SINCRONIZZAZIONE
+  repo_last_sync: Ultima sincronizzazione
   repo_never_synced: mai
   repo_sync_just_now: proprio ora
   repo_sync_minutes: "%{count} min fa"
   repo_sync_hours: "%{count} ore fa"
   repo_sync_days: "%{count} giorni fa"
-  repo_drivers: DRIVER
+  repo_drivers: Driver
   repo_drivers_count: "%{count} installati"
-  repo_drivers_from: DRIVER DA QUESTO REPOSITORY
-  repo_no_drivers: Nessun driver installato da questo repository.
-  repo_signature_verified: Firma verificata con la chiave dell'autore registrata alla prima importazione del repository.
-  repo_signature_unsigned: Repository non firmato. Gli hash dei pacchetti vengono controllati, ma l'autore non è autenticato.
-  repo_signature_verification_failed: Verifica della firma del repository non riuscita.
-  repo_compatible_fallback: Revisione compatibile
+  repo_drivers_from: Driver da questo repository
+  repo_no_drivers: Questo repository non fornisce ancora plugin.
   # Aggiornamenti per plugin
   updates_available: "%{count} aggiornamento plugin disponibile"
   updates_available_plural: "%{count} aggiornamenti plugin disponibili"
   update_all: Aggiorna tutto
   updating: Aggiornamento…
   update_available: Aggiornamento disponibile
-  update_via_repo: Aggiorna dal repository di questo plugin.
-  modified_on_disk: Disabilitato perché modificato su disco
-  modified_on_disk_sub: I file di questo plugin sono cambiati dall'installazione, quindi è stato disabilitato per sicurezza. Riabilitalo per accettare la modifica.
   udev_missing: L'accesso ai dispositivi Linux non è installato
   udev_missing_sub: "Nessun file udev di HaloDaemon trovato. Genera e installa le %{count} regole dispositivo per abilitare l'accesso."
   udev_outdated: L'accesso ai dispositivi Linux deve essere aggiornato
-  udev_outdated_sub: "%{count} regole dispositivo generate differiscono dal file installato in %{path}. Copia il comando di installazione, eseguilo in un terminale e ricarica udev."
+  udev_outdated_sub: "In %{path} mancano regole dispositivo per %{count} plugin installati. Copia il comando di installazione, eseguilo in un terminale e ricarica udev."
   udev_generate: Genera regole udev
   udev_copied: Comando di installazione copiato
   udev_info: Come funziona
@@ -84,8 +52,8 @@ plugins:
   udev_info_scope: HaloDaemon deriva l'accesso dal manifest di ogni plugin. Le regole HID e USB corrispondono agli ID vendor e prodotto dichiarati. Le regole SMBus sono limitate ai driver chipset o ai vendor PCI delle GPU dichiarati. I plugin senza hardware Linux corrispondente non aggiungono regole.
   udev_info_install_title: Installazione manuale
   udev_info_install: Genera il file deterministico, controllalo, poi installalo a livello di sistema e ricarica udev. Ripeti l'operazione dopo aver aggiunto, rimosso o aggiornato un plugin quando lo stato richiede un intervento.
-  udev_modal_current: "%{count} regole generate corrispondono a %{path}. Accesso aggiornato."
-  udev_modal_outdated: "%{count} regole generate differiscono da %{path}. Intervento necessario."
+  udev_modal_current: "%{path} contiene tutte le %{count} regole necessarie ai tuoi plugin. Accesso aggiornato."
+  udev_modal_outdated: "In %{path} mancano regole per %{count} plugin installati. Intervento necessario."
   udev_modal_missing: "%{count} regole generate non sono installate. Intervento necessario."
   udev_copy_command: Copia comando
   udev_command_copied: Copiato
@@ -101,8 +69,6 @@ plugins:
   issue_runtime_error: Errore di runtime
   issue_load_warning: Caricato con un avviso
   issue_load_failed: Caricamento non riuscito
-  repository_hash_mismatch: "Il pacchetto plugin '%{package}' non ha superato il controllo di integrità. SHA-256 previsto: %{expected}; SHA-256 rilevato: %{actual}."
-  repository_manifest_mismatch: "Il pacchetto plugin '%{package}' non ha superato il controllo di integrità. Il campo %{field} dovrebbe essere %{expected}, ma plugin.yaml dichiara %{actual}."
   issue_details: Dettagli
   issue_modal_title: "Il plugin %{plugin} sta riscontrando un problema"
   issue_copy: Copia
@@ -111,17 +77,19 @@ plugins:
   skipped_heading: Plugin ignorati
   skipped_title: Questo plugin è stato ignorato
   # Pannello dettagli
+  filter_all: Tutti
+  filter_devices: Dispositivi
+  filter_integrations: Integrazioni
+  filter_effects: Effetti
   type_device: Driver
   type_effect: Effetti
   type_integration: Integrazione
   experimental: Sperimentale
-  author: AUTORE
-  capabilities: FUNZIONALITÀ
-  targets: DISPOSITIVI SUPPORTATI
-  effects: EFFETTI
+  capabilities: Funzionalità
+  targets: Dispositivi supportati
+  effects: Effetti
   status_active: Attivo
   status_disabled: Disattivato
-  status_needs_permission: Richiede permessi
   status_inactive: Configurazione richiesta
   status_degraded: Funzionalità limitate
   req_command_missing: "Il daemon non trova '%{name}' nel PATH."
@@ -132,22 +100,10 @@ plugins:
   req_hwmon_missing: "Nessun sensore hardware rilevato in /sys/class/hwmon."
   req_hwmon_read_permission: "HaloDaemon non può leggere i sensori disponibili. Verifica i permessi sysfs e udev."
   req_hwmon_pwm_permission: "Il controllo delle ventole richiede l'accesso in scrittura ai file PWM in /sys/class/hwmon."
-  enable: Attiva
-  disable: Disattiva
   provenance_official: Ufficiale verificato
   provenance_repository: Repository non firmato
-  provenance_development: Sorgente di sviluppo
   provenance_local: Pacchetto locale
-  provenance_invalid: Firma non valida
   # Permessi
-  permissions: PERMESSI
-  permissions_pending: Questo plugin richiede permessi che non hai ancora concesso. Resterà inattivo finché non deciderai se concederli.
-  permissions_not_granted_tag: Non concesso
-  regrant_required: È necessario controllare i permessi
-  permissions_enable_hint: Se attivi questo plugin, ti verranno richiesti i permessi elencati sopra.
-  permissions_granted: Concesso
-  grant: Concedi permessi
-  revoke: Revoca e disattiva
   permission_hid: Accesso ai dispositivi HID
   permission_usb: Accesso ai dispositivi USB
   permission_hwmon: Monitoraggio hardware
@@ -156,7 +112,6 @@ plugins:
   permission_command: Esecuzione di comandi approvati
   permission_serial: Accesso alla porta seriale / COM
   permission_network: Rete
-  permission_os: Sistema operativo
   permission_secure_storage: Archiviazione sicura
   permission_smbus: SMBus
   permission_audio_routing: Instradamento audio
@@ -169,24 +124,44 @@ plugins:
   permission_command_desc: Consente al plugin di eseguire, senza una shell, solo i nomi degli eseguibili dichiarati nel manifest.
   permission_serial_desc: Consente al plugin di aprire solo la porta seriale/COM definita dal trasporto seriale dichiarato.
   permission_network_desc: Apre connessioni di rete, ad esempio verso un SDK o un server locale. Uno script dannoso potrebbe inviare dati all'esterno del computer.
-  permission_os_desc: Legge l'orologio di sistema (os.time / os.clock). Il rischio è basso e non viene mai concesso l'accesso a file o processi.
   permission_secure_storage_desc: Legge i valori segreti salvati di questo plugin (es. un token API) in chiaro durante l'esecuzione.
   permission_smbus_desc: Scansiona, legge e scrive dispositivi SMBus/I2C. Raggiunge ogni dispositivo sul bus, non solo l'hardware di questo plugin, quindi una scrittura errata può destabilizzare altri dispositivi.
   permission_audio_routing_desc: Crea e instrada sink audio di sistema. Uno script malevolo potrebbe avviare moduli audio o catturare/reindirizzare l'audio su questo computer.
   permission_data_reads_desc: "Legge i dati pubblicati dal sistema o da altri plugin:"
   # Campi di configurazione
-  settings: IMPOSTAZIONI
-  save_settings: Salva
   secret_set_hint: (un segreto è memorizzato)
   # Finestra di consenso permessi (mostrata quando si attiva un plugin che richiede permessi)
-  consent_title: Concedi permessi
-  consent_body: "%{name} richiede quanto segue per funzionare."
-  consent_warning: I permessi vengono concessi tutti insieme. Puoi revocarli in qualsiasi momento; in tal caso il plugin verrà disattivato.
-  consent_modified: Lo script del plugin è cambiato dall'ultima autorizzazione. Per motivi di sicurezza, devi ricontrollare i permessi e concedere nuovamente l'autorizzazione.
-  consent_permission_added: Un aggiornamento del plugin ha aggiunto un nuovo permesso. Per poterlo usare di nuovo, controlla le richieste qui sotto e concedi il nuovo permesso.
-  consent_grant_enable: Concedi e attiva
-  consent_cancel: Annulla
-  consent_deny: Non ora
   # Finestra di aggiunta
   cancel: Annulla
   # Conferma eliminazione
+  install: "Installa"
+  update: "Aggiorna"
+  uninstall: "Disinstalla"
+  uninstall_title: "Disinstalla plugin"
+  uninstall_body: "Disinstallare %{name}? Vengono eliminati anche le impostazioni e i segreti salvati."
+  enable_prompt_title: "Attivare %{name}?"
+  enable_prompt_intro: "Questo plugin userà…"
+  enable_prompt_nothing: "Questo plugin non usa dispositivi, programmi né accesso alla rete."
+  enable_prompt_confirm: "Attiva"
+  enable_prompt_decline: "Non attivare"
+  update_prompt_title: "Aggiornare %{name}? La nuova versione richiede più permessi"
+  update_prompt_intro: "Dopo l'aggiornamento, questo plugin userà…"
+  update_prompt_confirm: "Aggiorna"
+  update_prompt_decline: "Salta questo aggiornamento"
+  uses: "Utilizza"
+  uses_commands: "Esegue programmi"
+  not_installed_version: "Non installato · %{version}"
+  requires_newer_daemon: "Richiede una versione più recente di HaloDaemon"
+  api_incompatible: "Questo plugin richiede l’API plugin %{required}, ma questo HaloDaemon supporta %{supported}. Aggiorna HaloDaemon per usarlo."
+  provenance_signed: "Repository firmato"
+  repo_commit: "Commit"
+  repo_local: "Cartella locale"
+  repo_signature_official: "Ufficiale, firmato"
+  repos_refresh: "Aggiorna"
+  repos_add_folder: "Aggiungi cartella"
+  catalog_malformed: "Il catalogo del repository non è valido."
+  catalog_unsigned: "Il catalogo del repository non è firmato, ma questo repository richiede una firma."
+  catalog_untrusted_key: "Il catalogo del repository è firmato con una chiave non attendibile. Rimuovi e aggiungi di nuovo il repository per accettare una nuova chiave."
+  catalog_signature_mismatch: "La firma del catalogo del repository non corrisponde al contenuto."
+  catalog_stale: "Il catalogo del repository è più vecchio di quello già scaricato."
+  catalog_hash_mismatch: "Un plugin scaricato non corrisponde al catalogo del repository."

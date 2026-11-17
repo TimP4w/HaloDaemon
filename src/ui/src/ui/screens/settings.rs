@@ -2,14 +2,19 @@
 //! Settings page — matches the GTK GUI's settings content while using the
 //! Prism design visual layout (cards with toggles, value chips, buttons).
 
+use std::borrow::Cow;
+
 use crate::domain::topic_store::TopicStore;
 use crate::ui::components as widgets;
-use egui::{Align, Align2, Color32, Pos2, Rect, Sense, Stroke, Vec2};
-use halod_shared::commands::EngineKind;
+use egui::{Align2, Color32, Pos2, Stroke, Vec2};
+use halod_shared::commands::{DaemonCommand, EngineKind};
 use halod_shared::debug_info::{DebugInfo, DependencyStatus};
-use halod_shared::types::DiscoveryPhase;
+use halod_shared::types::{CoolingConfig, DiscoveryPhase, GuiConfig};
 
-use crate::runtime::ipc::CommandTx;
+use crate::domain::state::Debouncer;
+use crate::domain::tour;
+use crate::domain::tour::AnchorId;
+use crate::runtime::ipc::{self, CommandTx};
 use crate::ui::screens::depcheck::{fix_text, impact_text, title_text};
 use crate::ui::theme;
 
@@ -26,10 +31,68 @@ pub struct SettingsUi {
     /// Set once we've asked the daemon for `DebugInfo` to populate the
     /// dependency panel, so we don't re-request it every frame.
     deps_requested: bool,
+    rechecking: bool,
     /// Cached OS "launch at login" state; seeded on first render so the
     /// toggle doesn't hit the filesystem/registry every frame. `None` until
     /// seeded.
     start_on_boot: Option<bool>,
+    /// Section highlighted in the nav, and one waiting to be scrolled to.
+    active: Section,
+    scroll_to: Option<Section>,
+    save: Debouncer,
+    /// Slider values being dragged, with when they last moved, so a pending
+    /// save doesn't snap back to the last broadcast.
+    drafts: std::collections::HashMap<&'static str, (f32, f64)>,
+}
+
+impl SettingsUi {
+    pub fn debug_info_arrived(&mut self) {
+        self.rechecking = false;
+    }
+}
+
+#[derive(Clone, Copy, PartialEq, Eq, Debug, Default)]
+enum Section {
+    #[default]
+    Application,
+    Engines,
+    Devices,
+    Logging,
+    Healthcheck,
+    About,
+}
+
+impl Section {
+    const ALL: [Section; 6] = [
+        Self::Application,
+        Self::Engines,
+        Self::Devices,
+        Self::Logging,
+        Self::Healthcheck,
+        Self::About,
+    ];
+
+    fn title(self) -> std::borrow::Cow<'static, str> {
+        match self {
+            Self::Application => t!("settings.section_application"),
+            Self::Engines => t!("settings.section_engines"),
+            Self::Devices => t!("settings.section_devices"),
+            Self::Healthcheck => t!("settings.section_healthcheck"),
+            Self::Logging => t!("settings.section_logging"),
+            Self::About => t!("settings.section_about"),
+        }
+    }
+
+    fn subtitle(self) -> std::borrow::Cow<'static, str> {
+        match self {
+            Self::Application => t!("settings.section_application_sub"),
+            Self::Engines => t!("settings.section_engines_sub"),
+            Self::Devices => t!("settings.section_devices_sub"),
+            Self::Healthcheck => t!("settings.section_healthcheck_sub"),
+            Self::Logging => t!("settings.section_logging_sub"),
+            Self::About => t!("settings.section_about_sub"),
+        }
+    }
 }
 
 enum Modal {
@@ -47,7 +110,9 @@ pub fn show(
     connected: bool,
     debug: Option<&DebugInfo>,
     st: &mut SettingsUi,
+    show_hidden: &mut bool,
 ) {
+    st.save.flush(cmd, ui.input(|i| i.time));
     if !connected {
         st.deps_requested = false;
     }
@@ -58,13 +123,17 @@ pub fn show(
         st.deps_requested = true;
     }
 
-    egui::ScrollArea::vertical()
-        .auto_shrink([false, false])
-        .show(ui, |ui| {
-            widgets::page_frame(ui, |ui| {
-                page_body(ui, state, cmd, connected, debug, st);
-            });
+    widgets::page_frame(ui, |ui| {
+        widgets::split_columns(ui, 200.0, 28.0, |nav, body| {
+            section_nav(nav, st);
+            egui::ScrollArea::vertical()
+                .auto_shrink([false, false])
+                .show(body, |ui| {
+                    ui.set_max_width(ui.available_width().min(860.0));
+                    page_body(ui, state, cmd, connected, debug, st, show_hidden);
+                });
         });
+    });
 
     // ── Modals (drawn on top, not inside the scroll) ──────────────────────
     match st.modal {
@@ -83,6 +152,71 @@ pub fn show(
 
 // ── Page body ─────────────────────────────────────────────────────────────────
 
+fn section_nav(ui: &mut egui::Ui, st: &mut SettingsUi) {
+    ui.label(
+        egui::RichText::new(t!("settings.title"))
+            .font(theme::display())
+            .color(theme::TEXT),
+    );
+    ui.add_space(theme::SPACE_6);
+    ui.spacing_mut().item_spacing.y = theme::SPACE_1;
+    for section in Section::ALL {
+        let active = st.active == section;
+        let (rect, resp) = widgets::hover_row(ui, 34.0, active);
+        ui.painter().text(
+            Pos2::new(rect.left() + 12.0, rect.center().y),
+            Align2::LEFT_CENTER,
+            section.title(),
+            theme::body(14.0),
+            if active {
+                theme::NAV_TEXT_ACTIVE
+            } else {
+                theme::NAV_TEXT
+            },
+        );
+        if resp.clicked() {
+            st.active = section;
+            st.scroll_to = Some(section);
+        }
+    }
+}
+
+/// One titled settings group: heading, subtitle, and its rows in a card.
+fn group<R>(
+    ui: &mut egui::Ui,
+    st: &mut SettingsUi,
+    section: Section,
+    body: impl FnOnce(&mut egui::Ui, &mut SettingsUi) -> R,
+) -> egui::Rect {
+    if st.scroll_to == Some(section) {
+        ui.scroll_to_cursor(Some(egui::Align::TOP));
+        st.scroll_to = None;
+    }
+    ui.label(
+        egui::RichText::new(section.title())
+            .font(theme::semibold(16.0))
+            .color(theme::TEXT),
+    );
+    ui.label(
+        egui::RichText::new(section.subtitle())
+            .font(theme::body_md())
+            .color(theme::TEXT_MUT),
+    );
+    ui.add_space(theme::SPACE_5);
+    let rect = ui
+        .scope(|ui| {
+            widgets::card_with_margin(ui, egui::Margin::symmetric(18, 0), |ui| {
+                ui.set_width(ui.available_width());
+                ui.spacing_mut().item_spacing.y = 0.0;
+                body(ui, st)
+            })
+        })
+        .response
+        .rect;
+    ui.add_space(28.0);
+    rect
+}
+
 fn page_body(
     ui: &mut egui::Ui,
     state: &TopicStore,
@@ -90,178 +224,206 @@ fn page_body(
     connected: bool,
     debug: Option<&DebugInfo>,
     st: &mut SettingsUi,
+    show_hidden: &mut bool,
 ) {
-    ui.set_max_width(ui.available_width().min(840.0));
-    widgets::page_header(ui, &t!("settings.title"), &t!("settings.subtitle"), None);
-
-    // ── APPLICATION ───────────────────────────────────────────────────────
-    section_header(ui, &t!("settings.section_application"));
-    ui.add_space(theme::SPACE_2);
-    let app_card = ui.scope(|ui| {
-        widgets::card(ui, |ui| {
-            ui.spacing_mut().item_spacing.y = 0.0;
-            start_on_boot_row(ui, st);
-            language_row(ui, state, cmd);
-            close_to_tray_row(ui, state, cmd);
-            low_battery_notifications_row(ui, state, cmd);
-            window_controls_row(ui, state, cmd);
-            dependency_warning_row(ui, state, cmd);
-            plugin_downloads_row(ui, state, cmd);
-            replay_tutorials_row(ui, cmd);
+    let [close_to_tray, low_battery, window_controls, startup_check] = app_toggles(&state.gui);
+    let app = group(ui, st, Section::Application, |ui, st| {
+        start_on_boot_row(ui, &mut st.start_on_boot);
+        for (title, sub, on, command) in [close_to_tray, low_battery, window_controls] {
+            if widgets::list_row(ui, &title, &sub, |ui| widgets::toggle(ui, on) != on) {
+                ipc::send(cmd, command);
+            }
+        }
+        language_row(ui, state, cmd, &t!("settings.language_sub"));
+        if button_row(
+            ui,
+            &t!("settings.replay_tutorials_title"),
+            &t!("settings.replay_tutorials_sub"),
+            &t!("settings.replay_button"),
+        ) {
+            ipc::send(cmd, DaemonCommand::ResetToursSeen);
+            tour::request_reset(ui.ctx());
+        }
+    });
+    tour::anchor(ui.ctx(), AnchorId::SettingsApplication, app);
+    let engines = group(ui, st, Section::Engines, |ui, st| {
+        engine_rows(ui, state, cmd, st);
+    });
+    tour::anchor(ui.ctx(), AnchorId::SettingsEngines, engines);
+    group(ui, st, Section::Devices, |ui, st| {
+        let version = debug.map_or(env!("CARGO_PKG_VERSION"), |d| {
+            d.system.daemon_version.as_str()
         });
-    });
-    crate::domain::tour::anchor(
-        ui.ctx(),
-        crate::domain::tour::AnchorId::SettingsApplication,
-        app_card.response.rect,
-    );
-    ui.add_space(theme::SPACE_9);
-
-    // ── ENGINES ───────────────────────────────────────────────────────────
-    section_header(ui, &t!("settings.section_engines"));
-    ui.add_space(theme::SPACE_2);
-    let engines_card = ui.scope(|ui| {
-        widgets::card(ui, |ui| {
-            ui.spacing_mut().item_spacing.y = 0.0;
-            lcd_engine_row(ui, state, cmd);
+        let (sub, status) = if connected {
+            (
+                t!("settings.daemon_connected_sub", version = version),
+                t!("settings.daemon_running"),
+            )
+        } else {
+            (
+                t!("settings.daemon_disconnected_sub"),
+                t!("settings.daemon_stopped"),
+            )
+        };
+        widgets::list_row(ui, &t!("settings.daemon_title"), &sub, |ui| {
+            value_text(ui, &status)
         });
-    });
-    crate::domain::tour::anchor(
-        ui.ctx(),
-        crate::domain::tour::AnchorId::SettingsEngines,
-        engines_card.response.rect,
-    );
-    ui.add_space(theme::SPACE_9);
-
-    // ── DEVICES ───────────────────────────────────────────────────────────
-    section_header(ui, &t!("settings.section_devices"));
-    ui.add_space(theme::SPACE_2);
-    widgets::card(ui, |ui| {
-        ui.spacing_mut().item_spacing.y = 0.0;
-        daemon_status_row(ui, connected);
-        rediscover_row(ui, state, cmd);
-    });
-    ui.add_space(theme::SPACE_9);
-
-    // ── HEALTHCHECK ───────────────────────────────────────────────────────
-    healthcheck_section(ui, cmd, debug);
-    ui.add_space(theme::SPACE_9);
-
-    // ── LOGGING ───────────────────────────────────────────────────────────
-    section_header(ui, &t!("settings.section_logging"));
-    ui.add_space(theme::SPACE_2);
-    widgets::card(ui, |ui| {
-        ui.spacing_mut().item_spacing.y = 0.0;
-        log_level_row(ui, state, cmd);
-    });
-    ui.add_space(theme::SPACE_9);
-
-    // ── ADVANCED ──────────────────────────────────────────────────────────
-    section_header(ui, &t!("settings.section_advanced"));
-    ui.add_space(theme::SPACE_2);
-    widgets::card(ui, |ui| {
-        ui.spacing_mut().item_spacing.y = 0.0;
-        config_folder_row(ui, state);
-    });
-    ui.add_space(theme::SPACE_9);
-
-    // ── DEBUG ─────────────────────────────────────────────────────────────
-    section_header(ui, &t!("settings.section_debug"));
-    ui.add_space(theme::SPACE_2);
-    widgets::card(ui, |ui| {
-        ui.spacing_mut().item_spacing.y = 0.0;
-        diagnostics_row(ui, cmd, st);
-    });
-    ui.add_space(theme::SPACE_9);
-
-    // ── ABOUT ─────────────────────────────────────────────────────────────
-    section_header(ui, &t!("settings.section_about"));
-    ui.add_space(theme::SPACE_2);
-    widgets::card(ui, |ui| {
-        ui.spacing_mut().item_spacing.y = 0.0;
-        about_row(ui, st);
-        third_party_row(ui, st);
-        repo_row(ui);
-    });
-
-    ui.add_space(theme::SPACE_10);
-    footer(ui);
-}
-
-// ── Shared helpers ────────────────────────────────────────────────────────────
-
-fn row_rect(ui: &mut egui::Ui) -> Rect {
-    // Divider goes above every row but the first, so a list never ends on a
-    // trailing divider. Each card body is a fresh child ui, so an empty
-    // min_rect means this is the first row.
-    let first = ui.min_rect().height() <= 0.5;
-    let (rect, _) = ui.allocate_exact_size(Vec2::new(ui.available_width(), 52.0), Sense::hover());
-    if !first {
-        ui.painter().line_segment(
-            [rect.left_top(), rect.right_top()],
-            Stroke::new(1.0, theme::BORDER_SOFT),
+        widgets::list_row(
+            ui,
+            &t!("settings.rediscover_title"),
+            &t!("settings.rediscover_sub"),
+            |ui| {
+                if is_scanning(state) {
+                    widgets::button_loading(
+                        ui,
+                        &t!("settings.scanning_button"),
+                        widgets::ButtonKind::Secondary,
+                        ROW_BUTTON,
+                    );
+                } else if widgets::button(
+                    ui,
+                    &t!("settings.scan_now_button"),
+                    widgets::ButtonKind::Secondary,
+                    ROW_BUTTON,
+                )
+                .clicked()
+                {
+                    ipc::send(cmd, DaemonCommand::Rediscover);
+                }
+            },
         );
-    }
-    rect
+        if widgets::list_row(
+            ui,
+            &t!("settings.show_hidden_title"),
+            &t!("settings.show_hidden_sub"),
+            |ui| widgets::toggle(ui, *show_hidden) != *show_hidden,
+        ) {
+            *show_hidden = !*show_hidden;
+        }
+        if button_row(
+            ui,
+            &t!("settings.diagnostics_title"),
+            &t!("settings.diagnostics_sub"),
+            &t!("settings.open_button"),
+        ) {
+            ipc::send(cmd, DaemonCommand::GetDebugInfo);
+            st.modal = Some(Modal::Diagnostics);
+        }
+    });
+    group(ui, st, Section::Logging, |ui, _| {
+        let current = state.gui.log_level.to_lowercase();
+        let options: Vec<_> = LOG_LEVELS
+            .iter()
+            .map(|id| (id.to_string(), log_level_label(id).into_owned()))
+            .collect();
+        let picked = widgets::list_row(
+            ui,
+            &t!("settings.log_level"),
+            &t!("settings.log_level_sub"),
+            |ui| {
+                widgets::combo_picker_with_width(
+                    ui,
+                    "log_level_select",
+                    &options,
+                    &current,
+                    None,
+                    Some(SELECT_W),
+                )
+            },
+        );
+        if let Some(level) = picked.filter(|l| *l != current) {
+            ipc::send(cmd, DaemonCommand::SetLogLevel { level });
+        }
+        let unknown = t!("settings.unknown");
+        let dir = if state.config_dir.is_empty() {
+            &unknown
+        } else {
+            state.config_dir.as_str()
+        };
+        let log = halod_shared::app::config_dir()
+            .join(LOG_FILE)
+            .display()
+            .to_string();
+        if button_row(
+            ui,
+            &t!("settings.log_file_title"),
+            &log,
+            &t!("settings.open_log_button"),
+        ) {
+            open_path(&log);
+        }
+        if button_row(
+            ui,
+            &t!("settings.config_folder_title"),
+            dir,
+            &t!("settings.open_folder_button"),
+        ) && !state.config_dir.is_empty()
+        {
+            open_path(&state.config_dir);
+        }
+    });
+    group(ui, st, Section::Healthcheck, |ui, st| {
+        let (title, sub, on, command) = startup_check;
+        if widgets::list_row(ui, &title, &sub, |ui| widgets::toggle(ui, on) != on) {
+            ipc::send(cmd, command);
+        }
+        healthcheck_rows(ui, cmd, debug, st);
+    });
+    group(ui, st, Section::About, |ui, st| {
+        widgets::list_row(
+            ui,
+            &t!("settings.version_title"),
+            &t!(
+                "settings.version_sub",
+                build = env!("HALOD_BUILD_HASH"),
+                license = "GPL-3.0-or-later"
+            ),
+            |ui| value_text(ui, env!("CARGO_PKG_VERSION")),
+        );
+        if button_row(
+            ui,
+            &t!("settings.repository_title"),
+            REPO_URL.trim_start_matches("https://"),
+            &t!("settings.open_button"),
+        ) {
+            open_path(REPO_URL);
+        }
+        if button_row(
+            ui,
+            &t!("settings.credits_title"),
+            &t!("settings.credits_sub"),
+            &t!("settings.view_button"),
+        ) {
+            st.modal = Some(Modal::Credits);
+        }
+        if button_row(
+            ui,
+            &t!("settings.third_party_title"),
+            &t!("settings.third_party_sub"),
+            &t!("settings.view_button"),
+        ) {
+            st.modal = Some(Modal::Licenses);
+        }
+    });
 }
 
-fn row_label(ui: &mut egui::Ui, rect: Rect, title: &str, subtitle: &str) {
-    ui.painter().text(
-        Pos2::new(rect.left(), rect.top() + 10.0),
-        Align2::LEFT_TOP,
-        title,
-        theme::body_md(),
-        theme::TEXT,
-    );
-    ui.painter().text(
-        Pos2::new(rect.left(), rect.top() + 28.0),
-        Align2::LEFT_TOP,
-        subtitle,
-        theme::caption(),
-        theme::TEXT_FAINT,
-    );
+const ROW_BUTTON: Vec2 = Vec2::new(0.0, 30.0);
+const SELECT_W: f32 = 200.0;
+pub(crate) const LOG_FILE: &str = "halod.log";
+
+fn button_row(ui: &mut egui::Ui, title: &str, sub: &str, label: &str) -> bool {
+    widgets::list_row(ui, title, sub, |ui| {
+        widgets::button(ui, label, widgets::ButtonKind::Secondary, ROW_BUTTON).clicked()
+    })
 }
 
-fn row_toggle(ui: &mut egui::Ui, rect: Rect, on: bool, id: &str) -> bool {
-    row_toggle_at(ui, rect.right() - 36.0, rect.top() + 17.0, on, id)
-}
-
-fn row_toggle_at(ui: &mut egui::Ui, x: f32, y: f32, on: bool, id: &str) -> bool {
-    let toggle_rect = Rect::from_min_size(Pos2::new(x, y), Vec2::new(28.0, 15.0));
-    let resp = ui.interact(toggle_rect, ui.id().with(("toggle", id)), Sense::click());
-    let t = ui.ctx().animate_bool_with_time(resp.id, on, 0.15);
-    widgets::paint_toggle(ui.painter(), toggle_rect, t);
-    if resp.hovered() {
-        ui.ctx().set_cursor_icon(egui::CursorIcon::PointingHand);
-    }
-    resp.clicked()
-}
-
-fn right_button(ui: &mut egui::Ui, rect: Rect, label: &str, st: &mut SettingsUi, modal: Modal) {
-    let btn_w = 80.0_f32.max(
-        ui.painter()
-            .layout_no_wrap(label.to_string(), theme::body_sm(), theme::TEXT)
-            .size()
-            .x
-            + 20.0,
-    );
-    let btn_rect = Rect::from_min_size(
-        Pos2::new(rect.right() - btn_w, rect.top() + 10.0),
-        Vec2::new(btn_w, 30.0),
-    );
-    let mut btn_ui = ui.new_child(egui::UiBuilder::new().max_rect(btn_rect).layout(
-        egui::Layout::centered_and_justified(egui::Direction::LeftToRight),
-    ));
-    if widgets::button(
-        &mut btn_ui,
-        label,
-        widgets::ButtonKind::Ghost,
-        Vec2::new(btn_w, 30.0),
+/// A read-only value on the right of a settings row.
+fn value_text(ui: &mut egui::Ui, text: &str) -> egui::Response {
+    ui.label(
+        egui::RichText::new(text)
+            .font(theme::body_lg())
+            .color(theme::TEXT_SOFT),
     )
-    .clicked()
-    {
-        st.modal = Some(modal);
-    }
 }
 
 // ── APPLICATION rows ──────────────────────────────────────────────────────────
@@ -276,424 +438,392 @@ fn cache_after_toggle(prev: Option<bool>, new: bool, ok: bool) -> Option<bool> {
     }
 }
 
-fn start_on_boot_row(ui: &mut egui::Ui, st: &mut SettingsUi) {
-    let rect = row_rect(ui);
-    if crate::domain::lifecycle::autostart::system_managed() {
-        row_label(
+pub(crate) fn start_on_boot_row(ui: &mut egui::Ui, cache: &mut Option<bool>) {
+    use crate::domain::lifecycle::autostart;
+    let title = t!("settings.start_on_boot_title");
+    if autostart::system_managed() {
+        widgets::list_row(
             ui,
-            rect,
-            &t!("settings.start_on_boot_title"),
+            &title,
             &t!("settings.start_on_boot_managed_sub"),
-        );
-        ui.painter().text(
-            Pos2::new(rect.right(), rect.center().y),
-            Align2::RIGHT_CENTER,
-            t!("settings.start_on_boot_managed_value"),
-            theme::caption(),
-            theme::TEXT_FAINT,
+            |ui| {
+                ui.label(
+                    egui::RichText::new(t!("settings.start_on_boot_managed_value"))
+                        .font(theme::caption())
+                        .color(theme::TEXT_FAINT),
+                )
+            },
         );
         return;
     }
-    row_label(
-        ui,
-        rect,
-        &t!("settings.start_on_boot_title"),
-        &t!("settings.start_on_boot_sub"),
-    );
-    let on = *st
-        .start_on_boot
-        .get_or_insert_with(crate::domain::lifecycle::autostart::is_enabled);
-    if row_toggle(ui, rect, on, "start_on_boot") {
-        let ok = crate::domain::lifecycle::autostart::set_enabled(!on)
+    let on = *cache.get_or_insert_with(autostart::is_enabled);
+    if widgets::list_row(ui, &title, &t!("settings.start_on_boot_sub"), |ui| {
+        widgets::toggle(ui, on) != on
+    }) {
+        let ok = autostart::set_enabled(!on)
             .map_err(|e| log::error!("autostart toggle failed: {e}"))
             .is_ok();
-        st.start_on_boot = cache_after_toggle(st.start_on_boot, !on, ok);
+        *cache = cache_after_toggle(*cache, !on, ok);
     }
 }
 
-/// The daemon replaces the whole UI config on `SetUiConfig`, so every toggle
-/// sends the current snapshot with only its own field overridden (`Some`).
-fn send_ui_config(
-    cmd: &CommandTx,
-    state: &TopicStore,
-    close_to_tray: Option<bool>,
-    suppress_dependency_warning: Option<bool>,
-    hide_window_controls: Option<bool>,
-    low_battery_notifications: Option<bool>,
-) {
-    crate::runtime::ipc::send(
-        cmd,
-        halod_shared::commands::DaemonCommand::SetUiConfig {
-            close_to_tray: close_to_tray.unwrap_or(state.gui.close_to_tray),
-            suppress_dependency_warning: suppress_dependency_warning
-                .unwrap_or(state.gui.suppress_dependency_warning),
-            hide_window_controls: hide_window_controls.unwrap_or(state.gui.hide_window_controls),
-            low_battery_notifications: low_battery_notifications
-                .unwrap_or(state.gui.low_battery_notifications),
-        },
-    );
-}
+type ToggleRow = (Cow<'static, str>, Cow<'static, str>, bool, DaemonCommand);
 
-fn close_to_tray_row(ui: &mut egui::Ui, state: &TopicStore, cmd: &CommandTx) {
-    let rect = row_rect(ui);
-    row_label(
-        ui,
-        rect,
-        &t!("settings.close_to_tray_title"),
-        &t!("settings.close_to_tray_sub"),
-    );
-    let on = state.gui.close_to_tray;
-    if row_toggle(ui, rect, on, "close_to_tray") {
-        send_ui_config(cmd, state, Some(!on), None, None, None);
-    }
-}
-
-fn low_battery_notifications_row(ui: &mut egui::Ui, state: &TopicStore, cmd: &CommandTx) {
-    let rect = row_rect(ui);
-    row_label(
-        ui,
-        rect,
-        &t!("settings.low_battery_notifications_title"),
-        &t!("settings.low_battery_notifications_sub"),
-    );
-    let on = state.gui.low_battery_notifications;
-    if row_toggle(ui, rect, on, "low_battery_notifications") {
-        send_ui_config(cmd, state, None, None, None, Some(!on));
-    }
-}
-
-fn plugin_downloads_row(ui: &mut egui::Ui, state: &TopicStore, cmd: &CommandTx) {
-    let rect = row_rect(ui);
-    row_label(
-        ui,
-        rect,
-        &t!("settings.plugin_downloads_title"),
-        &t!("settings.plugin_downloads_sub"),
-    );
-    let on = state.gui.plugin_downloads == halod_shared::types::PluginDownloadConsent::Allowed;
-    if row_toggle(ui, rect, on, "plugin_downloads") {
-        crate::runtime::ipc::send(
-            cmd,
-            halod_shared::commands::DaemonCommand::SetPluginDownloadConsent { allowed: !on },
-        );
-    }
-}
-
-fn window_controls_row(ui: &mut egui::Ui, state: &TopicStore, cmd: &CommandTx) {
-    let rect = row_rect(ui);
-    row_label(
-        ui,
-        rect,
-        &t!("settings.window_controls_title"),
-        &t!("settings.window_controls_sub"),
-    );
-    let on = !state.gui.hide_window_controls;
-    if row_toggle(ui, rect, on, "window_controls") {
-        send_ui_config(cmd, state, None, None, Some(on), None);
-    }
-}
-
-fn dependency_warning_row(ui: &mut egui::Ui, state: &TopicStore, cmd: &CommandTx) {
-    let rect = row_rect(ui);
-    row_label(
-        ui,
-        rect,
-        &t!("settings.startup_healthcheck_title"),
-        &t!("settings.startup_healthcheck_sub"),
-    );
-    let warn_on = !state.gui.suppress_dependency_warning;
-    if row_toggle(ui, rect, warn_on, "dependency_warning") {
-        send_ui_config(cmd, state, None, Some(warn_on), None, None);
-    }
-}
-
-fn replay_tutorials_row(ui: &mut egui::Ui, cmd: &CommandTx) {
-    let rect = row_rect(ui);
-    row_label(
-        ui,
-        rect,
-        &t!("settings.replay_tutorials_title"),
-        &t!("settings.replay_tutorials_sub"),
-    );
-
-    let btn_w = 90.0;
-    let btn_rect = Rect::from_min_size(
-        Pos2::new(rect.right() - btn_w, rect.top() + 10.0),
-        Vec2::new(btn_w, 30.0),
-    );
-    let mut btn_ui = ui.new_child(egui::UiBuilder::new().max_rect(btn_rect).layout(
-        egui::Layout::centered_and_justified(egui::Direction::LeftToRight),
-    ));
-    if widgets::button(
-        &mut btn_ui,
-        &t!("settings.replay_button"),
-        widgets::ButtonKind::Ghost,
-        Vec2::new(btn_w, 30.0),
-    )
-    .clicked()
-    {
-        crate::runtime::ipc::send(cmd, halod_shared::commands::DaemonCommand::ResetToursSeen);
-        crate::domain::tour::request_reset(ui.ctx());
-    }
+/// `(title, subtitle, on, command that flips it)` for the Application toggles.
+/// `SetUiConfig` replaces the whole UI config, so each carries the full snapshot.
+fn app_toggles(gui: &GuiConfig) -> [ToggleRow; 4] {
+    let flip = |i: usize| {
+        let mut f = [
+            gui.close_to_tray,
+            gui.suppress_dependency_warning,
+            gui.hide_window_controls,
+            gui.low_battery_notifications,
+        ];
+        f[i] ^= true;
+        DaemonCommand::SetUiConfig {
+            close_to_tray: f[0],
+            suppress_dependency_warning: f[1],
+            hide_window_controls: f[2],
+            low_battery_notifications: f[3],
+        }
+    };
+    [
+        (
+            t!("settings.close_to_tray_title"),
+            t!("settings.close_to_tray_sub"),
+            gui.close_to_tray,
+            flip(0),
+        ),
+        (
+            t!("settings.low_battery_notifications_title"),
+            t!("settings.low_battery_notifications_sub"),
+            gui.low_battery_notifications,
+            flip(3),
+        ),
+        (
+            t!("settings.window_controls_title"),
+            t!("settings.window_controls_sub"),
+            !gui.hide_window_controls,
+            flip(2),
+        ),
+        (
+            t!("settings.startup_healthcheck_title"),
+            t!("settings.startup_healthcheck_sub"),
+            !gui.suppress_dependency_warning,
+            flip(1),
+        ),
+    ]
 }
 
 // ── ENGINES rows ──────────────────────────────────────────────────────────────
 
-fn lcd_engine_row(ui: &mut egui::Ui, state: &TopicStore, cmd: &CommandTx) {
-    let rect = row_rect(ui);
-    row_label(ui, rect, "LCD", &t!("settings.lcd_engine_sub"));
+const FAN_TICKS_MS: [u64; 4] = [500, 1000, 2000, 5000];
+const DRAFT_SETTLE_SECS: f64 = 1.5;
+const SAVE_DEBOUNCE_SECS: f64 = 0.2;
 
-    let lcd_enabled = state.lcd.config.enabled;
-    let lcd_fps = state.lcd.config.fps;
-
-    let chip_w = 72.0_f32;
-    let fps_chip_rect = Rect::from_min_size(
-        Pos2::new(rect.right() - chip_w - 40.0, rect.top() + 10.0),
-        Vec2::new(chip_w, 30.0),
+fn engine_rows(ui: &mut egui::Ui, state: &TopicStore, cmd: &CommandTx, st: &mut SettingsUi) {
+    let fps = |v: f32| t!("settings.fps_value", n = v.round() as u32).into_owned();
+    engine_slider(
+        ui,
+        st,
+        (
+            "canvas_fps",
+            &t!("settings.canvas_engine_title"),
+            &t!("settings.canvas_engine_sub"),
+        ),
+        state.lighting.config.canvas_fps as f32,
+        1.0..=60.0,
+        fps,
+        |v| DaemonCommand::set_engine_fps(EngineKind::Canvas, v.round() as u64),
     );
-
-    // Numeric-only fps input; re-seeded from config while unfocused, committed
-    // on Enter or when focus leaves (clamped to the valid 1..=60 range).
-    let fps_id = ui.id().with("lcd_fps");
-    let mut buf = ui
-        .data(|d| d.get_temp::<String>(fps_id))
-        .unwrap_or_default();
-    if !ui.memory(|m| m.has_focus(fps_id)) {
-        buf = lcd_fps.to_string();
-    }
-    let mut chip_ui = ui.new_child(egui::UiBuilder::new().max_rect(fps_chip_rect).layout(
-        egui::Layout::centered_and_justified(egui::Direction::LeftToRight),
-    ));
-    let resp = chip_ui.add_enabled(
-        lcd_enabled,
-        egui::TextEdit::singleline(&mut buf)
-            .id(fps_id)
-            .font(theme::mono_semibold(11.0))
-            .horizontal_align(Align::Center)
-            .desired_width(chip_w)
-            .margin(egui::vec2(8.0, 6.0)),
+    engine_slider(
+        ui,
+        st,
+        ("lcd_fps", "LCD", &t!("settings.lcd_engine_sub")),
+        state.lcd.config.fps as f32,
+        1.0..=60.0,
+        fps,
+        |v| DaemonCommand::set_engine_fps(EngineKind::Lcd, v.round() as u64),
     );
-    buf.retain(|c| c.is_ascii_digit());
-    if resp.lost_focus() {
-        let clamped = parse_fps(&buf, lcd_fps);
-        buf = clamped.to_string();
-        if clamped != lcd_fps {
-            crate::runtime::ipc::send(
-                cmd,
-                halod_shared::commands::DaemonCommand::set_engine_fps(
-                    EngineKind::Lcd,
-                    clamped as u64,
-                ),
-            );
-        }
-    }
-    ui.data_mut(|d| d.insert_temp(fps_id, buf));
-
-    let toggle_x = rect.right() - 36.0;
-    let toggle_y = rect.top() + 17.0;
-    if row_toggle_at(ui, toggle_x, toggle_y, lcd_enabled, "lcd") {
-        crate::runtime::ipc::send(
+    let current = state.cooling.config.fan_curve_tick_ms;
+    let options: Vec<_> = FAN_TICKS_MS
+        .iter()
+        .chain((!FAN_TICKS_MS.contains(&current)).then_some(&current))
+        .map(|ms| (ms.to_string(), tick_label(*ms)))
+        .collect();
+    let picked = widgets::list_row(
+        ui,
+        &t!("settings.fan_engine_title"),
+        &t!("settings.fan_engine_sub"),
+        |ui| {
+            widgets::combo_picker_with_width(
+                ui,
+                "fan_tick_select",
+                &options,
+                &current.to_string(),
+                None,
+                Some(SELECT_W),
+            )
+        },
+    );
+    if let Some(ms) = picked
+        .and_then(|v| v.parse::<u64>().ok())
+        .filter(|ms| *ms != current)
+    {
+        ipc::send(
             cmd,
-            halod_shared::commands::DaemonCommand::set_engine_enabled(
-                EngineKind::Lcd,
-                !lcd_enabled,
-            ),
+            DaemonCommand::SetEngineConfig {
+                engine: EngineKind::FanCurve,
+                enabled: None,
+                tick_ms: Some(ms),
+                fps: None,
+                failsafe_duty: None,
+            },
+        );
+    }
+    engine_slider(
+        ui,
+        st,
+        (
+            "failsafe_duty",
+            &t!("settings.failsafe_title"),
+            &t!("settings.failsafe_sub"),
+        ),
+        state.cooling.config.fan_failsafe_duty as f32,
+        0.0..=100.0,
+        |v| format!("{}%", v.round() as u32),
+        |v| DaemonCommand::SetFanFailsafeDuty {
+            duty: v.round() as u8,
+        },
+    );
+    for tuning in Tuning::ALL {
+        engine_slider(
+            ui,
+            st,
+            (tuning.key(), &tuning.title(), &tuning.sub()),
+            tuning.live(&state.cooling.config),
+            tuning.range(),
+            |v| tuning.readout(v),
+            |v| tuning.command(v),
         );
     }
 }
 
-// ── DEVICES rows ──────────────────────────────────────────────────────────────
+#[derive(Clone, Copy, PartialEq, Debug)]
+enum Tuning {
+    RampUp,
+    RampDown,
+    Hysteresis,
+    Smoothing,
+    Stale,
+}
 
-fn daemon_status_row(ui: &mut egui::Ui, connected: bool) {
-    let rect = row_rect(ui);
-    let (status_text, status_color) = if connected {
-        (t!("settings.daemon_connected"), theme::TRAFFIC_GREEN)
-    } else {
-        (t!("settings.daemon_disconnected"), theme::OFFLINE)
-    };
-    row_label(
-        ui,
-        rect,
-        &t!("settings.daemon_title"),
-        &t!("settings.daemon_sub"),
-    );
-    ui.painter().text(
-        Pos2::new(rect.right() - 10.0, rect.top() + 12.0),
-        Align2::RIGHT_TOP,
-        status_text,
-        theme::semibold(11.0),
-        status_color,
-    );
+impl Tuning {
+    const ALL: [Self; 5] = [
+        Self::RampUp,
+        Self::RampDown,
+        Self::Hysteresis,
+        Self::Smoothing,
+        Self::Stale,
+    ];
+
+    fn key(self) -> &'static str {
+        match self {
+            Self::RampUp => "fan_ramp_up",
+            Self::RampDown => "fan_ramp_down",
+            Self::Hysteresis => "fan_hysteresis",
+            Self::Smoothing => "fan_smoothing",
+            Self::Stale => "fan_stale",
+        }
+    }
+
+    fn title(self) -> Cow<'static, str> {
+        t!(format!("settings.{}_title", self.key()))
+    }
+
+    fn sub(self) -> Cow<'static, str> {
+        t!(format!("settings.{}_sub", self.key()))
+    }
+
+    fn range(self) -> std::ops::RangeInclusive<f32> {
+        match self {
+            Self::RampUp | Self::RampDown => 0.0..=50.0,
+            Self::Hysteresis => 0.0..=10.0,
+            Self::Smoothing => 0.0..=30.0,
+            Self::Stale => 0.0..=300.0,
+        }
+    }
+
+    fn snap(self, v: f32) -> f32 {
+        let step = if self == Self::Hysteresis { 0.5 } else { 1.0 };
+        (v / step).round() * step
+    }
+
+    fn live(self, c: &CoolingConfig) -> f32 {
+        match self {
+            Self::RampUp => c.fan_ramp_up_pct_per_s,
+            Self::RampDown => c.fan_ramp_down_pct_per_s,
+            Self::Hysteresis => c.fan_hysteresis_c,
+            Self::Smoothing => c.fan_smoothing_secs,
+            Self::Stale => c.fan_sensor_stale_secs,
+        }
+    }
+
+    fn readout(self, v: f32) -> String {
+        let v = self.snap(v);
+        let n = format!("{v}");
+        match self {
+            Self::RampUp | Self::RampDown if v == 0.0 => t!("settings.fan_instant"),
+            _ if v == 0.0 => t!("settings.fan_off"),
+            Self::RampUp | Self::RampDown => t!("settings.fan_rate_value", n = n),
+            Self::Hysteresis => t!("settings.fan_celsius_value", n = n),
+            Self::Smoothing | Self::Stale => t!("settings.fan_seconds_value", n = n),
+        }
+        .into_owned()
+    }
+
+    fn command(self, v: f32) -> DaemonCommand {
+        let v = Some(self.snap(v));
+        let only = |t: Self| v.filter(|_| t == self);
+        DaemonCommand::SetCoolingTuning {
+            ramp_up_pct_per_s: only(Self::RampUp),
+            ramp_down_pct_per_s: only(Self::RampDown),
+            hysteresis_c: only(Self::Hysteresis),
+            smoothing_secs: only(Self::Smoothing),
+            sensor_stale_secs: only(Self::Stale),
+        }
+    }
+}
+
+fn tick_label(ms: u64) -> String {
+    let secs = ms as f64 / 1000.0;
+    t!("settings.fan_tick_value", secs = format!("{secs}")).into_owned()
+}
+
+/// A settings row with a slider and its readout. Edits are held as a draft
+/// and saved once the user pauses.
+fn engine_slider(
+    ui: &mut egui::Ui,
+    st: &mut SettingsUi,
+    (key, title, sub): (&'static str, &str, &str),
+    live: f32,
+    range: std::ops::RangeInclusive<f32>,
+    readout: impl Fn(f32) -> String,
+    command: impl Fn(f32) -> DaemonCommand,
+) {
+    let now = ui.input(|i| i.time);
+    let mut value = shown_value(st.drafts.get(key).copied(), live, now);
+    let changed = widgets::list_row(ui, title, sub, |ui| {
+        ui.add_sized(
+            Vec2::new(56.0, 20.0),
+            egui::Label::new(
+                egui::RichText::new(readout(value))
+                    .font(theme::body_lg())
+                    .color(theme::TEXT_SOFT),
+            ),
+        );
+        ui.add_space(theme::SPACE_5);
+        ui.allocate_ui(Vec2::new(194.0, 16.0), |ui| {
+            widgets::slider(ui, &mut value, range)
+        })
+        .inner
+    });
+    if changed {
+        st.drafts.insert(key, (value, now));
+        st.save.queue(key, command(value), now, SAVE_DEBOUNCE_SECS);
+    }
+}
+
+/// The value a slider shows: a recent draft wins over the broadcast value.
+fn shown_value(draft: Option<(f32, f64)>, live: f32, now: f64) -> f32 {
+    match draft {
+        Some((v, at)) if now - at < DRAFT_SETTLE_SECS => v,
+        _ => live,
+    }
 }
 
 fn is_scanning(state: &TopicStore) -> bool {
     matches!(state.discovery.phase, DiscoveryPhase::Discovering)
 }
 
-fn rediscover_row(ui: &mut egui::Ui, state: &TopicStore, cmd: &CommandTx) {
-    let rect = row_rect(ui);
-    row_label(
-        ui,
-        rect,
-        &t!("settings.rediscover_title"),
-        &t!("settings.rediscover_sub"),
-    );
-
-    let btn_w = 90.0;
-    let btn_rect = Rect::from_min_size(
-        Pos2::new(rect.right() - btn_w, rect.top() + 10.0),
-        Vec2::new(btn_w, 30.0),
-    );
-    let mut btn_ui = ui.new_child(egui::UiBuilder::new().max_rect(btn_rect).layout(
-        egui::Layout::centered_and_justified(egui::Direction::LeftToRight),
-    ));
-    let btn_size = Vec2::new(btn_w, 30.0);
-    if is_scanning(state) {
-        widgets::button_loading(
-            &mut btn_ui,
-            &t!("settings.scanning_button"),
-            widgets::ButtonKind::Ghost,
-            btn_size,
-        );
-    } else if widgets::button(
-        &mut btn_ui,
-        &t!("settings.scan_now_button"),
-        widgets::ButtonKind::Ghost,
-        btn_size,
-    )
-    .clicked()
-    {
-        crate::runtime::ipc::send(cmd, halod_shared::commands::DaemonCommand::Rediscover);
-    }
-}
-
 // ── HEALTHCHECK rows ───────────────────────────────────────────────────────────
 
-fn healthcheck_section(ui: &mut egui::Ui, cmd: &CommandTx, debug: Option<&DebugInfo>) {
-    let (rect, _) = ui.allocate_exact_size(Vec2::new(ui.available_width(), 20.0), Sense::hover());
-    ui.painter().text(
-        Pos2::new(rect.left(), rect.center().y),
-        Align2::LEFT_CENTER,
-        t!("settings.section_healthcheck"),
-        theme::caption(),
-        theme::TEXT_FAINT2,
-    );
-    let btn_w = 76.0;
-    let btn_rect = Rect::from_min_size(
-        Pos2::new(rect.right() - btn_w, rect.top() - 4.0),
-        Vec2::new(btn_w, 26.0),
-    );
-    let mut btn_ui = ui.new_child(egui::UiBuilder::new().max_rect(btn_rect).layout(
-        egui::Layout::centered_and_justified(egui::Direction::LeftToRight),
-    ));
-    if widgets::button(
-        &mut btn_ui,
-        &t!("settings.recheck_button"),
-        widgets::ButtonKind::Ghost,
-        Vec2::new(btn_w, 26.0),
-    )
-    .clicked()
-    {
-        crate::runtime::ipc::send(cmd, halod_shared::commands::DaemonCommand::GetDebugInfo);
-    }
-    ui.add_space(theme::SPACE_2);
-
-    widgets::card(ui, |ui| {
-        ui.spacing_mut().item_spacing.y = 0.0;
-        match debug {
-            None => {
-                let rect = row_rect(ui);
-                row_label(
-                    ui,
-                    rect,
-                    &t!("settings.running_healthcheck_title"),
-                    &t!("settings.running_healthcheck_sub"),
-                );
-            }
-            Some(info) if info.dependencies.is_empty() => {
-                let rect = row_rect(ui);
-                row_label(
-                    ui,
-                    rect,
-                    &t!("settings.no_checks_title"),
-                    &t!("settings.no_checks_sub"),
-                );
-            }
-            Some(info) => {
-                for dep in &info.dependencies {
-                    dependency_row(ui, dep);
-                }
+fn healthcheck_rows(
+    ui: &mut egui::Ui,
+    cmd: &CommandTx,
+    debug: Option<&DebugInfo>,
+    st: &mut SettingsUi,
+) {
+    match debug {
+        None => widgets::list_row(
+            ui,
+            &t!("settings.running_healthcheck_title"),
+            &t!("settings.running_healthcheck_sub"),
+            |_| {},
+        ),
+        Some(info) if info.dependencies.is_empty() => widgets::list_row(
+            ui,
+            &t!("settings.no_checks_title"),
+            &t!("settings.no_checks_sub"),
+            |_| {},
+        ),
+        Some(info) => {
+            for dep in &info.dependencies {
+                dependency_row(ui, dep);
             }
         }
-    });
+    }
+    let clicked = widgets::list_row(
+        ui,
+        &t!("settings.recheck_title"),
+        &t!("settings.recheck_sub"),
+        |ui| {
+            if st.rechecking {
+                widgets::button_loading(
+                    ui,
+                    &t!("settings.recheck_button"),
+                    widgets::ButtonKind::Secondary,
+                    ROW_BUTTON,
+                );
+                false
+            } else {
+                widgets::button(
+                    ui,
+                    &t!("settings.recheck_button"),
+                    widgets::ButtonKind::Secondary,
+                    ROW_BUTTON,
+                )
+                .clicked()
+            }
+        },
+    );
+    if clicked {
+        st.rechecking = true;
+        ipc::send(cmd, DaemonCommand::GetDebugInfo);
+    }
 }
 
 fn dependency_row(ui: &mut egui::Ui, dep: &DependencyStatus) {
-    let rect = row_rect(ui);
-
-    let name = title_text(dep);
-    let title = if dep.platform.is_empty() || dep.platform == "All" {
-        name
-    } else {
-        format!("{}  ·  {}", name, dep.platform)
-    };
     // Show the actionable fix in place of the purpose when it's missing.
     let subtitle = if !dep.present {
         fix_text(dep)
     } else {
         impact_text(dep)
     };
-    row_label(ui, rect, &title, &subtitle);
-
-    // Status (line 1): green when detected; red only when a *required* dep is
-    // absent; otherwise a neutral grey — a missing optional tool is just info.
-    let (status, status_color) = if dep.present {
-        (t!("settings.dep_detected"), theme::TRAFFIC_GREEN)
-    } else if dep.required {
-        (t!("settings.dep_missing"), theme::OFFLINE)
-    } else {
-        (t!("settings.dep_not_found"), theme::TEXT_FAINT)
-    };
-    ui.painter().text(
-        Pos2::new(rect.right() - 10.0, rect.top() + 9.0),
-        Align2::RIGHT_TOP,
-        status,
-        theme::semibold(11.0),
-        status_color,
-    );
-
-    // Tag (line 2): "Required" (red only when unmet) or a muted "Optional".
-    let (tag, tag_color) = if dep.required {
-        (
-            t!("settings.dep_required"),
-            if dep.present {
-                theme::TEXT_MUT
-            } else {
-                theme::OFFLINE
-            },
-        )
-    } else {
-        (t!("settings.dep_optional"), theme::TEXT_MUT)
-    };
-    tag_pill(ui, rect.right() - 10.0, rect.top() + 30.0, &tag, tag_color);
+    let (status, tone) = dependency_status(dep);
+    widgets::list_row(ui, &title_text(dep), &subtitle, |ui| {
+        widgets::tag(ui, &status, tone)
+    });
 }
 
-/// A small right-anchored pill (rounded outline + label).
-fn tag_pill(ui: &mut egui::Ui, right: f32, y: f32, text: &str, color: Color32) {
-    let font = theme::body(9.5);
-    let text_w = ui
-        .painter()
-        .layout_no_wrap(text.to_string(), font.clone(), color)
-        .size()
-        .x;
-    let w = text_w + 14.0;
-    let h = 16.0;
-    let pill = Rect::from_min_size(Pos2::new(right - w, y), Vec2::new(w, h));
-    ui.painter().rect_filled(pill, 8.0, theme::hex(0x14131f));
-    ui.painter()
-        .rect_stroke(pill, 8.0, Stroke::new(1.0, color), egui::StrokeKind::Middle);
-    ui.painter()
-        .text(pill.center(), Align2::CENTER_CENTER, text, font, color);
+fn dependency_status(dep: &DependencyStatus) -> (std::borrow::Cow<'static, str>, widgets::TagTone) {
+    if dep.present {
+        (t!("settings.dep_detected"), widgets::TagTone::Ok)
+    } else if dep.required {
+        (t!("settings.dep_missing"), widgets::TagTone::Danger)
+    } else {
+        (t!("settings.dep_not_found"), widgets::TagTone::Warn)
+    }
 }
 
 // ── Language ────────────────────────────────────────────────────────────────
@@ -701,15 +831,6 @@ fn tag_pill(ui: &mut egui::Ui, right: f32, y: f32, text: &str, color: Color32) {
 /// Supported UI languages as `(code, native display name)`. Codes must match
 /// `halod_shared::types::SUPPORTED_LANGUAGES`; the parity is asserted in tests.
 pub(crate) const LANGUAGES: &[(&str, &str); 2] = &[("en", "English"), ("it", "Italiano")];
-
-/// Native display name for a language code, falling back to the code itself.
-pub(crate) fn language_display(code: &str) -> &str {
-    LANGUAGES
-        .iter()
-        .find(|(c, _)| *c == code)
-        .map(|(_, name)| *name)
-        .unwrap_or(code)
-}
 
 /// Apply `code` as the active translation locale, unless it is already active.
 pub fn apply_locale(code: &str) {
@@ -749,44 +870,27 @@ fn startup_locale_from_yaml(raw: &str) -> Option<String> {
         .then_some(code)
 }
 
-fn language_row(ui: &mut egui::Ui, state: &TopicStore, cmd: &CommandTx) {
-    let rect = row_rect(ui);
-    row_label(ui, rect, &t!("settings.language"), "");
-
-    let current = state.gui.language.as_str();
-    let combo_w = 130.0;
-    let combo_rect = Rect::from_min_size(
-        Pos2::new(rect.right() - combo_w, rect.top() + 11.0),
-        Vec2::new(combo_w, 30.0),
-    );
-    let mut combo_ui = ui.new_child(
-        egui::UiBuilder::new()
-            .max_rect(combo_rect)
-            .layout(egui::Layout::top_down(egui::Align::Min)),
-    );
-    let mut picked: Option<&str> = None;
-    egui::ComboBox::from_id_salt("language_select")
-        .selected_text(language_display(current))
-        .width(combo_w)
-        .show_ui(&mut combo_ui, |ui| {
-            for (code, name) in LANGUAGES {
-                if ui.selectable_label(current == *code, *name).clicked() {
-                    picked = Some(code);
-                }
-            }
-        });
-    if let Some(code) = picked {
-        if code != current {
-            // The GUI owns translation state; do not wait for the daemon's
-            // persistence round-trip before updating visible copy.
-            apply_locale(code);
-            crate::runtime::ipc::send(
-                cmd,
-                halod_shared::commands::DaemonCommand::SetLanguage {
-                    lang: code.to_string(),
-                },
-            );
-        }
+pub(crate) fn language_row(ui: &mut egui::Ui, state: &TopicStore, cmd: &CommandTx, sub: &str) {
+    let current = &state.gui.language;
+    let options: Vec<_> = LANGUAGES
+        .iter()
+        .map(|(c, n)| (c.to_string(), n.to_string()))
+        .collect();
+    let picked = widgets::list_row(ui, &t!("settings.language"), sub, |ui| {
+        widgets::combo_picker_with_width(
+            ui,
+            "language_select",
+            &options,
+            current,
+            None,
+            Some(SELECT_W),
+        )
+    });
+    if let Some(lang) = picked.filter(|c| c != current) {
+        // The GUI owns translation state; do not wait for the daemon's
+        // persistence round-trip before updating visible copy.
+        apply_locale(&lang);
+        ipc::send(cmd, DaemonCommand::SetLanguage { lang });
     }
 }
 
@@ -794,98 +898,18 @@ fn language_row(ui: &mut egui::Ui, state: &TopicStore, cmd: &CommandTx) {
 
 const LOG_LEVELS: &[&str; 4] = &["error", "warn", "info", "debug"];
 
-fn log_level_row(ui: &mut egui::Ui, state: &TopicStore, cmd: &CommandTx) {
-    let rect = row_rect(ui);
-    row_label(
-        ui,
-        rect,
-        &t!("settings.log_level"),
-        &t!("settings.log_level_sub"),
-    );
-
-    let current = state.gui.log_level.to_lowercase();
-    let combo_w = 130.0;
-    let combo_rect = Rect::from_min_size(
-        Pos2::new(rect.right() - combo_w, rect.top() + 11.0),
-        Vec2::new(combo_w, 30.0),
-    );
-    let mut combo_ui = ui.new_child(
-        egui::UiBuilder::new()
-            .max_rect(combo_rect)
-            .layout(egui::Layout::top_down(egui::Align::Min)),
-    );
-    let mut picked: Option<&str> = None;
-    egui::ComboBox::from_id_salt("log_level_select")
-        .selected_text(current.clone())
-        .width(combo_w)
-        .show_ui(&mut combo_ui, |ui| {
-            for &level in LOG_LEVELS {
-                if ui.selectable_label(current == level, level).clicked() {
-                    picked = Some(level);
-                }
-            }
-        });
-    if let Some(level) = picked {
-        if level != current {
-            crate::runtime::ipc::send(
-                cmd,
-                halod_shared::commands::DaemonCommand::SetLogLevel {
-                    level: level.to_string(),
-                },
-            );
-        }
-    }
-}
-
-// ── ADVANCED rows ─────────────────────────────────────────────────────────────
-
-fn config_folder_row(ui: &mut egui::Ui, state: &TopicStore) {
-    let rect = row_rect(ui);
-    ui.painter().text(
-        Pos2::new(rect.left(), rect.top() + 10.0),
-        Align2::LEFT_TOP,
-        t!("settings.config_folder_title"),
-        theme::body_md(),
-        theme::TEXT,
-    );
-    let config_unknown = t!("settings.unknown");
-    let config_path = if state.config_dir.is_empty() {
-        config_unknown.as_ref()
-    } else {
-        state.config_dir.as_str()
-    };
-    ui.painter().text(
-        Pos2::new(rect.left(), rect.top() + 28.0),
-        Align2::LEFT_TOP,
-        config_path,
-        theme::caption(),
-        theme::TEXT_FAINT,
-    );
-
-    let btn_w = 72.0;
-    let btn_rect = Rect::from_min_size(
-        Pos2::new(rect.right() - btn_w, rect.top() + 10.0),
-        Vec2::new(btn_w, 30.0),
-    );
-    let mut btn_ui = ui.new_child(egui::UiBuilder::new().max_rect(btn_rect).layout(
-        egui::Layout::centered_and_justified(egui::Direction::LeftToRight),
-    ));
-    if widgets::button(
-        &mut btn_ui,
-        &t!("settings.open_external_button"),
-        widgets::ButtonKind::Ghost,
-        Vec2::new(btn_w, 30.0),
-    )
-    .clicked()
-        && !state.config_dir.is_empty()
-    {
-        open_path(&state.config_dir);
+fn log_level_label(id: &str) -> Cow<'static, str> {
+    match id {
+        "error" => t!("settings.log_error"),
+        "warn" => t!("settings.log_warn"),
+        "debug" => t!("settings.log_debug"),
+        _ => t!("settings.log_info"),
     }
 }
 
 /// Spawn the platform file/URL opener for `p` on a detached thread so the UI
 /// never blocks. Uses `explorer` on Windows, `open` on macOS, `xdg-open` elsewhere.
-fn open_path(p: &str) {
+pub(crate) fn open_path(p: &str) {
     let p = p.to_string();
     std::thread::spawn(move || {
         let prog = if cfg!(target_os = "windows") {
@@ -903,165 +927,7 @@ fn open_path(p: &str) {
     });
 }
 
-// ── DEBUG rows ────────────────────────────────────────────────────────────────
-
-fn diagnostics_row(ui: &mut egui::Ui, cmd: &CommandTx, st: &mut SettingsUi) {
-    let rect = row_rect(ui);
-    ui.painter().text(
-        Pos2::new(rect.left(), rect.top() + 10.0),
-        Align2::LEFT_TOP,
-        t!("settings.diagnostics_title"),
-        theme::body_md(),
-        theme::TEXT,
-    );
-    ui.painter().text(
-        Pos2::new(rect.left(), rect.top() + 28.0),
-        Align2::LEFT_TOP,
-        t!("settings.diagnostics_sub"),
-        theme::caption(),
-        theme::TEXT_FAINT,
-    );
-
-    let btn_w = 80.0_f32.max(
-        ui.painter()
-            .layout_no_wrap(
-                t!("settings.open_button").to_string(),
-                theme::body_sm(),
-                theme::TEXT,
-            )
-            .size()
-            .x
-            + 20.0,
-    );
-    let btn_rect = Rect::from_min_size(
-        Pos2::new(rect.right() - btn_w, rect.top() + 10.0),
-        Vec2::new(btn_w, 30.0),
-    );
-    let mut btn_ui = ui.new_child(egui::UiBuilder::new().max_rect(btn_rect).layout(
-        egui::Layout::centered_and_justified(egui::Direction::LeftToRight),
-    ));
-    if widgets::button(
-        &mut btn_ui,
-        &t!("settings.open_button"),
-        widgets::ButtonKind::Ghost,
-        Vec2::new(btn_w, 30.0),
-    )
-    .clicked()
-    {
-        crate::runtime::ipc::send(cmd, halod_shared::commands::DaemonCommand::GetDebugInfo);
-        st.modal = Some(Modal::Diagnostics);
-    }
-}
-
-// ── ABOUT rows ────────────────────────────────────────────────────────────────
-
-fn about_row(ui: &mut egui::Ui, st: &mut SettingsUi) {
-    let rect = row_rect(ui);
-    ui.painter().text(
-        Pos2::new(rect.left(), rect.top() + 10.0),
-        Align2::LEFT_TOP,
-        halod_shared::app::APP_DISPLAY_NAME,
-        theme::body_md(),
-        theme::TEXT,
-    );
-    ui.painter().text(
-        Pos2::new(rect.left(), rect.top() + 28.0),
-        Align2::LEFT_TOP,
-        format!(
-            "v{} {}",
-            env!("CARGO_PKG_VERSION"),
-            t!("settings.app_tagline")
-        ),
-        theme::caption(),
-        theme::TEXT_FAINT,
-    );
-
-    right_button(ui, rect, &t!("settings.credits_button"), st, Modal::Credits);
-}
-
-fn third_party_row(ui: &mut egui::Ui, st: &mut SettingsUi) {
-    let rect = row_rect(ui);
-    ui.painter().text(
-        Pos2::new(rect.left(), rect.top() + 10.0),
-        Align2::LEFT_TOP,
-        t!("settings.third_party_title"),
-        theme::body_md(),
-        theme::TEXT,
-    );
-    ui.painter().text(
-        Pos2::new(rect.left(), rect.top() + 28.0),
-        Align2::LEFT_TOP,
-        t!("settings.third_party_sub"),
-        theme::caption(),
-        theme::TEXT_FAINT,
-    );
-
-    right_button(ui, rect, &t!("settings.view_button"), st, Modal::Licenses);
-}
-
 const REPO_URL: &str = halod_shared::app::REPO_URL;
-
-fn repo_row(ui: &mut egui::Ui) {
-    let rect = row_rect(ui);
-    let resp = ui.interact(rect, ui.id().with("repo_row"), Sense::click());
-    ui.painter().text(
-        Pos2::new(rect.left(), rect.top() + 10.0),
-        Align2::LEFT_TOP,
-        t!("settings.repository_title"),
-        theme::body_md(),
-        theme::TEXT,
-    );
-    ui.painter().text(
-        Pos2::new(rect.left(), rect.top() + 28.0),
-        Align2::LEFT_TOP,
-        REPO_URL.trim_start_matches("https://"),
-        theme::caption(),
-        if resp.hovered() {
-            theme::CYAN
-        } else {
-            theme::TEXT_FAINT
-        },
-    );
-    if resp.hovered() {
-        ui.ctx().set_cursor_icon(egui::CursorIcon::PointingHand);
-    }
-    if resp.clicked() {
-        open_path(REPO_URL);
-    }
-}
-
-/// Parse `buf` as a u32 FPS value, falling back to `fallback`, clamped to 1–60.
-fn parse_fps(buf: &str, fallback: u32) -> u32 {
-    buf.parse::<u32>().unwrap_or(fallback).clamp(1, 60)
-}
-
-// ── Section header ────────────────────────────────────────────────────────────
-
-fn section_header(ui: &mut egui::Ui, text: &str) {
-    let (rect, _) = ui.allocate_exact_size(Vec2::new(ui.available_width(), 20.0), Sense::hover());
-    ui.painter().text(
-        Pos2::new(rect.left(), rect.center().y),
-        Align2::LEFT_CENTER,
-        text,
-        theme::caption(),
-        theme::TEXT_FAINT2,
-    );
-}
-
-// ── Footer ────────────────────────────────────────────────────────────────────
-
-fn footer(ui: &mut egui::Ui) {
-    ui.label(
-        egui::RichText::new(concat!(
-            "HaloDaemon v",
-            env!("CARGO_PKG_VERSION"),
-            " · ",
-            env!("HALOD_BUILD_HASH")
-        ))
-        .font(theme::body_sm())
-        .color(theme::TEXT_FAINT),
-    );
-}
 
 // ── Modals ────────────────────────────────────────────────────────────────────
 
@@ -1095,8 +961,8 @@ fn licenses_modal(ctx: &egui::Context, st: &mut SettingsUi) {
             );
             ui.add_space(theme::SPACE_5);
             egui::Frame::NONE
-                .fill(theme::hex(0x080b10))
-                .stroke(Stroke::new(1.0, theme::hex(0x1c2230)))
+                .fill(theme::BODY)
+                .stroke(Stroke::new(1.0, theme::BORDER))
                 .corner_radius(theme::RADIUS_SM)
                 .inner_margin(theme::PAD_WELL)
                 .show(ui, |ui| {
@@ -1222,12 +1088,12 @@ fn diagnostics_modal(ctx: &egui::Context, debug: Option<&DebugInfo>, st: &mut Se
                 }
                 Some(info) => {
                     // ── Copy / export ─────────────────────────────────────────
-                    let copied_key = egui::Id::new("diag_copied_at");
+                    let copied_key = egui::Id::unique("diag_copied_at");
                     ui.horizontal(|ui| {
                         if widgets::button(
                             ui,
                             &t!("settings.copy_json_button"),
-                            widgets::ButtonKind::Ghost,
+                            widgets::ButtonKind::Secondary,
                             egui::vec2(110.0, 30.0),
                         )
                         .clicked()
@@ -1240,7 +1106,7 @@ fn diagnostics_modal(ctx: &egui::Context, debug: Option<&DebugInfo>, st: &mut Se
                         if widgets::button(
                             ui,
                             &t!("settings.export_button"),
-                            widgets::ButtonKind::Ghost,
+                            widgets::ButtonKind::Secondary,
                             egui::vec2(110.0, 30.0),
                         )
                         .clicked()
@@ -1366,8 +1232,8 @@ fn diagnostics_modal(ctx: &egui::Context, debug: Option<&DebugInfo>, st: &mut Se
 /// A subtle inset panel wrapping one diagnostics section's rows.
 fn diag_card<R>(ui: &mut egui::Ui, body: impl FnOnce(&mut egui::Ui) -> R) -> R {
     let r = egui::Frame::NONE
-        .fill(theme::hex(0x080b10))
-        .stroke(Stroke::new(1.0, theme::hex(0x1c2230)))
+        .fill(theme::BODY)
+        .stroke(Stroke::new(1.0, theme::BORDER))
         .corner_radius(theme::RADIUS_SM)
         .inner_margin(theme::PAD_WELL)
         .show(ui, |ui| {
@@ -1431,6 +1297,37 @@ fn export_diagnostics(json: String) {
 #[cfg(test)]
 mod tests {
     use super::*;
+
+    #[test]
+    fn the_recheck_spinner_stops_when_a_snapshot_arrives() {
+        let mut st = SettingsUi {
+            rechecking: true,
+            ..Default::default()
+        };
+        st.debug_info_arrived();
+        assert!(!st.rechecking);
+    }
+
+    #[test]
+    fn checks_that_fail_or_are_missing_stand_out() {
+        let dep = |present: bool, required: bool| DependencyStatus {
+            id: halod_shared::debug_info::DependencyRule::Ffmpeg,
+            present,
+            required,
+            platform: "All".into(),
+            fix_variant: String::new(),
+        };
+        assert_eq!(dependency_status(&dep(true, true)).1, widgets::TagTone::Ok);
+        assert_eq!(dependency_status(&dep(true, false)).1, widgets::TagTone::Ok);
+        assert_eq!(
+            dependency_status(&dep(false, true)).1,
+            widgets::TagTone::Danger
+        );
+        assert_eq!(
+            dependency_status(&dep(false, false)).1,
+            widgets::TagTone::Warn
+        );
+    }
     use halod_shared::types::DiscoveryStatus;
 
     #[test]
@@ -1447,38 +1344,6 @@ gui:
     #[test]
     fn startup_locale_rejects_codes_without_a_gui_catalog() {
         assert_eq!(startup_locale_from_yaml("gui:\n  language: xx\n"), None);
-    }
-
-    fn card_divider_count(rows: usize) -> usize {
-        let ctx = egui::Context::default();
-        theme::install_fonts(&ctx);
-        let input = egui::RawInput {
-            screen_rect: Some(egui::Rect::from_min_size(
-                egui::Pos2::ZERO,
-                egui::vec2(700.0, 900.0),
-            )),
-            ..Default::default()
-        };
-        let out = ctx.run_ui(input, |ui| {
-            widgets::card(ui, |ui| {
-                ui.spacing_mut().item_spacing.y = 0.0;
-                for _ in 0..rows {
-                    let _ = row_rect(ui);
-                }
-            });
-        });
-        out.shapes
-            .iter()
-            .filter(|s| matches!(s.shape, egui::Shape::LineSegment { .. }))
-            .count()
-    }
-
-    #[test]
-    fn row_list_draws_no_trailing_divider() {
-        // N rows separate with N-1 dividers — the last row must not add one.
-        assert_eq!(card_divider_count(1), 0);
-        assert_eq!(card_divider_count(3), 2);
-        assert_eq!(card_divider_count(7), 6);
     }
 
     #[test]
@@ -1653,9 +1518,79 @@ gui:
     }
 
     #[test]
-    fn language_display_falls_back_to_code() {
-        assert_eq!(language_display("en"), "English");
-        assert_eq!(language_display("xx"), "xx");
+    fn each_app_toggle_command_flips_only_its_own_row() {
+        fn apply(g: &mut GuiConfig, c: DaemonCommand) {
+            match c {
+                DaemonCommand::SetUiConfig {
+                    close_to_tray,
+                    suppress_dependency_warning,
+                    hide_window_controls,
+                    low_battery_notifications,
+                } => {
+                    g.close_to_tray = close_to_tray;
+                    g.suppress_dependency_warning = suppress_dependency_warning;
+                    g.hide_window_controls = hide_window_controls;
+                    g.low_battery_notifications = low_battery_notifications;
+                }
+                other => panic!("unexpected command {other:?}"),
+            }
+        }
+        let on = |g: &GuiConfig| app_toggles(g).map(|(_, _, on, _)| on);
+        for base in [GuiConfig::default(), {
+            let mut g = GuiConfig::default();
+            g.close_to_tray ^= true;
+            g.hide_window_controls ^= true;
+            g
+        }] {
+            for (i, (_, _, _, command)) in app_toggles(&base).into_iter().enumerate() {
+                let mut next = base.clone();
+                apply(&mut next, command);
+                let (before, after) = (on(&base), on(&next));
+                for j in 0..before.len() {
+                    assert_eq!(after[j], before[j] ^ (i == j), "row {i} changed row {j}");
+                }
+            }
+        }
+    }
+
+    #[test]
+    fn each_tuning_command_sets_only_its_own_field() {
+        for tuning in Tuning::ALL {
+            let DaemonCommand::SetCoolingTuning {
+                ramp_up_pct_per_s,
+                ramp_down_pct_per_s,
+                hysteresis_c,
+                smoothing_secs,
+                sensor_stale_secs,
+            } = tuning.command(2.3)
+            else {
+                panic!("unexpected command for {tuning:?}");
+            };
+            let set: Vec<_> = [
+                (Tuning::RampUp, ramp_up_pct_per_s),
+                (Tuning::RampDown, ramp_down_pct_per_s),
+                (Tuning::Hysteresis, hysteresis_c),
+                (Tuning::Smoothing, smoothing_secs),
+                (Tuning::Stale, sensor_stale_secs),
+            ]
+            .into_iter()
+            .filter_map(|(t, v)| v.map(|v| (t, v)))
+            .collect();
+            assert_eq!(set, vec![(tuning, tuning.snap(2.3))]);
+        }
+    }
+
+    #[test]
+    fn tuning_snaps_hysteresis_to_half_degrees_and_others_to_whole_units() {
+        assert_eq!(Tuning::Hysteresis.snap(2.3), 2.5);
+        assert_eq!(Tuning::Smoothing.snap(2.3), 2.0);
+    }
+
+    #[test]
+    fn zero_tuning_reads_as_disabled() {
+        assert_eq!(Tuning::RampDown.readout(0.2), t!("settings.fan_instant"));
+        assert_eq!(Tuning::Stale.readout(0.0), t!("settings.fan_off"));
+        assert_ne!(Tuning::Stale.readout(30.0), t!("settings.fan_off"));
     }
 
     #[test]
@@ -1676,12 +1611,19 @@ gui:
     }
 
     #[test]
-    fn parse_fps_clamps_and_falls_back() {
-        assert_eq!(parse_fps("30", 24), 30);
-        assert_eq!(parse_fps("0", 24), 1);
-        assert_eq!(parse_fps("120", 24), 60);
-        assert_eq!(parse_fps("", 24), 24);
-        assert_eq!(parse_fps("abc", 24), 24);
+    fn a_fresh_draft_wins_until_it_settles() {
+        assert_eq!(shown_value(None, 20.0, 5.0), 20.0);
+        assert_eq!(shown_value(Some((30.0, 5.0)), 20.0, 5.5), 30.0);
+        assert_eq!(
+            shown_value(Some((30.0, 5.0)), 20.0, 5.0 + DRAFT_SETTLE_SECS),
+            20.0
+        );
+    }
+
+    #[test]
+    fn fan_tick_labels_read_in_seconds() {
+        assert_eq!(tick_label(2000), t!("settings.fan_tick_value", secs = "2"));
+        assert_eq!(tick_label(500), t!("settings.fan_tick_value", secs = "0.5"));
     }
 
     #[test]

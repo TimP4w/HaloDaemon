@@ -2,6 +2,8 @@
 //! `Slot`/`KvStateCache` state cells and the per-capability state-slot types.
 //! Domain-owned state slots shared by device implementations.
 
+use crate::config::PlacedZone;
+use crate::domain::cooling::model::FanCurveRecord;
 use halod_shared::keyboard::KeyboardLayoutSelection;
 use halod_shared::types::{LightingState, VisibilityState};
 use halod_shared::zone_transform::ZoneContentTransform;
@@ -11,23 +13,23 @@ use std::collections::HashMap;
 /// A `Mutex`-backed state cell shared by the device state slots below, so each
 /// slot type avoids hand-rolling the same lock dance.
 #[derive(Default)]
-pub struct Slot<T>(std::sync::Mutex<T>);
+pub struct Slot<T>(parking_lot::Mutex<T>);
 
 impl<T> Slot<T> {
     pub fn with<R>(&self, f: impl FnOnce(&T) -> R) -> R {
-        f(&self.0.lock().unwrap())
+        f(&self.0.lock())
     }
     pub fn update<R>(&self, f: impl FnOnce(&mut T) -> R) -> R {
-        f(&mut self.0.lock().unwrap())
+        f(&mut self.0.lock())
     }
 }
 
 impl<T: Clone> Slot<T> {
     pub fn get(&self) -> T {
-        self.0.lock().unwrap().clone()
+        self.0.lock().clone()
     }
     pub fn set(&self, value: T) {
-        *self.0.lock().unwrap() = value;
+        *self.0.lock() = value;
     }
 }
 
@@ -82,11 +84,11 @@ impl KeyboardLayoutSlot {
     }
 }
 
-pub struct KvStateCache<V>(std::sync::Mutex<std::collections::HashMap<String, V>>);
+pub struct KvStateCache<V>(parking_lot::Mutex<std::collections::HashMap<String, V>>);
 
 impl<V> Default for KvStateCache<V> {
     fn default() -> Self {
-        KvStateCache(std::sync::Mutex::new(std::collections::HashMap::new()))
+        KvStateCache(parking_lot::Mutex::new(std::collections::HashMap::new()))
     }
 }
 
@@ -95,22 +97,18 @@ impl<V: Clone + Serialize + DeserializeOwned> KvStateCache<V> {
     where
         V: PartialEq,
     {
-        self.0
-            .lock()
-            .unwrap()
-            .insert(key.to_string(), value.clone())
-            != Some(value)
+        self.0.lock().insert(key.to_string(), value.clone()) != Some(value)
     }
 
     pub fn get(&self, key: &str) -> Option<V>
     where
         V: Copy,
     {
-        self.0.lock().unwrap().get(key).copied()
+        self.0.lock().get(key).copied()
     }
 
     pub fn save(&self) -> serde_json::Value {
-        let map = self.0.lock().unwrap();
+        let map = self.0.lock();
         if map.is_empty() {
             return serde_json::Value::Null;
         }
@@ -134,13 +132,13 @@ pub struct LightingStateSlot(Slot<LightingStateInner>);
 #[derive(Default)]
 struct LightingStateInner {
     current_state: Option<LightingState>,
-    placed_channels: Vec<crate::config::PlacedZone>,
+    placed_channels: Vec<PlacedZone>,
     channel_transforms: HashMap<String, ZoneContentTransform>,
 }
 
 slot_accessors!(LightingStateSlot {
     current_state / set_state : current_state : Option<LightingState>,
-    placed_channels / set_canvas_zones : placed_channels : Vec<crate::config::PlacedZone>,
+    placed_channels / set_canvas_zones : placed_channels : Vec<PlacedZone>,
     channel_transforms / set_zone_transforms : channel_transforms : HashMap<String, ZoneContentTransform>,
 });
 
@@ -158,17 +156,13 @@ impl LightingStateSlot {
 
 /// Persisted curves keyed by device-local cooling channel.
 #[derive(Default)]
-pub struct CoolingStateSlot(Slot<HashMap<String, crate::domain::cooling::model::FanCurveRecord>>);
+pub struct CoolingStateSlot(Slot<HashMap<String, FanCurveRecord>>);
 
 impl CoolingStateSlot {
-    pub fn curve(&self, channel_id: &str) -> Option<crate::domain::cooling::model::FanCurveRecord> {
+    pub fn curve(&self, channel_id: &str) -> Option<FanCurveRecord> {
         self.0.with(|curves| curves.get(channel_id).cloned())
     }
-    pub fn set_curve(
-        &self,
-        channel_id: String,
-        mut curve: crate::domain::cooling::model::FanCurveRecord,
-    ) {
+    pub fn set_curve(&self, channel_id: String, mut curve: FanCurveRecord) {
         curve.sanitize();
         self.0.update(|curves| {
             curves.insert(channel_id, curve);
@@ -182,7 +176,7 @@ impl CoolingStateSlot {
     pub fn clear_curves(&self) {
         self.0.set(HashMap::new());
     }
-    pub fn curves(&self) -> HashMap<String, crate::domain::cooling::model::FanCurveRecord> {
+    pub fn curves(&self) -> HashMap<String, FanCurveRecord> {
         self.0.get()
     }
     pub fn save(&self) -> serde_json::Value {
@@ -195,9 +189,8 @@ impl CoolingStateSlot {
         serde_json::to_value(curves).unwrap_or(serde_json::Value::Null)
     }
     pub fn load(&self, value: &serde_json::Value) {
-        if let Ok(mut curves) = serde_json::from_value::<
-            HashMap<String, crate::domain::cooling::model::FanCurveRecord>,
-        >(value.clone())
+        if let Ok(mut curves) =
+            serde_json::from_value::<HashMap<String, FanCurveRecord>>(value.clone())
         {
             for curve in curves.values_mut() {
                 curve.sanitize();

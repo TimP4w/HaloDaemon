@@ -5,12 +5,13 @@
 use std::sync::mpsc;
 
 use anyhow::{Context, Result};
+use halod_shared::ids::PluginId;
 
 use super::SecretStore;
 
 const SERVICE: &str = halod_shared::app::APP_NAME;
 
-fn account(plugin_id: &str, key: &str) -> String {
+fn account(plugin_id: &PluginId, key: &str) -> String {
     format!("{plugin_id}/{key}")
 }
 
@@ -112,7 +113,7 @@ impl KeyringStore {
 }
 
 impl SecretStore for KeyringStore {
-    fn set(&self, plugin_id: &str, key: &str, plaintext: &str) -> Result<()> {
+    fn set(&self, plugin_id: &PluginId, key: &str, plaintext: &str) -> Result<()> {
         let (reply, result) = mpsc::channel();
         self.tx
             .send(Request::Set {
@@ -124,7 +125,7 @@ impl SecretStore for KeyringStore {
         receive(result)
     }
 
-    fn get(&self, plugin_id: &str, key: &str) -> Result<Option<String>> {
+    fn get(&self, plugin_id: &PluginId, key: &str) -> Result<Option<String>> {
         let (reply, result) = mpsc::channel();
         self.tx
             .send(Request::Get {
@@ -135,7 +136,7 @@ impl SecretStore for KeyringStore {
         receive(result)
     }
 
-    fn delete(&self, plugin_id: &str, key: &str) -> Result<()> {
+    fn delete(&self, plugin_id: &PluginId, key: &str) -> Result<()> {
         let (reply, result) = mpsc::channel();
         self.tx
             .send(Request::Delete {

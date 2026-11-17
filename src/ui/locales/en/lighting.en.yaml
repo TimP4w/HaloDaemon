@@ -1,8 +1,8 @@
 lighting:
-  title: RGB Lighting
+  title: Lighting
   subtitle: Apply one color or effect to every device at once
-  tab_canvas: Effects Canvas
-  tab_direct: Direct Effects
+  tab_canvas: Effects canvas
+  tab_direct: Direct effects
   static: Static
   paint: Paint
   edit: Edit
@@ -13,11 +13,16 @@ lighting:
   global_effect: Global effect
   new_effect: New effect
   import: Import
-  effect_settings: Effect settings
+  effect_settings_for: "Effect settings · %{name}"
   master_brightness: Master brightness
   saturation: Saturation
-  target_devices_zones: Target devices & zones
-  targets_subtitle: Choose which devices and zones use this lighting. Select a device to view its zones.
+  target_devices_zones: Target devices and zones
+  targets_subtitle: Choose which devices use this lighting. Select a device to see its zones.
+  source_builtin: Built-in
+  source_effects: Effects
+  source_mine: My effects
+  on_canvas_warning: "%{names} is on the canvas. Applying this effect removes it from the canvas."
+  apply_to: "Apply to %{n} devices"
   deselect_all: Deselect all
   select_all: Select all
   zones_count: "%{sel}/%{total} zones"
@@ -29,26 +34,20 @@ lighting:
   remove_from_canvas_title: Remove from canvas?
   remove_from_canvas_body: This device is on the canvas. Applying this effect will remove it from the canvas.
   remove_and_apply: Remove & apply
-  lighting_preview: Lighting preview
-  mode_static: STATIC
-  mode_paint: PAINT
-  mode_effect: EFFECT
-  mode_software: SOFTWARE
-  mode_canvas_engine: CANVAS ENGINE
-  zone_caps: ZONE
-  layout_caps: LAYOUT
+  preview: Preview
+  layout: Layout
   all_zones: All
   paint_hint: Click or drag LEDs to paint
   clear: Clear
   fill_zone: Fill zone
-  transform_caps: TRANSFORM
-  reverse: "↺ Reverse"
-  swap: "⇄ Swap"
-  flip_h: "⇄ Flip H"
-  flip_v: "⇅ Flip V"
+  transform: Transform
+  reverse: Reverse
+  swap: Swap
+  flip_h: Flip horizontal
+  flip_v: Flip vertical
   reset: Reset
   rotate: Rotate
   effect: Effect
-  place_on_canvas: "Place on Canvas →"
+  place_on_canvas: Place on canvas
   brush_color: Brush color
   color: Color

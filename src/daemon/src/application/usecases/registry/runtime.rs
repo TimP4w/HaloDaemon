@@ -6,21 +6,20 @@ use crate::domain::events::ChangeSink as _;
 use std::sync::Arc;
 
 use crate::application::state::AppState;
+use crate::domain::events::Change;
 
 /// Seed the persisted GUI config before IPC starts accepting clients, ensuring
 /// the very first retained snapshot contains authoritative locale state.
 pub async fn publish_gui(app: &Arc<AppState>) {
-    app.record_change(crate::domain::events::Change::Gui).await;
+    app.record_change(Change::Gui).await;
 }
 
 pub async fn bootstrap(app: &Arc<AppState>) {
-    app.record_change(crate::domain::events::Change::Bootstrap)
-        .await;
+    app.record_change(Change::Bootstrap).await;
 }
 
 pub async fn topology_changed(app: &Arc<AppState>) {
-    app.record_change(crate::domain::events::Change::DiscoveryTopology)
-        .await;
+    app.record_change(Change::DiscoveryTopology).await;
 }
 
 #[cfg(test)]

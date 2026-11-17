@@ -1,18 +1,19 @@
 shell:
   nav_home: Home
-  nav_lighting: RGB Lighting
+  nav_lighting: Lighting
   nav_cooling: Cooling
   nav_plugins: Plugins
-  nav_integrations: Integrations
   nav_settings: Settings
-  workspace: WORKSPACE
-  my_devices: MY DEVICES
-  no_devices: No devices yet
-  daemon_running: Daemon running
-  daemon_offline: Daemon offline
-  daemon_offline_sub: Not connected
-  start: Start
-  daemon_not_running: Daemon not running
-  daemon_unreachable: HaloDaemon can't reach the halod service.
-  daemon_start_hint: Start it to control your devices.
-  start_daemon: Start daemon
+  daemon_not_running: "HaloDaemon isn’t running"
+  daemon_unreachable: "The app can’t reach the HaloDaemon service, so your devices can’t be controlled. Lighting, fan curves and profiles keep their last state until it’s back."
+  daemon_reconnecting: "Trying to reconnect…"
+  open_log: "Open log"
+  start_daemon: "Start HaloDaemon"
+  notifications: "Notifications"
+  mark_all_read: "Mark all read"
+  clear: "Clear"
+  no_notifications: "No notifications yet"
+  age_now: "now"
+  age_min: "%{n} min"
+  age_hour: "%{n} h"
+  age_day: "%{n} d"

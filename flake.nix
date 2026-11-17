@@ -77,6 +77,8 @@
               rustfmt
               reuse
               cargo-about
+              cargo-audit
+              cargo-deny
 
               gcc
               pkg-config

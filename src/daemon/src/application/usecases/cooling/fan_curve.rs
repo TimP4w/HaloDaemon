@@ -7,11 +7,13 @@ use std::sync::Arc;
 use crate::application::state::AppState;
 use crate::domain::cooling::engine::fan_curve::preset_curves;
 use crate::domain::cooling::model::FanCurveRecord;
+use crate::domain::events::Change;
 use crate::domain::profiles::device_state::persist_device_state;
 use crate::domain::registry::require_device_owned_id;
+use halod_shared::ids::DeviceId;
 
 pub async fn set_cooling_curve_points(
-    device_id: String,
+    device_id: DeviceId,
     channel_id: String,
     points: Vec<[f32; 2]>,
     sensor_id: Option<String>,
@@ -37,13 +39,12 @@ pub async fn set_cooling_curve_points(
     );
     cooling.set_curve(channel_id, record);
     persist_device_state(&app, device.as_ref()).await;
-    app.record_change(crate::domain::events::Change::CoolingDevice(device_id))
-        .await;
+    app.record_change(Change::CoolingDevice(device_id)).await;
     Ok(())
 }
 
 pub async fn set_cooling_curve_preset(
-    device_id: String,
+    device_id: DeviceId,
     channel_id: String,
     preset: String,
     sensor_id: Option<String>,
@@ -69,7 +70,7 @@ pub async fn set_cooling_curve_preset(
 }
 
 pub async fn remove_cooling_curve(
-    device_id: String,
+    device_id: DeviceId,
     channel_id: String,
     app: Arc<AppState>,
 ) -> Result<()> {
@@ -86,8 +87,7 @@ pub async fn remove_cooling_curve(
     );
     cooling.clear_curve(&channel_id);
     persist_device_state(&app, device.as_ref()).await;
-    app.record_change(crate::domain::events::Change::CoolingDevice(device_id))
-        .await;
+    app.record_change(Change::CoolingDevice(device_id)).await;
     Ok(())
 }
 
@@ -156,7 +156,7 @@ mod tests {
         );
         let app = app_with(vec![device.clone()]);
         app.data_bus
-            .replace_host_sensors(vec![(fan_id.to_owned(), reading)]);
+            .replace_host_sensors(vec![(fan_id.parse().unwrap(), reading)]);
         (app, device)
     }
 
@@ -165,7 +165,7 @@ mod tests {
         let (app, device) = make_app_with_fan_and_sensor("fan_0", "sensor_0");
         let preset = preset_curves().iter().find(|p| p.id == "balanced").unwrap();
         set_cooling_curve_preset(
-            "fan_0".into(),
+            "fan_0".parse().unwrap(),
             "default".into(),
             "balanced".into(),
             Some("sensor_0".into()),
@@ -182,7 +182,7 @@ mod tests {
     async fn set_fan_curve_points_stores_custom_points() {
         let (app, device) = make_app_with_fan("fan_0");
         set_cooling_curve_points(
-            "fan_0".into(),
+            "fan_0".parse().unwrap(),
             "default".into(),
             vec![[30.0f32, 20.0], [80.0f32, 100.0]],
             None,
@@ -221,7 +221,7 @@ mod tests {
     async fn set_fan_curve_points_accepts_owned_temperature_sensor() {
         let (app, device) = make_app_with_fan_and_sensor("fan_0", "cpu_temp");
         set_cooling_curve_points(
-            "fan_0".into(),
+            "fan_0".parse().unwrap(),
             "default".into(),
             vec![[30.0f32, 20.0], [80.0f32, 100.0]],
             Some("cpu_temp".into()),
@@ -239,7 +239,7 @@ mod tests {
     async fn set_fan_curve_points_rejects_unknown_sensor() {
         let (app, _device) = make_app_with_fan("fan_0");
         let err = set_cooling_curve_points(
-            "fan_0".into(),
+            "fan_0".parse().unwrap(),
             "default".into(),
             vec![[30.0f32, 20.0], [80.0f32, 100.0]],
             Some("ghost_sensor".into()),
@@ -259,7 +259,7 @@ mod tests {
         )]);
         crate::application::usecases::device::telemetry::observe(&app).await;
         let err = set_cooling_curve_points(
-            "fan_0".into(),
+            "fan_0".parse().unwrap(),
             "default".into(),
             vec![[30.0f32, 20.0], [80.0f32, 100.0]],
             Some("load0".into()),
@@ -274,7 +274,7 @@ mod tests {
     async fn remove_fan_curve_removes_entry() {
         let (app, device) = make_app_with_fan("fan_0");
         set_cooling_curve_points(
-            "fan_0".into(),
+            "fan_0".parse().unwrap(),
             "default".into(),
             vec![[30.0f32, 20.0], [80.0f32, 100.0]],
             None,
@@ -284,7 +284,7 @@ mod tests {
         .unwrap();
         assert!(fan_curve(&device).is_some());
 
-        remove_cooling_curve("fan_0".into(), "default".into(), app)
+        remove_cooling_curve("fan_0".parse().unwrap(), "default".into(), app)
             .await
             .unwrap();
         assert!(fan_curve(&device).is_none());
@@ -294,7 +294,7 @@ mod tests {
     async fn remove_fan_curve_errors_on_missing_device() {
         let cfg = Config::default();
         let app = Arc::new(AppState::new(cfg));
-        let err = remove_cooling_curve("nonexistent".into(), "default".into(), app)
+        let err = remove_cooling_curve("nonexistent".parse().unwrap(), "default".into(), app)
             .await
             .unwrap_err();
         assert!(err.to_string().contains("nonexistent"));
@@ -304,7 +304,7 @@ mod tests {
     async fn set_and_remove_fan_curve_error_on_unknown_channel() {
         let (app, _device) = make_app_with_fan("fan_0");
         let set_err = set_cooling_curve_points(
-            "fan_0".into(),
+            "fan_0".parse().unwrap(),
             "missing".into(),
             vec![[30.0, 20.0], [80.0, 100.0]],
             None,
@@ -314,7 +314,7 @@ mod tests {
         .unwrap_err();
         assert!(set_err.to_string().contains("unknown cooling channel"));
 
-        let remove_err = remove_cooling_curve("fan_0".into(), "missing".into(), app)
+        let remove_err = remove_cooling_curve("fan_0".parse().unwrap(), "missing".into(), app)
             .await
             .unwrap_err();
         assert!(remove_err.to_string().contains("unknown cooling channel"));
@@ -325,7 +325,7 @@ mod tests {
         let cfg = Config::default();
         let app = Arc::new(AppState::new(cfg));
         let err = set_cooling_curve_points(
-            "ghost".into(),
+            "ghost".parse().unwrap(),
             "default".into(),
             vec![[30.0f32, 20.0], [80.0f32, 100.0]],
             None,
@@ -341,7 +341,7 @@ mod tests {
         let cfg = Config::default();
         let app = Arc::new(AppState::new(cfg));
         let err = set_cooling_curve_preset(
-            "ghost".into(),
+            "ghost".parse().unwrap(),
             "default".into(),
             "balanced".into(),
             None,

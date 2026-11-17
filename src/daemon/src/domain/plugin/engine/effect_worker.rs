@@ -15,10 +15,15 @@ use mlua::{Function, Lua, LuaSerdeExt, Table};
 use serde::{Deserialize, Serialize};
 use tokio::sync::oneshot;
 
-use halod_shared::types::{EffectParamValue, Permission};
+use halod_shared::types::EffectParamValue;
 
 use super::bytebuf::ByteBuf;
+use super::ffi::lua_err;
 use super::lua_worker::LuaWorker;
+use crate::application::bus::data_bus;
+use crate::domain::plugin::ResolvedConfig;
+use crate::infrastructure::audio::SpectrumFrame;
+use halod_shared::ids::DeviceId;
 
 pub const CANVAS_W: u32 = 400;
 pub const CANVAS_H: u32 = 300;
@@ -40,7 +45,7 @@ pub struct EffectFrameInput {
     pub time: f32,
     pub dt: f32,
     pub frame: u64,
-    pub audio: crate::infrastructure::audio::SpectrumFrame,
+    pub audio: SpectrumFrame,
 }
 
 #[derive(Debug, Clone, Serialize)]
@@ -48,7 +53,7 @@ pub struct EffectZoneInput {
     pub id: String,
     pub topology: String,
     pub led_count: usize,
-    pub device_id: String,
+    pub device_id: DeviceId,
 }
 
 impl EffectZoneInput {
@@ -57,7 +62,7 @@ impl EffectZoneInput {
             id: "canvas".into(),
             topology: "canvas".into(),
             led_count: 0,
-            device_id: String::new(),
+            device_id: Default::default(),
         }
     }
 }
@@ -155,21 +160,19 @@ impl PluginEffectHandle {
     /// Spawn the worker thread for one live effect instance. `effect_id` is
     /// the plugin-local id (not the namespaced catalog id) — it drives the
     /// `render_effect_<id>` / `led_effect_<id>` callback lookup.
-    #[cfg_attr(not(test), allow(dead_code))]
+    #[cfg(test)]
     pub fn spawn(
         script_source: String,
         module_sources: std::collections::BTreeMap<String, String>,
         effect_id: String,
         params: HashMap<String, EffectParamValue>,
-        granted: Vec<Permission>,
-        config: crate::domain::plugin::ResolvedConfig,
+        config: ResolvedConfig,
     ) -> Self {
         Self::spawn_with_data(
             script_source,
             module_sources,
             effect_id,
             params,
-            granted,
             config,
             Default::default(),
         )
@@ -180,8 +183,7 @@ impl PluginEffectHandle {
         module_sources: std::collections::BTreeMap<String, String>,
         effect_id: String,
         params: HashMap<String, EffectParamValue>,
-        granted: Vec<Permission>,
-        config: crate::domain::plugin::ResolvedConfig,
+        config: ResolvedConfig,
         data: super::data_api::DataRuntime,
     ) -> Self {
         let worker = LuaWorker::spawn_vm(
@@ -196,7 +198,6 @@ impl PluginEffectHandle {
                     &module_sources,
                     &effect_id,
                     &params,
-                    &granted,
                     &config,
                     data.clone(),
                 )
@@ -265,10 +266,6 @@ impl PluginEffectHandle {
             })
             .await?
     }
-}
-
-fn lua_err(context: &str, e: mlua::Error) -> anyhow::Error {
-    anyhow!("effect {context}: {e}")
 }
 
 /// HSV (h,s,v each 0..1) to sRGB bytes. Used only to back `halod.hsv` for
@@ -429,7 +426,7 @@ fn effect_context_table(
                     "data key '{key}' is not declared in consumes"
                 )));
             }
-            crate::application::bus::data_bus::snapshot_to_lua(lua, &data.bus.read(&key))
+            data_bus::snapshot_to_lua(lua, &data.bus.read(&key))
         })?,
     )?;
 
@@ -558,12 +555,11 @@ fn build_ctx(
     module_sources: &std::collections::BTreeMap<String, String>,
     effect_id: &str,
     params: &HashMap<String, EffectParamValue>,
-    granted: &[Permission],
-    config: &crate::domain::plugin::ResolvedConfig,
+    config: &ResolvedConfig,
     data: super::data_api::DataRuntime,
 ) -> Result<EffectCtx> {
     let (lua, budget) =
-        super::lua_worker::bootstrap_worker_vm(granted, config, module_sources, data.clone())?;
+        super::lua_worker::bootstrap_worker_vm(config, module_sources, data.clone())?;
     register_effect_helpers(&lua).map_err(|e| lua_err("effect helpers", e))?;
 
     let manifest: Table = lua
@@ -698,7 +694,7 @@ mod tests {
             id: id.to_owned(),
             topology: "linear".to_owned(),
             led_count,
-            device_id: "device".to_owned(),
+            device_id: "device".parse().unwrap(),
         }
     }
 
@@ -733,7 +729,6 @@ mod tests {
             Default::default(),
             "plasma".to_string(),
             params(),
-            vec![],
             HashMap::new(),
         );
         let bytes = handle.render_pixmap(frame(0.0, 1)).await.unwrap();
@@ -760,7 +755,6 @@ mod tests {
             Default::default(),
             "comet".to_string(),
             params(),
-            vec![],
             HashMap::new(),
         );
         let colors = handle
@@ -785,7 +779,6 @@ mod tests {
             Default::default(),
             "over".to_string(),
             params(),
-            vec![],
             HashMap::new(),
         );
         let colors = handle
@@ -805,7 +798,6 @@ mod tests {
             Default::default(),
             "nope".to_string(),
             params(),
-            vec![],
             HashMap::new(),
         );
         assert!(handle.render_pixmap(frame(0.0, 1)).await.is_err());
@@ -825,7 +817,6 @@ mod tests {
             Default::default(),
             "boom".to_string(),
             params(),
-            vec![],
             HashMap::new(),
         );
         assert!(handle.render_pixmap(frame(0.0, 1)).await.is_err());
@@ -843,7 +834,6 @@ mod tests {
             Default::default(),
             "spin".to_string(),
             params(),
-            vec![],
             HashMap::new(),
         );
         let result = handle.render_pixmap(frame(0.0, 1)).await;
@@ -889,7 +879,6 @@ mod tests {
             [("speed".to_string(), EffectParamValue::Float(0.8))]
                 .into_iter()
                 .collect(),
-            vec![],
             HashMap::new(),
         );
         let bytes = pixmap.render_pixmap(frame(1.5, 1)).await.unwrap();
@@ -904,7 +893,6 @@ mod tests {
             Default::default(),
             "comet".to_string(),
             params(),
-            vec![],
             HashMap::new(),
         );
         let colors = direct
@@ -933,7 +921,6 @@ mod tests {
             Default::default(),
             "comet".to_string(),
             fwd_params,
-            vec![],
             HashMap::new(),
         );
         let forward_colors = forward
@@ -952,7 +939,6 @@ mod tests {
             Default::default(),
             "comet".to_string(),
             back_params,
-            vec![],
             HashMap::new(),
         );
         let backward_colors = backward
@@ -1002,7 +988,6 @@ mod tests {
             [("mode".to_owned(), EffectParamValue::Str("test".to_owned()))]
                 .into_iter()
                 .collect(),
-            vec![],
             HashMap::new(),
         );
         let mut first_frame = frame(1.25, 10);
@@ -1039,7 +1024,6 @@ mod tests {
             Default::default(),
             "stateful".to_owned(),
             params(),
-            vec![],
             HashMap::new(),
         );
         let first = handle
@@ -1069,7 +1053,6 @@ mod tests {
             Default::default(),
             "legacy".to_owned(),
             params(),
-            vec![],
             HashMap::new(),
         );
         assert!(handle.render_pixmap(frame(0.0, 1)).await.is_err());

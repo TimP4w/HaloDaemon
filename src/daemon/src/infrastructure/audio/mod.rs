@@ -1,9 +1,10 @@
 // SPDX-License-Identifier: GPL-3.0-or-later
+use parking_lot::RwLock;
 use std::sync::{
     atomic::{AtomicBool, AtomicU64, Ordering},
-    Arc, OnceLock, RwLock,
+    Arc, OnceLock,
 };
-use std::time::Instant;
+use tokio::time::Instant;
 
 pub mod dsp;
 pub mod sink;
@@ -71,12 +72,12 @@ impl AudioHandle {
 
     pub fn latest(&self) -> SpectrumFrame {
         self.last_read_ms.store(monotonic_ms(), Ordering::Relaxed);
-        *self.latest.read().unwrap_or_else(|e| e.into_inner())
+        *self.latest.read()
     }
 
     /// Called by the platform capture thread.
     fn publish(&self, frame: SpectrumFrame) {
-        *self.latest.write().unwrap_or_else(|e| e.into_inner()) = frame;
+        *self.latest.write() = frame;
     }
 
     /// True once no consumer has polled `latest()` for [`IDLE_EXIT_MS`] —

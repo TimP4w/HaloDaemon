@@ -9,29 +9,16 @@ use std::collections::{HashMap, VecDeque};
 use std::sync::atomic::{AtomicBool, Ordering};
 use std::sync::Arc;
 
-use crate::domain::{self, state::Page, topic_store::TopicStore};
-use crate::runtime::ipc::{self, CommandTx, FrameSinks, UiRx};
+use crate::domain::{self, state::Page};
+use crate::runtime::ipc::{CommandTx, FrameSinks, UiRx};
 use crate::ui;
+use halod_shared::ids::DeviceId;
 
 pub struct App {
     pub(crate) ui: UiRx,
     pub(crate) frame_sinks: FrameSinks,
-    /// Last atomic bus state, re-cloned only when its watch channel changes.
-    pub(crate) state_cache: Arc<TopicStore>,
-    /// LCD library filenames, re-cloned only when the watch channel changes.
-    pub(crate) lcd_images_cache: Arc<Vec<String>>,
-    /// Decoded plugin display assets, keyed by `ipc::plugin_asset_cache_key`.
-    pub(crate) plugin_assets_cache: Arc<HashMap<String, Vec<u8>>>,
-    pub(crate) debug_cache: Option<halod_shared::debug_info::DebugInfo>,
-    pub(crate) udev_rules_cache: Option<halod_shared::types::UdevRulesStatus>,
-    pub(crate) running_apps_cache: Vec<halod_shared::types::RunningApp>,
-    pub(crate) lcd_upload_cache: Option<halod_shared::types::LcdUploadProgress>,
-    pub(crate) canvas_frame_cache: Option<halod_shared::types::CanvasFrame>,
     pub(crate) cmd: CommandTx,
     pub(crate) entered: bool,
-    /// Plugin ids already toasted as quarantined (disabled for an on-disk
-    /// change), so each is alerted once until it leaves that state.
-    pub(crate) quarantine_toasted: std::collections::HashSet<String>,
     /// Recommendation keys already toasted this session, so a "new plugin you
     /// may activate" alert fires once per hardware match (persisted dedup lives
     /// in `seen_tours`; this bridges the daemon roundtrip within a session).
@@ -45,7 +32,7 @@ pub struct App {
     pub(crate) cooling_ui: ui::screens::cooling::CoolingUi,
     pub(crate) sensor_history: HashMap<String, VecDeque<f32>>,
     /// Rolling write-rate throughput (bytes/sec) per device id.
-    pub(crate) write_rate_history: HashMap<String, VecDeque<f32>>,
+    pub(crate) write_rate_history: HashMap<DeviceId, VecDeque<f32>>,
     pub(crate) last_sample: f64,
     pub(crate) page: Page,
     pub(crate) device_ui: ui::screens::device::DeviceUi,
@@ -54,7 +41,6 @@ pub struct App {
     pub(crate) effect_designer_ui: ui::screens::effect_designer::DesignerUi,
     pub(crate) settings_ui: ui::screens::settings::SettingsUi,
     pub(crate) plugins_ui: ui::screens::plugins::PluginsUi,
-    pub(crate) integrations_ui: ui::screens::integrations::IntegrationsUi,
     pub(crate) profile_ui: ui::screens::profile::ProfileUi,
     pub(crate) depcheck_ui: ui::screens::depcheck::DepCheckUi,
     pub(crate) tour: domain::tour::TourState,
@@ -63,8 +49,6 @@ pub struct App {
     /// Open notification Details modal. Outlives the toast that spawned it.
     /// A notification Details modal's translated title and full error text.
     pub(crate) issue_details_modal: Option<(String, String)>,
-    /// Repository-integrity episodes already notified during this GUI session.
-    pub(crate) integrity_alert_notified: std::collections::HashSet<String>,
     /// Set by the tray "Quit" so a close request bypasses "close to tray" and
     /// actually exits instead of hiding the window.
     pub(crate) force_quit: Arc<AtomicBool>,
@@ -72,16 +56,7 @@ pub struct App {
     pub(crate) hide_state: Arc<domain::state::HideState>,
     /// A just-loaded named LCD template, consumed once by the open editor.
     pub(crate) pending_lcd_template: Option<(String, halod_shared::lcd_custom::CustomTemplateDef)>,
-    /// Latest LCD editor render, cached like `lcd_images_cache`: most frames
-    /// carry no update on the watch channel (a delta reply is ~one per
-    /// 200ms), so this must survive frames where `has_changed()` is false
-    /// rather than going back to `None`.
-    pub(crate) lcd_editor_render_cache: Option<ipc::DecodedEditorRender>,
     pub(crate) depcheck_grace: ui::screens::depcheck::GraceState,
-    pub(crate) plugin_releases_cache:
-        std::collections::HashMap<String, Vec<halod_shared::types::PluginReleaseInfo>>,
-    /// Host serial ports, for the `serial_port` config-field dropdown.
-    pub(crate) serial_ports_cache: Vec<halod_shared::types::SerialPortInfo>,
     /// Set once we've requested the serial-port list, so we ask the daemon at
     /// most once per session instead of every frame a picker is visible.
     pub(crate) serial_ports_requested: bool,
@@ -97,7 +72,7 @@ impl App {
         domain::lifecycle::classify_close(
             close_requested,
             self.force_quit.load(Ordering::SeqCst),
-            self.state_cache.gui.close_to_tray,
+            self.ui.state.get().gui.close_to_tray,
         )
     }
 
@@ -105,10 +80,9 @@ impl App {
         self.device_ui.release_render_memory();
         self.canvas_ui.release_textures();
         self.plugins_ui.release_textures();
-        self.integrations_ui.release_textures();
         self.profile_ui.release_textures();
-        self.plugin_assets_cache = Arc::new(HashMap::new());
-        self.lcd_editor_render_cache = None;
+        self.ui.plugin_assets.set(HashMap::new());
+        self.ui.lcd_editor_render.set(None);
         self.frame_sinks.clear();
         ui::icons::clear();
     }
@@ -127,17 +101,8 @@ impl App {
         App {
             ui,
             frame_sinks,
-            state_cache: Arc::new(TopicStore::default()),
-            lcd_images_cache: Arc::new(Vec::new()),
-            plugin_assets_cache: Arc::new(HashMap::new()),
-            debug_cache: None,
-            udev_rules_cache: None,
-            running_apps_cache: Vec::new(),
-            lcd_upload_cache: None,
-            canvas_frame_cache: None,
             cmd,
             entered: false,
-            quarantine_toasted: std::collections::HashSet::new(),
             recommendation_toasted: std::collections::HashSet::new(),
             onboarding_completed: false,
             onboarding_ui: ui::screens::onboarding::OnboardingUi::default(),
@@ -153,22 +118,17 @@ impl App {
             effect_designer_ui: ui::screens::effect_designer::DesignerUi::new_effect(),
             settings_ui: ui::screens::settings::SettingsUi::default(),
             plugins_ui: ui::screens::plugins::PluginsUi::default(),
-            integrations_ui: ui::screens::integrations::IntegrationsUi::default(),
             profile_ui: ui::screens::profile::ProfileUi::default(),
             depcheck_ui: ui::screens::depcheck::DepCheckUi::default(),
             tour: domain::tour::TourState::default(),
             tray,
             toasts: ui::components::toast::Toasts::default(),
             issue_details_modal: None,
-            integrity_alert_notified: std::collections::HashSet::new(),
             force_quit,
             hidden,
             hide_state,
             pending_lcd_template: None,
-            lcd_editor_render_cache: None,
             depcheck_grace: ui::screens::depcheck::GraceState::default(),
-            plugin_releases_cache: std::collections::HashMap::new(),
-            serial_ports_cache: Vec::new(),
             serial_ports_requested: false,
         }
     }
@@ -176,9 +136,7 @@ impl App {
     // Only the Wayland custom-hide loop drives this out-of-frame tray sync.
     #[cfg(target_os = "linux")]
     pub(crate) fn sync_tray_background(&mut self, ctx: &egui::Context) {
-        if let Some(state) = crate::runtime::ipc::take_changed(&mut self.ui.state, "state") {
-            self.accept_state(state);
-        }
+        self.sync_state();
         // With the Wayland surface destroyed there are no egui frames, so the
         // normal `update` ingestion path cannot deliver notifications. Drain
         // them here, issue native notifications, and retain their in-app toast
@@ -194,6 +152,6 @@ impl App {
             crate::ui::screens::profile::observe_notifications(&mut self.profile_ui, &incoming);
             self.toasts.ingest(incoming, ctx.input(|input| input.time));
         }
-        self.tray.sync(ctx, &self.state_cache);
+        self.tray.sync(ctx, self.ui.state.get());
     }
 }

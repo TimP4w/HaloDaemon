@@ -1,21 +1,30 @@
 // SPDX-License-Identifier: GPL-3.0-or-later
-#[cfg(feature = "dev-plugin-repo")]
-use std::path::PathBuf;
 use std::sync::Arc;
 use tokio::sync::{watch, Mutex, RwLock};
 
+use crate::application::bus::coordinator::EffectiveStatePublisher;
+use crate::application::bus::data_bus::DataBus;
 use crate::application::ipc::ClientHandle;
 use crate::config::Config;
+use crate::domain::events::Change;
+use crate::domain::events::ChangeSink;
+use crate::domain::input::InputEventBus;
+use crate::domain::plugin::catalog::RepoCatalog;
+use crate::domain::plugin::Registry;
 use crate::domain::registry::observers::discovery::{DiscoveryScope, PendingRediscovery};
+use crate::infrastructure::secrets::FileKeyStore;
+use crate::infrastructure::secrets::SecretStore;
+use crate::util::backoff::RetryQueue;
 use halod_shared::types::DiscoveryStatus;
 
 mod config_repository;
 mod device_registry;
+pub use device_registry::CommandTarget;
 mod persistence;
 mod workers;
 
 #[cfg(test)]
-use crate::application::run_loop::EngineRunConfig;
+use crate::application::run_loop::EngineConfig;
 pub use crate::domain::cooling::CoolingEngineState;
 pub use crate::domain::input::{ButtonEvent, InputState};
 pub use crate::domain::lcd::LcdEngineState;
@@ -42,7 +51,7 @@ pub struct AppState {
     pub lcd: LcdEngineState,
     pub focus: FocusState,
     pub input: InputState,
-    pub input_events: crate::domain::input::InputEventBus,
+    pub input_events: InputEventBus,
 
     // --- Runtime / lifecycle infra ---
     /// Per-device command serialization. Commands targeting the same device
@@ -52,7 +61,7 @@ pub struct AppState {
     /// Serializes atomic topic production. Concurrent changes can otherwise
     /// snapshot the same plugin devices at once and fill their single-threaded
     /// worker queues ahead of interactive writes.
-    pub effective_state: crate::application::bus::coordinator::EffectiveStatePublisher,
+    pub effective_state: EffectiveStatePublisher,
     pub clients: Mutex<Vec<ClientHandle>>,
     /// Flipped to `true` once every domain's engine has been set
     pub engines_ready: watch::Sender<bool>,
@@ -66,32 +75,20 @@ pub struct AppState {
     /// Elects one drain loop. Callers may merge work while another drain runs,
     /// then wait on this gate until their request has been consumed.
     pub rediscovery_runner: Mutex<()>,
-    /// Latest plugin/repository update availability, retained in the plugins
-    /// bus record.
-    pub plugin_update_plan: Mutex<crate::application::usecases::plugin::repos::UpdatePlan>,
-    /// Latest signature result observed for a fetched repository commit, keyed
-    /// by slug. The SHA distinguishes a rejected remote tip from the active revision.
-    pub repo_signature_status: Mutex<
-        std::collections::HashMap<String, (String, halod_shared::types::RepoSignatureStatus)>,
-    >,
-    pub signature_status_cache: Mutex<
-        std::collections::HashMap<(String, String), halod_shared::types::RepoSignatureStatus>,
-    >,
-    /// The device-plugin registry (loaded manifests, consent/config, notice
+    /// Last verified catalog per remote repository slug.
+    pub plugin_catalogs: Mutex<std::collections::HashMap<String, RepoCatalog>>,
+    pub plugin_store: Mutex<()>,
+    pub repo_refresh_retry: Arc<RetryQueue>,
+    /// The device-plugin registry (loaded manifests, config, notice
     /// dedup, load warnings).
-    pub registry: crate::domain::plugin::Registry,
-    pub data_bus: Arc<crate::application::bus::data_bus::DataBus>,
-    #[cfg(feature = "dev-plugin-repo")]
-    /// Process-local development repository selected with `--dev-plugin-repo`.
-    /// Registry rebuilds must retain this priority source rather than falling
-    /// back to the managed official checkout.
-    pub development_plugin_repo: RwLock<Option<PathBuf>>,
+    pub registry: Registry,
+    pub data_bus: Arc<DataBus>,
     /// Backing store for plugin-declared secret config values.
-    pub secret_store: Arc<dyn crate::infrastructure::secrets::SecretStore>,
+    pub secret_store: Arc<dyn SecretStore>,
     /// Pending state-restore retries, keyed by device id. A device that is
     /// still waking (wireless link not up, firmware not answering) drops the
     /// writes it is sent, so a one-shot restore silently loses the user's state.
-    pub restore_retry: Arc<crate::util::backoff::RetryQueue>,
+    pub restore_retry: Arc<RetryQueue>,
 }
 
 impl AppState {
@@ -106,39 +103,29 @@ impl AppState {
             lcd: LcdEngineState::new(),
             focus: FocusState::new(),
             input: InputState::new(),
-            input_events: crate::domain::input::InputEventBus::new(),
-            effective_state: crate::application::bus::coordinator::EffectiveStatePublisher::default(
-            ),
+            input_events: InputEventBus::new(),
+            effective_state: EffectiveStatePublisher::default(),
             clients: Mutex::new(Vec::new()),
             engines_ready: watch::channel(false).0,
             shutdown: tokio::sync::Notify::new(),
             discovery_scope: RwLock::new(DiscoveryScope::Clean),
             pending_rediscovery: Mutex::new(PendingRediscovery::Clean),
             rediscovery_runner: Mutex::new(()),
-            plugin_update_plan: Mutex::default(),
-            repo_signature_status: Mutex::new(std::collections::HashMap::new()),
-            signature_status_cache: Mutex::new(std::collections::HashMap::new()),
-            registry: crate::domain::plugin::Registry::default(),
-            data_bus: Arc::new(crate::application::bus::data_bus::DataBus::default()),
-            #[cfg(feature = "dev-plugin-repo")]
-            development_plugin_repo: RwLock::new(None),
-            secret_store: Arc::new(crate::infrastructure::secrets::FileKeyStore::new()),
+            plugin_catalogs: Mutex::default(),
+            plugin_store: Mutex::default(),
+            repo_refresh_retry: Arc::default(),
+            registry: Registry::default(),
+            data_bus: Arc::new(DataBus::default()),
+            secret_store: Arc::new(FileKeyStore::new()),
             restore_retry: Arc::default(),
         }
-    }
-
-    pub async fn invalidate_signature_status(&self, slug: &str) {
-        self.signature_status_cache
-            .lock()
-            .await
-            .retain(|(cached, _), _| cached != slug);
     }
 
     /// The serialization lock for one device id, created on first use. Held for
     /// the duration of a device-scoped command so concurrent commands to the
     /// same device don't interleave; different devices get different locks.
-    pub async fn device_lock(&self, id: &str) -> Arc<Mutex<()>> {
-        self.device_registry.command_lock(id).await
+    pub async fn device_lock(&self, target: CommandTarget) -> Arc<Mutex<()>> {
+        self.device_registry.command_lock(target).await
     }
 
     /// Signal that the config is dirty. The save worker debounces and snapshots
@@ -149,10 +136,7 @@ impl AppState {
 
     /// Override the secret store (e.g. with `crate::infrastructure::secrets::open_secret_store()`
     /// to prefer the OS keyring). Builder-style, like `with_secret_store`.
-    pub fn with_secret_store(
-        mut self,
-        store: Arc<dyn crate::infrastructure::secrets::SecretStore>,
-    ) -> Self {
+    pub fn with_secret_store(mut self, store: Arc<dyn SecretStore>) -> Self {
         self.secret_store = store;
         self
     }
@@ -183,8 +167,8 @@ impl AppState {
 }
 
 #[async_trait::async_trait]
-impl crate::domain::events::ChangeSink for AppState {
-    async fn record_change(&self, change: crate::domain::events::Change) {
+impl ChangeSink for AppState {
+    async fn record_change(&self, change: Change) {
         self.effective_state.record(self, change).await;
     }
 }
@@ -194,6 +178,7 @@ mod tests {
     use super::*;
     use crate::config::Config;
     use crate::test_support::app_with;
+    use halod_shared::ids::DeviceId;
 
     #[test]
     fn retained_record_commits_are_scoped_to_usecases() {
@@ -252,7 +237,7 @@ mod tests {
     async fn sensor_bus_excludes_disabled_devices() {
         let mut cfg = Config::default();
         cfg.known_devices.insert(
-            "disabled_dev".into(),
+            "disabled_dev".parse().unwrap(),
             crate::domain::registry::model::DeviceRecord {
                 name: String::new(),
                 vendor: String::new(),
@@ -340,14 +325,14 @@ mod tests {
         {
             let mut cfg = app.config.write().await;
             cfg.known_devices.insert(
-                "visible_dev".into(),
+                "visible_dev".parse().unwrap(),
                 crate::domain::registry::model::DeviceRecord {
                     active_state: halod_shared::types::VisibilityState::Visible,
                     ..Default::default()
                 },
             );
             cfg.known_devices.insert(
-                "hidden_dev".into(),
+                "hidden_dev".parse().unwrap(),
                 crate::domain::registry::model::DeviceRecord {
                     active_state: halod_shared::types::VisibilityState::Hidden,
                     ..Default::default()
@@ -356,17 +341,17 @@ mod tests {
         }
 
         let active = app.get_active_devices().await;
-        let ids: Vec<String> = active.iter().map(|d| d.id().to_owned()).collect();
+        let ids: Vec<DeviceId> = active.iter().map(|d| d.id().to_owned()).collect();
         assert!(
-            ids.contains(&"visible_dev".to_string()),
+            ids.contains(&"visible_dev".parse().unwrap()),
             "visible device must be active"
         );
         assert!(
-            ids.contains(&"unknown_dev".to_string()),
+            ids.contains(&"unknown_dev".parse().unwrap()),
             "unknown device defaults to active"
         );
         assert!(
-            !ids.contains(&"hidden_dev".to_string()),
+            !ids.contains(&"hidden_dev".parse().unwrap()),
             "hidden device must not be active"
         );
     }
@@ -384,8 +369,8 @@ mod tests {
             fps: 0,
             ..Default::default()
         };
-        assert_eq!(EngineRunConfig::canvas(&rgb_floor).tick_ms, 1000);
-        assert_eq!(EngineRunConfig::lcd(&lcd_floor).tick_ms, 1000);
+        assert_eq!(rgb_floor.tick_ms(), 1000);
+        assert_eq!(lcd_floor.tick_ms(), 1000);
 
         // Above the ceiling: clamps to 240 fps → 4 ms tick.
         let rgb_ceiling = RgbConfig {
@@ -396,18 +381,14 @@ mod tests {
             fps: 10_000,
             ..Default::default()
         };
-        assert_eq!(EngineRunConfig::canvas(&rgb_ceiling).tick_ms, 1000 / 240);
-        assert_eq!(EngineRunConfig::lcd(&lcd_ceiling).tick_ms, 1000 / 240);
+        assert_eq!(rgb_ceiling.tick_ms(), 1000 / 240);
+        assert_eq!(lcd_ceiling.tick_ms(), 1000 / 240);
     }
 
     #[tokio::test]
     #[allow(clippy::await_holding_lock)]
     async fn save_worker_eventually_writes_config_to_disk() {
-        let _guard = crate::test_support::HALOD_CONFIG_DIR_LOCK
-            .lock()
-            .unwrap_or_else(|e| e.into_inner());
-        let dir = tempfile::tempdir().expect("tempdir");
-        unsafe { std::env::set_var("HALOD_CONFIG_DIR", dir.path()) };
+        let dir = crate::test_support::tmp_config_dir();
 
         let app = Arc::new(AppState::new(Config::default()));
         let _worker = start_config_save_worker(Arc::clone(&app));
@@ -424,18 +405,12 @@ mod tests {
             yaml_path.exists(),
             "config.yaml must be written after a save signal"
         );
-
-        unsafe { std::env::remove_var("HALOD_CONFIG_DIR") };
     }
 
     #[tokio::test]
     #[allow(clippy::await_holding_lock)]
     async fn save_worker_debounces_rapid_signals_into_single_save() {
-        let _guard = crate::test_support::HALOD_CONFIG_DIR_LOCK
-            .lock()
-            .unwrap_or_else(|e| e.into_inner());
-        let dir = tempfile::tempdir().expect("tempdir");
-        unsafe { std::env::set_var("HALOD_CONFIG_DIR", dir.path()) };
+        let dir = crate::test_support::tmp_config_dir();
 
         let app = Arc::new(AppState::new(Config::default()));
         let _worker = start_config_save_worker(Arc::clone(&app));
@@ -464,8 +439,6 @@ mod tests {
             std::fs::metadata(&yaml_path).unwrap().len() > 0,
             "config.yaml must be non-empty"
         );
-
-        unsafe { std::env::remove_var("HALOD_CONFIG_DIR") };
     }
 
     #[tokio::test]
@@ -502,7 +475,7 @@ mod tests {
             ),
         };
         app.set_discovery_scope(DiscoveryScope::PluginSet {
-            plugin_ids: ["p".to_string()].into_iter().collect(),
+            plugin_ids: ["p".parse().unwrap()].into_iter().collect(),
             filter: Arc::new(DiscoveryFilter { specs: vec![spec] }),
         })
         .await;

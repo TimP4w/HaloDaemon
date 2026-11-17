@@ -1,7 +1,7 @@
 // SPDX-License-Identifier: GPL-3.0-or-later
-//! Palette, fonts and small paint helpers for the "Prism Control" design
-//! (imported from claude.ai/design). Dark midnight surfaces, Halo violet accent,
-//! Inter Tight for text and JetBrains Mono for numerics.
+//! Palette, fonts and small paint helpers for the "Graphite" design
+//! (imported from claude.ai/design). Neutral graphite surfaces, blue accent,
+//! Geist for text and numerics; JetBrains Mono for code.
 
 use egui::{
     Color32, Context, FontData, FontDefinitions, FontFamily, FontId, Mesh, Pos2, Rect, Shape,
@@ -15,49 +15,78 @@ pub use tokens::*;
 pub use type_scale::*;
 
 // ── Surfaces ─────────────────────────────────────────────────────────────────
-pub const BODY: Color32 = hex(0x10121c);
-pub const TITLE_BG: Color32 = hex(0x131520);
-pub const SIDEBAR_BG: Color32 = hex(0x12141f);
+pub const BODY: Color32 = hex(0x0a0b0d);
+pub const TITLE_BG: Color32 = hex(0x0d0e11);
+pub const SIDEBAR_BG: Color32 = hex(0x0d0e11);
 /// Raised cards throughout the application.
-pub const CARD_BG: Color32 = hex(0x171a28);
+pub const CARD_BG: Color32 = hex(0x111317);
 /// Dialog, modal, menu, and popup shells.
-pub const MODAL_BG: Color32 = hex(0x171925);
-pub const INNER_BG: Color32 = hex(0x151722);
-pub const ROW_ACTIVE: Color32 = hex(0x1d2030);
+pub const MODAL_BG: Color32 = hex(0x111317);
+pub const INNER_BG: Color32 = hex(0x0e1013);
+pub const ROW_ACTIVE: Color32 = hex(0x1a1d23);
 
 // ── Borders ──────────────────────────────────────────────────────────────────
-pub const BORDER: Color32 = hex(0x2d3046);
-pub const BORDER_SOFT: Color32 = hex(0x202337);
-pub const BORDER_INNER: Color32 = hex(0x393d57);
+pub const BORDER: Color32 = hex(0x1f2329);
+pub const BORDER_SOFT: Color32 = hex(0x1c1f25);
+pub const BORDER_INNER: Color32 = hex(0x2a2e35);
+/// Open-control and dashed placeholder outlines.
+pub const BORDER_STRONG: Color32 = hex(0x2f343c);
 /// Subtle chrome divider (title bar / sidebar edges) — barely above the bg.
-pub const DIVIDER: Color32 = hex(0x191b29);
+pub const DIVIDER: Color32 = hex(0x1d2026);
 
 // ── Text ─────────────────────────────────────────────────────────────────────
-pub const TEXT: Color32 = hex(0xf1f0fa);
+pub const TEXT: Color32 = hex(0xe8eaed);
 pub const TEXT_BRIGHT: Color32 = hex(0xffffff);
-pub const TEXT_DIM: Color32 = hex(0xb1b4ca);
-pub const TEXT_MUT: Color32 = hex(0x858aa5);
-pub const TEXT_FAINT: Color32 = hex(0x646983);
-pub const TEXT_FAINT2: Color32 = hex(0x515670);
+pub const TEXT_DIM: Color32 = hex(0x9aa1ab);
+pub const TEXT_MUT: Color32 = hex(0x8b929c);
+pub const TEXT_FAINT: Color32 = hex(0x7c838d);
+pub const TEXT_FAINT2: Color32 = hex(0x5c636d);
+pub const TEXT_SOFT: Color32 = hex(0xc3c8cf);
+/// Top-bar navigation ink: inactive and active tab labels.
+pub const NAV_TEXT: Color32 = hex(0xa3aab4);
+pub const NAV_TEXT_ACTIVE: Color32 = hex(0xf3f4f6);
 
 // ── Accent + status ──────────────────────────────────────────────────────────
-/// Halo's product violet. The historical `CYAN` name remains for API compatibility.
-pub const CYAN: Color32 = hex(0x9b7fe0);
-pub const TRAFFIC_RED: Color32 = hex(0xff647c);
-pub const TRAFFIC_YELLOW: Color32 = hex(0xf6bf5f);
-pub const TRAFFIC_GREEN: Color32 = hex(0x42d9a1);
-pub const ONLINE: Color32 = hex(0x42d9a1);
-pub const ONLINE_TEXT: Color32 = hex(0x82e6bd);
-pub const OFFLINE: Color32 = hex(0xff647c);
-pub const OFFLINE_TEXT: Color32 = hex(0xffa0af);
+/// The product accent. The historical `CYAN` name remains for API compatibility.
+pub const CYAN: Color32 = hex(0x4c8dff);
+pub const TRAFFIC_RED: Color32 = hex(0xf0616d);
+pub const TRAFFIC_YELLOW: Color32 = hex(0xf5a524);
+pub const TRAFFIC_GREEN: Color32 = hex(0x3ecf8e);
+pub const ONLINE: Color32 = hex(0x3ecf8e);
+pub const ONLINE_TEXT: Color32 = hex(0x9be3bd);
+pub const OFFLINE: Color32 = hex(0xf0616d);
+pub const OFFLINE_TEXT: Color32 = hex(0xf3a5aa);
+/// Destructive fill (solid danger buttons) and its outline-variant border.
+pub const DANGER: Color32 = hex(0xc9414c);
+pub const DANGER_BORDER: Color32 = hex(0x5a2a2e);
 
 // ── Progress / loading ───────────────────────────────────────────────────────
-/// Loading gradient stops (lavender → magenta) shared by the ring spinner and
-/// the gradient loading bar, so every progress surface reads as one family.
-pub const PROGRESS_A: Color32 = hex(0xb49aff);
-pub const PROGRESS_B: Color32 = hex(0xf178d0);
 /// Track behind a progress fill / under a spinner ring.
-pub const TRACK: Color32 = hex(0x25283a);
+pub const TRACK: Color32 = hex(0x23272e);
+/// Raised control fill (secondary buttons, selects) and its stronger outline.
+pub const RAISED_BG: Color32 = hex(0x15181d);
+/// Fill behind identity tiles (device and plugin glyphs).
+pub const TILE_BG: Color32 = hex(0x181b21);
+/// Ink on accent-filled controls.
+pub const ON_ACCENT: Color32 = hex(0x0a0b0d);
+/// Selected option tile: accent-tinted fill, ring and ink.
+pub const SELECTED_BG: Color32 = hex(0x15233c);
+pub const SELECTED_BORDER: Color32 = hex(0x2f4f86);
+pub const SELECTED_TEXT: Color32 = hex(0xcfe0ff);
+/// Accent and ok tag tones (border, ink / fill, border).
+pub const ACCENT_BORDER: Color32 = hex(0x24406e);
+pub const ACCENT_INK: Color32 = hex(0xa9c6ff);
+pub const OK_FILL: Color32 = hex(0x12261d);
+pub const OK_BORDER: Color32 = hex(0x1f4a36);
+pub const ACCENT_TEXT: Color32 = hex(0xa9c6ff);
+pub const LINK: Color32 = hex(0x7aa8ff);
+/// Checked checkbox-row surface (ringed with [`ACCENT_BORDER`]).
+pub const CHECKED_BG: Color32 = hex(0x0f1726);
+/// Warning ink (tags, inline warnings).
+pub const WARN_TEXT: Color32 = hex(0xf3d38a);
+/// Recessed stage behind the lighting canvas and preview wells, and its grid.
+pub const STAGE_BG: Color32 = hex(0x08090b);
+pub const STAGE_GRID: Color32 = hex(0x14171c);
 
 /// Success badge (the onboarding "done" check): deep-green disc + ring.
 pub const SUCCESS_FILL: Color32 = hex(0x10251f);
@@ -65,9 +94,8 @@ pub const SUCCESS_RING: Color32 = hex(0x2e8766);
 
 // ── Stat + battery accents ───────────────────────────────────────────────────
 pub const STAT_CYAN: Color32 = hex(0x53d5e8);
-pub const STAT_PURPLE: Color32 = hex(0x9b7fe0);
-pub const STAT_GREEN: Color32 = hex(0x42d9a1);
-pub const STAT_AMBER: Color32 = hex(0xf6bf5f);
+pub const STAT_GREEN: Color32 = hex(0x3ecf8e);
+pub const STAT_AMBER: Color32 = hex(0xf5a524);
 
 /// Logo mark gradient stops: Halo violet with electric pink and cyan highlights.
 pub const LOGO_STOPS: [Color32; 6] = [
@@ -82,38 +110,19 @@ pub const LOGO_STOPS: [Color32; 6] = [
 /// Accent choices offered when configuring a Home dashboard widget. Stored by
 /// index, so entries may be appended but never reordered.
 pub const WIDGET_HUES: [Color32; 8] = [
-    STAT_PURPLE,
+    CYAN,
     STAT_CYAN,
     STAT_GREEN,
     STAT_AMBER,
-    PROGRESS_B,
+    hex(0xf178d0),
     OFFLINE,
-    PROGRESS_A,
+    hex(0xb49aff),
     hex(0x6b94e0),
 ];
 
 /// Accent color for a widget's stored palette index (wraps [`WIDGET_HUES`]).
 pub fn widget_hue(i: u8) -> Color32 {
     WIDGET_HUES[i as usize % WIDGET_HUES.len()]
-}
-
-/// Vibrant per-device accent palette (assigned by device type / id hash).
-pub const DEVICE_HUES: [Color32; 10] = [
-    hex(0x53d5e8),
-    hex(0x9b7fe0),
-    hex(0x4fc2c2),
-    hex(0x6b94e0),
-    hex(0x42d9a1),
-    hex(0xf178d0),
-    hex(0x8b7fe0),
-    hex(0xff647c),
-    hex(0xf6bf5f),
-    hex(0x4fc2c2),
-];
-
-/// A device's accent color (its type's slot in [`DEVICE_HUES`]).
-pub fn device_color(d: &halod_shared::types::WireDevice) -> Color32 {
-    DEVICE_HUES[crate::domain::models::device::hue_index(d)]
 }
 
 /// Battery accent color for a classified [`crate::domain::models::device::BatteryLevel`].
@@ -149,22 +158,14 @@ macro_rules! font {
 fn font_definitions() -> FontDefinitions {
     let mut defs = FontDefinitions::default();
     font!(defs, "it400", "../../../../assets/fonts/InterTight-400.ttf");
-    font!(defs, "it600", "../../../../assets/fonts/InterTight-600.ttf");
-    font!(defs, "it700", "../../../../assets/fonts/InterTight-700.ttf");
+    font!(defs, "g400", "../../../../assets/fonts/Geist-Regular.ttf");
+    font!(defs, "g500", "../../../../assets/fonts/Geist-Medium.ttf");
+    font!(defs, "g600", "../../../../assets/fonts/Geist-SemiBold.ttf");
+    font!(defs, "g700", "../../../../assets/fonts/Geist-Bold.ttf");
     font!(
         defs,
         "jm400",
         "../../../../assets/fonts/JetBrainsMono-400.ttf"
-    );
-    font!(
-        defs,
-        "jm600",
-        "../../../../assets/fonts/JetBrainsMono-600.ttf"
-    );
-    font!(
-        defs,
-        "jm700",
-        "../../../../assets/fonts/JetBrainsMono-700.ttf"
     );
     // The exact NotoSans face the daemon's LCD renderer embeds, so the LCD
     // editor preview's Sans text matches the device pixel-for-pixel.
@@ -176,11 +177,7 @@ fn font_definitions() -> FontDefinitions {
 
     // Our custom faces lack symbol glyphs (×, ▾, →, …), so append egui's
     // Monospace fallback chain (Hack covers the missing shapes/arrows).
-    let fallback = defs
-        .families
-        .get(&FontFamily::Monospace)
-        .cloned()
-        .unwrap_or_default();
+    let fallback = fallback_faces(&defs);
     let with_fallback = |key: &str| {
         let mut v = vec![key.to_owned()];
         v.extend(fallback.iter().cloned());
@@ -191,13 +188,12 @@ fn font_definitions() -> FontDefinitions {
             .insert(FontFamily::Name(name.into()), with_fallback(key));
     };
     defs.families
-        .insert(FontFamily::Proportional, with_fallback("it400"));
+        .insert(FontFamily::Proportional, with_fallback("g400"));
     defs.families
         .insert(FontFamily::Monospace, with_fallback("jm400"));
-    fam(&mut defs, "semibold", "it600");
-    fam(&mut defs, "bold", "it700");
-    fam(&mut defs, "mono", "jm600");
-    fam(&mut defs, "mono-bold", "jm700");
+    fam(&mut defs, "medium", "g500");
+    fam(&mut defs, "semibold", "g600");
+    fam(&mut defs, "bold", "g700");
     // LCD editor preview faces — the exact weights the daemon's renderer embeds
     // (NotoSans-Regular / JetBrainsMono-Regular / InterTight-400), so the inline
     // text editor matches the device-rendered sprite.
@@ -206,6 +202,20 @@ fn font_definitions() -> FontDefinitions {
     fam(&mut defs, "lcd_inter", "it400");
 
     defs
+}
+
+/// egui's bundled faces in both default families (symbols and emoji live only
+/// in the proportional one), so any glyph our faces lack still renders.
+fn fallback_faces(defs: &FontDefinitions) -> Vec<String> {
+    let mut faces: Vec<String> = Vec::new();
+    for family in [FontFamily::Monospace, FontFamily::Proportional] {
+        for face in defs.families.get(&family).into_iter().flatten() {
+            if !faces.contains(face) {
+                faces.push(face.clone());
+            }
+        }
+    }
+    faces
 }
 
 pub fn install_fonts(ctx: &Context) {
@@ -218,11 +228,7 @@ pub fn install_fonts_with_system<'a>(
 ) -> std::collections::HashSet<String> {
     let mut defs = font_definitions();
     let mut loaded = std::collections::HashSet::new();
-    let fallback = defs
-        .families
-        .get(&FontFamily::Monospace)
-        .cloned()
-        .unwrap_or_default();
+    let fallback = fallback_faces(&defs);
     for family_name in families {
         let Some((bytes, index)) = halod_shared::system_fonts::data(family_name) else {
             continue;
@@ -259,17 +265,17 @@ pub fn install(ctx: &Context) {
     // application's explicit modal component.
     v.window_fill = MODAL_BG;
     v.window_stroke = Stroke::new(1.0, BORDER);
-    v.window_corner_radius = egui::CornerRadius::same(11);
-    v.menu_corner_radius = egui::CornerRadius::same(11);
+    v.window_corner_radius = egui::CornerRadius::same(12);
+    v.menu_corner_radius = egui::CornerRadius::same(10);
     v.widgets.inactive.weak_bg_fill = INNER_BG;
-    v.widgets.inactive.bg_stroke = Stroke::new(1.0, BORDER);
-    v.widgets.inactive.corner_radius = egui::CornerRadius::same(7);
-    v.widgets.hovered.weak_bg_fill = hex(0x1a1d2c);
+    v.widgets.inactive.bg_stroke = Stroke::new(1.0, BORDER_INNER);
+    v.widgets.inactive.corner_radius = egui::CornerRadius::same(6);
+    v.widgets.hovered.weak_bg_fill = RAISED_BG;
     v.widgets.hovered.bg_stroke = Stroke::new(1.0, BORDER_INNER);
-    v.widgets.hovered.corner_radius = egui::CornerRadius::same(7);
+    v.widgets.hovered.corner_radius = egui::CornerRadius::same(6);
     v.widgets.active.weak_bg_fill = ROW_ACTIVE;
     v.widgets.active.bg_stroke = Stroke::new(1.0, CYAN);
-    v.widgets.active.corner_radius = egui::CornerRadius::same(7);
+    v.widgets.active.corner_radius = egui::CornerRadius::same(6);
 
     ctx.set_visuals(v);
     ctx.all_styles_mut(|s| {
@@ -283,6 +289,9 @@ pub fn install(ctx: &Context) {
 pub fn body(size: f32) -> FontId {
     FontId::proportional(size)
 }
+pub fn medium(size: f32) -> FontId {
+    FontId::new(size, FontFamily::Name("medium".into()))
+}
 pub fn semibold(size: f32) -> FontId {
     FontId::new(size, FontFamily::Name("semibold".into()))
 }
@@ -291,12 +300,6 @@ pub fn bold(size: f32) -> FontId {
 }
 pub fn mono(size: f32) -> FontId {
     FontId::monospace(size)
-}
-pub fn mono_semibold(size: f32) -> FontId {
-    FontId::new(size, FontFamily::Name("mono".into()))
-}
-pub fn mono_bold(size: f32) -> FontId {
-    FontId::new(size, FontFamily::Name("mono-bold".into()))
 }
 
 // ── Paint helpers ────────────────────────────────────────────────────────────
@@ -427,67 +430,6 @@ pub fn glow(painter: &egui::Painter, center: Pos2, radius: f32, color: Color32, 
     glow_ellipse(painter, center, radius, radius, color, strength);
 }
 
-/// A broad, low-contrast glow with a curved falloff and no perceptible rim.
-pub fn gentle_glow(
-    painter: &egui::Painter,
-    center: Pos2,
-    radius: f32,
-    color: Color32,
-    strength: f32,
-) {
-    gentle_glow_ellipse(painter, center, radius, radius, color, strength);
-}
-
-/// Elliptical form of [`gentle_glow`], useful behind wide hover surfaces.
-pub fn gentle_glow_ellipse(
-    painter: &egui::Painter,
-    center: Pos2,
-    radius_x: f32,
-    radius_y: f32,
-    color: Color32,
-    strength: f32,
-) {
-    const SEGMENTS: usize = 48;
-    let mut mesh = Mesh::default();
-    let bands = gentle_glow_bands(strength);
-    for i in 0..=SEGMENTS {
-        let angle = std::f32::consts::TAU * i as f32 / SEGMENTS as f32;
-        let base = mesh.vertices.len() as u32;
-        for &(factor, alpha) in &bands {
-            mesh.colored_vertex(
-                center
-                    + egui::vec2(
-                        angle.cos() * radius_x * factor,
-                        angle.sin() * radius_y * factor,
-                    ),
-                a(color, alpha),
-            );
-        }
-        if i > 0 {
-            let columns = bands.len() as u32;
-            for band in 0..columns - 1 {
-                let previous = base - columns + band;
-                let current = base + band;
-                mesh.add_triangle(previous, previous + 1, current);
-                mesh.add_triangle(previous + 1, current, current + 1);
-            }
-        }
-    }
-    painter.add(Shape::mesh(mesh));
-}
-
-fn gentle_glow_bands(strength: f32) -> [(f32, f32); 7] {
-    [
-        (0.0, strength),
-        (0.20, strength * 0.92),
-        (0.40, strength * 0.72),
-        (0.60, strength * 0.43),
-        (0.78, strength * 0.19),
-        (0.92, strength * 0.045),
-        (1.0, 0.0),
-    ]
-}
-
 /// Like [`glow`] but elliptical — a wide, short dome reads as a far subtler
 /// wash than a full circle when anchored at a card's top edge.
 pub fn glow_ellipse(
@@ -522,56 +464,6 @@ pub fn top_right_halo(painter: &egui::Painter, rect: Rect, time: f32) {
     for (center, rx, ry, color, strength) in top_right_halo_blobs(rect, time) {
         glow_ellipse(&painter, center, rx, ry, color, strength);
     }
-}
-
-/// Paint the same ambient logo wash around a focal point, such as the radar.
-pub fn centered_halo(
-    painter: &egui::Painter,
-    clip_rect: Rect,
-    center: Pos2,
-    radius: f32,
-    time: f32,
-) {
-    let painter = painter.with_clip_rect(clip_rect);
-    for (center, rx, ry, color, strength) in centered_halo_blobs(center, radius, time) {
-        glow_ellipse(&painter, center, rx, ry, color, strength);
-    }
-}
-
-fn centered_halo_blobs(
-    center: Pos2,
-    radius: f32,
-    time: f32,
-) -> [(Pos2, f32, f32, Color32, f32); 3] {
-    let drift = |phase: f32, amount: f32| {
-        egui::vec2(
-            (time * 0.16 + phase).sin() * amount,
-            (time * 0.12 + phase).cos() * amount,
-        )
-    };
-    [
-        (
-            center + drift(0.0, radius * 0.18),
-            radius * 2.15,
-            radius * 1.75,
-            LOGO_STOPS[0],
-            0.075,
-        ),
-        (
-            center + drift(2.1, radius * 0.22),
-            radius * 1.65,
-            radius * 1.45,
-            LOGO_STOPS[2],
-            0.055,
-        ),
-        (
-            center + drift(4.2, radius * 0.20),
-            radius * 1.55,
-            radius * 1.35,
-            LOGO_STOPS[3],
-            0.045,
-        ),
-    ]
 }
 
 fn top_right_halo_blobs(rect: Rect, time: f32) -> [(Pos2, f32, f32, Color32, f32); 3] {
@@ -643,50 +535,6 @@ pub fn round_corners(painter: &egui::Painter, rect: Rect, r: f32, bg: Color32) {
     }
 }
 
-/// Animated "aurora": a few hue-shifted [`glow_ellipse`] blobs drifting around
-/// `anchor`, fading in with `t` (0..1). `time` is the monotonic clock,
-/// `rx`/`ry` the blob radii, and `spread` scales how far they wander. The caller
-/// should clip the painter and keep requesting repaints while `t > 0`.
-pub fn aurora(
-    painter: &egui::Painter,
-    anchor: Pos2,
-    rx: f32,
-    ry: f32,
-    spread: f32,
-    color: Color32,
-    t: f32,
-    time: f32,
-) {
-    let base = egui::ecolor::Hsva::from(color);
-    // (drift phase, hue offset, oscillation speed, peak strength)
-    let layers = [
-        (0.0_f32, 0.00_f32, 0.7_f32, 0.14_f32),
-        (2.1, 0.07, 1.1, 0.11),
-        (4.2, -0.06, 0.9, 0.09),
-    ];
-    for (k, &(ph, dh, sp, st)) in layers.iter().enumerate() {
-        let osc = (time * sp + ph).sin();
-        let osc2 = (time * sp * 0.6 + ph * 1.7).cos();
-        let cx = anchor.x - spread * (0.06 + 0.16 * k as f32) + osc * spread * 0.14;
-        let cy = anchor.y + osc2 * ry * 0.15;
-        let col = egui::ecolor::Hsva::new(
-            (base.h + dh + osc * 0.03).rem_euclid(1.0),
-            base.s.clamp(0.4, 1.0),
-            base.v.max(0.75),
-            1.0,
-        );
-        let strength = st * t * (0.65 + 0.35 * osc2);
-        glow_ellipse(
-            painter,
-            Pos2::new(cx, cy),
-            rx,
-            ry,
-            Color32::from(col),
-            strength,
-        );
-    }
-}
-
 /// Linear blend between two colors (component-wise, unmultiplied).
 pub fn lerp_color(x: Color32, y: Color32, t: f32) -> Color32 {
     let t = t.clamp(0.0, 1.0);
@@ -701,6 +549,23 @@ pub fn lerp_color(x: Color32, y: Color32, t: f32) -> Color32 {
 
 #[cfg(test)]
 mod tests {
+
+    #[test]
+    fn every_family_falls_back_to_the_symbol_faces() {
+        let defs = font_definitions();
+        let defaults = FontDefinitions::default();
+        let symbol_faces: Vec<&String> = defaults
+            .families
+            .get(&FontFamily::Proportional)
+            .into_iter()
+            .flatten()
+            .collect();
+        for family in defs.families.values() {
+            for face in &symbol_faces {
+                assert!(family.contains(face), "{family:?} lacks {face}");
+            }
+        }
+    }
     use super::*;
 
     #[test]
@@ -713,16 +578,6 @@ mod tests {
         assert_eq!(drift_conic(1.0), DRIFT_STOPS[0]);
         assert_eq!(drift_conic(1.25), drift_conic(0.25));
         assert_eq!(drift_conic(-0.25), drift_conic(0.75));
-    }
-
-    #[test]
-    fn device_hues_len_matches_model_hue_count() {
-        // Pinned against domain::models::device::DEVICE_HUE_COUNT, which
-        // every `hue_index()` result is bounds-checked against.
-        assert_eq!(
-            DEVICE_HUES.len(),
-            crate::domain::models::device::DEVICE_HUE_COUNT
-        );
     }
 
     #[test]
@@ -750,32 +605,5 @@ mod tests {
             start.map(|blob| (blob.1, blob.2, blob.3, blob.4)),
             later.map(|blob| (blob.1, blob.2, blob.3, blob.4))
         );
-    }
-
-    #[test]
-    fn centered_halo_surrounds_its_anchor() {
-        let center = Pos2::new(400.0, 300.0);
-        let radius = 180.0;
-        let blobs = centered_halo_blobs(center, radius, 0.0);
-
-        assert!(blobs
-            .iter()
-            .all(|blob| blob.0.distance(center) <= radius * 0.22 + 1e-3));
-        assert!(blobs.iter().all(|blob| blob.1 > radius));
-        assert_eq!(
-            blobs.map(|blob| blob.3),
-            [LOGO_STOPS[0], LOGO_STOPS[2], LOGO_STOPS[3]]
-        );
-    }
-
-    #[test]
-    fn gentle_glow_fades_smoothly_to_transparent() {
-        let bands = gentle_glow_bands(0.16);
-
-        assert_eq!(bands.first(), Some(&(0.0, 0.16)));
-        assert_eq!(bands.last(), Some(&(1.0, 0.0)));
-        assert!(bands.windows(2).all(|pair| pair[0].0 < pair[1].0));
-        assert!(bands.windows(2).all(|pair| pair[0].1 > pair[1].1));
-        assert!(bands[bands.len() - 2].1 < 0.01);
     }
 }

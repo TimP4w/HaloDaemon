@@ -42,49 +42,104 @@ fn split_widths(avail: f32, gap: f32, left_w: f32) -> (f32, f32) {
     (left, (avail - gap - left).max(0.0))
 }
 
-/// The standard page inner margin (`36 px` sides, `26/30 px` top/bottom) every
-/// top-level page wraps its body in. Use instead of hand-rolling the `Frame`.
+/// Widest a page body grows before it centres in the window.
+pub const PAGE_MAX_W: f32 = 1360.0;
+
+/// The standard page body: `24/28 px` padding, capped at [`PAGE_MAX_W`] and
+/// centred. Every top-level page wraps its body in this.
 pub fn page_frame<R>(ui: &mut egui::Ui, body: impl FnOnce(&mut egui::Ui) -> R) -> R {
-    egui::Frame::NONE
-        .inner_margin(egui::Margin {
-            left: 36,
-            right: 36,
-            top: 26,
-            bottom: 30,
-        })
-        .show(ui, body)
-        .inner
+    let avail = ui.available_rect_before_wrap();
+    let rect = centered_column(avail, PAGE_MAX_W);
+    ui.scope_builder(egui::UiBuilder::new().max_rect(rect), |ui| {
+        egui::Frame::NONE
+            .inner_margin(egui::Margin {
+                left: 28,
+                right: 28,
+                top: 24,
+                bottom: 32,
+            })
+            .show(ui, body)
+            .inner
+    })
+    .inner
 }
 
-/// The standard page heading: bold title (optionally registered as a tour
-/// anchor), muted subtitle, and the gap before the page body.
-pub fn page_header(
+/// `avail` narrowed to at most `max_w`, centred horizontally.
+fn centered_column(avail: egui::Rect, max_w: f32) -> egui::Rect {
+    let w = avail.width().min(max_w);
+    egui::Rect::from_min_size(
+        egui::pos2(avail.center().x - w / 2.0, avail.top()),
+        egui::vec2(w, avail.height()),
+    )
+}
+
+/// The page title row: title with an inline muted summary on the left and
+/// `actions` laid right-to-left on the right.
+pub fn page_title(
     ui: &mut egui::Ui,
     title: &str,
-    subtitle: &str,
-    anchor: Option<crate::domain::tour::AnchorId>,
-) {
+    summary: &str,
+    actions: impl FnOnce(&mut egui::Ui),
+) -> egui::Rect {
     use crate::ui::theme;
-    let title_resp = ui.label(
-        egui::RichText::new(title)
-            .font(theme::bold(22.0))
-            .color(theme::TEXT),
+    page_title_with(
+        ui,
+        title,
+        |ui| {
+            ui.label(
+                egui::RichText::new(summary)
+                    .font(theme::body_md())
+                    .color(theme::TEXT_DIM),
+            );
+        },
+        actions,
+    )
+}
+
+/// [`page_title`] with custom content (e.g. a view switcher) after the title.
+pub fn page_title_with(
+    ui: &mut egui::Ui,
+    title: &str,
+    after_title: impl FnOnce(&mut egui::Ui),
+    actions: impl FnOnce(&mut egui::Ui),
+) -> egui::Rect {
+    use crate::ui::theme;
+    let mut title_rect = egui::Rect::NOTHING;
+    egui::Sides::new().height(36.0).show(
+        ui,
+        |ui| {
+            title_rect = ui
+                .label(
+                    egui::RichText::new(title)
+                        .font(theme::display())
+                        .color(theme::TEXT),
+                )
+                .rect;
+            ui.add_space(theme::SPACE_6);
+            after_title(ui);
+        },
+        |ui| {
+            ui.spacing_mut().item_spacing.x = theme::SPACE_5;
+            actions(ui);
+        },
     );
-    if let Some(anchor) = anchor {
-        crate::domain::tour::anchor(ui.ctx(), anchor, title_resp.rect);
-    }
-    ui.add_space(theme::SPACE_1);
-    ui.label(
-        egui::RichText::new(subtitle)
-            .font(theme::body_md())
-            .color(theme::TEXT_MUT),
-    );
-    ui.add_space(theme::SPACE_9);
+    ui.add_space(theme::SPACE_8);
+    title_rect
 }
 
 #[cfg(test)]
 mod tests {
     use super::*;
+
+    #[test]
+    fn page_column_is_capped_and_centred() {
+        let avail = egui::Rect::from_min_size(egui::pos2(0.0, 10.0), egui::vec2(2000.0, 500.0));
+        let col = centered_column(avail, PAGE_MAX_W);
+        assert_eq!(col.width(), PAGE_MAX_W);
+        assert!((col.center().x - avail.center().x).abs() < 0.01);
+        let narrow = egui::Rect::from_min_size(egui::pos2(0.0, 0.0), egui::vec2(800.0, 500.0));
+        assert_eq!(centered_column(narrow, PAGE_MAX_W), narrow);
+    }
 
     #[test]
     fn split_widths_partitions_available_minus_gap() {

@@ -27,19 +27,29 @@ pub const VIRTUAL_POINTER_NAME: &str = "HaloDaemon Virtual Pointer";
 #[cfg(target_os = "linux")]
 pub const SCREEN_CAPTURE_CLIENT: &str = "halod-screen";
 
-/// The official plugin repository's URL, seeded into config and cloned at
-/// startup (see `registry::ensure_official_repo`). Not bundled: nothing here
-/// is embedded in the daemon binary, so this is a network fetch, not a build input.
-pub const OFFICIAL_PLUGIN_REPO_URL: &str = "https://github.com/TimP4w/HaloDaemon-plugins";
+pub const OFFICIAL_PLUGIN_CATALOG_URL: &str =
+    "https://timp4w.github.io/HaloDaemon-plugins/catalog.yaml";
 
-/// Fixed slug for the official plugin repo record — never derived from the
-/// URL, so a future URL change can't orphan the non-removable guard in
-/// `crate::application::usecases::plugin::repos::remove_repo`.
+/// Fixed so a URL change can never orphan the non-removable official record.
 pub const OFFICIAL_PLUGIN_REPO_SLUG: &str = "official";
 
-/// Trusted release keys for the official plugin repository. Keys are indexed
-/// by stable id so a daemon release can overlap old and rotated signing keys.
+/// Indexed by key id so a daemon release can overlap old and rotated keys.
 pub const OFFICIAL_PLUGIN_REPO_PUBLIC_KEYS: &[(&str, &str)] = &[(
     "halodaemon-official-2026",
     "tjbwm5X4f70e+soVNV1AfRyb/TtnEsNNl+93YMO6IhQ=",
 )];
+
+#[cfg(test)]
+mod tests {
+    use super::OFFICIAL_PLUGIN_REPO_PUBLIC_KEYS;
+    use halod_plugin_signing::catalog::verifying_key;
+
+    #[test]
+    fn official_pinned_keys_are_valid_ed25519_keys() {
+        assert!(!OFFICIAL_PLUGIN_REPO_PUBLIC_KEYS.is_empty());
+        for (id, key) in OFFICIAL_PLUGIN_REPO_PUBLIC_KEYS {
+            assert!(halod_shared::ids::is_identifier(id), "{id}");
+            verifying_key(key).unwrap();
+        }
+    }
+}

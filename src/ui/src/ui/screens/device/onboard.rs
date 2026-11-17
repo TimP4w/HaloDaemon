@@ -3,10 +3,15 @@
 
 use crate::ui::components as widgets;
 use egui::{Align2, Pos2, Rect, Sense, Stroke, Vec2};
+use halod_shared::commands::DeviceOp;
 use halod_shared::types::{Boolean, DeviceCapability, OnboardProfileSlot, OnboardProfiles};
 
 use super::TabCtx;
+use crate::domain::tour;
+use crate::domain::tour::AnchorId;
+use crate::runtime::ipc;
 use crate::ui::theme;
+use halod_shared::ids::DeviceId;
 
 /// Boolean-capability key for the ONBOARD_PROFILES host/onboard mode switch.
 /// Rendered here rather than in the generic Controls tab.
@@ -36,11 +41,7 @@ fn slot_can_restore(slot: &OnboardProfileSlot) -> bool {
 }
 
 pub fn show(ui: &mut egui::Ui, ctx: &TabCtx) {
-    crate::domain::tour::anchor(
-        ui.ctx(),
-        crate::domain::tour::AnchorId::TabOnboard,
-        ui.max_rect(),
-    );
+    tour::anchor(ui.ctx(), AnchorId::TabOnboard, ui.max_rect());
     let Some(op) = ctx.dev.capabilities.iter().find_map(|c| match c {
         DeviceCapability::OnboardProfiles(p) => Some(p),
         _ => None,
@@ -61,20 +62,16 @@ pub fn show(ui: &mut egui::Ui, ctx: &TabCtx) {
         ui.add_space(theme::SPACE_6);
     }
 
-    egui::Frame::NONE
-        .fill(theme::CARD_BG)
-        .stroke(Stroke::new(1.0, theme::BORDER))
-        .corner_radius(theme::RADIUS_XL)
-        .show(ui, |ui| {
-            ui.style_mut().spacing.item_spacing = egui::vec2(0.0, 0.0);
-            let host_mode = host_mode_boolean(&ctx.dev.capabilities).is_some_and(|b| b.value);
-            for slot in &op.slots {
-                slot_row(ui, &id, ctx, op, slot, host_mode);
-            }
-        });
+    widgets::card_frameless(ui, |ui| {
+        ui.style_mut().spacing.item_spacing = egui::vec2(0.0, 0.0);
+        let host_mode = host_mode_boolean(&ctx.dev.capabilities).is_some_and(|b| b.value);
+        for slot in &op.slots {
+            slot_row(ui, &id, ctx, op, slot, host_mode);
+        }
+    });
 }
 
-fn host_mode_row(ui: &mut egui::Ui, id: &str, ctx: &TabCtx, b: &Boolean) {
+fn host_mode_row(ui: &mut egui::Ui, id: &DeviceId, ctx: &TabCtx, b: &Boolean) {
     widgets::card(ui, |ui| {
         widgets::setting_row(
             ui,
@@ -82,12 +79,14 @@ fn host_mode_row(ui: &mut egui::Ui, id: &str, ctx: &TabCtx, b: &Boolean) {
             &t!("devtabs.host_mode_desc"),
             |ui| {
                 if !b.read_only && widgets::toggle(ui, b.value) != b.value {
-                    crate::runtime::ipc::send(
+                    ipc::send(
                         ctx.cmd,
-                        halod_shared::commands::DaemonCommand::SetBoolean {
-                            id: id.to_string(),
-                            key: b.key.clone(),
-                            value: !b.value,
+                        halod_shared::commands::DaemonCommand::Device {
+                            device_id: id.clone(),
+                            op: DeviceOp::SetBoolean {
+                                key: b.key.clone(),
+                                value: !b.value,
+                            },
                         },
                     );
                 }
@@ -98,53 +97,57 @@ fn host_mode_row(ui: &mut egui::Ui, id: &str, ctx: &TabCtx, b: &Boolean) {
 
 fn slot_row(
     ui: &mut egui::Ui,
-    id: &str,
+    id: &DeviceId,
     ctx: &TabCtx,
     op: &OnboardProfiles,
     slot: &OnboardProfileSlot,
     host_mode: bool,
 ) {
     let active = slot.active || slot.index == op.active_slot;
-    let (row, _) = ui.allocate_exact_size(Vec2::new(ui.available_width(), 46.0), Sense::hover());
+    let (row, _) = ui.allocate_exact_size(Vec2::new(ui.available_width(), 56.0), Sense::hover());
     let p = ui.painter();
-
-    if active {
-        p.rect_filled(
-            row.shrink2(Vec2::new(6.0, 5.0)),
-            theme::RADIUS_MD,
-            theme::ROW_ACTIVE,
-        );
-    }
     p.line_segment(
         [row.left_bottom(), row.right_bottom()],
         Stroke::new(1.0, theme::BORDER_SOFT),
     );
 
     let cy = row.center().y;
-    p.circle_filled(
-        Pos2::new(row.left() + 22.0, cy),
-        4.0,
-        if active {
-            theme::CYAN
-        } else {
-            theme::hex(0x3a4860)
-        },
+    let (dot, status) = match (active, slot.enabled) {
+        (true, _) => (theme::CYAN, t!("devtabs.slot_active")),
+        (false, true) => (theme::TEXT_FAINT2, t!("devtabs.slot_saved")),
+        (false, false) => (theme::BORDER_INNER, t!("devtabs.slot_empty")),
+    };
+    p.circle_filled(Pos2::new(row.left() + 22.0, cy), 4.0, dot);
+    let title = p.text(
+        Pos2::new(row.left() + 38.0, cy - 9.0),
+        Align2::LEFT_CENTER,
+        t!("devtabs.slot_n", n = slot.index),
+        theme::medium(14.0),
+        theme::TEXT,
     );
     p.text(
-        Pos2::new(row.left() + 38.0, cy),
+        Pos2::new(row.left() + 38.0, cy + 10.0),
         Align2::LEFT_CENTER,
-        if slot.read_only {
-            format!(
-                "{} ({})",
-                t!("devtabs.slot_n", n = slot.index),
-                t!("devtabs.read_only")
-            )
-        } else {
-            t!("devtabs.slot_n", n = slot.index).to_string()
-        },
-        theme::body_lg(),
-        if active { theme::TEXT } else { theme::TEXT_DIM },
+        status,
+        theme::body_sm(),
+        theme::TEXT_MUT,
     );
+    if slot.read_only {
+        let w =
+            p.layout_no_wrap(
+                t!("devtabs.read_only").into(),
+                theme::caption(),
+                theme::TEXT,
+            )
+            .size()
+            .x + 16.0;
+        widgets::paint_tag(
+            p,
+            Pos2::new(title.right() + 10.0 + w, title.center().y),
+            &t!("devtabs.read_only"),
+            widgets::TagTone::Neutral,
+        );
+    }
 
     let btn_area = Rect::from_min_max(
         Pos2::new(row.right() - 310.0, row.top()),
@@ -158,51 +161,38 @@ fn slot_row(
             ui.add_space(theme::SPACE_8);
             // Switch — greyed out (non-interactive) in host mode or on the
             // already-active slot.
-            if slot.enabled {
-                if switch_disabled(host_mode, active) {
-                    widgets::button_disabled(
-                        ui,
-                        &t!("devtabs.switch"),
-                        widgets::ButtonKind::Ghost,
-                        egui::vec2(68.0, 28.0),
-                    );
-                } else if widgets::button(
+            if slot.enabled
+                && widgets::button_enabled(
                     ui,
                     &t!("devtabs.switch"),
-                    widgets::ButtonKind::Ghost,
+                    widgets::ButtonKind::Secondary,
                     egui::vec2(68.0, 28.0),
+                    !switch_disabled(host_mode, active),
                 )
-                .clicked()
-                {
-                    crate::runtime::ipc::send(
-                        ctx.cmd,
-                        halod_shared::commands::DaemonCommand::OnboardProfileSwitch {
-                            id: id.to_string(),
-                            slot: slot.index,
-                        },
-                    );
-                }
+            {
+                ipc::send(
+                    ctx.cmd,
+                    halod_shared::commands::DaemonCommand::Device {
+                        device_id: id.clone(),
+                        op: DeviceOp::OnboardProfileSwitch { slot: slot.index },
+                    },
+                );
             }
             if slot_can_toggle(slot) {
-                let (label, enabled_after) = if slot.enabled {
-                    (t!("devtabs.remove"), false)
+                let (label, enabled_after, kind) = if slot.enabled {
+                    (t!("devtabs.remove"), false, widgets::ButtonKind::Danger)
                 } else {
-                    (t!("devtabs.create"), true)
+                    (t!("devtabs.create"), true, widgets::ButtonKind::Ghost)
                 };
-                if widgets::button(
-                    ui,
-                    &label,
-                    widgets::ButtonKind::Ghost,
-                    egui::vec2(68.0, 28.0),
-                )
-                .clicked()
-                {
-                    crate::runtime::ipc::send(
+                if widgets::button(ui, &label, kind, egui::vec2(68.0, 28.0)).clicked() {
+                    ipc::send(
                         ctx.cmd,
-                        halod_shared::commands::DaemonCommand::OnboardProfileSetEnabled {
-                            id: id.to_string(),
-                            slot: slot.index,
-                            enabled: enabled_after,
+                        halod_shared::commands::DaemonCommand::Device {
+                            device_id: id.clone(),
+                            op: DeviceOp::OnboardProfileSetEnabled {
+                                slot: slot.index,
+                                enabled: enabled_after,
+                            },
                         },
                     );
                 }
@@ -211,16 +201,16 @@ fn slot_row(
                 && widgets::button(
                     ui,
                     &t!("devtabs.restore_to_rom"),
-                    widgets::ButtonKind::Ghost,
+                    widgets::ButtonKind::Secondary,
                     egui::vec2(112.0, 28.0),
                 )
                 .clicked()
             {
-                crate::runtime::ipc::send(
+                ipc::send(
                     ctx.cmd,
-                    halod_shared::commands::DaemonCommand::OnboardProfileRestore {
-                        id: id.to_string(),
-                        slot: slot.index,
+                    halod_shared::commands::DaemonCommand::Device {
+                        device_id: id.clone(),
+                        op: DeviceOp::OnboardProfileRestore { slot: slot.index },
                     },
                 );
             }

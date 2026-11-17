@@ -131,10 +131,10 @@ mod tests {
     #[test]
     fn semantic_changes_own_their_topic_dependency_graph() {
         assert_eq!(
-            topics(&Change::LightingDevice("kbd".into())),
+            topics(&Change::LightingDevice("kbd".parse().unwrap())),
             vec![
                 Topic::Lighting,
-                Topic::Device("kbd".into()),
+                Topic::Device("kbd".parse().unwrap()),
                 Topic::Profiles
             ]
         );
@@ -146,16 +146,16 @@ mod tests {
         assert_eq!(topics(&Change::LightingCatalog), vec![Topic::Lighting]);
         assert_eq!(topics(&Change::LcdCatalog), vec![Topic::Lcd]);
         assert_eq!(
-            topics(&Change::CanvasDevice("kbd".into())),
+            topics(&Change::CanvasDevice("kbd".parse().unwrap())),
             vec![
                 Topic::Lighting,
-                Topic::Device("kbd".into()),
+                Topic::Device("kbd".parse().unwrap()),
                 Topic::Profiles
             ]
         );
         assert_eq!(
-            topics(&Change::Device("mouse".into())),
-            vec![Topic::Device("mouse".into()), Topic::Profiles]
+            topics(&Change::Device("mouse".parse().unwrap())),
+            vec![Topic::Device("mouse".parse().unwrap()), Topic::Profiles]
         );
         assert_eq!(
             topics(&Change::Canvas),
@@ -166,14 +166,14 @@ mod tests {
     #[test]
     fn persisted_device_state_changes_refresh_profile_overrides() {
         let changes = [
-            Change::Device("mouse".into()),
-            Change::Devices(vec!["mouse".into(), "keyboard".into()]),
+            Change::Device("mouse".parse().unwrap()),
+            Change::Devices(vec!["mouse".parse().unwrap(), "keyboard".parse().unwrap()]),
             Change::Lighting,
-            Change::LightingDevice("keyboard".into()),
+            Change::LightingDevice("keyboard".parse().unwrap()),
             Change::Canvas,
-            Change::CanvasDevice("keyboard".into()),
-            Change::CoolingDevice("fan".into()),
-            Change::LcdDevice("screen".into()),
+            Change::CanvasDevice("keyboard".parse().unwrap()),
+            Change::CoolingDevice("fan".parse().unwrap()),
+            Change::LcdDevice("screen".parse().unwrap()),
         ];
 
         for change in changes {
@@ -194,7 +194,7 @@ mod tests {
         let mut transactions = app.data_bus.subscribe_transactions();
 
         app.effective_state
-            .record(&app, Change::Device("mouse".into()))
+            .record(&app, Change::Device("mouse".parse().unwrap()))
             .await;
 
         let transaction = transactions.recv().await.unwrap();
@@ -210,12 +210,12 @@ mod tests {
     async fn unchanged_projection_does_not_emit_a_transaction() {
         let app = app_with(vec![Arc::new(MockDevice::new("mouse"))]);
         app.effective_state
-            .record(&app, Change::Device("mouse".into()))
+            .record(&app, Change::Device("mouse".parse().unwrap()))
             .await;
         let mut transactions = app.data_bus.subscribe_transactions();
 
         app.effective_state
-            .record(&app, Change::Device("mouse".into()))
+            .record(&app, Change::Device("mouse".parse().unwrap()))
             .await;
 
         assert!(

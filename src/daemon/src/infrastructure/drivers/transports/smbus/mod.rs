@@ -10,17 +10,17 @@
 // below. This module hosts the daemon-side transport: discovery/scan jobs, the
 // PCI gate, write-rate metering, and the `SmBusDevice` handle.
 
-use anyhow::{anyhow, Result};
-use serde::{Deserialize, Serialize};
-use std::sync::atomic::{AtomicUsize, Ordering};
-use std::sync::{Arc, Mutex};
-
 use crate::{
     application::state::AppState,
     domain::registry::observers::discovery::{DiscoveryHandle, TransportScanner},
     infrastructure::drivers::Metered,
 };
+use anyhow::{anyhow, Result};
 use halod_shared::types::{WriteRateLimit, WriteRateStatus};
+use parking_lot::Mutex;
+use serde::{Deserialize, Serialize};
+use std::sync::atomic::{AtomicUsize, Ordering};
+use std::sync::Arc;
 
 // The raw SMBus primitives — the ops trait, `BusInfo`, and the platform
 // backends — now live in `halod-hwaccess` (shared with the elevated broker).
@@ -29,7 +29,11 @@ use halod_shared::types::{WriteRateLimit, WriteRateStatus};
 use halod_hwaccess::smbus::{enumerate_buses, enumerate_gpu_buses};
 pub use halod_hwaccess::smbus::{BusInfo, SmBusSyncOps};
 
+use crate::domain::plugin;
+use crate::domain::plugin::ProbeMode;
+use crate::domain::plugin::Registry;
 pub use halod_shared::debug_info::SmbusBusKind;
+use halod_shared::ids::PluginId;
 
 /// A PCI-identity filter that gates a GPU-bus scan to known cards, so the daemon
 /// never pokes an RGB address on a graphics card it doesn't recognise — the GPU
@@ -65,6 +69,18 @@ impl PciMatch {
     }
 }
 
+impl From<&halod_shared::types::PciIdentity> for PciMatch {
+    fn from(identity: &halod_shared::types::PciIdentity) -> Self {
+        Self {
+            vendor: identity.vendor,
+            device: identity.device,
+            sub_vendor: identity.sub_vendor,
+            sub_device: identity.sub_device,
+            confirmed: false,
+        }
+    }
+}
+
 pub struct SmBusDevice {
     /// Rate-limits the whole bus; devices sharing a plugin scan entry already
     /// share this gate and its bus mutex. Boxed so tests can inject a recording
@@ -97,8 +113,8 @@ impl SmBusDevice {
     where
         F: FnOnce(&mut dyn SmBusSyncOps) -> Result<R>,
     {
-        self.io.write_tallied_local(move |inner, bytes| {
-            let mut g = inner.lock().map_err(|_| anyhow!("smbus lock poisoned"))?;
+        self.io.write_tallied(move |inner, bytes| {
+            let mut g = inner.lock();
             let mut counting = CountingSmBusOps {
                 inner: &mut **g,
                 bytes,
@@ -180,7 +196,7 @@ impl SmBusTransport {
         tokio::task::spawn_blocking(|| (enumerate_buses(), enumerate_gpu_buses()))
             .await
             .unwrap_or_else(|e| {
-                log::error!("[SmBus] enumerate_for_debug task panicked: {e}");
+                log::error!("enumerate_for_debug task panicked: {e}");
                 Default::default()
             })
     }
@@ -216,7 +232,7 @@ struct ScanJob {
 enum PreScan {
     None,
     Plugin {
-        plugin_id: String,
+        plugin_id: PluginId,
         source: String,
         modules: std::collections::BTreeMap<String, String>,
         scope: Vec<u8>,
@@ -234,7 +250,7 @@ enum Probe {
     ReadByte,
 }
 
-fn plugin_scan_jobs(registry: &crate::domain::plugin::Registry) -> Vec<ScanJob> {
+fn plugin_scan_jobs(registry: &Registry) -> Vec<ScanJob> {
     registry
         .plugin_smbus_scan_entries()
         .into_iter()
@@ -243,9 +259,9 @@ fn plugin_scan_jobs(registry: &crate::domain::plugin::Registry) -> Vec<ScanJob> 
             addresses: e.addresses.clone(),
             write_rate_limit: e.write_rate_limit,
             probe: match e.probe {
-                crate::domain::plugin::ProbeMode::Quick => Probe::Quick,
-                crate::domain::plugin::ProbeMode::ReadByte => Probe::ReadByte,
-                crate::domain::plugin::ProbeMode::None => Probe::Always,
+                ProbeMode::Quick => Probe::Quick,
+                ProbeMode::ReadByte => Probe::ReadByte,
+                ProbeMode::None => Probe::Always,
             },
             pre_scan: if e.pre_scan {
                 PreScan::Plugin {
@@ -314,7 +330,7 @@ async fn discover(app: Arc<AppState>) -> Result<()> {
         // is a defense-in-depth backstop for malformed runtime state.
         if job.bus_kind == SmbusBusKind::Gpu && job.pci_match.is_empty() {
             log::warn!(
-                "[SmBusTransport] GPU scan entry declares no pci_match; refusing to \
+                "GPU scan entry declares no pci_match; refusing to \
                  scan GPU buses (risk of hanging the display bus). Entry skipped."
             );
             continue;
@@ -324,18 +340,14 @@ async fn discover(app: Arc<AppState>) -> Result<()> {
             SmbusBusKind::Chipset => chipset_buses.iter().filter(|b| !b.is_gpu_bus()).collect(),
             SmbusBusKind::Gpu => gpu_buses.iter().collect(),
         };
-        log::debug!(
-            "[SmBusTransport] {:?}: {} bus(es) to scan",
-            job.bus_kind,
-            buses.len()
-        );
+        log::debug!("{:?}: {} bus(es) to scan", job.bus_kind, buses.len());
 
         for bus_info in buses {
             // Consult the PCI gate before opening the bus: a card the gate doesn't
             // list is never touched. `confirmed` matches downgrade to no probe.
             let Some(effective_probe) = gate_bus(&job.pci_match, bus_info, job.probe) else {
                 log::debug!(
-                    "[SmBusTransport] bus {} ({:04x}:{:04x} / {:04x}:{:04x}) not in PCI gate; skipping",
+                    "bus {} ({:04x}:{:04x} / {:04x}:{:04x}) not in PCI gate; skipping",
                     bus_info.bus_number,
                     bus_info.pci_vendor,
                     bus_info.pci_device,
@@ -359,14 +371,10 @@ async fn discover(app: Arc<AppState>) -> Result<()> {
                 Ok(b) => b,
                 Err(e) => {
                     if open_warned {
-                        log::debug!(
-                            "[SmBusTransport] Cannot open bus {}: {}",
-                            bus_info.bus_number,
-                            e
-                        );
+                        log::debug!("Cannot open bus {}: {}", bus_info.bus_number, e);
                     } else {
                         log::warn!(
-                            "[SmBusTransport] cannot open SMBus bus {}: {}, \
+                            "cannot open SMBus bus {}: {}, \
                              SMBus RGB devices (e.g. DRAM) on this bus \
                              will be unavailable",
                             bus_info.bus_number,
@@ -407,7 +415,7 @@ async fn discover(app: Arc<AppState>) -> Result<()> {
 
 /// Run a job's Lua pre-scan against a freshly opened bus.
 async fn run_pre_scan(
-    registry: &crate::domain::plugin::Registry,
+    registry: &Registry,
     pre_scan: &PreScan,
     bus: &Arc<SmBusDevice>,
     bus_number: u8,
@@ -426,14 +434,7 @@ async fn run_pre_scan(
             let scope = scope.clone();
             let granted = registry.granted_for(plugin_id);
             tokio::task::spawn_blocking(move || {
-                crate::domain::plugin::run_pre_scan(
-                    &source,
-                    &modules,
-                    bus,
-                    scope,
-                    &granted,
-                    tokio::runtime::Handle::current(),
-                )
+                plugin::run_pre_scan(&source, &modules, bus, scope, &granted)
             })
             .await
             .unwrap_or_else(|e| Err(anyhow!("pre_scan task panicked: {e}")))
@@ -444,7 +445,7 @@ async fn run_pre_scan(
             PreScan::Plugin { plugin_id, .. } => plugin_id.as_str(),
             _ => "native",
         };
-        log::debug!("[SmBusTransport] pre_scan ({who}) failed on bus {bus_number}: {e}");
+        log::debug!("pre_scan ({who}) failed on bus {bus_number}: {e}");
     }
 }
 
@@ -468,10 +469,9 @@ mod tests {
         SmBusSyncOps,
     };
     use crate::infrastructure::drivers::Metered;
-    use halod_shared::types::Permission;
+    use parking_lot::Mutex;
     use std::sync::atomic::{AtomicUsize, Ordering};
-    use std::sync::{Arc, Mutex};
-
+    use std::sync::Arc;
     struct FakeOps {
         fail_writes: bool,
     }
@@ -553,15 +553,9 @@ mod tests {
             }
         "#;
 
-        let err = crate::domain::plugin::run_pre_scan(
-            source,
-            &Default::default(),
-            bus,
-            vec![0x50],
-            &[Permission::Os],
-            tokio::runtime::Handle::current(),
-        )
-        .unwrap_err();
+        let err =
+            crate::domain::plugin::run_pre_scan(source, &Default::default(), bus, vec![0x50], &[])
+                .unwrap_err();
 
         assert!(err.to_string().contains("requires the `smbus` permission"));
         assert_eq!(accesses.load(Ordering::Relaxed), 0);

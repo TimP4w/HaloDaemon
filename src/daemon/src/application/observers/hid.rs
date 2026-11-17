@@ -2,27 +2,34 @@
 use anyhow::Result;
 use std::collections::{HashMap, HashSet};
 use std::sync::Arc;
+use std::time::Duration;
+use tokio::time::Instant;
 
+use crate::application::usecases::registry::registration;
+use crate::application::usecases::registry::runtime;
+use crate::domain::plugin::Registry;
+use crate::util::backoff::{respawn_wait, FailureStreak};
 use crate::{
     application::state::{AppState, HidTrackingEntry},
     domain::device::Device,
     domain::registry::observers::discovery::{DiscoveryHandle, TransportScanner},
 };
+use halod_shared::ids::DeviceId;
 
-/// Exponential backoff capped at 30 s. After 5+ consecutive failures, promote
-/// logging to warn so operators notice a persistent HID subsystem problem.
-async fn backoff_sleep(failures: u32) {
-    let secs = std::cmp::min(1u64 << failures.min(5), 30);
-    tokio::time::sleep(std::time::Duration::from_secs(secs)).await;
+const MAX_ENUMERATION_BACKOFF: Duration = Duration::from_secs(30);
+
+async fn back_off(streak: &mut Option<FailureStreak>) {
+    let wait = respawn_wait(FailureStreak::record_in(streak, Instant::now()));
+    tokio::time::sleep(wait.min(MAX_ENUMERATION_BACKOFF)).await;
 }
 
 /// Background service driven from `main`: re-enumerates HID devices every 2 s,
 /// adding newly connected devices and removing disconnected ones. Backs off
 /// exponentially after repeated failures (e.g. post-suspend).
 pub async fn hotplug_monitor(app: Arc<AppState>) {
-    let mut failures: u32 = 0;
+    let mut streak: Option<FailureStreak> = None;
     loop {
-        tokio::time::sleep(std::time::Duration::from_secs(2)).await;
+        tokio::time::sleep(Duration::from_secs(2)).await;
 
         let live: Vec<HidDeviceInfo> = match tokio::task::spawn_blocking(|| {
             hidapi::HidApi::new().map(|api| api.device_list().map(HidDeviceInfo::from).collect())
@@ -30,23 +37,21 @@ pub async fn hotplug_monitor(app: Arc<AppState>) {
         .await
         {
             Ok(Ok(v)) => {
-                failures = 0;
+                streak = None;
                 v
             }
             Ok(Err(e)) => {
-                failures += 1;
-                if failures == 1 {
-                    log::debug!("Hotplug: HID enumeration failed: {e}");
+                if streak.is_none() {
+                    log::debug!("HID enumeration failed: {e}");
                 } else {
-                    log::warn!("Hotplug: HID enumeration failed ({failures} consecutive): {e}");
+                    log::warn!("HID enumeration failed again: {e}");
                 }
-                backoff_sleep(failures).await;
+                back_off(&mut streak).await;
                 continue;
             }
             Err(e) => {
-                failures += 1;
-                log::warn!("Hotplug: spawn_blocking panicked ({failures} consecutive): {e}");
-                backoff_sleep(failures).await;
+                log::warn!("HID enumeration task panicked: {e}");
+                back_off(&mut streak).await;
                 continue;
             }
         };
@@ -188,7 +193,7 @@ impl From<&hidapi::DeviceInfo> for HidDeviceInfo {
 /// wins. Result order follows enumeration first-occurrence so device `idx`
 /// assignment stays stable.
 fn pick_hid_devices<'a>(
-    registry: &crate::domain::plugin::Registry,
+    registry: &Registry,
     entries: &'a [HidDeviceInfo],
 ) -> Vec<&'a HidDeviceInfo> {
     let make_probe = |e: &HidDeviceInfo| DiscoveryHandle::Hid {
@@ -278,15 +283,15 @@ pub(crate) async fn handle_hid_key_removed(app: Arc<AppState>, key: String) {
         // Children a receiver registered after it was tracked (a paired device
         // that woke later) share its worker and die with it.
         let owned_children = {
-            let tracked: HashSet<&str> = arcs.iter().map(|d| d.id()).collect();
+            let tracked: HashSet<&DeviceId> = arcs.iter().map(|d| d.id()).collect();
             let mut owners = app.device_registry.children.lock().await;
-            let owned: HashSet<String> = tracked
+            let owned: HashSet<DeviceId> = tracked
                 .iter()
                 .filter_map(|id| owners.remove(*id))
                 .flatten()
                 .collect();
             for children in owners.values_mut() {
-                children.retain(|id| !tracked.contains(id.as_str()) && !owned.contains(id));
+                children.retain(|id| !tracked.contains(id) && !owned.contains(id));
             }
             owned
         };
@@ -313,10 +318,10 @@ pub(crate) async fn handle_hid_key_removed(app: Arc<AppState>, key: String) {
         }
         // Children register after their root, so reverse order closes them first.
         for d in to_close.iter().rev() {
-            crate::application::usecases::registry::registration::close_device(&app, d).await;
+            registration::close_device(&app, d).await;
         }
         log::info!("Hotplug: removed device(s) for key {key}");
-        crate::application::usecases::registry::runtime::topology_changed(&app).await;
+        runtime::topology_changed(&app).await;
 
         // The device may now be available through its paired receiver, whose
         // pairing table only shows the slot once the cable is gone — rescan
@@ -338,10 +343,7 @@ pub(crate) async fn handle_hid_key_removed(app: Arc<AppState>, key: String) {
                         if let Some(ctrl) = ctrl_dev.as_controller() {
                             let children = ctrl.rescan_children().await;
                             for child in children {
-                                crate::application::usecases::registry::registration::register_device(
-                                    &app2, child,
-                                )
-                                .await;
+                                registration::register_device(&app2, child).await;
                             }
                         }
                     }
@@ -349,7 +351,7 @@ pub(crate) async fn handle_hid_key_removed(app: Arc<AppState>, key: String) {
                 }
                 .await
                 {
-                    log::error!("[hotplug] controller rescan task failed: {e}");
+                    log::error!("controller rescan task failed: {e}");
                 }
             });
         }
@@ -409,10 +411,10 @@ async fn add_hid_device(
 
     let _ = scoped;
 
+    registration::release_wireless_twin(app, impl_.id()).await;
+
     // Register as a new primary device via the centralised registration lifecycle.
-    let registered =
-        crate::application::usecases::registry::registration::register_device(app, impl_.clone())
-            .await;
+    let registered = registration::register_device(app, impl_.clone()).await;
     if !registered {
         return;
     }
@@ -420,8 +422,7 @@ async fn add_hid_device(
     if impl_.active_state() != halod_shared::types::VisibilityState::Disabled {
         if let Some(ctrl) = impl_.as_controller() {
             for child in ctrl.discover_children().await {
-                crate::application::usecases::registry::registration::register_device(app, child)
-                    .await;
+                registration::register_device(app, child).await;
             }
         }
     }
@@ -448,7 +449,7 @@ mod tests {
     #[tokio::test]
     async fn removing_a_hid_key_closes_children_registered_after_tracking() {
         let root = Arc::new(MockDevice::new("logitech-c547"));
-        let late_child = Arc::new(MockDevice::new("logitech_6B3DD4CD"));
+        let late_child = Arc::new(MockDevice::new("logitech-6B3DD4CD"));
         let unrelated = Arc::new(MockDevice::new("other"));
         let app = app_with(vec![root.clone()]);
         app.hid
@@ -466,13 +467,13 @@ mod tests {
             .children
             .lock()
             .await
-            .entry("logitech-c547".into())
+            .entry("logitech-c547".parse().unwrap())
             .or_default()
-            .insert("logitech_6B3DD4CD".into());
+            .insert("logitech-6B3DD4CD".parse().unwrap());
 
         handle_hid_key_removed(Arc::clone(&app), "046d:c547:".into()).await;
 
-        let remaining: Vec<String> = app
+        let remaining: Vec<DeviceId> = app
             .device_registry
             .read()
             .await

@@ -7,6 +7,7 @@ use halod_shared::types::{
 };
 
 use crate::domain::registry::observers::discovery::DiscoveryHandle;
+use halod_shared::ids::{DeviceId, PluginId};
 
 #[derive(Debug, Clone, PartialEq, Eq, PartialOrd, Ord, Hash)]
 pub enum IdentityScope {
@@ -124,8 +125,8 @@ impl DeviceIdentity {
 #[derive(Debug, Clone, PartialEq, Eq)]
 pub enum DeviceOrigin {
     Builtin,
-    Plugin(String),
-    Integration(String),
+    Plugin(PluginId),
+    Integration(PluginId),
 }
 
 impl DeviceOrigin {
@@ -282,7 +283,7 @@ pub fn compare(
 }
 
 pub struct ConflictEntry {
-    pub id: String,
+    pub id: DeviceId,
     pub identity: DeviceIdentity,
     pub origin: DeviceOrigin,
     pub connected: bool,
@@ -452,7 +453,7 @@ mod tests {
     use super::*;
     fn entry(id: &str, serial: Option<&str>, location: Option<&str>) -> ConflictEntry {
         ConflictEntry {
-            id: id.into(),
+            id: id.parse().unwrap(),
             identity: DeviceIdentity {
                 scope: Some(IdentityScope::Local),
                 serial: normalize_serial(serial),
@@ -510,9 +511,9 @@ mod tests {
         assert_eq!(
             compare(
                 &smbus_identity(1, 0x70),
-                &DeviceOrigin::Plugin("ene_smbus".into()),
+                &DeviceOrigin::Plugin("ene_smbus".parse().unwrap()),
                 &smbus_identity(1, 0x70),
-                &DeviceOrigin::Integration("openrgb".into()),
+                &DeviceOrigin::Integration("openrgb".parse().unwrap()),
             ),
             MatchEvidence::ConfirmedLocation
         );
@@ -531,7 +532,7 @@ mod tests {
     #[test]
     fn smbus_duplicates_across_sources_form_a_conflict_group() {
         let smbus_entry = |id: &str, origin| ConflictEntry {
-            id: id.into(),
+            id: id.parse().unwrap(),
             identity: smbus_identity(1, 0x70),
             origin,
             connected: true,
@@ -539,10 +540,13 @@ mod tests {
             integration_root: false,
         };
         let entries = vec![
-            smbus_entry("ene_smbus-addr70", DeviceOrigin::Plugin("ene_smbus".into())),
+            smbus_entry(
+                "ene_smbus-addr70",
+                DeviceOrigin::Plugin("ene_smbus".parse().unwrap()),
+            ),
             smbus_entry(
                 "openrgb-ctrl_0",
-                DeviceOrigin::Integration("openrgb".into()),
+                DeviceOrigin::Integration("openrgb".parse().unwrap()),
             ),
         ];
         let found = detect_conflicts(&entries);

@@ -19,7 +19,6 @@ fn main() {
     println!("cargo:rerun-if-changed=../assets/fonts");
     println!("cargo:rerun-if-changed=assets/icons");
     println!("cargo:rerun-if-changed=../../LICENSES");
-    println!("cargo:rerun-if-env-changed=HALOD_OFFICIAL_PLUGIN_LICENSES");
 
     let out_dir = PathBuf::from(std::env::var_os("OUT_DIR").unwrap());
     let workspace = PathBuf::from(std::env::var_os("CARGO_MANIFEST_DIR").unwrap())
@@ -40,7 +39,6 @@ fn main() {
             let mut content = refs_section.into_bytes();
             content.extend_from_slice(&o.stdout);
             append_bundled_asset_licenses(&workspace, &mut content);
-            append_official_plugin_licenses(&mut content);
             std::fs::write(out_dir.join("third_party_licenses.txt"), &content)
                 .expect("failed to write third_party_licenses.txt");
         }
@@ -148,21 +146,8 @@ fn license_failure(
         .as_bytes(),
     );
     append_bundled_asset_licenses(workspace, &mut content);
-    append_official_plugin_licenses(&mut content);
     std::fs::write(out_dir.join("third_party_licenses.txt"), &content)
         .expect("failed to write license fallback");
-}
-
-/// Official release builds append the notice produced by the plugin repository.
-fn append_official_plugin_licenses(buf: &mut Vec<u8>) {
-    let Some(path) = std::env::var_os("HALOD_OFFICIAL_PLUGIN_LICENSES") else {
-        return;
-    };
-    let content = std::fs::read(&path).unwrap_or_else(|error| {
-        panic!("reading official plugin license notice {:?}: {error}", path)
-    });
-    buf.extend_from_slice(b"\n===================================================================\nOFFICIAL PLUGINS\n===================================================================\n\n");
-    buf.extend_from_slice(&content);
 }
 
 fn scan_protocol_references(workspace: &std::path::Path) -> String {
@@ -258,7 +243,12 @@ fn append_bundled_asset_licenses(workspace: &std::path::Path, buf: &mut Vec<u8>)
             "https://github.com/JetBrains/JetBrainsMono",
         ),
         (
-            "Inter Tight (proportional, GUI)",
+            "Geist (proportional, GUI)",
+            "2026 The Geist Project Authors",
+            "https://github.com/vercel/geist-font",
+        ),
+        (
+            "Inter Tight (proportional, LCD engine)",
             "2016 The Inter Project Authors",
             "https://github.com/rsms/inter",
         ),
@@ -281,15 +271,10 @@ fn append_bundled_asset_licenses(workspace: &std::path::Path, buf: &mut Vec<u8>)
            Copyright: Google LLC\n\
            License: Apache-2.0\n\
            URL: https://fonts.google.com/icons\n\n\
-         Boxicons (verified badge SVG)\n\
-           Copyright: 2015-2021 Aniket Suvarna\n\
+         Bootstrap Icons (computer device SVG)\n\
+           Copyright: 2019-2024 The Bootstrap Authors\n\
            License: MIT\n\
-           URL: https://github.com/box-icons/boxicons-core\n\n\
-         Visual Studio Code Codicons (integrity shield SVG)\n\
-           Copyright: Microsoft Corporation\n\
-           License: CC-BY-4.0\n\
-           Source: https://github.com/microsoft/vscode-codicons\n\
-           License URL: https://github.com/microsoft/vscode-codicons/blob/main/LICENSE\n\n",
+           URL: https://github.com/twbs/icons\n\n",
     );
     buf.extend_from_slice(header.as_bytes());
 

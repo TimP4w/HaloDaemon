@@ -3,17 +3,19 @@
 //! (accent, background, brightness, raw streaming).
 
 use egui::Rect;
-use halod_shared::commands::DaemonCommand;
 use halod_shared::lcd_custom::{BgKind, FONT_INTER, FONT_MONO, FONT_SANS};
 use halod_shared::lcd_geometry::MAX_SCALE;
 use halod_shared::types::LcdStatus;
 
 use super::super::library::image_picker;
 use super::super::params::render_param;
-use super::super::preview::raw_streaming_row;
+use super::super::preview::{display_controls, raw_streaming_row};
 use super::{send_def, DeviceUi, TabCtx};
+use crate::domain::tour;
+use crate::domain::tour::AnchorId;
 use crate::ui::components as widgets;
 use crate::ui::theme;
+use halod_shared::ids::DeviceId;
 
 /// Shown in the inspector column instead of [`selected_widget_card`] when no
 /// widget is selected on the stage.
@@ -35,11 +37,7 @@ pub(super) fn empty_selection_card(ui: &mut egui::Ui) {
 /// tour overlay, so omitting the empty-state anchor makes step three time out.
 fn anchor_variant_card(ui: &egui::Ui) {
     let rect = Rect::from_min_size(ui.cursor().min, egui::Vec2::new(ui.available_width(), 28.0));
-    crate::domain::tour::anchor(
-        ui.ctx(),
-        crate::domain::tour::AnchorId::LcdEditorVariant,
-        rect,
-    );
+    tour::anchor(ui.ctx(), AnchorId::LcdEditorVariant, rect);
 }
 
 /// "SELECTED · {type}" caption matching the design's per-variant labels.
@@ -104,38 +102,41 @@ pub(super) fn selected_widget_card(
     ui: &mut egui::Ui,
     ctx: &TabCtx,
     st: &mut DeviceUi,
-    id: &str,
+    id: &DeviceId,
     sel: &str,
 ) {
     let Some(idx) = st.lcd.editor.def.widgets.iter().position(|w| w.id == sel) else {
         return;
     };
     anchor_variant_card(ui);
-    ui.label({
-        let widget = &st.lcd.editor.def.widgets[idx];
-        let plugin_label = Some(widget.widget.clone()).and_then(|catalog_id| {
-            ctx.state
-                .lcd
-                .engine
-                .available_widgets
-                .iter()
-                .find(|descriptor| descriptor.id == catalog_id)
-                .map(|descriptor| {
-                    descriptor
-                        .localized_name(&ctx.state.gui.language)
-                        .to_owned()
-                })
-        });
-        egui::RichText::new(t!(
-            "lcd.selected_caption",
-            kind = plugin_label
-                .map(std::borrow::Cow::Owned)
-                .unwrap_or_else(|| std::borrow::Cow::Borrowed("Missing widget"))
-        ))
-        .font(theme::caption())
-        .color(theme::TEXT_FAINT2)
+    let kind = {
+        let catalog_id = &st.lcd.editor.def.widgets[idx].widget;
+        ctx.state
+            .lcd
+            .engine
+            .available_widgets
+            .iter()
+            .find(|descriptor| &descriptor.id == catalog_id)
+            .map(|descriptor| {
+                descriptor
+                    .localized_name(&ctx.state.gui.language)
+                    .to_owned()
+            })
+            .unwrap_or_else(|| t!("lcd.missing_widget").to_string())
+    };
+    ui.vertical(|ui| {
+        ui.spacing_mut().item_spacing.y = theme::SPACE_1;
+        ui.label(
+            egui::RichText::new(t!("lcd.selected"))
+                .font(theme::body_sm())
+                .color(theme::TEXT_MUT),
+        );
+        ui.label(
+            egui::RichText::new(kind)
+                .font(theme::heading())
+                .color(theme::TEXT),
+        );
     });
-    ui.add_space(theme::SPACE_7);
 
     let plugin_descriptor =
         Some(st.lcd.editor.def.widgets[idx].widget.clone()).and_then(|catalog_id| {
@@ -189,7 +190,6 @@ pub(super) fn selected_widget_card(
         let widget = &mut st.lcd.editor.def.widgets[idx];
         for p in &schema {
             changed |= render_param(ui, ctx, p, &mut widget.params);
-            ui.add_space(theme::SPACE_2);
         }
     }
 
@@ -212,7 +212,6 @@ pub(super) fn selected_widget_card(
             st.lcd.editor.def.widgets[idx].color = Some(c);
             changed = true;
         }
-        ui.add_space(theme::SPACE_3);
     }
 
     // Per-widget font override for every text-drawing widget.
@@ -225,7 +224,6 @@ pub(super) fn selected_widget_card(
             st.lcd.editor.def.widgets[idx].font = Some(f);
             changed = true;
         }
-        ui.add_space(theme::SPACE_3);
     }
 
     // The `filename` param is a `ParamKind::Image` no-op above — the image is
@@ -236,14 +234,13 @@ pub(super) fn selected_widget_card(
     {
         let current =
             halod_shared::lcd_custom::param_str(&st.lcd.editor.def.widgets[idx], "filename");
-        if let Some(pick) = image_picker(ui, ctx, st, id, &current) {
+        if let Some(pick) = image_picker(ui, "widget_image", ctx, st, id, &current) {
             st.lcd.editor.def.widgets[idx].params.insert(
                 "filename".to_string(),
                 halod_shared::types::EffectParamValue::Str(pick),
             );
             changed = true;
         }
-        ui.add_space(theme::SPACE_3);
     }
 
     // Size.
@@ -259,7 +256,6 @@ pub(super) fn selected_widget_card(
         st.lcd.editor.def.widgets[idx].scale = scale;
         changed = true;
     }
-    ui.add_space(theme::SPACE_3);
 
     if changed {
         if let Some(descriptor) = plugin_descriptor {
@@ -280,12 +276,13 @@ pub(super) fn selected_widget_card(
         send_def(ctx, st, id, false);
     }
 
-    ui.horizontal(|ui| {
+    ui.columns(2, |cols| {
+        let w = cols[0].available_width();
         if widgets::button(
-            ui,
+            &mut cols[0],
             &t!("lcd.center"),
-            widgets::ButtonKind::Ghost,
-            egui::vec2(118.0, 28.0),
+            widgets::ButtonKind::Secondary,
+            egui::vec2(w, 30.0),
         )
         .clicked()
         {
@@ -293,12 +290,11 @@ pub(super) fn selected_widget_card(
             st.lcd.editor.def.widgets[idx].y = 0.5;
             send_def(ctx, st, id, false);
         }
-
         if widgets::button(
-            ui,
+            &mut cols[1],
             &t!("lcd.delete"),
             widgets::ButtonKind::Danger,
-            egui::vec2(118.0, 28.0),
+            egui::vec2(w, 30.0),
         )
         .clicked()
         {
@@ -307,6 +303,29 @@ pub(super) fn selected_widget_card(
             send_def(ctx, st, id, true);
         }
     });
+
+    let mut order = None;
+    ui.columns(2, |cols| {
+        for (index, action) in super::layers::LayerAction::ORDER.into_iter().enumerate() {
+            let col = &mut cols[index % 2];
+            let w = col.available_width();
+            if widgets::button(
+                col,
+                &action.label(),
+                widgets::ButtonKind::Secondary,
+                egui::vec2(w, 30.0),
+            )
+            .clicked()
+            {
+                order = Some(action);
+            }
+        }
+    });
+    if let Some(action) = order {
+        if st.lcd.editor.apply_layer(sel, action) {
+            send_def(ctx, st, id, true);
+        }
+    }
 }
 
 // ── Screen style ───────────────────────────────────────────────────────────────
@@ -342,15 +361,15 @@ pub(super) fn screen_style_card(
     ui: &mut egui::Ui,
     ctx: &TabCtx,
     st: &mut DeviceUi,
-    id: &str,
+    id: &DeviceId,
     lcd: &LcdStatus,
 ) {
     ui.label(
-        egui::RichText::new(t!("lcd.screen_style"))
+        egui::RichText::new(t!("lcd.display"))
             .font(theme::heading())
             .color(theme::TEXT),
     );
-    ui.add_space(theme::SPACE_7);
+    display_controls(ui, ctx, st, id, lcd);
 
     let mut changed = false;
 
@@ -361,7 +380,6 @@ pub(super) fn screen_style_card(
         st.lcd.editor.def.style.accent = c;
         changed = true;
     }
-    ui.add_space(theme::SPACE_6);
 
     sync_system_fonts(ui, st);
     let current_font = st.lcd.editor.def.style.font.clone();
@@ -375,7 +393,6 @@ pub(super) fn screen_style_card(
         st.lcd.editor.def.style.font = font;
         changed = true;
     }
-    ui.add_space(theme::SPACE_6);
 
     ui.label(
         egui::RichText::new(t!("lcd.background"))
@@ -402,7 +419,6 @@ pub(super) fn screen_style_card(
     });
 
     if let BgKind::Image { filename, dim } = st.lcd.editor.def.style.background.clone() {
-        ui.add_space(theme::SPACE_4);
         background_image_picker(ui, ctx, st, id, &filename, dim, &mut changed);
     }
 
@@ -410,25 +426,6 @@ pub(super) fn screen_style_card(
         send_def(ctx, st, id, false);
     }
 
-    // Screen brightness — same underlying command/scratch key as the Display
-    // card's slider (the design duplicates it here too; both edit one value).
-    ui.add_space(theme::SPACE_7);
-    let key = "lcd_bright";
-    let mut b = st.guarded(key, lcd.brightness as f32, ctx.time);
-    let readout = format!("{}%", b.round() as i32);
-    if widgets::slider_row(ui, &t!("lcd.brightness"), &mut b, 0.0..=100.0, &readout) {
-        st.set(key, b, ctx.time);
-        st.queue(
-            key,
-            DaemonCommand::SetScreenBrightness {
-                id: id.to_string(),
-                brightness: b.round() as u8,
-            },
-            ctx.time,
-        );
-    }
-
-    ui.add_space(theme::SPACE_7);
     raw_streaming_row(ui, ctx, id, lcd);
 }
 
@@ -436,19 +433,18 @@ fn background_image_picker(
     ui: &mut egui::Ui,
     ctx: &TabCtx,
     st: &mut DeviceUi,
-    id: &str,
+    id: &DeviceId,
     filename: &str,
     dim: f64,
     changed: &mut bool,
 ) {
-    if let Some(pick) = image_picker(ui, ctx, st, id, filename) {
+    if let Some(pick) = image_picker(ui, "background_image", ctx, st, id, filename) {
         st.lcd.editor.def.style.background = BgKind::Image {
             filename: pick,
             dim,
         };
         *changed = true;
     }
-    ui.add_space(theme::SPACE_3);
     let mut dim_pct = dim as f32;
     let readout = format!("{}%", dim_pct.round() as i32);
     if widgets::slider_row(ui, &t!("lcd.dim"), &mut dim_pct, 0.0..=100.0, &readout) {

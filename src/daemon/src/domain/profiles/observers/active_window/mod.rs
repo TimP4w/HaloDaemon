@@ -21,12 +21,8 @@ pub enum FocusEvent {
 
 #[derive(Debug, Clone)]
 pub enum ControlMsg {
-    ManualSwitch {
-        profile: String,
-    },
+    ManualSwitch { profile: String },
     RulesUpdated,
-    #[allow(dead_code)] // explicit shutdown is exercised by direct event-loop users/tests
-    Shutdown,
 }
 
 pub struct FocusWatcherEngine {
@@ -54,7 +50,7 @@ impl FocusWatcherEngine {
                     }
                 }
                 Err(e) => {
-                    log::info!("[FocusWatcher] No platform backend available: {e}");
+                    log::info!("No platform backend available: {e}");
                     run_idle_loop(ctrl_rx).await;
                 }
             }
@@ -100,10 +96,7 @@ async fn apply_focus(
 
             if let Some(rule) = matched {
                 if !profiles_exist.contains_key(&rule.profile) {
-                    log::warn!(
-                        "[FocusWatcher] Rule profile '{}' not found, skipping",
-                        rule.profile
-                    );
+                    log::warn!("Rule profile '{}' not found, skipping", rule.profile);
                     if last_active_rule.take().is_some() {
                         switch_profile_direct(baseline.to_string(), app.clone()).await;
                     }
@@ -126,7 +119,8 @@ async fn apply_focus(
 }
 
 /// Returns `Some(ctrl_rx)` when the focus backend stream closes (backend died);
-/// the caller can continue with `run_idle_loop`. Returns `None` on Shutdown.
+/// the caller can continue with `run_idle_loop`. Returns `None` once the
+/// control channel closes.
 pub async fn run_event_loop(
     app: Arc<AppState>,
     mut ctrl_rx: mpsc::Receiver<ControlMsg>,
@@ -155,7 +149,7 @@ pub async fn run_event_loop(
             }
             msg = ctrl_rx.recv() => {
                 match msg {
-                    None | Some(ControlMsg::Shutdown) => return None,
+                    None => return None,
                     Some(ControlMsg::ManualSwitch { profile }) => {
                         baseline = profile.clone();
                         switch_profile_direct(profile, app.clone()).await;
@@ -169,13 +163,8 @@ pub async fn run_event_loop(
     }
 }
 
-/// Keeps the engine alive without a backend: only responds to Shutdown.
 async fn run_idle_loop(mut ctrl_rx: mpsc::Receiver<ControlMsg>) {
-    while let Some(msg) = ctrl_rx.recv().await {
-        if matches!(msg, ControlMsg::Shutdown) {
-            return;
-        }
-    }
+    while ctrl_rx.recv().await.is_some() {}
 }
 
 async fn spawn_platform_backend() -> anyhow::Result<mpsc::Receiver<FocusEvent>> {
@@ -225,7 +214,7 @@ mod tests {
             })
             .await
             .unwrap();
-        ctrl_tx.send(ControlMsg::Shutdown).await.unwrap();
+        drop(ctrl_tx);
         drop(focus_tx);
 
         run_event_loop(app.clone(), ctrl_rx, focus_rx).await;
@@ -245,7 +234,7 @@ mod tests {
             })
             .await
             .unwrap();
-        ctrl_tx.send(ControlMsg::Shutdown).await.unwrap();
+        drop(ctrl_tx);
 
         run_event_loop(app.clone(), ctrl_rx, focus_rx).await;
 
@@ -265,7 +254,7 @@ mod tests {
             .await
             .unwrap();
         focus_tx.send(FocusEvent::NoApp).await.unwrap();
-        ctrl_tx.send(ControlMsg::Shutdown).await.unwrap();
+        drop(ctrl_tx);
 
         run_event_loop(app.clone(), ctrl_rx, focus_rx).await;
 
@@ -297,7 +286,7 @@ mod tests {
             .await
             .unwrap();
         focus_tx.send(FocusEvent::NoApp).await.unwrap();
-        ctrl_tx.send(ControlMsg::Shutdown).await.unwrap();
+        drop(ctrl_tx);
 
         run_event_loop(app.clone(), ctrl_rx, focus_rx).await;
 
@@ -324,7 +313,7 @@ mod tests {
             })
             .await
             .unwrap();
-        ctrl_tx.send(ControlMsg::Shutdown).await.unwrap();
+        drop(ctrl_tx);
 
         run_event_loop(app.clone(), ctrl_rx, focus_rx).await;
 
@@ -344,7 +333,7 @@ mod tests {
             })
             .await
             .unwrap();
-        ctrl_tx.send(ControlMsg::Shutdown).await.unwrap();
+        drop(ctrl_tx);
 
         run_event_loop(app.clone(), ctrl_rx, focus_rx).await;
         assert_eq!(app.config.read().await.active_profile, "default");
@@ -363,7 +352,7 @@ mod tests {
             .await
             .unwrap();
         ctrl_tx.send(ControlMsg::RulesUpdated).await.unwrap();
-        ctrl_tx.send(ControlMsg::Shutdown).await.unwrap();
+        drop(ctrl_tx);
 
         run_event_loop(app.clone(), ctrl_rx, focus_rx).await;
         assert_eq!(app.config.read().await.active_profile, "Web");
@@ -382,7 +371,7 @@ mod tests {
             .await
             .unwrap();
         ctrl_tx.send(ControlMsg::RulesUpdated).await.unwrap();
-        ctrl_tx.send(ControlMsg::Shutdown).await.unwrap();
+        drop(ctrl_tx);
 
         run_event_loop(app.clone(), ctrl_rx, focus_rx).await;
         assert_eq!(app.config.read().await.active_profile, "default");

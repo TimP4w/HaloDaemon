@@ -3,6 +3,7 @@ use super::chain;
 use crate::domain::registry::identity::{DeviceIdentity, DeviceOrigin};
 use anyhow::Result;
 use async_trait::async_trait;
+use halod_shared::ids::{DeviceId, PluginId};
 use halod_shared::types::{
     CategoryLayout, ConnectionType, DeviceCapability, DeviceType, VisibilityState, WireDevice,
     WriteRateStatus,
@@ -98,7 +99,7 @@ macro_rules! as_capability {
 #[async_trait]
 pub trait Device: Send + Sync {
     /// Stable identifier, unique per physical device across runs.
-    fn id(&self) -> &str;
+    fn id(&self) -> &DeviceId;
 
     fn name(&self) -> &str;
 
@@ -133,7 +134,7 @@ pub trait Device: Send + Sync {
             chain::enrich_wire_capabilities(host, &mut caps);
         }
         WireDevice {
-            id: self.id().to_owned(),
+            id: self.id().into(),
             name: self.wire_device_name().await,
             vendor: self.vendor().to_owned(),
             model: self.model().to_owned(),
@@ -165,11 +166,11 @@ pub trait Device: Send + Sync {
     /// (e.g. the OpenRGB SDK client) rather than a real device. `None` for
     /// every other device, including the devices an integration exposes as
     /// children.
-    fn integration_id(&self) -> Option<String> {
+    fn integration_id(&self) -> Option<PluginId> {
         None
     }
 
-    fn owning_plugin_id(&self) -> Option<String> {
+    fn owning_plugin_id(&self) -> Option<PluginId> {
         None
     }
 
@@ -384,7 +385,7 @@ mod tests {
         .await;
 
         assert_eq!(
-            *dev.write_order.lock().unwrap(),
+            *dev.write_order.lock(),
             vec!["onboard", "choice", "lighting"],
             "a control write can hand the LEDs back to firmware, so the restored \
              colour has to be the last thing that reaches the device"
@@ -417,7 +418,7 @@ mod tests {
         }))
         .await;
 
-        assert_eq!(*dev.write_order.lock().unwrap(), vec!["choice", "lighting"]);
+        assert_eq!(*dev.write_order.lock(), vec!["choice", "lighting"]);
     }
 
     #[test]
@@ -449,7 +450,7 @@ mod tests {
         assert!(slot.placed_channels().is_empty(), "starts empty");
 
         let channels = vec![PlacedZone {
-            device_id: "dev1".to_string(),
+            device_id: "dev1".parse().unwrap(),
             channel_id: "z1".to_string(),
             x: 0.0,
             y: 0.0,

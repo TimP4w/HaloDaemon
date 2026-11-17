@@ -1,4 +1,6 @@
 // SPDX-License-Identifier: GPL-3.0-or-later
+use crate::domain::device::Device;
+use halod_shared::ids::DeviceId;
 use serde::{Deserialize, Serialize};
 use std::collections::HashMap;
 
@@ -17,12 +19,12 @@ pub struct DeviceRecord {
 /// currently registered we seed the record from its `name/vendor/model`; when
 /// it isn't (offline / never-seen) we leave a `DeviceRecord::default()`.
 pub fn ensure_record<'a>(
-    known: &'a mut HashMap<String, DeviceRecord>,
-    device_id: &str,
-    device: Option<&dyn crate::domain::device::Device>,
+    known: &'a mut HashMap<DeviceId, DeviceRecord>,
+    device_id: &DeviceId,
+    device: Option<&dyn Device>,
 ) -> &'a mut DeviceRecord {
     known
-        .entry(device_id.to_string())
+        .entry(device_id.into())
         .or_insert_with(|| match device {
             Some(d) => DeviceRecord {
                 name: d.name().to_string(),
@@ -52,7 +54,7 @@ pub struct ChannelLayoutRecord {
 pub struct ChainLinkRecord {
     /// Stable across restarts — canvas placements, transforms, and saved RGB
     /// state are keyed by this child id.
-    pub id: String,
+    pub id: DeviceId,
     pub name: String,
     pub topology: halod_shared::types::ZoneTopology,
     pub led_count: u32,

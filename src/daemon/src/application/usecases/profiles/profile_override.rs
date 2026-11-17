@@ -5,6 +5,7 @@ use anyhow::{bail, Result};
 use std::sync::Arc;
 
 use crate::application::state::AppState;
+use crate::domain::events::Change;
 use halod_shared::commands::OverrideTarget;
 use halod_shared::types::DEFAULT_PROFILE_NAME;
 
@@ -21,7 +22,7 @@ pub async fn remove_profile_override(
         if profile_name == DEFAULT_PROFILE_NAME {
             bail!("cannot remove overrides from the default profile");
         }
-        log::info!("[Profile] Removing override {target:?} from '{profile_name}'");
+        log::info!("Removing override {target:?} from '{profile_name}'");
         let is_active = cfg.active_profile == profile_name;
         let Some(profile) = cfg.profiles.get_mut(&profile_name) else {
             bail!("unknown profile '{profile_name}'");
@@ -54,11 +55,9 @@ pub async fn remove_profile_override(
     app.request_config_save();
     if is_active {
         super::lifecycle::load_active_profile(app.clone()).await;
-        app.record_change(crate::domain::events::Change::ProfileSwitch)
-            .await;
+        app.record_change(Change::ProfileSwitch).await;
     } else {
-        app.record_change(crate::domain::events::Change::Profiles)
-            .await;
+        app.record_change(Change::Profiles).await;
     }
     Ok(())
 }
@@ -74,7 +73,7 @@ mod tests {
         let mut cfg = Config::default();
         let mut gaming = Profile::default();
         gaming.device_states.insert(
-            "dev1".into(),
+            "dev1".parse().unwrap(),
             json!({ "fan_curve": {"a": 2}, "rgb": {"m": "x"} }),
         );
         cfg.profiles.insert("Gaming".into(), gaming);
@@ -88,7 +87,7 @@ mod tests {
         remove_profile_override(
             "Gaming".into(),
             OverrideTarget::DeviceCapability {
-                device_id: "dev1".into(),
+                device_id: "dev1".parse().unwrap(),
                 state_key: "fan_curve".into(),
             },
             app.clone(),
@@ -109,7 +108,7 @@ mod tests {
             remove_profile_override(
                 "Gaming".into(),
                 OverrideTarget::DeviceCapability {
-                    device_id: "dev1".into(),
+                    device_id: "dev1".parse().unwrap(),
                     state_key: key.into(),
                 },
                 app.clone(),
@@ -155,7 +154,7 @@ mod tests {
         remove_profile_override(
             "Gaming".into(),
             OverrideTarget::DeviceCapability {
-                device_id: "nonexistent".into(),
+                device_id: "nonexistent".parse().unwrap(),
                 state_key: "fan_curve".into(),
             },
             app.clone(),
@@ -200,7 +199,7 @@ mod tests {
         remove_profile_override(
             "Gaming".into(),
             OverrideTarget::DeviceCapability {
-                device_id: "dev1".into(),
+                device_id: "dev1".parse().unwrap(),
                 state_key: "fan_curve".into(),
             },
             app.clone(),

@@ -18,7 +18,15 @@ pub(super) fn bytes_from(value: &Value) -> mlua::Result<Vec<u8>> {
     }
 }
 
-/// Surface an `anyhow` error to Lua with its full context chain.
-pub(super) fn to_lua_err(e: anyhow::Error) -> mlua::Error {
+pub(crate) fn to_lua_err(e: anyhow::Error) -> mlua::Error {
     mlua::Error::RuntimeError(format!("{e:#}"))
+}
+
+#[cfg(feature = "plugin-test")]
+pub(crate) fn from_lua_err(e: mlua::Error) -> anyhow::Error {
+    anyhow::anyhow!("{e}")
+}
+
+pub(crate) fn lua_err(context: &str, e: mlua::Error) -> anyhow::Error {
+    anyhow::anyhow!("{context}: {e}")
 }

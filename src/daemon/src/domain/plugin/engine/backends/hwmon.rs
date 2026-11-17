@@ -32,10 +32,7 @@ fn open(
     }
 }
 
-pub(super) const DESCRIPTOR: PluginTransportDescriptor = PluginTransportDescriptor {
+pub(super) const DESCRIPTOR: PluginTransportDescriptor = PluginTransportDescriptor::Configured {
     kind: "hwmon",
-    matches: None,
     open,
-    id_suffix: None,
-    validate: None,
 };

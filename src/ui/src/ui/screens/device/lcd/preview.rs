@@ -3,12 +3,15 @@
 //! rotation, and raw-streaming toggle.
 
 use egui::{Color32, Rect, Sense, Stroke, Vec2};
-use halod_shared::commands::DaemonCommand;
+use halod_shared::commands::{DaemonCommand, DeviceOp};
 use halod_shared::types::{LcdStatus, LcdUploadProgress, ScreenRotation, ScreenShape};
 
 use super::{drive_preview, preview_key, rot_label, DeviceUi, TabCtx};
+use crate::runtime::ipc;
 use crate::ui::components as widgets;
+use crate::ui::screens::device;
 use crate::ui::theme;
+use halod_shared::ids::DeviceId;
 
 /// UV rect that center-crops `tex` to a square, so painting it into the square
 /// or circular preview fills the area without distorting the source aspect
@@ -83,23 +86,6 @@ pub(super) fn paint_image_circle(
     p.add(egui::Shape::mesh(mesh));
 }
 
-/// Paint an animated spinner arc centred at `center`, driving its own repaint.
-fn paint_spinner(ui: &egui::Ui, center: egui::Pos2, time: f64) {
-    use egui::epaint::PathShape;
-    const SEG: usize = 16;
-    let radius = 13.0;
-    let start = (time * 4.0) as f32 % std::f32::consts::TAU;
-    let pts: Vec<egui::Pos2> = (0..=SEG)
-        .map(|i| {
-            let a = start + i as f32 / SEG as f32 * std::f32::consts::PI * 1.5;
-            center + radius * egui::vec2(a.cos(), a.sin())
-        })
-        .collect();
-    ui.painter()
-        .add(PathShape::line(pts, Stroke::new(2.5, theme::CYAN)));
-    ui.ctx().request_repaint();
-}
-
 /// Whether the "setting image" preview spinner should clear: either the daemon
 /// confirmed `pending` as the active image and its texture is ready, or a fresh
 /// terminal (`Done`/`Failed`) upload signal arrived for this device.
@@ -108,17 +94,17 @@ fn preview_pending_cleared(
     active_image: Option<&str>,
     tex_ready: bool,
     terminal: Option<&LcdUploadProgress>,
-    device_id: &str,
+    device_id: &DeviceId,
 ) -> bool {
     (active_image == Some(pending) && tex_ready)
-        || crate::ui::screens::device::is_terminal_upload_for(terminal, device_id)
+        || device::is_terminal_upload_for(terminal, device_id)
 }
 
 pub(super) fn display_card(
     ui: &mut egui::Ui,
     ctx: &TabCtx,
     st: &mut DeviceUi,
-    id: &str,
+    id: &DeviceId,
     lcd: &LcdStatus,
 ) {
     widgets::card_titled(
@@ -180,7 +166,14 @@ pub(super) fn display_card(
                     }
                 }
                 if loading {
-                    paint_spinner(ui, center, ctx.time);
+                    crate::ui::components::paint_spinner(
+                        ui.painter(),
+                        center,
+                        26.0,
+                        ctx.time as f32,
+                        theme::CYAN,
+                    );
+                    ui.ctx().request_repaint();
                 } else if no_preview {
                     p.text(
                         center,
@@ -193,50 +186,7 @@ pub(super) fn display_card(
             }
             ui.add_space(theme::SPACE_8);
 
-            // Brightness.
-            let key = "lcd_bright";
-            let mut b = st.guarded(key, lcd.brightness as f32, ctx.time);
-            let readout = format!("{}%", b.round() as i32);
-            if widgets::slider_row(ui, &t!("lcd.brightness"), &mut b, 0.0..=100.0, &readout) {
-                st.set(key, b, ctx.time);
-                st.queue(
-                    key,
-                    DaemonCommand::SetScreenBrightness {
-                        id: id.to_string(),
-                        brightness: b.round() as u8,
-                    },
-                    ctx.time,
-                );
-            }
-            ui.add_space(theme::SPACE_8);
-
-            // Rotation.
-            widgets::caps_label(ui, &t!("lcd.rotation"));
-            ui.add_space(theme::SPACE_3);
-            ui.horizontal(|ui| {
-                ui.spacing_mut().item_spacing.x = 7.0;
-                let rots = if lcd.descriptor.supported_rotations.is_empty() {
-                    vec![
-                        ScreenRotation::R0,
-                        ScreenRotation::R90,
-                        ScreenRotation::R180,
-                        ScreenRotation::R270,
-                    ]
-                } else {
-                    lcd.descriptor.supported_rotations.clone()
-                };
-                for r in rots {
-                    if widgets::pill(ui, rot_label(r), r == lcd.rotation) && r != lcd.rotation {
-                        crate::runtime::ipc::send(
-                            ctx.cmd,
-                            halod_shared::commands::DaemonCommand::SetScreenRotation {
-                                id: id.to_string(),
-                                rotation: r,
-                            },
-                        );
-                    }
-                }
-            });
+            display_controls(ui, ctx, st, id, lcd);
             ui.add_space(theme::SPACE_8);
 
             raw_streaming_row(ui, ctx, id, lcd);
@@ -245,14 +195,82 @@ pub(super) fn display_card(
             if widgets::button(
                 ui,
                 &t!("lcd.reset_to_default"),
-                widgets::ButtonKind::Ghost,
+                widgets::ButtonKind::Secondary,
                 egui::vec2(150.0, 30.0),
             )
             .clicked()
             {
-                crate::runtime::ipc::send(
+                ipc::send(
                     ctx.cmd,
-                    halod_shared::commands::DaemonCommand::SetScreenDefault { id: id.to_string() },
+                    halod_shared::commands::DaemonCommand::Device {
+                        device_id: id.clone(),
+                        op: DeviceOp::SetScreenDefault,
+                    },
+                );
+            }
+        },
+    );
+}
+
+/// Brightness slider and the inline rotation picker, shared by the Display
+/// card and the editor's Display card.
+pub(super) fn display_controls(
+    ui: &mut egui::Ui,
+    ctx: &TabCtx,
+    st: &mut DeviceUi,
+    id: &DeviceId,
+    lcd: &LcdStatus,
+) {
+    let key = "lcd_bright";
+    let mut b = st.guarded(key, lcd.brightness as f32, ctx.time);
+    let readout = format!("{}%", b.round() as i32);
+    if widgets::slider_row(ui, &t!("lcd.brightness"), &mut b, 0.0..=100.0, &readout) {
+        st.set(key, b, ctx.time);
+        st.queue(
+            key,
+            DaemonCommand::Device {
+                device_id: id.clone(),
+                op: DeviceOp::SetScreenBrightness {
+                    brightness: b.round() as u8,
+                },
+            },
+            ctx.time,
+        );
+    }
+    let rots = if lcd.descriptor.supported_rotations.is_empty() {
+        vec![
+            ScreenRotation::R0,
+            ScreenRotation::R90,
+            ScreenRotation::R180,
+            ScreenRotation::R270,
+        ]
+    } else {
+        lcd.descriptor.supported_rotations.clone()
+    };
+    let labels: Vec<&str> = rots.iter().map(|r| rot_label(*r)).collect();
+    let mut idx = rots
+        .iter()
+        .position(|r| *r == lcd.rotation)
+        .unwrap_or(usize::MAX);
+    egui::Sides::new().show(
+        ui,
+        |ui| {
+            ui.label(
+                egui::RichText::new(t!("lcd.rotation"))
+                    .font(theme::body_md())
+                    .color(theme::TEXT),
+            );
+        },
+        |ui| {
+            if widgets::segmented(ui, &labels, &mut idx, false) {
+                ipc::send(
+                    ctx.cmd,
+                    DaemonCommand::Device {
+                        device_id: id.clone(),
+                        op: DeviceOp::SetScreenRotation {
+                            rotation: rots[idx],
+                        },
+                    },
                 );
             }
         },
@@ -261,7 +279,7 @@ pub(super) fn display_card(
 
 /// Raw streaming: bypass the Q565 encode and push uncompressed frames.
 /// Shared by the Display card and the editor's Screen style card.
-pub(super) fn raw_streaming_row(ui: &mut egui::Ui, ctx: &TabCtx, id: &str, lcd: &LcdStatus) {
+pub(super) fn raw_streaming_row(ui: &mut egui::Ui, ctx: &TabCtx, id: &DeviceId, lcd: &LcdStatus) {
     let on = lcd.raw_streaming;
     let mut next = on;
     egui::Sides::new().show(
@@ -277,11 +295,11 @@ pub(super) fn raw_streaming_row(ui: &mut egui::Ui, ctx: &TabCtx, id: &str, lcd: 
         |ui| next = widgets::toggle(ui, on),
     );
     if next != on {
-        crate::runtime::ipc::send(
+        ipc::send(
             ctx.cmd,
-            halod_shared::commands::DaemonCommand::SetScreenRawStreaming {
-                id: id.to_string(),
-                enabled: next,
+            halod_shared::commands::DaemonCommand::Device {
+                device_id: id.clone(),
+                op: DeviceOp::SetScreenRawStreaming { enabled: next },
             },
         );
     }
@@ -295,7 +313,7 @@ mod tests {
 
     fn terminal(stage: LcdUploadStage, device_id: &str) -> LcdUploadProgress {
         LcdUploadProgress {
-            device_id: device_id.into(),
+            device_id: device_id.parse().unwrap(),
             stage,
             percent: None,
         }
@@ -309,7 +327,7 @@ mod tests {
             Some("a.png"),
             true,
             None,
-            "lcd"
+            &"lcd".parse().unwrap()
         ));
         // Confirmed but texture not yet ready, no terminal → keep spinning.
         assert!(!preview_pending_cleared(
@@ -317,7 +335,7 @@ mod tests {
             Some("a.png"),
             false,
             None,
-            "lcd"
+            &"lcd".parse().unwrap()
         ));
         // A device-write failure clears even though the image never became active.
         let failed = terminal(LcdUploadStage::Failed, "lcd");
@@ -326,10 +344,16 @@ mod tests {
             None,
             false,
             Some(&failed),
-            "lcd"
+            &"lcd".parse().unwrap()
         ));
         // Staleness: no fresh terminal (delivered as `None`) → keep spinning.
-        assert!(!preview_pending_cleared("a.png", None, false, None, "lcd"));
+        assert!(!preview_pending_cleared(
+            "a.png",
+            None,
+            false,
+            None,
+            &"lcd".parse().unwrap()
+        ));
         // A terminal for another device is ignored.
         let other = terminal(LcdUploadStage::Failed, "other");
         assert!(!preview_pending_cleared(
@@ -337,7 +361,7 @@ mod tests {
             None,
             false,
             Some(&other),
-            "lcd"
+            &"lcd".parse().unwrap()
         ));
     }
 

@@ -266,8 +266,9 @@ fn exec_icon_map() -> &'static HashMap<String, String> {
     })
 }
 
-fn running_icon_map() -> &'static std::sync::Mutex<HashMap<String, String>> {
-    use std::sync::{Mutex, OnceLock};
+fn running_icon_map() -> &'static parking_lot::Mutex<HashMap<String, String>> {
+    use parking_lot::Mutex;
+    use std::sync::OnceLock;
     static MAP: OnceLock<Mutex<HashMap<String, String>>> = OnceLock::new();
     MAP.get_or_init(|| Mutex::new(HashMap::new()))
 }
@@ -276,7 +277,7 @@ fn running_icon_map() -> &'static std::sync::Mutex<HashMap<String, String>> {
 /// catalog and associations discovered during running-app scans.
 pub(super) fn resolve_icons(process_names: &[String]) -> HashMap<String, String> {
     let desktop = exec_icon_map();
-    let running = running_icon_map().lock().unwrap();
+    let running = running_icon_map().lock();
     resolve_icons_from(process_names, desktop, &running)
 }
 
@@ -361,7 +362,7 @@ pub(super) fn build_apps() -> Vec<RunningApp> {
         })
         .collect();
 
-    let mut icons = running_icon_map().lock().unwrap();
+    let mut icons = running_icon_map().lock();
     for app in &apps {
         if !app.icon_name.is_empty() {
             icons.insert(app.process_name.clone(), app.icon_name.clone());

@@ -5,19 +5,24 @@ edition.workspace = true
 license.workspace = true
 repository.workspace = true
 publish = false
-description = "Canonical HaloDaemon plugin repository hashing and signing tool"
+description = "HaloDaemon plugin catalog builder, signer and verifier"
 
 [lints]
 workspace = true
 
 [dependencies]
+halod-shared = { path = "../shared" }
 anyhow = { workspace = true }
 serde = { workspace = true }
-semver = { workspace = true }
+semver = { workspace = true, features = ["serde"] }
 serde_yaml = "0.9.34"
 sha2 = "0.11.0"
-base64 = "0.22.1"
+base64 = "0.23.1"
 ed25519-dalek = "3.0.0"
 getrandom = "0.4.3"
 tempfile = "3.27.0"
 zeroize = "1.9.0"
+flate2 = "1.1.9"
+tar = "0.4.46"
+url = "2.5.8"
+ureq = { version = "3.3.0", default-features = false, features = ["rustls"] }

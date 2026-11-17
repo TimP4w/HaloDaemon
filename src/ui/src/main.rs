@@ -24,6 +24,7 @@ use std::sync::atomic::Ordering;
 #[cfg(not(target_os = "linux"))]
 use std::sync::Arc;
 
+use crate::runtime::ipc;
 use app::App;
 use domain::lifecycle::CloseAction;
 #[cfg(not(target_os = "linux"))]
@@ -76,10 +77,7 @@ impl eframe::App for App {
             }
             CloseAction::Quit => {
                 if !self.force_quit.load(Ordering::SeqCst) {
-                    crate::runtime::ipc::send(
-                        &self.cmd,
-                        halod_shared::commands::DaemonCommand::Shutdown,
-                    );
+                    ipc::send(&self.cmd, halod_shared::commands::DaemonCommand::Shutdown);
                 }
             }
         }

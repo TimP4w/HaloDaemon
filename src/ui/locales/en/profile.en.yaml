@@ -10,6 +10,10 @@ capability:
   boolean: Toggles
 
 profile:
+  profiles_title: Profiles
+  delete_profile: Delete profile
+  new_profile: New profile
+  title_caption: Profile
   new_profile_btn: "+ New profile"
   profile_settings_btn: "Profile settings"
   new_profile_title: "New Profile"
@@ -20,18 +24,19 @@ profile:
   delete_title: "Delete profile?"
   delete_confirm: 'Do you want to delete "%{name}"? You cannot undo this action.'
   delete: "Delete"
-  back: "← Back"
+  rename: "Rename"
+  fallback: "Fallback"
   active: "Active"
   set_active: "Set active"
   default_desc: "The default profile remains active when no application rule matches."
-  profile_desc: "Settings for this profile are applied when it is active."
-  auto_activate_title: "AUTO-ACTIVATE"
-  auto_activate_desc: "Switch to this profile automatically when any of these apps are in focus."
-  add_processes: "+ Add processes"
-  overrides_title: "OVERRIDES"
-  overrides_empty: "No device-specific settings yet. Changes you make while this profile is active are saved here."
-  canvas_effects: "Canvas effects"
-  revert: "Revert"
+  profile_desc: "Changes you make while this profile is active are saved to it."
+  auto_activate_title: "Switch automatically"
+  auto_activate_desc: "Use this profile while any of these apps is in focus."
+  add_processes: "Add app"
+  overrides_title: "Saved in this profile"
+  overrides_empty: "Nothing saved yet. Changes you make while this profile is active are saved here."
+  canvas_effects: "Effects canvas"
+  revert: "Revert to default"
   select_processes_title: "Select processes"
   select_processes_desc: "Choose which running apps trigger this profile."
   filter_processes_hint: "Filter processes…"

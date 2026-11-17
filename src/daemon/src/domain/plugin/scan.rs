@@ -9,11 +9,12 @@ use halod_shared::types::WriteRateLimit;
 
 use super::manifest::ProbeMode;
 use crate::infrastructure::drivers::transports::smbus::{PciMatch, SmbusBusKind};
+use halod_shared::ids::PluginId;
 
 /// One plugin-declared SMBus scan: the fields the scanner needs to probe the bus
 /// plus what it needs to run the plugin's `pre_scan`.
 pub struct PluginScanEntry {
-    pub plugin_id: String,
+    pub plugin_id: PluginId,
     /// Full script text, so the scanner can build a throwaway VM for `pre_scan`.
     pub script_source: String,
     pub module_sources: std::collections::BTreeMap<String, String>,
@@ -39,16 +40,13 @@ impl PluginScanEntry {
 
 impl super::Registry {
     /// Build the SMBus scan entries every activation-ready plugin declares. Called
-    /// by the SMBus scanner each discovery pass, so consent, enable/disable, and
+    /// by the SMBus scanner each discovery pass, so enable/disable and
     /// reloads take effect.
     pub fn plugin_smbus_scan_entries(&self) -> Vec<PluginScanEntry> {
         let state = self.snapshot();
         let mut out = Vec::new();
         for m in state.manifests.iter() {
-            if !m.supports_current_platform()
-                || state.disabled.contains(&m.plugin_id)
-                || !super::consent_satisfied_in(&state, m)
-            {
+            if !m.supports_current_platform() || state.disabled.contains(&m.plugin_id) {
                 continue;
             }
             for spec in m.smbus_devices() {

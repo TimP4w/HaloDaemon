@@ -12,6 +12,7 @@
 //! monolithic dev build) or through that RPC. On Linux everything here runs
 //! in-process, unprivileged, gated only by `/dev/i2c-*` permissions.
 
+pub mod log_file;
 pub mod proto;
 pub mod smbus;
 

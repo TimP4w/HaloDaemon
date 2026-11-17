@@ -7,6 +7,8 @@ use std::sync::Arc;
 
 use crate::application::state::AppState;
 use crate::domain::device::Device;
+use crate::domain::events::Change;
+use halod_shared::ids::DeviceId;
 use halod_shared::types::Sensor;
 
 const DEVICE_SAMPLE_TIMEOUT: std::time::Duration = std::time::Duration::from_secs(2);
@@ -15,7 +17,7 @@ const DEVICE_SAMPLE_TIMEOUT: std::time::Duration = std::time::Duration::from_sec
 /// records. Every sampled device is returned so its complete observed
 /// projection (telemetry, controls, throughput, etc.) can be checked for a
 /// change; the coordinator suppresses identical records.
-pub(crate) async fn observe(app: &AppState) -> std::collections::HashSet<String> {
+pub(crate) async fn observe(app: &AppState) -> std::collections::HashSet<DeviceId> {
     let known = app.config.read().await.known_devices.clone();
     let devices = app.device_registry.read().await.clone();
     let eligible: Vec<_> = devices
@@ -56,13 +58,13 @@ pub(crate) async fn observe(app: &AppState) -> std::collections::HashSet<String>
     affected
 }
 
-async fn sample_device(device: Arc<dyn Device>) -> Vec<(String, Sensor)> {
+async fn sample_device(device: Arc<dyn Device>) -> Vec<(DeviceId, Sensor)> {
     let mut sensors = Vec::new();
     if let Some(capability) = device.as_sensor_capability() {
         match tokio::time::timeout(DEVICE_SAMPLE_TIMEOUT, capability.get_sensors()).await {
             Ok(Ok(readings)) => {
                 for sensor in readings {
-                    sensors.push((device.id().to_owned(), sensor));
+                    sensors.push((device.id().clone(), sensor));
                 }
             }
             Ok(Err(error)) => log::debug!("sensor read failed for {}: {error:#}", device.id()),
@@ -77,7 +79,7 @@ async fn sample_device(device: Arc<dyn Device>) -> Vec<(String, Sensor)> {
     {
         Ok(readings) => {
             for sensor in readings {
-                sensors.push((device.id().to_owned(), sensor));
+                sensors.push((device.id().clone(), sensor));
             }
         }
         Err(_) => log::warn!("fan sensor read timed out for {}", device.id()),
@@ -89,10 +91,8 @@ async fn sample_device(device: Arc<dyn Device>) -> Vec<(String, Sensor)> {
 pub async fn refresh(app: &Arc<AppState>) {
     let changed = observe(app).await;
     if !changed.is_empty() {
-        app.record_change(crate::domain::events::Change::SensorTelemetry(
-            changed.into_iter().collect(),
-        ))
-        .await;
+        app.record_change(Change::SensorTelemetry(changed.into_iter().collect()))
+            .await;
     }
 }
 

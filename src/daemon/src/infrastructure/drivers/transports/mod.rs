@@ -14,7 +14,6 @@ pub mod tcp;
 pub mod usb;
 
 use anyhow::Result;
-use async_trait::async_trait;
 use halod_shared::types::{WriteRateLimit, WriteRateStatus};
 
 /// Shared USB interface claim guard with automatic detach/reattach of kernel drivers on Linux.
@@ -68,11 +67,12 @@ impl UsbClaim {
 
 impl Drop for UsbClaim {
     fn drop(&mut self) {
-        if let Err(e) = self.handle.release_interface(self.interface) {
-            log::warn!(
+        match self.handle.release_interface(self.interface) {
+            Ok(()) | Err(rusb::Error::NoDevice) => {}
+            Err(e) => log::warn!(
                 "UsbClaim: release_interface({}) failed: {e}",
                 self.interface
-            );
+            ),
         }
         #[cfg(target_os = "linux")]
         if self.had_kernel_driver {
@@ -86,19 +86,18 @@ impl Drop for UsbClaim {
     }
 }
 
-#[async_trait]
 pub trait Transport: Send + Sync {
-    async fn write(&self, data: &[u8]) -> Result<()>;
-    async fn read(&self, size: usize) -> Result<Vec<u8>>;
+    fn write(&self, data: &[u8]) -> Result<()>;
+    fn read(&self, size: usize) -> Result<Vec<u8>>;
 
-    async fn write_then_read(&self, data: &[u8], size: usize) -> Result<Vec<u8>> {
-        self.write(data).await?;
-        self.read(size).await
+    fn write_then_read(&self, data: &[u8], size: usize) -> Result<Vec<u8>> {
+        self.write(data)?;
+        self.read(size)
     }
 
-    async fn write_many(&self, packets: &[Vec<u8>]) -> Result<()> {
+    fn write_many(&self, packets: &[Vec<u8>]) -> Result<()> {
         for pkt in packets {
-            self.write(pkt).await?;
+            self.write(pkt)?;
         }
         Ok(())
     }
@@ -136,7 +135,7 @@ pub trait Transport: Send + Sync {
     }
 
     /// Drain unsolicited input in arrival order for delivery to Lua `event()`.
-    async fn drain_events(&self, _limit: usize) -> Result<Vec<TransportEvent>> {
+    fn drain_events(&self, _limit: usize) -> Result<Vec<TransportEvent>> {
         Ok(Vec::new())
     }
 
@@ -151,15 +150,14 @@ pub trait Transport: Send + Sync {
 /// HID-only byte-stream operations, including companion collections and
 /// unsolicited report delivery. Callers holding only [`Transport`] must first
 /// opt into this capability through [`Transport::as_hid`].
-#[async_trait]
 pub trait HidTransport: Transport {
     /// Send a feature report and read the reply; unlike `write_then_read`,
     /// `response_size` excludes the leading report-ID byte.
-    async fn feature_exchange(&self, data: &[u8], response_size: usize) -> Result<Vec<u8>>;
+    fn feature_exchange(&self, data: &[u8], response_size: usize) -> Result<Vec<u8>>;
 
     /// Send a feature report with no reply — the explicit write half of
     /// `feature_exchange`. The leading byte of `data` is the report id.
-    async fn send_feature_report(&self, _data: &[u8]) -> Result<()> {
+    fn send_feature_report(&self, _data: &[u8]) -> Result<()> {
         Err(anyhow::anyhow!(
             "send_feature_report is not supported by this transport"
         ))
@@ -167,54 +165,54 @@ pub trait HidTransport: Transport {
 
     /// Request a feature report for `report_id`; `size` excludes the leading
     /// report-id byte, matching `feature_exchange`.
-    async fn get_feature_report(&self, _report_id: u8, _size: usize) -> Result<Vec<u8>> {
+    fn get_feature_report(&self, _report_id: u8, _size: usize) -> Result<Vec<u8>> {
         Err(anyhow::anyhow!(
             "get_feature_report is not supported by this transport"
         ))
     }
 
     /// Request an input report for `report_id`; `size` excludes the report-id byte.
-    async fn get_input_report(&self, _report_id: u8, _size: usize) -> Result<Vec<u8>> {
+    fn get_input_report(&self, _report_id: u8, _size: usize) -> Result<Vec<u8>> {
         Err(anyhow::anyhow!(
             "get_input_report is not supported by this transport"
         ))
     }
 
-    async fn read_nonblocking(&self, size: usize) -> Result<Vec<u8>> {
-        self.read(size).await
+    fn read_nonblocking(&self, size: usize) -> Result<Vec<u8>> {
+        self.read(size)
     }
 
     /// Pop the next inbound report regardless of which endpoint it arrived on.
     /// Single-node transports have only one endpoint, so this defaults to
     /// `read`; multi-collection transports (HID short/long on Windows) merge
     /// both queues so protocol code can match a reply wherever it lands.
-    async fn read_any(&self, size: usize) -> Result<Vec<u8>> {
-        self.read(size).await
+    fn read_any(&self, size: usize) -> Result<Vec<u8>> {
+        self.read(size)
     }
 
     /// Hand back a report that was read but did not belong to the in-flight
     /// request, so it is delivered through the event path (`drain_events`)
     /// instead of being dropped. The transport never interprets the bytes.
-    async fn defer_event(&self, data: &[u8]) -> Result<()>;
+    fn defer_event(&self, data: &[u8]) -> Result<()>;
 
     /// Write to an explicitly opened companion HID collection. Protocol code
     /// chooses the collection; the transport never interprets report IDs.
-    async fn write_companion(&self, data: &[u8]) -> Result<()>;
+    fn write_companion(&self, data: &[u8]) -> Result<()>;
 
     /// Batch writes to an explicitly opened companion collection. HID
     /// protocols with split short/long collections use this for streaming.
-    async fn write_many_companion(&self, packets: &[Vec<u8>]) -> Result<()> {
+    fn write_many_companion(&self, packets: &[Vec<u8>]) -> Result<()> {
         for packet in packets {
-            self.write_companion(packet).await?;
+            self.write_companion(packet)?;
         }
         Ok(())
     }
 
-    async fn read_companion(&self, size: usize) -> Result<Vec<u8>>;
+    fn read_companion(&self, size: usize) -> Result<Vec<u8>>;
 
-    async fn write_then_read_companion(&self, data: &[u8], size: usize) -> Result<Vec<u8>> {
-        self.write_companion(data).await?;
-        self.read_companion(size).await
+    fn write_then_read_companion(&self, data: &[u8], size: usize) -> Result<Vec<u8>> {
+        self.write_companion(data)?;
+        self.read_companion(size)
     }
 
     fn has_companion(&self) -> bool {

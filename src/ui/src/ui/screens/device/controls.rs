@@ -6,20 +6,20 @@
 use crate::ui::components as widgets;
 use std::collections::{BTreeMap, HashMap};
 
-use halod_shared::commands::DaemonCommand;
+use halod_shared::commands::{DaemonCommand, DeviceOp};
 use halod_shared::types::{
     CategoryLayout, ChoiceDisplay, DeviceCapability, RangeDisplay, VisibleWhen,
 };
 
 use super::{DeviceUi, TabCtx};
+use crate::domain::tour;
+use crate::domain::tour::AnchorId;
+use crate::runtime::ipc;
 use crate::ui::theme;
+use halod_shared::ids::DeviceId;
 
 pub fn show(ui: &mut egui::Ui, ctx: &TabCtx, st: &mut DeviceUi) {
-    crate::domain::tour::anchor(
-        ui.ctx(),
-        crate::domain::tour::AnchorId::TabControls,
-        ui.max_rect(),
-    );
+    tour::anchor(ui.ctx(), AnchorId::TabControls, ui.max_rect());
     let id = ctx.dev.id.clone();
     let siblings = collect_siblings(&ctx.dev.capabilities);
 
@@ -245,7 +245,7 @@ enum Setting<'a> {
     Action(&'a halod_shared::types::Action),
 }
 
-fn setting_row(ui: &mut egui::Ui, id: &str, ctx: &TabCtx, st: &mut DeviceUi, s: Setting) {
+fn setting_row(ui: &mut egui::Ui, id: &DeviceId, ctx: &TabCtx, st: &mut DeviceUi, s: Setting) {
     match s {
         Setting::Choice(c) => {
             let edit_key = format!("choice:{}", c.key);
@@ -261,21 +261,30 @@ fn setting_row(ui: &mut egui::Ui, id: &str, ctx: &TabCtx, st: &mut DeviceUi, s: 
                             .color(theme::TEXT_DIM),
                     );
                     ui.add_space(theme::SPACE_3);
-                    widgets::pill_strip(ui, |ui| {
-                        for (i, opt) in c.options.iter().enumerate() {
-                            if widgets::pill(ui, &opt.label, i == selected) && i != selected {
-                                st.set(&edit_key, i as f32, ctx.time);
-                                crate::runtime::ipc::send(
-                                    ctx.cmd,
-                                    halod_shared::commands::DaemonCommand::SetChoice {
-                                        id: id.to_string(),
-                                        key: c.key.clone(),
-                                        selected: i,
-                                    },
-                                );
-                            }
-                        }
-                    });
+                    let labels: Vec<&str> = c.options.iter().map(|o| o.label.as_str()).collect();
+                    let mut pick = selected;
+                    let changed = if labels.len() <= 5 {
+                        widgets::segmented(ui, &labels, &mut pick, true)
+                    } else {
+                        let tiles = widgets::option_grid(ui, &labels, Some(selected), 3);
+                        tiles.iter().position(|t| t.clicked()).is_some_and(|i| {
+                            pick = i;
+                            i != selected
+                        })
+                    };
+                    if changed {
+                        st.set(&edit_key, pick as f32, ctx.time);
+                        ipc::send(
+                            ctx.cmd,
+                            halod_shared::commands::DaemonCommand::Device {
+                                device_id: id.clone(),
+                                op: DeviceOp::SetChoice {
+                                    key: c.key.clone(),
+                                    selected: pick,
+                                },
+                            },
+                        );
+                    }
                 }
                 ChoiceDisplay::List => {
                     ui.label(
@@ -296,12 +305,14 @@ fn setting_row(ui: &mut egui::Ui, id: &str, ctx: &TabCtx, st: &mut DeviceUi, s: 
                         if let Ok(idx) = new_id.parse::<usize>() {
                             if idx != selected {
                                 st.set(&edit_key, idx as f32, ctx.time);
-                                crate::runtime::ipc::send(
+                                ipc::send(
                                     ctx.cmd,
-                                    halod_shared::commands::DaemonCommand::SetChoice {
-                                        id: id.to_string(),
-                                        key: c.key.clone(),
-                                        selected: idx,
+                                    halod_shared::commands::DaemonCommand::Device {
+                                        device_id: id.clone(),
+                                        op: DeviceOp::SetChoice {
+                                            key: c.key.clone(),
+                                            selected: idx,
+                                        },
                                     },
                                 );
                             }
@@ -322,12 +333,14 @@ fn setting_row(ui: &mut egui::Ui, id: &str, ctx: &TabCtx, st: &mut DeviceUi, s: 
                             let on = selected == 1;
                             if widgets::toggle(ui, on) != on {
                                 st.set(&edit_key, usize::from(!on) as f32, ctx.time);
-                                crate::runtime::ipc::send(
+                                ipc::send(
                                     ctx.cmd,
-                                    halod_shared::commands::DaemonCommand::SetChoice {
-                                        id: id.to_string(),
-                                        key: c.key.clone(),
-                                        selected: if on { 0 } else { 1 },
+                                    halod_shared::commands::DaemonCommand::Device {
+                                        device_id: id.clone(),
+                                        op: DeviceOp::SetChoice {
+                                            key: c.key.clone(),
+                                            selected: if on { 0 } else { 1 },
+                                        },
                                     },
                                 );
                             }
@@ -358,10 +371,12 @@ fn setting_row(ui: &mut egui::Ui, id: &str, ctx: &TabCtx, st: &mut DeviceUi, s: 
                         st.set(&key, snapped, ctx.time);
                         st.queue(
                             &key,
-                            DaemonCommand::SetRange {
-                                id: id.to_string(),
-                                key: r.key.clone(),
-                                value: snapped.round() as i32,
+                            DaemonCommand::Device {
+                                device_id: id.clone(),
+                                op: DeviceOp::SetRange {
+                                    key: r.key.clone(),
+                                    value: snapped.round() as i32,
+                                },
                             },
                             ctx.time,
                         );
@@ -380,10 +395,12 @@ fn setting_row(ui: &mut egui::Ui, id: &str, ctx: &TabCtx, st: &mut DeviceUi, s: 
                         st.set(&key, snapped, ctx.time);
                         st.queue(
                             &key,
-                            DaemonCommand::SetRange {
-                                id: id.to_string(),
-                                key: r.key.clone(),
-                                value: snapped.round() as i32,
+                            DaemonCommand::Device {
+                                device_id: id.clone(),
+                                op: DeviceOp::SetRange {
+                                    key: r.key.clone(),
+                                    value: snapped.round() as i32,
+                                },
                             },
                             ctx.time,
                         );
@@ -405,25 +422,18 @@ fn setting_row(ui: &mut egui::Ui, id: &str, ctx: &TabCtx, st: &mut DeviceUi, s: 
                     );
                 },
                 |ui| {
-                    if b.read_only {
-                        // Paint a non-interactive toggle showing the current value.
-                        let (rect, _resp) = ui
-                            .allocate_exact_size(egui::Vec2::new(34.0, 18.0), egui::Sense::hover());
-                        let t = ui.ctx().animate_bool_with_time(ui.next_auto_id(), on, 0.1);
-                        widgets::paint_toggle(ui.painter(), rect, t);
-                    } else {
-                        let new_val = widgets::toggle(ui, on);
-                        if new_val != on {
-                            st.set(&edit_key, if new_val { 1.0 } else { 0.0 }, ctx.time);
-                            crate::runtime::ipc::send(
-                                ctx.cmd,
-                                halod_shared::commands::DaemonCommand::SetBoolean {
-                                    id: id.to_string(),
+                    if widgets::toggle_ex(ui, on, b.read_only).clicked() {
+                        st.set(&edit_key, if on { 0.0 } else { 1.0 }, ctx.time);
+                        ipc::send(
+                            ctx.cmd,
+                            halod_shared::commands::DaemonCommand::Device {
+                                device_id: id.clone(),
+                                op: DeviceOp::SetBoolean {
                                     key: b.key.clone(),
-                                    value: new_val,
+                                    value: !on,
                                 },
-                            );
-                        }
+                            },
+                        );
                     }
                 },
             );
@@ -433,16 +443,16 @@ fn setting_row(ui: &mut egui::Ui, id: &str, ctx: &TabCtx, st: &mut DeviceUi, s: 
             if widgets::button(
                 ui,
                 &a.label,
-                widgets::ButtonKind::Ghost,
+                widgets::ButtonKind::Secondary,
                 egui::vec2(ui.available_width().min(180.0), 32.0),
             )
             .clicked()
             {
-                crate::runtime::ipc::send(
+                ipc::send(
                     ctx.cmd,
-                    halod_shared::commands::DaemonCommand::TriggerAction {
-                        id: id.to_string(),
-                        key: a.key.clone(),
+                    halod_shared::commands::DaemonCommand::Device {
+                        device_id: id.clone(),
+                        op: DeviceOp::TriggerAction { key: a.key.clone() },
                     },
                 );
             }

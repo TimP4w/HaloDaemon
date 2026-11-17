@@ -8,8 +8,7 @@ API or a web service, such as a Philips Hue bridge or a weather provider.
 ## Overview
 
 Unlike the stream transports, HTTP is not exposed as `dev.transport` userdata.
-A plugin that declares an `http` transport and holds the `network` permission
-gets the `halod.http:request{…}` capability global. Each call is a synchronous,
+A plugin that declares an `http` transport gets the `halod.http:request{…}` capability global. Each call is a synchronous,
 bounded request/response validated against the manifest before a socket opens;
 there is no persistent connection the plugin controls.
 
@@ -40,8 +39,8 @@ disable certificate verification.
 
 - Only request/response is exposed: no streaming, websockets, or server push.
 - The plugin cannot reach any origin outside its approved allowlist.
-- Service discovery via mDNS/SSDP is a separate integration-setup mechanism, not
-  part of this transport.
+- Service discovery via mDNS, SSDP or a TCP probe is a separate integration-setup
+  mechanism, not part of this transport.
 
 See the plugin repository's manifest reference (`transports.http`) and Lua API
 (`halod.http:request`) for the full authoring contract.

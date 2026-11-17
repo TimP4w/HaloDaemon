@@ -5,12 +5,21 @@
 //! the cooling engine's status cache for retained bus topic production. Any condition
 //! preventing safe closed-loop control drives the fan to the failsafe duty.
 
-use std::collections::HashMap;
+use crate::application::run_loop::EngineConfig;
+use crate::config::CoolingConfig;
+use halod_shared::bus::{topic, BusValue};
+use std::collections::{HashMap, VecDeque};
 use std::sync::Arc;
+use std::time::Duration;
+use tokio::time::Instant;
 
+use crate::application::notifications;
+use crate::application::run_loop::EngineConfigReceiver;
 use crate::application::state::AppState;
+use crate::application::usecases::cooling::runtime;
 use crate::domain::cooling::model::FanCurveRecord;
 use crate::domain::cooling::state::curve_key;
+use halod_shared::ids::DeviceId;
 use halod_shared::types::FanCurveStatus;
 
 pub struct PresetCurve {
@@ -79,14 +88,68 @@ pub fn preset_curves() -> &'static [PresetCurve] {
     PRESETS
 }
 
-const HYSTERESIS_C: f32 = 3.0;
-
-/// Hysteresis filter: rising tracks immediately, falling requires >3°C drop.
-fn hysteresis_temp(last: Option<f32>, current: f32) -> f32 {
+/// Rising tracks immediately; falling is held until it drops more than `band`.
+fn hysteresis_temp(last: Option<f32>, current: f32, band: f32) -> f32 {
     match last {
-        Some(prev) if current < prev && current > prev - HYSTERESIS_C => prev,
+        Some(prev) if current < prev && current > prev - band => prev,
         _ => current,
     }
+}
+
+fn smoothed_temp(
+    samples: &mut VecDeque<(Instant, f32)>,
+    now: Instant,
+    window: Duration,
+    value: f32,
+) -> f32 {
+    if window.is_zero() {
+        samples.clear();
+        return value;
+    }
+    samples.push_back((now, value));
+    while samples
+        .front()
+        .is_some_and(|(at, _)| now.duration_since(*at) > window)
+    {
+        samples.pop_front();
+    }
+    samples.iter().map(|(_, v)| v).sum::<f32>() / samples.len() as f32
+}
+
+/// Smallest step a limited ramp takes, so slow rates still move an integer duty.
+const MIN_RAMP_STEP: f32 = 1.0;
+
+fn ramp_toward(origin: Option<f32>, target: f32, up: f32, down: f32, dt_s: f32) -> f32 {
+    let Some(origin) = origin else {
+        return target;
+    };
+    let delta = target - origin;
+    let rate = if delta > 0.0 { up } else { down };
+    if rate <= 0.0 {
+        return target;
+    }
+    let step = (rate * dt_s).max(MIN_RAMP_STEP);
+    origin + delta.clamp(-step, step)
+}
+
+/// Returns the updated last-change marker and whether `value` has been flat
+/// for at least `window` (a zero window never reports stale).
+fn sensor_stale(
+    last_change: Option<(f32, Instant)>,
+    now: Instant,
+    value: f32,
+    window: Duration,
+) -> ((f32, Instant), bool) {
+    let since = match last_change {
+        Some((prev, at)) if prev.to_bits() == value.to_bits() => at,
+        _ => now,
+    };
+    let stale = !window.is_zero() && now.duration_since(since) >= window;
+    ((value, since), stale)
+}
+
+fn secs(v: f32) -> Duration {
+    Duration::try_from_secs_f32(v).unwrap_or_default()
 }
 
 fn default_curve() -> FanCurveRecord {
@@ -102,7 +165,7 @@ fn default_curve() -> FanCurveRecord {
 }
 
 struct StallState {
-    since: std::time::Instant,
+    since: tokio::time::Instant,
     notified: bool,
 }
 
@@ -121,7 +184,7 @@ enum Presence {
 #[derive(Clone, Copy)]
 struct ProbeState {
     saved_duty: u8,
-    started: std::time::Instant,
+    started: tokio::time::Instant,
 }
 
 #[derive(Default)]
@@ -132,16 +195,24 @@ struct PerFanState {
     failsafe_error_logged: bool,
     presence: Presence,
     probe: Option<ProbeState>,
+    sensor_missing_since: Option<tokio::time::Instant>,
+    samples: VecDeque<(Instant, f32)>,
+    last_change: Option<(f32, Instant)>,
+    last_tick: Option<Instant>,
 }
+
+/// How long a curve keeps its last duty while its sensor is absent, so a
+/// sensor that is still starting or briefly drops out does not flap the fan.
+const SENSOR_GRACE: std::time::Duration = std::time::Duration::from_secs(10);
 
 pub struct FanCurveEngine {
     app_state: Arc<AppState>,
-    per_fan: std::sync::Mutex<HashMap<String, PerFanState>>,
+    per_fan: parking_lot::Mutex<HashMap<String, PerFanState>>,
 }
 
 #[derive(Clone)]
 struct CurveTarget {
-    device_id: String,
+    device_id: DeviceId,
     channel_id: String,
 }
 
@@ -173,14 +244,14 @@ fn log_status_changes(
         if matches!(status, FanCurveStatus::Ok) {
             if let Some(old) = old {
                 log::info!(
-                    "[FanCurve] Cooling recovered for {}:{} from {old:?} (sensor: {sensor})",
+                    "Cooling recovered for {}:{} from {old:?} (sensor: {sensor})",
                     target.device_id,
                     target.channel_id
                 );
             }
         } else {
             log::warn!(
-                "[FanCurve] Cooling warning for {}:{}: {status:?} (previous: {old:?}, sensor: {sensor})",
+                "Cooling warning for {}:{}: {status:?} (previous: {old:?}, sensor: {sensor})",
                 target.device_id,
                 target.channel_id
             );
@@ -188,46 +259,71 @@ fn log_status_changes(
     }
 }
 
-// Non-async lock helpers — MutexGuard must not cross .await.
 impl FanCurveEngine {
-    fn lock_mutex<T>(mu: &std::sync::Mutex<T>) -> std::sync::MutexGuard<'_, T> {
-        mu.lock().unwrap_or_else(|e| e.into_inner())
+    /// `None` when the sensor has been flat past the stale window.
+    fn control_temp(&self, fan_id: &str, raw: f32, cfg: &CoolingConfig) -> Option<f32> {
+        let now = Instant::now();
+        let mut map = self.per_fan.lock();
+        let state = map.entry(fan_id.to_string()).or_default();
+        state.sensor_missing_since = None;
+        let (last_change, stale) =
+            sensor_stale(state.last_change, now, raw, secs(cfg.fan_sensor_stale_secs));
+        state.last_change = Some(last_change);
+        if stale {
+            return None;
+        }
+        let smoothed = smoothed_temp(&mut state.samples, now, secs(cfg.fan_smoothing_secs), raw);
+        let eff = hysteresis_temp(state.control_temp, smoothed, cfg.fan_hysteresis_c);
+        state.control_temp = Some(eff);
+        Some(eff)
     }
 
-    fn update_control_temp(&self, fan_id: &str, sensor_value: f32) -> f32 {
-        let mut map = Self::lock_mutex(&self.per_fan);
+    fn elapsed_since_last_tick(&self, fan_id: &str, tick_ms: u64) -> f32 {
+        let now = Instant::now();
+        let mut map = self.per_fan.lock();
         let state = map.entry(fan_id.to_string()).or_default();
-        let eff = hysteresis_temp(state.control_temp, sensor_value);
-        state.control_temp = Some(eff);
-        eff
+        let dt = state
+            .last_tick
+            .map_or(Duration::from_millis(tick_ms), |at| now.duration_since(at));
+        state.last_tick = Some(now);
+        dt.as_secs_f32()
+    }
+
+    fn sensor_missing_within_grace(&self, fan_id: &str) -> bool {
+        let now = tokio::time::Instant::now();
+        let mut map = self.per_fan.lock();
+        let state = map.entry(fan_id.to_string()).or_default();
+        let since = *state.sensor_missing_since.get_or_insert(now);
+        now.duration_since(since) < SENSOR_GRACE
     }
 
     fn clear_missing_device(&self, fan_id: &str) {
-        Self::lock_mutex(&self.per_fan)
+        self.per_fan
+            .lock()
             .entry(fan_id.to_string())
             .or_default()
             .missing_device_ticks = 0;
     }
 
     fn record_missing_device(&self, fan_id: &str) {
-        let mut map = Self::lock_mutex(&self.per_fan);
+        let mut map = self.per_fan.lock();
         let state = map.entry(fan_id.to_string()).or_default();
         state.missing_device_ticks += 1;
         if should_log_missing_device(state.missing_device_ticks) {
-            log::debug!("[FanCurve] Fan/pump device not found or not controllable: {fan_id}");
+            log::debug!("Fan/pump device not found or not controllable: {fan_id}");
         }
     }
 
     /// Record a stall tick; returns `(should_notify, elapsed_secs)`.
     fn record_stall(&self, fan_id: &str) -> (bool, u64) {
         const STALL_SECS: u64 = 10;
-        let mut map = Self::lock_mutex(&self.per_fan);
+        let mut map = self.per_fan.lock();
         let entry = map
             .entry(fan_id.to_string())
             .or_default()
             .stall
             .get_or_insert_with(|| StallState {
-                since: std::time::Instant::now(),
+                since: tokio::time::Instant::now(),
                 notified: false,
             });
         let elapsed = entry.since.elapsed().as_secs();
@@ -239,13 +335,13 @@ impl FanCurveEngine {
     }
 
     fn clear_stall(&self, fan_id: &str) {
-        if let Some(state) = Self::lock_mutex(&self.per_fan).get_mut(fan_id) {
+        if let Some(state) = self.per_fan.lock().get_mut(fan_id) {
             state.stall = None;
         }
     }
 
     fn clear_failsafe_error(&self, fan_id: &str) {
-        if let Some(state) = Self::lock_mutex(&self.per_fan).get_mut(fan_id) {
+        if let Some(state) = self.per_fan.lock().get_mut(fan_id) {
             state.failsafe_error_logged = false;
         }
     }
@@ -253,7 +349,7 @@ impl FanCurveEngine {
     /// Returns `true` if this is the first error of the current episode
     /// (caller should log the warning).
     fn mark_failsafe_error(&self, fan_id: &str) -> bool {
-        let mut map = Self::lock_mutex(&self.per_fan);
+        let mut map = self.per_fan.lock();
         let state = map.entry(fan_id.to_string()).or_default();
         let first = !state.failsafe_error_logged;
         state.failsafe_error_logged = true;
@@ -261,7 +357,8 @@ impl FanCurveEngine {
     }
 
     fn presence_snapshot(&self, key: &str) -> (Presence, Option<ProbeState>) {
-        Self::lock_mutex(&self.per_fan)
+        self.per_fan
+            .lock()
             .get(key)
             .map_or((Presence::Unknown, None), |state| {
                 (state.presence, state.probe)
@@ -269,41 +366,52 @@ impl FanCurveEngine {
     }
 
     fn set_presence(&self, key: &str, presence: Presence) {
-        let mut map = Self::lock_mutex(&self.per_fan);
+        let mut map = self.per_fan.lock();
         let state = map.entry(key.to_string()).or_default();
         state.presence = presence;
         state.probe = None;
     }
 
     fn begin_probe(&self, key: &str, saved_duty: u8) {
-        let mut map = Self::lock_mutex(&self.per_fan);
+        let mut map = self.per_fan.lock();
         let state = map.entry(key.to_string()).or_default();
         state.presence = Presence::Probing;
         state.probe = Some(ProbeState {
             saved_duty,
-            started: std::time::Instant::now(),
+            started: tokio::time::Instant::now(),
         });
     }
 
     #[cfg(test)]
-    fn seed_presence(&self, fan_id: &str, presence: Presence, probe: Option<ProbeState>) {
-        let mut map = Self::lock_mutex(&self.per_fan);
+    fn seed_presence(&self, fan_id: &DeviceId, presence: Presence, probe: Option<ProbeState>) {
+        let mut map = self.per_fan.lock();
         let state = map.entry(curve_key(fan_id, "default")).or_default();
         state.presence = presence;
         state.probe = probe;
     }
 
     #[cfg(test)]
-    fn seed_stall(&self, fan_id: &str, since: std::time::Instant, notified: bool) {
-        Self::lock_mutex(&self.per_fan)
+    fn seed_stall(&self, fan_id: &str, since: tokio::time::Instant, notified: bool) {
+        self.per_fan
+            .lock()
             .entry(fan_id.to_string())
             .or_default()
             .stall = Some(StallState { since, notified });
     }
 
     #[cfg(test)]
+    fn expire_sensor_grace(&self, fan_id: &str) {
+        self.per_fan
+            .lock()
+            .entry(fan_id.to_string())
+            .or_default()
+            .sensor_missing_since = tokio::time::Instant::now().checked_sub(SENSOR_GRACE);
+    }
+
+    #[cfg(test)]
     fn missing_ticks(&self, fan_id: &str) -> u32 {
-        Self::lock_mutex(&self.per_fan)
+        self.per_fan
+            .lock()
             .get(fan_id)
             .map_or(0, |state| state.missing_device_ticks)
     }
@@ -319,32 +427,26 @@ impl FanCurveEngine {
     pub fn new(app_state: Arc<AppState>) -> Arc<Self> {
         Arc::new(Self {
             app_state,
-            per_fan: std::sync::Mutex::new(HashMap::new()),
+            per_fan: parking_lot::Mutex::new(HashMap::new()),
         })
     }
 
     pub fn start(
         self: Arc<Self>,
-        cfg_rx: crate::application::run_loop::EngineConfigReceiver,
+        cfg_rx: EngineConfigReceiver<CoolingConfig>,
     ) -> tokio::task::JoinHandle<()> {
         tokio::spawn(async move {
             crate::application::run_loop::engine_run_loop_idle(
                 "FanCurve",
                 cfg_rx,
                 tokio::time::MissedTickBehavior::Skip,
-                |_cfg| {
-                    let this = Arc::clone(&self);
-                    let duty = _cfg.failsafe_duty.unwrap_or(100);
-                    async move { this.tick(duty).await }
-                },
-                std::future::pending::<()>,
-                || std::future::ready(true),
+                FanCurveLoop { engine: self },
             )
             .await;
         })
     }
 
-    async fn tick(&self, failsafe_duty: u8) {
+    async fn tick(&self, cfg: &CoolingConfig) {
         let curves: HashMap<String, (CurveTarget, FanCurveRecord)> = {
             let devices = self.app_state.get_active_devices().await;
             let cfg = self.app_state.config.read().await;
@@ -368,7 +470,7 @@ impl FanCurveEngine {
                             default
                         });
                         let target = CurveTarget {
-                            device_id: device.id().to_owned(),
+                            device_id: device.id().clone(),
                             channel_id: channel.id,
                         };
                         map.insert(
@@ -397,15 +499,11 @@ impl FanCurveEngine {
                             FanCurveStatus::Ok
                         }
                         Presence::Connected | Presence::Unknown => {
-                            self.process_curve(key, target, record, &sensors, failsafe_duty)
-                                .await
+                            self.process_curve(key, target, record, &sensors, cfg).await
                         }
                     }
                 }
-                _ => {
-                    self.process_curve(key, target, record, &sensors, failsafe_duty)
-                        .await
-                }
+                _ => self.process_curve(key, target, record, &sensors, cfg).await,
             };
             new_statuses.insert(key.clone(), status);
         }
@@ -422,7 +520,7 @@ impl FanCurveEngine {
             }
         };
         if changed {
-            crate::application::usecases::cooling::runtime::status_changed(&self.app_state).await;
+            runtime::status_changed(&self.app_state).await;
         }
     }
 
@@ -432,11 +530,13 @@ impl FanCurveEngine {
         curve_target: &CurveTarget,
         record: &FanCurveRecord,
         sensors: &HashMap<String, halod_shared::types::Sensor>,
-        failsafe_duty: u8,
+        cfg: &CoolingConfig,
     ) -> FanCurveStatus {
+        let failsafe_duty = cfg.fan_failsafe_duty;
+        let dt_s = self.elapsed_since_last_tick(key, cfg.fan_curve_tick_ms);
         if let Err(e) = record.validate() {
             log::warn!(
-                "[FanCurve] Invalid curve for {}:{}: {e:#}",
+                "Invalid curve for {}:{}: {e:#}",
                 curve_target.device_id,
                 curve_target.channel_id
             );
@@ -457,21 +557,28 @@ impl FanCurveEngine {
                 return FanCurveStatus::NoSensor;
             };
             let Some(sensor) = sensors.get(sensor_id) else {
-                log::debug!("[FanCurve] Sensor not found: {sensor_id}");
-                self.apply_failsafe(key, curve_target, failsafe_duty).await;
+                log::debug!("Sensor not found: {sensor_id}");
+                if !self.sensor_missing_within_grace(key) {
+                    self.apply_failsafe(key, curve_target, failsafe_duty).await;
+                }
                 return FanCurveStatus::NoSensor;
             };
             if sensor.sensor_type != halod_shared::types::SensorType::Temperature {
-                log::warn!("[FanCurve] Sensor {sensor_id} is not a temperature sensor");
+                log::warn!("Sensor {sensor_id} is not a temperature sensor");
                 self.apply_failsafe(key, curve_target, failsafe_duty).await;
                 return FanCurveStatus::NoSensor;
             }
             if !sensor.value.is_finite() {
-                log::warn!("[FanCurve] Sensor {sensor_id} returned a non-finite temperature");
-                self.apply_failsafe(key, curve_target, failsafe_duty).await;
+                log::warn!("Sensor {sensor_id} returned a non-finite temperature");
+                if !self.sensor_missing_within_grace(key) {
+                    self.apply_failsafe(key, curve_target, failsafe_duty).await;
+                }
                 return FanCurveStatus::NoSensor;
             }
-            let temp = self.update_control_temp(key, sensor.value as f32);
+            let Some(temp) = self.control_temp(key, sensor.value as f32, cfg) else {
+                self.apply_failsafe(key, curve_target, failsafe_duty).await;
+                return FanCurveStatus::SensorMalfunction;
+            };
             interpolate(&record.points, temp)
         };
         let fan_device = self
@@ -485,18 +592,32 @@ impl FanCurveEngine {
                 return FanCurveStatus::NoDevice;
             }
             self.clear_missing_device(key);
-            let current = current_duty(device, &curve_target.channel_id).await;
-            if (current - target).abs() > 1.0 {
-                let duty = target.round().clamp(0.0, 100.0) as u8;
+            let reported = current_duty(device, &curve_target.channel_id).await;
+            let origin = self
+                .app_state
+                .cooling
+                .applied_duty(key)
+                .await
+                .map(f32::from)
+                .or(reported);
+            let next = ramp_toward(
+                origin,
+                target,
+                cfg.fan_ramp_up_pct_per_s,
+                cfg.fan_ramp_down_pct_per_s,
+                dt_s,
+            );
+            if (reported.unwrap_or(0.0) - target).abs() > 1.0 {
+                let duty = next.round().clamp(0.0, 100.0) as u8;
                 if let Err(e) = apply_duty(device, &curve_target.channel_id, duty).await {
                     log::warn!(
-                        "[FanCurve] Failed to set duty for {}:{}: {e}",
+                        "Failed to set duty for {}:{}: {e}",
                         curve_target.device_id,
                         curve_target.channel_id
                     );
                     return FanCurveStatus::WriteError(e.to_string());
                 }
-                crate::application::usecases::cooling::runtime::duty_applied(
+                runtime::duty_applied(
                     &self.app_state,
                     &curve_target.device_id,
                     &curve_target.channel_id,
@@ -518,20 +639,20 @@ impl FanCurveEngine {
     #[cfg(test)]
     async fn process_fan(
         &self,
-        fan_id: &str,
+        fan_id: &DeviceId,
         record: &FanCurveRecord,
         sensors: &HashMap<String, halod_shared::types::Sensor>,
-        failsafe_duty: u8,
+        cfg: &CoolingConfig,
     ) -> FanCurveStatus {
         self.process_curve(
             &curve_key(fan_id, "default"),
             &CurveTarget {
-                device_id: fan_id.to_string(),
+                device_id: fan_id.clone(),
                 channel_id: "default".to_string(),
             },
             record,
             sensors,
-            failsafe_duty,
+            cfg,
         )
         .await
     }
@@ -596,6 +717,7 @@ impl FanCurveEngine {
                 } else {
                     let saved = current_duty(device, channel_id)
                         .await
+                        .unwrap_or(0.0)
                         .round()
                         .clamp(0.0, 100.0) as u8;
                     self.begin_probe(key, saved);
@@ -610,7 +732,7 @@ impl FanCurveEngine {
     #[cfg(test)]
     async fn probe_presence(
         &self,
-        fan_id: &str,
+        fan_id: &DeviceId,
         device: &Arc<dyn crate::domain::device::Device>,
     ) -> Presence {
         self.advance_presence(&curve_key(fan_id, "default"), device, "default")
@@ -650,7 +772,7 @@ impl FanCurveEngine {
                             .map(|channel| channel.name)
                     })
                     .unwrap_or_else(|| device.name().to_owned());
-                crate::application::notifications::send(
+                notifications::send(
                     &self.app_state,
                     halod_shared::types::NotificationCode::FanStalled { fan: fan_name },
                 )
@@ -690,7 +812,7 @@ impl FanCurveEngine {
             match apply_duty(device, &target.channel_id, duty).await {
                 Ok(()) => {
                     self.clear_failsafe_error(key);
-                    crate::application::usecases::cooling::runtime::duty_applied(
+                    runtime::duty_applied(
                         &self.app_state,
                         &target.device_id,
                         &target.channel_id,
@@ -701,7 +823,7 @@ impl FanCurveEngine {
                 Err(e) => {
                     if self.mark_failsafe_error(key) {
                         log::warn!(
-                            "[FanCurve] Failsafe set_duty failed for {}:{}: {e}",
+                            "Failsafe set_duty failed for {}:{}: {e}",
                             target.device_id,
                             target.channel_id
                         );
@@ -712,17 +834,17 @@ impl FanCurveEngine {
     }
 }
 
-async fn current_duty(device: &Arc<dyn crate::domain::device::Device>, channel_id: &str) -> f32 {
-    if let Some(cooling) = device.as_cooling() {
-        cooling
-            .get_cooling_status(channel_id)
-            .await
-            .ok()
-            .and_then(|s| s.duty)
-            .unwrap_or(0) as f32
-    } else {
-        0.0
-    }
+async fn current_duty(
+    device: &Arc<dyn crate::domain::device::Device>,
+    channel_id: &str,
+) -> Option<f32> {
+    device
+        .as_cooling()?
+        .get_cooling_status(channel_id)
+        .await
+        .ok()?
+        .duty
+        .map(f32::from)
 }
 
 async fn current_rpm(
@@ -759,9 +881,51 @@ fn interpolate(points: &[(f32, f32)], temp: f32) -> f32 {
     halod_shared::curve::duty_at_tuples(points, temp)
 }
 
+struct FanCurveLoop {
+    engine: Arc<FanCurveEngine>,
+}
+
+impl crate::application::run_loop::IdleEngine for FanCurveLoop {
+    type Config = CoolingConfig;
+
+    async fn tick(&mut self, cfg: CoolingConfig) {
+        self.engine.tick(&cfg).await;
+    }
+
+    async fn wait_for_work(&mut self) {
+        std::future::pending::<()>().await;
+    }
+
+    async fn has_work(&mut self) -> bool {
+        true
+    }
+
+    async fn on_disabled(&mut self) {}
+}
+
+impl EngineConfig for CoolingConfig {
+    const TOPIC: &'static str = topic::COOLING;
+
+    fn enabled(&self) -> bool {
+        self.fan_curve_enabled
+    }
+
+    fn tick_ms(&self) -> u64 {
+        self.fan_curve_tick_ms
+    }
+
+    fn from_bus(value: &BusValue) -> Option<Self> {
+        match value {
+            BusValue::Cooling(state) => Some(state.config.clone()),
+            _ => None,
+        }
+    }
+}
+
 #[cfg(test)]
 mod tests {
     use super::*;
+    use crate::application::usecases::device::telemetry::observe;
     use crate::config::Config;
     use crate::domain::cooling::model::FanCurveRecord;
     use crate::domain::device::{CoolingCapability, CoolingStateSlot, Device};
@@ -796,29 +960,32 @@ mod tests {
 
     #[test]
     fn hysteresis_first_reading_uses_current_temp() {
-        assert_eq!(hysteresis_temp(None, 50.0), 50.0);
+        assert_eq!(hysteresis_temp(None, 50.0, 3.0), 50.0);
     }
 
     #[test]
     fn hysteresis_rising_temp_tracks_immediately() {
-        assert_eq!(hysteresis_temp(Some(50.0), 55.0), 55.0);
+        assert_eq!(hysteresis_temp(Some(50.0), 55.0, 3.0), 55.0);
     }
 
     #[test]
     fn hysteresis_small_fall_holds_previous_temp() {
-        assert_eq!(hysteresis_temp(Some(50.0), 48.0), 50.0);
+        assert_eq!(hysteresis_temp(Some(50.0), 48.0, 3.0), 50.0);
+    }
+
+    #[test]
+    fn zero_hysteresis_tracks_every_fall() {
+        assert_eq!(hysteresis_temp(Some(50.0), 49.9, 0.0), 49.9);
     }
 
     #[test]
     fn hysteresis_large_fall_tracks_new_temp() {
-        assert_eq!(hysteresis_temp(Some(50.0), 46.0), 46.0);
+        assert_eq!(hysteresis_temp(Some(50.0), 46.0, 3.0), 46.0);
     }
 
     #[test]
     fn hysteresis_at_band_edge_tracks_new_temp() {
-        // Exactly HYSTERESIS_C below is *outside* the band (`>` is strict), so 47 °C
-        // is tracked, not held at 50. Pins the `>` boundary against `>=`.
-        assert_eq!(hysteresis_temp(Some(50.0), 50.0 - HYSTERESIS_C), 47.0);
+        assert_eq!(hysteresis_temp(Some(50.0), 47.0, 3.0), 47.0);
     }
 
     #[test]
@@ -899,6 +1066,15 @@ mod tests {
         assert!((interpolate(&points, 45.0) - 38.0).abs() < 0.01);
     }
 
+    fn instant_cfg(failsafe: u8) -> CoolingConfig {
+        CoolingConfig {
+            fan_failsafe_duty: failsafe,
+            fan_ramp_up_pct_per_s: 0.0,
+            fan_ramp_down_pct_per_s: 0.0,
+            ..Default::default()
+        }
+    }
+
     fn fan(id: &str) -> MockDevice {
         MockDevice::new(id).with_fan_rpm(1000).with_fan_duty(20)
     }
@@ -912,7 +1088,7 @@ mod tests {
         let fan = Arc::new(fan("fan_0"));
         let sensor = sensor("sensor_0", 42.0);
         let app = app_with(vec![fan, sensor]);
-        crate::application::usecases::device::telemetry::observe(&app).await;
+        observe(&app).await;
         let sensors = app.data_bus.sensors();
         assert_eq!(sensors.get("sensor_0").map(|s| s.value), Some(42.0));
     }
@@ -928,9 +1104,9 @@ mod tests {
         let fan = Arc::new(fan("fan_0").with_curve(record));
         let sensor = sensor("sensor_0", 70.0);
         let app = app_with(vec![fan.clone(), sensor]);
-        crate::application::usecases::device::telemetry::observe(&app).await;
+        observe(&app).await;
         let engine = FanCurveEngine::new(app);
-        engine.tick(75).await;
+        engine.tick(&instant_cfg(75)).await;
         assert_ne!(fan.fan_duty(), 20, "duty should have been updated from 20");
     }
 
@@ -945,9 +1121,9 @@ mod tests {
         let fan = Arc::new(fan("fan_0").with_curve(record));
         let sensor = sensor("sensor_0", 50.0);
         let app = app_with(vec![fan.clone(), sensor]);
-        crate::application::usecases::device::telemetry::observe(&app).await;
+        observe(&app).await;
         let engine = FanCurveEngine::new(app);
-        engine.tick(75).await;
+        engine.tick(&instant_cfg(75)).await;
         assert_eq!(
             fan.fan_duty(),
             20,
@@ -980,8 +1156,33 @@ mod tests {
         let fan = Arc::new(fan("fan_0").with_curve(record));
         let app = app_with(vec![fan.clone()]);
         let engine = FanCurveEngine::new(app);
-        engine.tick(75).await;
+        engine.expire_sensor_grace(&curve_key(&"fan_0".parse().unwrap(), "default"));
+        engine.tick(&instant_cfg(75)).await;
         assert_eq!(fan.fan_duty(), 75);
+    }
+
+    #[tokio::test]
+    async fn missing_sensor_keeps_duty_during_grace() {
+        let record = FanCurveRecord {
+            sensor_id: Some("late_sensor".to_string()),
+            points: vec![(0.0, 50.0), (100.0, 100.0)],
+        };
+        let fan = Arc::new(fan("fan_0").with_curve(record));
+        let app = app_with(vec![fan.clone()]);
+        let engine = FanCurveEngine::new(app);
+        engine.tick(&instant_cfg(75)).await;
+        engine.tick(&instant_cfg(75)).await;
+        assert_eq!(fan.fan_duty(), 20);
+    }
+
+    #[tokio::test]
+    async fn sensor_reading_restarts_grace() {
+        let key = curve_key(&"fan_0".parse().unwrap(), "default");
+        let app = Arc::new(AppState::new(Config::default()));
+        let engine = FanCurveEngine::new(app);
+        engine.expire_sensor_grace(&key);
+        engine.control_temp(&key, 40.0, &instant_cfg(75));
+        assert!(engine.sensor_missing_within_grace(&key));
     }
 
     #[tokio::test]
@@ -993,19 +1194,20 @@ mod tests {
         let fan = Arc::new(fan("fan_0").with_curve(record));
         let sensor = sensor("sensor_0", f64::NAN);
         let app = app_with(vec![fan.clone(), sensor]);
-        crate::application::usecases::device::telemetry::observe(&app).await;
+        observe(&app).await;
 
         let engine = FanCurveEngine::new(app.clone());
-        engine.tick(75).await;
+        engine.expire_sensor_grace(&curve_key(&"fan_0".parse().unwrap(), "default"));
+        engine.tick(&instant_cfg(75)).await;
 
         assert_eq!(fan.fan_duty(), 75);
         assert_eq!(
-            app.cooling.statuses.lock().await[&curve_key("fan_0", "default")],
+            app.cooling.statuses.lock().await[&curve_key(&"fan_0".parse().unwrap(), "default")],
             FanCurveStatus::Ok
         );
-        engine.tick(75).await;
+        engine.tick(&instant_cfg(75)).await;
         assert_eq!(
-            app.cooling.statuses.lock().await[&curve_key("fan_0", "default")],
+            app.cooling.statuses.lock().await[&curve_key(&"fan_0".parse().unwrap(), "default")],
             FanCurveStatus::NoSensor
         );
     }
@@ -1019,16 +1221,16 @@ mod tests {
         let fan = Arc::new(fan("fan_0").with_curve(record));
         let app = app_with(vec![fan.clone()]);
         let engine = FanCurveEngine::new(app.clone());
-        engine.tick(75).await;
+        engine.tick(&instant_cfg(75)).await;
         assert_eq!(fan.fan_duty(), 75);
         assert_eq!(
-            app.cooling.statuses.lock().await[&curve_key("fan_0", "default")],
+            app.cooling.statuses.lock().await[&curve_key(&"fan_0".parse().unwrap(), "default")],
             FanCurveStatus::Ok
         );
-        engine.tick(75).await;
+        engine.tick(&instant_cfg(75)).await;
         let statuses = app.cooling.statuses.lock().await;
         assert_eq!(
-            statuses[&curve_key("fan_0", "default")],
+            statuses[&curve_key(&"fan_0".parse().unwrap(), "default")],
             FanCurveStatus::NoSensor
         );
     }
@@ -1042,7 +1244,7 @@ mod tests {
         let fan = Arc::new(fan("fan_0").with_curve(record));
         let app = app_with(vec![fan.clone()]);
 
-        FanCurveEngine::new(app).tick(75).await;
+        FanCurveEngine::new(app).tick(&instant_cfg(75)).await;
 
         assert_eq!(fan.fan_duty(), 100);
     }
@@ -1057,7 +1259,7 @@ mod tests {
         let initial_duty = fan.fan_duty();
         let app = app_with(vec![fan.clone()]);
 
-        FanCurveEngine::new(app).tick(75).await;
+        FanCurveEngine::new(app).tick(&instant_cfg(75)).await;
 
         assert_eq!(fan.fan_duty(), initial_duty);
     }
@@ -1073,7 +1275,7 @@ mod tests {
 
         let app = app_with(vec![fan.clone()]);
         let engine = FanCurveEngine::new(app.clone());
-        engine.tick(75).await;
+        engine.tick(&instant_cfg(75)).await;
 
         assert!(
             fan.cooling_state().curve("default").is_some(),
@@ -1086,17 +1288,17 @@ mod tests {
         let fan = Arc::new(fan("fan_0"));
         let app = app_with(vec![fan.clone()]);
         let engine = FanCurveEngine::new(app.clone());
-        engine.tick(75).await;
+        engine.tick(&instant_cfg(75)).await;
 
         assert_eq!(fan.fan_duty(), 75);
         assert_eq!(
-            app.cooling.statuses.lock().await[&curve_key("fan_0", "default")],
+            app.cooling.statuses.lock().await[&curve_key(&"fan_0".parse().unwrap(), "default")],
             FanCurveStatus::Ok
         );
-        engine.tick(75).await;
+        engine.tick(&instant_cfg(75)).await;
         let statuses = app.cooling.statuses.lock().await;
         assert_eq!(
-            statuses[&curve_key("fan_0", "default")],
+            statuses[&curve_key(&"fan_0".parse().unwrap(), "default")],
             FanCurveStatus::NoSensor
         );
     }
@@ -1110,7 +1312,7 @@ mod tests {
         let fan = Arc::new(fan("fan_0").with_curve(custom_record));
         let app = app_with(vec![fan.clone()]);
         let engine = FanCurveEngine::new(app.clone());
-        engine.tick(75).await;
+        engine.tick(&instant_cfg(75)).await;
 
         // The original custom points should be preserved, not replaced by balanced defaults
         let record = fan
@@ -1131,7 +1333,7 @@ mod tests {
         use crate::domain::registry::model::DeviceRecord;
         let mut cfg = app.config.write().await;
         cfg.known_devices.insert(
-            device_id.to_string(),
+            device_id.parse().unwrap(),
             DeviceRecord {
                 name: device_id.to_string(),
                 vendor: "test".into(),
@@ -1154,7 +1356,7 @@ mod tests {
         let initial_duty = fan.fan_duty();
 
         let engine = FanCurveEngine::new(app.clone());
-        engine.tick(75).await;
+        engine.tick(&instant_cfg(75)).await;
 
         assert!(
             fan.cooling_state().curve("default").is_none(),
@@ -1179,7 +1381,7 @@ mod tests {
         {
             let mut cfg = app.config.write().await;
             cfg.channel_visibility
-                .entry("fan_0".into())
+                .entry("fan_0".parse().unwrap())
                 .or_default()
                 .insert(
                     halod_shared::types::ChannelKind::Cooling.key("default"),
@@ -1188,7 +1390,9 @@ mod tests {
         }
         let initial_duty = fan.fan_duty();
 
-        FanCurveEngine::new(app.clone()).tick(75).await;
+        FanCurveEngine::new(app.clone())
+            .tick(&instant_cfg(75))
+            .await;
 
         assert!(fan.cooling_state().curve("default").is_none());
         assert_eq!(fan.fan_duty(), initial_duty);
@@ -1206,16 +1410,18 @@ mod tests {
         {
             let mut cfg = app.config.write().await;
             cfg.channel_visibility
-                .entry("fan_0".into())
+                .entry("fan_0".parse().unwrap())
                 .or_default()
                 .insert(
                     halod_shared::types::ChannelKind::Cooling.key("default"),
                     halod_shared::types::VisibilityState::Hidden,
                 );
         }
-        crate::application::usecases::device::telemetry::observe(&app).await;
+        observe(&app).await;
 
-        FanCurveEngine::new(app.clone()).tick(75).await;
+        FanCurveEngine::new(app.clone())
+            .tick(&instant_cfg(75))
+            .await;
 
         assert_ne!(
             fan.fan_duty(),
@@ -1237,7 +1443,7 @@ mod tests {
         let initial_duty = fan.fan_duty();
 
         let engine = FanCurveEngine::new(app);
-        engine.tick(75).await;
+        engine.tick(&instant_cfg(75)).await;
 
         assert_eq!(
             fan.fan_duty(),
@@ -1252,13 +1458,20 @@ mod tests {
         // must be NoDevice rather than WriteError (no write was attempted).
         let app = app_with(vec![sensor("s", 50.0)]);
         let engine = FanCurveEngine::new(app.clone());
-        crate::application::usecases::device::telemetry::observe(&app).await;
+        observe(&app).await;
         let sensors = app.data_bus.sensors();
         let record = FanCurveRecord {
             sensor_id: Some("s".to_string()),
             points: vec![(0.0, 50.0), (100.0, 100.0)],
         };
-        let status = engine.process_fan("ghost_fan", &record, &sensors, 75).await;
+        let status = engine
+            .process_fan(
+                &"ghost_fan".parse().unwrap(),
+                &record,
+                &sensors,
+                &instant_cfg(75),
+            )
+            .await;
         assert_eq!(status, FanCurveStatus::NoDevice);
     }
 
@@ -1276,10 +1489,17 @@ mod tests {
         let app = app_with(vec![fan.clone(), sensor]);
         let initial_duty = fan.fan_duty();
         let engine = FanCurveEngine::new(app.clone());
-        crate::application::usecases::device::telemetry::observe(&app).await;
+        observe(&app).await;
         let sensors = app.data_bus.sensors();
 
-        let status = engine.process_fan("fan_0", &record, &sensors, 75).await;
+        let status = engine
+            .process_fan(
+                &"fan_0".parse().unwrap(),
+                &record,
+                &sensors,
+                &instant_cfg(75),
+            )
+            .await;
 
         assert_eq!(status, FanCurveStatus::NoDevice);
         assert_eq!(
@@ -1330,7 +1550,7 @@ mod tests {
         let engine = FanCurveEngine::new(app);
         engine.seed_stall(
             "fan_0",
-            std::time::Instant::now() - std::time::Duration::from_secs(15),
+            tokio::time::Instant::now() - std::time::Duration::from_secs(15),
             false,
         );
         let device: Arc<dyn crate::domain::device::Device> = fan;
@@ -1349,14 +1569,14 @@ mod tests {
         let engine = FanCurveEngine::new(app);
         engine.seed_stall(
             "fan_0",
-            std::time::Instant::now() - std::time::Duration::from_secs(15),
+            tokio::time::Instant::now() - std::time::Duration::from_secs(15),
             false,
         );
         let device: Arc<dyn crate::domain::device::Device> = fan;
         // target = 10% ≤ 20% → not considered a stall
         let status = engine.check_stall("fan_0", &device, 10.0).await;
         assert_eq!(status, FanCurveStatus::Ok);
-        assert!(engine.per_fan.lock().unwrap()["fan_0"].stall.is_none());
+        assert!(engine.per_fan.lock()["fan_0"].stall.is_none());
     }
 
     #[tokio::test]
@@ -1370,7 +1590,7 @@ mod tests {
         let engine = FanCurveEngine::new(app);
         engine.seed_stall(
             "fan_0",
-            std::time::Instant::now() - std::time::Duration::from_secs(15),
+            tokio::time::Instant::now() - std::time::Duration::from_secs(15),
             true, // already notified
         );
         let device: Arc<dyn crate::domain::device::Device> = fan;
@@ -1378,7 +1598,7 @@ mod tests {
         assert_eq!(status, FanCurveStatus::FanStalled);
         // notified flag must stay true
         assert!(
-            engine.per_fan.lock().unwrap()["fan_0"]
+            engine.per_fan.lock()["fan_0"]
                 .stall
                 .as_ref()
                 .unwrap()
@@ -1398,13 +1618,13 @@ mod tests {
         let engine = FanCurveEngine::new(app);
         engine.seed_stall(
             "fan_0",
-            std::time::Instant::now() - std::time::Duration::from_secs(15),
+            tokio::time::Instant::now() - std::time::Duration::from_secs(15),
             true,
         );
         let device: Arc<dyn crate::domain::device::Device> = fan;
         let status = engine.check_stall("fan_0", &device, 50.0).await;
         assert_eq!(status, FanCurveStatus::Ok);
-        assert!(engine.per_fan.lock().unwrap()["fan_0"].stall.is_none());
+        assert!(engine.per_fan.lock()["fan_0"].stall.is_none());
     }
 
     #[tokio::test]
@@ -1420,13 +1640,13 @@ mod tests {
         let engine = FanCurveEngine::new(app);
         engine.seed_stall(
             "fan_0",
-            std::time::Instant::now() - std::time::Duration::from_secs(15),
+            tokio::time::Instant::now() - std::time::Duration::from_secs(15),
             false,
         );
         let device: Arc<dyn crate::domain::device::Device> = fan;
         let status = engine.check_stall("fan_0", &device, 20.0).await;
         assert_eq!(status, FanCurveStatus::Ok);
-        assert!(engine.per_fan.lock().unwrap()["fan_0"].stall.is_none());
+        assert!(engine.per_fan.lock()["fan_0"].stall.is_none());
     }
 
     #[tokio::test]
@@ -1442,13 +1662,13 @@ mod tests {
         let engine = FanCurveEngine::new(app);
         engine.seed_stall(
             "fan_0",
-            std::time::Instant::now() - std::time::Duration::from_secs(15),
+            tokio::time::Instant::now() - std::time::Duration::from_secs(15),
             false,
         );
         let device: Arc<dyn crate::domain::device::Device> = fan;
         let _ = engine.check_stall("fan_0", &device, 50.0).await;
         assert!(
-            engine.per_fan.lock().unwrap()["fan_0"]
+            engine.per_fan.lock()["fan_0"]
                 .stall
                 .as_ref()
                 .unwrap()
@@ -1472,7 +1692,7 @@ mod tests {
         let status = engine.check_stall("fan_0", &device, 50.0).await;
         assert_eq!(status, FanCurveStatus::Ok);
         assert!(
-            !engine.per_fan.lock().unwrap()["fan_0"]
+            !engine.per_fan.lock()["fan_0"]
                 .stall
                 .as_ref()
                 .unwrap()
@@ -1488,7 +1708,9 @@ mod tests {
         let engine = FanCurveEngine::new(app);
         let device: Arc<dyn crate::domain::device::Device> = fan.clone();
         assert_eq!(
-            engine.probe_presence("fan_0", &device).await,
+            engine
+                .probe_presence(&"fan_0".parse().unwrap(), &device)
+                .await,
             Presence::Connected
         );
         assert_eq!(fan.fan_duty(), 20, "a spinning fan is never probed");
@@ -1501,7 +1723,9 @@ mod tests {
         let engine = FanCurveEngine::new(app);
         let device: Arc<dyn crate::domain::device::Device> = fan.clone();
         assert_eq!(
-            engine.probe_presence("fan_0", &device).await,
+            engine
+                .probe_presence(&"fan_0".parse().unwrap(), &device)
+                .await,
             Presence::Probing
         );
         assert_eq!(
@@ -1517,16 +1741,18 @@ mod tests {
         let app = app_with(vec![fan.clone()]);
         let engine = FanCurveEngine::new(app);
         engine.seed_presence(
-            "fan_0",
+            &"fan_0".parse().unwrap(),
             Presence::Probing,
             Some(ProbeState {
                 saved_duty: 20,
-                started: std::time::Instant::now() - std::time::Duration::from_secs(5),
+                started: tokio::time::Instant::now() - std::time::Duration::from_secs(5),
             }),
         );
         let device: Arc<dyn crate::domain::device::Device> = fan.clone();
         assert_eq!(
-            engine.probe_presence("fan_0", &device).await,
+            engine
+                .probe_presence(&"fan_0".parse().unwrap(), &device)
+                .await,
             Presence::Absent
         );
         assert_eq!(fan.fan_duty(), 20, "probe restores the pre-probe duty");
@@ -1538,16 +1764,18 @@ mod tests {
         let app = app_with(vec![fan.clone()]);
         let engine = FanCurveEngine::new(app);
         engine.seed_presence(
-            "fan_0",
+            &"fan_0".parse().unwrap(),
             Presence::Probing,
             Some(ProbeState {
                 saved_duty: 30,
-                started: std::time::Instant::now(),
+                started: tokio::time::Instant::now(),
             }),
         );
         let device: Arc<dyn crate::domain::device::Device> = fan.clone();
         assert_eq!(
-            engine.probe_presence("fan_0", &device).await,
+            engine
+                .probe_presence(&"fan_0".parse().unwrap(), &device)
+                .await,
             Presence::Connected
         );
         assert_eq!(
@@ -1562,10 +1790,12 @@ mod tests {
         let fan = Arc::new(fan("fan_0").with_fan_rpm(800));
         let app = app_with(vec![fan.clone()]);
         let engine = FanCurveEngine::new(app);
-        engine.seed_presence("fan_0", Presence::Absent, None);
+        engine.seed_presence(&"fan_0".parse().unwrap(), Presence::Absent, None);
         let device: Arc<dyn crate::domain::device::Device> = fan.clone();
         assert_eq!(
-            engine.probe_presence("fan_0", &device).await,
+            engine
+                .probe_presence(&"fan_0".parse().unwrap(), &device)
+                .await,
             Presence::Connected
         );
     }
@@ -1575,10 +1805,12 @@ mod tests {
         let fan = Arc::new(fan("fan_0").with_fan_rpm(0));
         let app = app_with(vec![fan.clone()]);
         let engine = FanCurveEngine::new(app);
-        engine.seed_presence("fan_0", Presence::Absent, None);
+        engine.seed_presence(&"fan_0".parse().unwrap(), Presence::Absent, None);
         let device: Arc<dyn crate::domain::device::Device> = fan.clone();
         assert_eq!(
-            engine.probe_presence("fan_0", &device).await,
+            engine
+                .probe_presence(&"fan_0".parse().unwrap(), &device)
+                .await,
             Presence::Absent
         );
     }
@@ -1588,10 +1820,10 @@ mod tests {
         let fan = Arc::new(fan("fan_0").with_fan_rpm(0));
         let app = app_with(vec![fan.clone()]);
         let engine = FanCurveEngine::new(app.clone());
-        engine.seed_presence("fan_0", Presence::Absent, None);
+        engine.seed_presence(&"fan_0".parse().unwrap(), Presence::Absent, None);
         let initial = fan.fan_duty();
 
-        engine.tick(75).await;
+        engine.tick(&instant_cfg(75)).await;
 
         assert_eq!(
             fan.fan_duty(),
@@ -1599,9 +1831,100 @@ mod tests {
             "an absent header must not be driven to the failsafe duty"
         );
         assert_eq!(
-            app.cooling.statuses.lock().await[&curve_key("fan_0", "default")],
+            app.cooling.statuses.lock().await[&curve_key(&"fan_0".parse().unwrap(), "default")],
             FanCurveStatus::Disconnected
         );
+    }
+
+    fn flat_curve(duty: f32) -> FanCurveRecord {
+        FanCurveRecord {
+            sensor_id: None,
+            points: vec![(0.0, duty), (100.0, duty)],
+        }
+    }
+
+    #[tokio::test(start_paused = true)]
+    async fn spin_down_is_rate_limited_while_spin_up_is_instant() {
+        let cfg = CoolingConfig {
+            fan_ramp_up_pct_per_s: 0.0,
+            fan_ramp_down_pct_per_s: 5.0,
+            fan_curve_tick_ms: 2000,
+            ..Default::default()
+        };
+        let down = Arc::new(fan("fan_0").with_fan_duty(100).with_curve(flat_curve(30.0)));
+        let up = Arc::new(fan("fan_1").with_fan_duty(20).with_curve(flat_curve(80.0)));
+        let engine = FanCurveEngine::new(app_with(vec![down.clone(), up.clone()]));
+
+        engine.tick(&cfg).await;
+        assert_eq!(down.fan_duty(), 90);
+        assert_eq!(up.fan_duty(), 80);
+
+        tokio::time::advance(Duration::from_secs(4)).await;
+        engine.tick(&cfg).await;
+        assert_eq!(down.fan_duty(), 70);
+
+        tokio::time::advance(Duration::from_secs(60)).await;
+        engine.tick(&cfg).await;
+        assert_eq!(down.fan_duty(), 30);
+    }
+
+    #[tokio::test(start_paused = true)]
+    async fn flat_sensor_past_stale_window_reports_malfunction_and_failsafe() {
+        let cfg = CoolingConfig {
+            fan_sensor_stale_secs: 10.0,
+            ..instant_cfg(75)
+        };
+        let record = FanCurveRecord {
+            sensor_id: Some("sensor_0".to_string()),
+            points: vec![(0.0, 30.0), (100.0, 30.0 + 1.0)],
+        };
+        let fan = Arc::new(fan("fan_0").with_curve(record));
+        let app = app_with(vec![fan.clone(), sensor("sensor_0", 40.0)]);
+        observe(&app).await;
+        let engine = FanCurveEngine::new(app.clone());
+        let key = curve_key(&"fan_0".parse().unwrap(), "default");
+
+        engine.tick(&cfg).await;
+        assert_eq!(app.cooling.statuses.lock().await[&key], FanCurveStatus::Ok);
+
+        tokio::time::advance(Duration::from_secs(11)).await;
+        observe(&app).await;
+        engine.tick(&cfg).await;
+        assert_eq!(fan.fan_duty(), 75);
+        assert_eq!(
+            app.cooling.statuses.lock().await[&key],
+            FanCurveStatus::SensorMalfunction
+        );
+    }
+
+    #[test]
+    fn sensor_stale_tracks_flat_values_only() {
+        let t0 = Instant::now();
+        let window = Duration::from_secs(10);
+        let later = t0 + Duration::from_secs(11);
+        let (mark, stale) = sensor_stale(None, t0, 40.0, window);
+        assert!(!stale);
+        assert!(sensor_stale(Some(mark), later, 40.0, window).1);
+        assert!(!sensor_stale(Some(mark), later, 41.0, window).1);
+        assert!(!sensor_stale(Some(mark), later, 40.0, Duration::ZERO).1);
+    }
+
+    #[test]
+    fn smoothing_drops_samples_older_than_the_window() {
+        let t0 = Instant::now();
+        let window = Duration::from_secs(5);
+        let mut samples = VecDeque::new();
+        smoothed_temp(&mut samples, t0, window, 90.0);
+        assert_eq!(
+            smoothed_temp(&mut samples, t0 + Duration::from_secs(1), window, 50.0),
+            70.0
+        );
+        assert_eq!(
+            smoothed_temp(&mut samples, t0 + Duration::from_secs(7), window, 50.0),
+            50.0
+        );
+        assert_eq!(smoothed_temp(&mut samples, t0, Duration::ZERO, 33.0), 33.0);
+        assert!(samples.is_empty());
     }
 
     fn pump(record: FanCurveRecord) -> Arc<MockDevice> {
@@ -1621,9 +1944,9 @@ mod tests {
         };
         let pump = pump(record);
         let app = app_with(vec![pump.clone(), sensor("sensor_0", 50.0)]);
-        crate::application::usecases::device::telemetry::observe(&app).await;
+        observe(&app).await;
         let engine = FanCurveEngine::new(app);
-        engine.tick(75).await;
+        engine.tick(&instant_cfg(75)).await;
         assert_ne!(pump.fan_duty(), 50, "pump duty should have been updated");
     }
 
@@ -1656,7 +1979,11 @@ mod tests {
         let engine = FanCurveEngine::new(app);
         let device: Arc<dyn crate::domain::device::Device> = pump.clone();
         let presence = engine
-            .advance_presence(&curve_key("pump_0", "pump"), &device, "pump")
+            .advance_presence(
+                &curve_key(&"pump_0".parse().unwrap(), "pump"),
+                &device,
+                "pump",
+            )
             .await;
         assert_eq!(presence, Presence::Connected);
         assert_eq!(pump.fan_duty(), 50, "a tach-less header is never probed");
@@ -1665,8 +1992,11 @@ mod tests {
 
 #[cfg(test)]
 mod prop_tests {
-    use super::{hysteresis_temp, interpolate, HYSTERESIS_C};
+    use super::{hysteresis_temp, interpolate, ramp_toward, smoothed_temp};
     use proptest::prelude::*;
+    use std::collections::VecDeque;
+    use std::time::Duration;
+    use tokio::time::Instant;
 
     /// Non-empty curve with strictly ascending temperatures and duties in
     /// `[0, 100]`. Accumulates positive gaps so temps strictly increase without
@@ -1730,15 +2060,62 @@ mod prop_tests {
         /// Downward hysteresis only holds a higher previous value within the band;
         /// rising temperatures always pass through immediately.
         #[test]
-        fn hysteresis_holds_within_band_only(last in -50.0f32..150.0, current in -50.0f32..150.0) {
-            let out = hysteresis_temp(Some(last), current);
+        fn hysteresis_holds_within_band_only(
+            last in -50.0f32..150.0,
+            current in -50.0f32..150.0,
+            band in 0.0f32..20.0,
+        ) {
+            let out = hysteresis_temp(Some(last), current, band);
             if current >= last {
                 prop_assert_eq!(out, current, "rising temps pass through");
-            } else if current > last - HYSTERESIS_C {
+            } else if current > last - band {
                 prop_assert_eq!(out, last, "small drop holds the previous temp");
             } else {
                 prop_assert_eq!(out, current, "drop beyond the band tracks immediately");
             }
+        }
+            #[test]
+        fn ramp_lands_between_origin_and_target(
+            origin in 0.0f32..100.0,
+            target in 0.0f32..100.0,
+            up in 0.0f32..100.0,
+            down in 0.0f32..100.0,
+            dt in 0.0f32..10.0,
+        ) {
+            let out = ramp_toward(Some(origin), target, up, down, dt);
+            let (lo, hi) = (origin.min(target), origin.max(target));
+            prop_assert!(out >= lo - 1e-3 && out <= hi + 1e-3, "{out} not in [{lo}, {hi}]");
+        }
+
+        #[test]
+        fn unlimited_ramp_reaches_target(origin in 0.0f32..100.0, target in 0.0f32..100.0, dt in 0.0f32..10.0) {
+            prop_assert_eq!(ramp_toward(Some(origin), target, 0.0, 0.0, dt), target);
+        }
+
+        #[test]
+        fn longer_elapsed_time_never_moves_less(
+            origin in 0.0f32..100.0,
+            target in 0.0f32..100.0,
+            rate in 0.1f32..100.0,
+            dt1 in 0.0f32..10.0,
+            dt2 in 0.0f32..10.0,
+        ) {
+            let (short, long) = (dt1.min(dt2), dt1.max(dt2));
+            let moved = |dt| (ramp_toward(Some(origin), target, rate, rate, dt) - origin).abs();
+            prop_assert!(moved(short) <= moved(long) + 1e-3);
+        }
+
+        #[test]
+        fn smoothed_temp_stays_within_sample_range(values in prop::collection::vec(-50.0f32..150.0, 1..20)) {
+            let start = Instant::now();
+            let mut samples = VecDeque::new();
+            let mut out = 0.0;
+            for (i, v) in values.iter().enumerate() {
+                out = smoothed_temp(&mut samples, start + Duration::from_secs(i as u64), Duration::from_secs(60), *v);
+            }
+            let min = values.iter().copied().fold(f32::MAX, f32::min);
+            let max = values.iter().copied().fold(f32::MIN, f32::max);
+            prop_assert!(out >= min - 1e-3 && out <= max + 1e-3);
         }
     }
 }

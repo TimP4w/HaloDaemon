@@ -83,8 +83,8 @@ fn response_to_lua(lua: &Lua, response: HttpResponse) -> mlua::Result<Table> {
 mod tests {
     use super::*;
     use crate::infrastructure::http::{HttpBackend, HttpPolicy};
-    use std::sync::{Arc, Mutex};
-
+    use parking_lot::Mutex;
+    use std::sync::Arc;
     struct StubBackend {
         last: Mutex<Option<HttpRequest>>,
         response: HttpResponse,
@@ -92,7 +92,7 @@ mod tests {
 
     impl HttpBackend for StubBackend {
         fn request(&self, req: &HttpRequest, _max: usize) -> anyhow::Result<HttpResponse> {
-            *self.last.lock().unwrap() = Some(req.clone());
+            *self.last.lock() = Some(req.clone());
             Ok(self.response.clone())
         }
     }
@@ -143,7 +143,7 @@ mod tests {
             .eval()
             .unwrap();
         assert_eq!(body, "{\"ok\":true}");
-        let seen = backend.last.lock().unwrap().clone().unwrap();
+        let seen = backend.last.lock().clone().unwrap();
         assert_eq!(seen.method, "GET");
         assert_eq!(seen.path, "/v1/status");
     }
@@ -169,6 +169,6 @@ mod tests {
             .unwrap_err()
             .to_string();
         assert!(err.contains("allowlist"), "{err}");
-        assert!(backend.last.lock().unwrap().is_none());
+        assert!(backend.last.lock().is_none());
     }
 }

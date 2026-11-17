@@ -3,11 +3,10 @@
 //! math, and hit-shape helpers shared by the viewport and zone renderer.
 
 use egui::{Pos2, Rect, Vec2};
+use halod_shared::ids::DeviceId;
 use halod_shared::types::{LedPosition, PlacedZone};
 
 use super::{DragState, Handle, MarqueeState};
-
-pub(super) use crate::ui::components::letterbox;
 
 /// Pre-computed-sin/cos variant; call when sin/cos are already available to
 /// avoid recomputing the transcendentals.
@@ -120,7 +119,7 @@ pub(super) fn zones_in_marquee(
     channels: &[PlacedZone],
     mq: &MarqueeState,
     canvas_rect: Rect,
-) -> std::collections::HashSet<(String, String)> {
+) -> std::collections::HashSet<(DeviceId, String)> {
     let m = Rect::from_two_pos(
         norm_to_screen(mq.start_norm, canvas_rect),
         norm_to_screen(mq.cur_norm, canvas_rect),
@@ -259,7 +258,7 @@ fn resize_from_corner(orig: &PlacedZone, c: usize, delta: Vec2) -> PlacedZone {
 }
 
 // ── Coordinate mapping ────────────────────────────────────────────────────────
-pub(super) fn zone_key(device_id: &str, channel_id: &str) -> String {
+pub(super) fn zone_key(device_id: &DeviceId, channel_id: &str) -> String {
     format!("{device_id}:{channel_id}")
 }
 
@@ -350,7 +349,7 @@ mod tests {
     fn letterbox_preserves_aspect_and_fits() {
         // Wide box, 1:1 content → square centred inside.
         let outer = Rect::from_min_size(Pos2::ZERO, Vec2::new(800.0, 400.0));
-        let lb = letterbox(outer, 1.0);
+        let lb = crate::ui::components::letterbox(outer, 1.0);
         assert!((lb.width() - lb.height()).abs() < 1e-3);
         assert!(lb.width() <= outer.width() + 1e-3 && lb.height() <= outer.height() + 1e-3);
         assert!((lb.center() - outer.center()).length() < 1e-3);

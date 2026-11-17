@@ -2,9 +2,19 @@
 //! Device page header: name/badge row, status chips, battery chips.
 
 use egui::{Align2, Pos2, Rect, Stroke, Vec2};
+use halod_shared::commands::DeviceOp;
 use halod_shared::types::{Battery, BatteryStatus, ConnectionType, DeviceCapability, WireDevice};
 
-use crate::ui::theme::{self, a};
+use crate::domain::models::device;
+use crate::domain::tour;
+use crate::domain::tour::AnchorId;
+use crate::runtime::ipc;
+use crate::runtime::ipc::CommandTx;
+use crate::ui::components;
+use crate::ui::components::ButtonKind;
+use crate::ui::components::TagTone;
+use crate::ui::icons;
+use crate::ui::theme;
 
 /// Total LED count reported across all of the device's RGB capabilities and channels.
 pub(super) fn led_count(dev: &WireDevice) -> usize {
@@ -27,37 +37,30 @@ pub(super) fn header(
     ui: &mut egui::Ui,
     dev: &WireDevice,
     ui_state: &mut super::DeviceUi,
-    cmd: &crate::runtime::ipc::CommandTx,
+    cmd: &CommandTx,
 ) {
-    let color = theme::device_color(dev);
-    let editing_rename = ui_state.rename_editing;
-    let header_h = if editing_rename { 64.0 } else { 50.0 };
-    let (rect, _) = ui.allocate_exact_size(
-        Vec2::new(ui.available_width(), header_h),
-        egui::Sense::hover(),
-    );
-    crate::domain::tour::anchor(ui.ctx(), crate::domain::tour::AnchorId::DeviceHeader, rect);
+    let (rect, _) =
+        ui.allocate_exact_size(Vec2::new(ui.available_width(), 48.0), egui::Sense::hover());
+    tour::anchor(ui.ctx(), AnchorId::DeviceHeader, rect);
     let cy = rect.center().y;
-    let tx = rect.left() + 76.0; // badge width (60) + gap (16)
+    let tx = rect.left() + 64.0;
 
     {
-        let badge = Rect::from_min_size(Pos2::new(rect.left(), cy - 28.0), Vec2::new(60.0, 56.0));
+        let tile = Rect::from_min_size(rect.min, Vec2::splat(48.0));
         let p = ui.painter();
-        theme::gentle_glow(p, badge.center(), 50.0, color, 0.16);
-        crate::ui::components::device_badge(p, badge, dev.device_type);
+        theme::paint_surface(p, tile, theme::RADIUS_MD, theme::TILE_BG, theme::TRACK);
+        components::device_badge(p, tile.shrink(8.0), dev.device_type);
     }
 
-    // ── Name row: edit mode or static ────────────────────────────────────────
-
+    let name_cy = cy - 10.0;
     if ui_state.rename_editing {
-        let row_cy = cy - 11.0;
-        let input_rect = Rect::from_min_size(Pos2::new(tx, row_cy - 15.0), Vec2::new(300.0, 30.0));
+        let input_rect = Rect::from_min_size(Pos2::new(tx, name_cy - 15.0), Vec2::new(300.0, 30.0));
         let mut child = ui.new_child(egui::UiBuilder::new().max_rect(input_rect).layout(
             egui::Layout::centered_and_justified(egui::Direction::TopDown),
         ));
         let te_resp = child.add(
             egui::TextEdit::singleline(&mut ui_state.rename_val)
-                .font(theme::bold(20.0))
+                .font(theme::semibold(20.0))
                 .margin(egui::vec2(10.0, 4.0)),
         );
         if ui_state.rename_just_started {
@@ -69,36 +72,36 @@ pub(super) fn header(
         let esc = ui.input(|i| i.key_pressed(egui::Key::Escape));
 
         let save_rect = Rect::from_min_size(
-            Pos2::new(input_rect.right() + 8.0, row_cy - 14.0),
+            Pos2::new(input_rect.right() + 8.0, name_cy - 14.0),
             Vec2::new(56.0, 28.0),
         );
         let cancel_rect = Rect::from_min_size(
-            Pos2::new(save_rect.right() + 6.0, row_cy - 14.0),
+            Pos2::new(save_rect.right() + 6.0, name_cy - 14.0),
             Vec2::new(64.0, 28.0),
         );
-        let save_resp = crate::ui::components::button_at(
+        let save_resp = components::button_at(
             ui,
             save_rect,
-            ui.id().with("rename_save"),
+            ui.scope_id().with("rename_save"),
             &t!("devtabs.save"),
-            crate::ui::components::ButtonKind::Primary,
+            ButtonKind::Primary,
         );
-        let cancel_resp = crate::ui::components::button_at(
+        let cancel_resp = components::button_at(
             ui,
             cancel_rect,
-            ui.id().with("rename_cancel"),
+            ui.scope_id().with("rename_cancel"),
             &t!("devtabs.cancel"),
-            crate::ui::components::ButtonKind::Ghost,
+            ButtonKind::Secondary,
         );
 
         if commit || save_resp.clicked() {
             let trimmed = ui_state.rename_val.trim().to_string();
             if !trimmed.is_empty() {
-                crate::runtime::ipc::send(
+                ipc::send(
                     cmd,
-                    halod_shared::commands::DaemonCommand::SetDeviceName {
+                    halod_shared::commands::DaemonCommand::Device {
                         device_id: dev.id.clone(),
-                        name: trimmed,
+                        op: DeviceOp::SetDeviceName { name: trimmed },
                     },
                 );
             }
@@ -110,21 +113,21 @@ pub(super) fn header(
     } else {
         let name_w = ui
             .painter()
-            .layout_no_wrap(dev.name.clone(), theme::bold(22.0), theme::TEXT)
+            .layout_no_wrap(dev.name.clone(), theme::semibold(24.0), theme::TEXT)
             .size()
             .x;
 
         let btn_rect = Rect::from_center_size(
-            Pos2::new(tx + name_w + 22.0, cy - 10.0),
+            Pos2::new(tx + name_w + 22.0, name_cy),
             Vec2::new(28.0, 28.0),
         );
-        let btn_id = egui::Id::new("device_rename_btn").with(&dev.id);
+        let btn_id = egui::Id::unique("device_rename_btn").with(&dev.id);
         let btn_resp = ui.interact(btn_rect, btn_id, egui::Sense::click());
         let t = ui
             .ctx()
             .animate_bool_with_time(btn_resp.id, btn_resp.hovered(), 0.12);
-        let icon_col = theme::lerp_color(theme::TEXT_MUT, theme::CYAN, t);
-        let border_col = theme::lerp_color(theme::BORDER, theme::hex(0x234650), t);
+        let icon_col = theme::lerp_color(theme::TEXT_DIM, theme::TEXT, t);
+        let border_col = theme::lerp_color(theme::BORDER_INNER, theme::TEXT_FAINT2, t);
         if btn_resp.hovered() {
             ui.ctx().set_cursor_icon(egui::CursorIcon::PointingHand);
         }
@@ -136,42 +139,71 @@ pub(super) fn header(
 
         let p = ui.painter();
         p.text(
-            Pos2::new(tx, cy - 10.0),
+            Pos2::new(tx, name_cy),
             Align2::LEFT_CENTER,
             &dev.name,
-            theme::bold(22.0),
+            theme::semibold(24.0),
             theme::TEXT,
         );
-        p.rect_filled(btn_rect, 8.0, theme::hex(0x10141d));
         p.rect_stroke(
             btn_rect,
-            8.0,
+            theme::RADIUS_SM,
             Stroke::new(1.0, border_col),
             egui::StrokeKind::Middle,
         );
-        crate::ui::icons::draw_pencil(p, btn_rect, icon_col);
+        icons::draw_pencil(p, btn_rect.shrink(7.0), icon_col);
     }
 
-    // ── Subtitle + status chips (always visible) ──────────────────────────────
-    let leds = led_count(dev);
-    let mut sub = crate::domain::models::device::type_label(dev).to_string();
-    if leds > 0 {
-        sub.push_str(&format!(" · {leds} LEDs"));
-    }
-    let vm = format!("{} {}", dev.vendor, dev.model);
-    if !vm.trim().is_empty() {
-        sub.push_str(&format!(" · {}", vm.trim()));
-    }
     let p = ui.painter();
     p.text(
-        Pos2::new(tx, cy + if editing_rename { 13.0 } else { 11.0 }),
+        Pos2::new(tx, cy + 17.0),
         Align2::LEFT_CENTER,
-        sub,
-        theme::body_md(),
-        theme::TEXT_MUT,
+        header_meta(dev),
+        theme::body(14.0),
+        theme::TEXT_DIM,
     );
-    status_chips(p, rect, dev);
-    ui.add_space(theme::SPACE_7);
+    if !dev.connected {
+        components::paint_tag(
+            p,
+            Pos2::new(rect.right(), cy),
+            &t!("devtabs.offline"),
+            TagTone::Danger,
+        );
+    }
+}
+
+/// "Type · link · headline stat", e.g. `CPU cooler · USB · 24 LEDs` or
+/// `Headset · Wireless · Battery 64%`.
+fn header_meta(dev: &WireDevice) -> String {
+    let link = if connection(dev).or(dev.connection_type) == Some(ConnectionType::Wireless) {
+        t!("devtabs.wireless").to_string()
+    } else {
+        device::transport_label(dev)
+    };
+    let mut parts = vec![device::type_label(dev).to_string(), link];
+    let all = batteries(dev);
+    let multi = all.len() > 1;
+    let known: Vec<_> = all
+        .into_iter()
+        .filter(|b| !matches!(b.status, BatteryStatus::Unknown))
+        .collect();
+    for b in &known {
+        let label = if multi && !b.label.is_empty() {
+            b.label.clone()
+        } else {
+            t!("devtabs.battery").to_string()
+        };
+        parts.push(if matches!(b.status, BatteryStatus::Charging) {
+            format!("{label} {}% {}", b.level, t!("devtabs.charging_bolt"))
+        } else {
+            format!("{label} {}%", b.level)
+        });
+    }
+    let leds = led_count(dev);
+    if known.is_empty() && leds > 0 {
+        parts.push(t!("devtabs.led_count", n = leds).to_string());
+    }
+    parts.join(" · ")
 }
 
 /// All reported battery cells across the device's `Battery` capability.
@@ -192,139 +224,6 @@ fn connection(dev: &WireDevice) -> Option<ConnectionType> {
         DeviceCapability::Connection(s) => Some(s.connection_type),
         _ => None,
     })
-}
-
-pub(super) fn status_chips(p: &egui::Painter, rect: Rect, dev: &WireDevice) {
-    let cy = rect.center().y;
-    // Only show a status chip when offline; connected devices with no battery
-    // need no label ("Connected" is visually redundant — you're on its page).
-    if !dev.connected {
-        let st = p.text(
-            Pos2::new(rect.right(), cy),
-            Align2::RIGHT_CENTER,
-            t!("devtabs.offline"),
-            theme::body_sm(),
-            theme::OFFLINE_TEXT,
-        );
-        p.circle_filled(Pos2::new(st.left() - 9.0, cy), 3.5, theme::OFFLINE);
-        return;
-    }
-
-    let mut right = rect.right();
-    // Filter to cells with a known status; Unknown means the wireless link is
-    // down (headset off) — show nothing rather than stale 0% data.
-    let known: Vec<_> = batteries(dev)
-        .into_iter()
-        .filter(|b| !matches!(b.status, BatteryStatus::Unknown))
-        .collect();
-    let multi = known.len() > 1;
-    // Lay chips right-to-left so the first cell sits leftmost.
-    for (i, b) in known.iter().enumerate().rev() {
-        let label = if multi {
-            t!("devtabs.battery_n", n = i + 1).to_string()
-        } else {
-            t!("devtabs.battery").to_string()
-        };
-        right = battery_chip(p, right, cy, b, &label) - 8.0;
-    }
-    if let Some(ct) = connection(dev) {
-        connection_chip(p, right, cy, ct);
-    }
-}
-
-/// Draw a status-chip pill (background + border) of width `w` with its right
-/// edge at `right`, returning the pill rect for glyph/text placement.
-fn chip_pill(p: &egui::Painter, right: f32, cy: f32, w: f32) -> Rect {
-    let pill = Rect::from_min_size(Pos2::new(right - w, cy - 17.0), Vec2::new(w, 34.0));
-    theme::paint_card_rect(p, pill, 9.0);
-    pill
-}
-
-/// Draw the wired/wireless chip with its right edge at `right`.
-fn connection_chip(p: &egui::Painter, right: f32, cy: f32, ct: ConnectionType) {
-    let wireless = matches!(ct, ConnectionType::Wireless);
-    let col = if wireless {
-        theme::STAT_CYAN
-    } else {
-        theme::TEXT_MUT
-    };
-    let pill = chip_pill(p, right, cy, 140.0);
-    let body = Rect::from_min_size(
-        Pos2::new(pill.left() + 12.0, cy - 6.0),
-        Vec2::new(18.0, 12.0),
-    );
-    crate::ui::components::connection_glyph(p, body, wireless, col);
-
-    let tx = body.right() + 12.0;
-    p.text(
-        Pos2::new(tx, cy - 8.0),
-        Align2::LEFT_CENTER,
-        t!("devtabs.info_connection"),
-        theme::micro(),
-        theme::TEXT_FAINT,
-    );
-    p.text(
-        Pos2::new(tx, cy + 7.0),
-        Align2::LEFT_CENTER,
-        if wireless {
-            t!("devtabs.wireless")
-        } else {
-            t!("devtabs.wired")
-        },
-        theme::subhead(),
-        a(col, 0.95),
-    );
-}
-
-/// Draw one battery chip (glyph + percentage + label/state) with its right edge
-/// at `right`. Returns the chip's left edge.
-fn battery_chip(p: &egui::Painter, right: f32, cy: f32, b: &Battery, label: &str) -> f32 {
-    let charging = matches!(b.status, BatteryStatus::Charging);
-    let col = theme::battery_color(b.level, charging);
-    let pill = chip_pill(p, right, cy, 150.0);
-    let body = Rect::from_min_size(
-        Pos2::new(pill.left() + 12.0, cy - 6.0),
-        Vec2::new(22.0, 12.0),
-    );
-    crate::ui::components::battery_glyph(p, body, b.level, col);
-
-    let tx = body.right() + 12.0;
-    p.text(
-        Pos2::new(tx, cy - 8.0),
-        Align2::LEFT_CENTER,
-        label,
-        theme::micro(),
-        theme::TEXT_FAINT,
-    );
-    let pct = p.text(
-        Pos2::new(tx, cy + 7.0),
-        Align2::LEFT_CENTER,
-        format!("{}%", b.level),
-        theme::value(),
-        theme::TEXT_BRIGHT,
-    );
-    let state = if charging {
-        t!("devtabs.charging_bolt")
-    } else {
-        battery_status_label(&b.status)
-    };
-    p.text(
-        Pos2::new(pct.right() + 6.0, cy + 7.0),
-        Align2::LEFT_CENTER,
-        state,
-        theme::body(9.5),
-        a(col, 0.95),
-    );
-    pill.left()
-}
-
-/// Greyed "charging"/"discharging" helper kept for battery cards.
-pub(super) fn battery_status_label(s: &BatteryStatus) -> std::borrow::Cow<'static, str> {
-    match s {
-        BatteryStatus::Charging => t!("devtabs.charging"),
-        BatteryStatus::Discharging => t!("devtabs.discharging"),
-        BatteryStatus::Unknown => t!("devtabs.unknown"),
-    }
 }
 
 #[cfg(test)]
@@ -385,5 +284,50 @@ mod tests {
         assert_eq!(led_count(&dev(DeviceType::Keyboard, vec![cap])), 8);
         // No RGB capability → zero.
         assert_eq!(led_count(&dev(DeviceType::Other, vec![])), 0);
+    }
+
+    #[test]
+    fn meta_reads_type_link_then_battery_or_leds() {
+        use halod_shared::types::{ConnectionStatus, DeviceType};
+        let mut headset = dev(
+            DeviceType::Headset,
+            vec![
+                DeviceCapability::Connection(ConnectionStatus {
+                    connection_type: ConnectionType::Wireless,
+                }),
+                DeviceCapability::Battery(vec![Battery {
+                    key: "main".into(),
+                    label: "Battery".into(),
+                    level: 64,
+                    status: BatteryStatus::Discharging,
+                }]),
+            ],
+        );
+        headset.transport = Some("hid".into());
+        assert_eq!(header_meta(&headset), "Headset · Wireless · Battery 64%");
+
+        let cell = |key: &str, label: &str, level, status| Battery {
+            key: key.into(),
+            label: label.into(),
+            level,
+            status,
+        };
+        headset.capabilities[1] = DeviceCapability::Battery(vec![
+            cell("headset", "Headset", 80, BatteryStatus::Discharging),
+            cell("slot", "Charging Slot", 0, BatteryStatus::Unknown),
+        ]);
+        assert_eq!(header_meta(&headset), "Headset · Wireless · Headset 80%");
+        headset.capabilities[1] = DeviceCapability::Battery(vec![
+            cell("headset", "Headset", 80, BatteryStatus::Discharging),
+            cell("slot", "Charging Slot", 100, BatteryStatus::Discharging),
+        ]);
+        assert_eq!(
+            header_meta(&headset),
+            "Headset · Wireless · Headset 80% · Charging Slot 100%"
+        );
+
+        let mut hub = dev(DeviceType::Hub, vec![]);
+        hub.transport = Some("smbus".into());
+        assert_eq!(header_meta(&hub), "Controller · SMBus");
     }
 }

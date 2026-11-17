@@ -7,14 +7,16 @@ use halod_shared::types::{ButtonAction, ButtonMapping};
 use tokio::sync::broadcast::error::RecvError;
 
 use crate::application::state::{AppState, ButtonEvent};
+use crate::application::usecases::input::runtime;
 use crate::domain::input::engine::action_executor::ActionExecutor;
+use halod_shared::ids::DeviceId;
 
 #[derive(Debug)]
 struct PressedAction {
-    device_id: String,
+    device_id: DeviceId,
     cid: u16,
     resolved_action: ButtonAction,
-    pressed_at: std::time::Instant,
+    pressed_at: tokio::time::Instant,
 }
 
 /// Momentary-DPI lifecycle for one (device_id, cid); no entry means Idle.
@@ -57,8 +59,8 @@ impl KeyRemapEngine {
         let mut shutdown_rx = engine.app.input.shutdown_rx();
         tokio::spawn(async move {
             // (device_id, cid) → DPI saved before a momentary press
-            let mut held_momentary: HashMap<(String, u16), MomentaryDpiState> = HashMap::new();
-            let mut pressed: HashMap<(String, u16), PressedAction> = HashMap::new();
+            let mut held_momentary: HashMap<(DeviceId, u16), MomentaryDpiState> = HashMap::new();
+            let mut pressed: HashMap<(DeviceId, u16), PressedAction> = HashMap::new();
             loop {
                 let event = match tokio::select! {
                     event = rx.recv() => Some(event),
@@ -96,7 +98,7 @@ impl KeyRemapEngine {
     async fn release_pressed(
         &self,
         pa: PressedAction,
-        held: &mut HashMap<(String, u16), MomentaryDpiState>,
+        held: &mut HashMap<(DeviceId, u16), MomentaryDpiState>,
         outcome: ReleaseOutcome,
     ) {
         log::trace!(
@@ -113,8 +115,8 @@ impl KeyRemapEngine {
     /// Cancel every held action and any in-flight macro (lag recovery, shutdown).
     async fn release_all(
         &self,
-        pressed: &mut HashMap<(String, u16), PressedAction>,
-        held: &mut HashMap<(String, u16), MomentaryDpiState>,
+        pressed: &mut HashMap<(DeviceId, u16), PressedAction>,
+        held: &mut HashMap<(DeviceId, u16), MomentaryDpiState>,
     ) {
         let drained: Vec<PressedAction> = pressed.drain().map(|(_, pa)| pa).collect();
         for pa in drained {
@@ -129,8 +131,8 @@ impl KeyRemapEngine {
     async fn process_event(
         &self,
         event: ButtonEvent,
-        held: &mut HashMap<(String, u16), MomentaryDpiState>,
-        pressed: &mut HashMap<(String, u16), PressedAction>,
+        held: &mut HashMap<(DeviceId, u16), MomentaryDpiState>,
+        pressed: &mut HashMap<(DeviceId, u16), PressedAction>,
     ) {
         self.retry_pending_dpi_restores(&event.device_id, held)
             .await;
@@ -176,7 +178,7 @@ impl KeyRemapEngine {
                     device_id: event.device_id.clone(),
                     cid,
                     resolved_action: action.clone(),
-                    pressed_at: std::time::Instant::now(),
+                    pressed_at: tokio::time::Instant::now(),
                 },
             );
             self.handle_button(&action, true, cid, &event.device_id, held)
@@ -187,13 +189,13 @@ impl KeyRemapEngine {
     /// Retry any `RestorePending` momentary-DPI entries for `device_id`.
     async fn retry_pending_dpi_restores(
         &self,
-        device_id: &str,
-        held: &mut HashMap<(String, u16), MomentaryDpiState>,
+        device_id: &DeviceId,
+        held: &mut HashMap<(DeviceId, u16), MomentaryDpiState>,
     ) {
         let pending: Vec<u16> = held
             .iter()
             .filter(|(k, v)| {
-                k.0 == device_id && matches!(v, MomentaryDpiState::RestorePending { .. })
+                k.0 == *device_id && matches!(v, MomentaryDpiState::RestorePending { .. })
             })
             .map(|(k, _)| k.1)
             .collect();
@@ -205,11 +207,11 @@ impl KeyRemapEngine {
     /// On failure, stays `RestorePending` for a later opportunistic retry.
     async fn restore_momentary_dpi(
         &self,
-        device_id: &str,
+        device_id: &DeviceId,
         cid: u16,
-        held: &mut HashMap<(String, u16), MomentaryDpiState>,
+        held: &mut HashMap<(DeviceId, u16), MomentaryDpiState>,
     ) {
-        let key = (device_id.to_string(), cid);
+        let key = (device_id.clone(), cid);
         let original = match held.get(&key) {
             Some(
                 MomentaryDpiState::Applied { original, .. }
@@ -230,12 +232,11 @@ impl KeyRemapEngine {
             held.insert(key, MomentaryDpiState::RestorePending { original });
         } else {
             held.remove(&key);
-            crate::application::usecases::input::runtime::device_changed(&self.app, device_id)
-                .await;
+            runtime::device_changed(&self.app, device_id).await;
         }
     }
 
-    async fn get_mappings(&self, device_id: &str) -> Option<Vec<ButtonMapping>> {
+    async fn get_mappings(&self, device_id: &DeviceId) -> Option<Vec<ButtonMapping>> {
         let device = self.app.find_device_by_id(device_id).await?;
         Some(device.as_key_remap()?.get_key_remap_status().await.mappings)
     }
@@ -257,8 +258,8 @@ impl KeyRemapEngine {
         action: &ButtonAction,
         pressed: bool,
         cid: u16,
-        device_id: &str,
-        held: &mut HashMap<(String, u16), MomentaryDpiState>,
+        device_id: &DeviceId,
+        held: &mut HashMap<(DeviceId, u16), MomentaryDpiState>,
     ) {
         match (action, pressed) {
             (ButtonAction::LayerShift, pressed) => {
@@ -287,16 +288,13 @@ impl KeyRemapEngine {
                                 log::warn!("KeyRemapEngine: momentary DPI press: {e}");
                             } else {
                                 held.insert(
-                                    (device_id.to_string(), cid),
+                                    (device_id.clone(), cid),
                                     MomentaryDpiState::Applied {
                                         original: status.current_dpi,
                                         temporary: *dpi,
                                     },
                                 );
-                                crate::application::usecases::input::runtime::device_changed(
-                                    &self.app, device_id,
-                                )
-                                .await;
+                                runtime::device_changed(&self.app, device_id).await;
                             }
                         }
                     }
@@ -374,7 +372,13 @@ mod tests {
         let mut held = HashMap::new();
 
         engine
-            .handle_button(&ButtonAction::LayerShift, true, 0, "dev", &mut held)
+            .handle_button(
+                &ButtonAction::LayerShift,
+                true,
+                0,
+                &"dev".parse().unwrap(),
+                &mut held,
+            )
             .await;
 
         assert!(engine.layer_shift_active());
@@ -383,12 +387,18 @@ mod tests {
     #[tokio::test]
     async fn layer_shift_release_clears_active_flag() {
         let app = Arc::new(AppState::new(Config::default()));
-        app.input.layer_shift_press("dev", 0);
+        app.input.layer_shift_press(&"dev".parse().unwrap(), 0);
         let engine = test_engine(Arc::clone(&app));
         let mut held = HashMap::new();
 
         engine
-            .handle_button(&ButtonAction::LayerShift, false, 0, "dev", &mut held)
+            .handle_button(
+                &ButtonAction::LayerShift,
+                false,
+                0,
+                &"dev".parse().unwrap(),
+                &mut held,
+            )
             .await;
 
         assert!(!engine.layer_shift_active());
@@ -402,13 +412,31 @@ mod tests {
 
         // Double-fire the same token, then release once.
         engine
-            .handle_button(&ButtonAction::LayerShift, true, 0x50, "dev", &mut held)
+            .handle_button(
+                &ButtonAction::LayerShift,
+                true,
+                0x50,
+                &"dev".parse().unwrap(),
+                &mut held,
+            )
             .await;
         engine
-            .handle_button(&ButtonAction::LayerShift, true, 0x50, "dev", &mut held)
+            .handle_button(
+                &ButtonAction::LayerShift,
+                true,
+                0x50,
+                &"dev".parse().unwrap(),
+                &mut held,
+            )
             .await;
         engine
-            .handle_button(&ButtonAction::LayerShift, false, 0x50, "dev", &mut held)
+            .handle_button(
+                &ButtonAction::LayerShift,
+                false,
+                0x50,
+                &"dev".parse().unwrap(),
+                &mut held,
+            )
             .await;
 
         assert!(
@@ -430,13 +458,13 @@ mod tests {
                 &ButtonAction::MomentaryDpi { dpi: 1600 },
                 true,
                 0x10,
-                "dev1",
+                &"dev1".parse().unwrap(),
                 &mut held,
             )
             .await;
 
         assert_eq!(
-            held.get(&("dev1".to_string(), 0x10)),
+            held.get(&("dev1".parse().unwrap(), 0x10)),
             Some(&MomentaryDpiState::Applied {
                 original: 800,
                 temporary: 1600,
@@ -444,7 +472,7 @@ mod tests {
             "restore point must be the initial DPI"
         );
         assert_eq!(
-            *dev.dpi_direct_last.as_ref().unwrap().lock().unwrap(),
+            *dev.dpi_direct_last.as_ref().unwrap().lock(),
             Some(1600),
             "set_dpi_direct must have been called with the target DPI"
         );
@@ -458,7 +486,7 @@ mod tests {
         let engine = test_engine(Arc::clone(&app));
         let mut held = HashMap::new();
         held.insert(
-            ("dev1".to_string(), 0x10u16),
+            ("dev1".parse().unwrap(), 0x10u16),
             MomentaryDpiState::Applied {
                 original: 800,
                 temporary: 1600,
@@ -470,14 +498,14 @@ mod tests {
                 &ButtonAction::MomentaryDpi { dpi: 1600 },
                 false,
                 0x10,
-                "dev1",
+                &"dev1".parse().unwrap(),
                 &mut held,
             )
             .await;
 
         assert!(held.is_empty(), "held entry must be removed on release");
         assert_eq!(
-            *dev.dpi_direct_last.as_ref().unwrap().lock().unwrap(),
+            *dev.dpi_direct_last.as_ref().unwrap().lock(),
             Some(800),
             "set_dpi_direct must restore the saved DPI"
         );
@@ -495,7 +523,7 @@ mod tests {
                 &ButtonAction::MomentaryDpi { dpi: 1600 },
                 false,
                 0x10,
-                "dev1",
+                &"dev1".parse().unwrap(),
                 &mut held,
             )
             .await;
@@ -516,26 +544,26 @@ mod tests {
                 &ButtonAction::MomentaryDpi { dpi: 1600 },
                 true,
                 0x10,
-                "dev1",
+                &"dev1".parse().unwrap(),
                 &mut held,
             )
             .await;
 
         // External change to the "live" hardware DPI after the press.
-        *dev.dpi_direct_last.as_ref().unwrap().lock().unwrap() = Some(3200);
+        *dev.dpi_direct_last.as_ref().unwrap().lock() = Some(3200);
 
         engine
             .handle_button(
                 &ButtonAction::MomentaryDpi { dpi: 1600 },
                 false,
                 0x10,
-                "dev1",
+                &"dev1".parse().unwrap(),
                 &mut held,
             )
             .await;
 
         assert_eq!(
-            *dev.dpi_direct_last.as_ref().unwrap().lock().unwrap(),
+            *dev.dpi_direct_last.as_ref().unwrap().lock(),
             Some(800),
             "release must restore the held app-state value, not the live hardware value"
         );
@@ -552,7 +580,7 @@ mod tests {
                 &ButtonAction::MomentaryDpi { dpi: 1600 },
                 true,
                 0x10,
-                "dev1",
+                &"dev1".parse().unwrap(),
                 &mut held,
             )
             .await;
@@ -564,12 +592,12 @@ mod tests {
                 &ButtonAction::MomentaryDpi { dpi: 1600 },
                 false,
                 0x10,
-                "dev1",
+                &"dev1".parse().unwrap(),
                 &mut held,
             )
             .await;
         assert_eq!(
-            held.get(&("dev1".to_string(), 0x10)),
+            held.get(&("dev1".parse().unwrap(), 0x10)),
             Some(&MomentaryDpiState::RestorePending { original: 800 }),
             "a failed restore must stay pending, not strand silently"
         );
@@ -582,7 +610,7 @@ mod tests {
         engine
             .process_event(
                 ButtonEvent {
-                    device_id: "dev1".to_string(),
+                    device_id: "dev1".parse().unwrap(),
                     pressed: vec![],
                     released: vec![],
                 },
@@ -594,10 +622,7 @@ mod tests {
             held.is_empty(),
             "retry must succeed and clear the pending entry"
         );
-        assert_eq!(
-            *dev.dpi_direct_last.as_ref().unwrap().lock().unwrap(),
-            Some(800)
-        );
+        assert_eq!(*dev.dpi_direct_last.as_ref().unwrap().lock(), Some(800));
     }
 
     #[tokio::test]
@@ -617,7 +642,7 @@ mod tests {
             ),
         ];
         let app = Arc::new(AppState::new(Config::default()));
-        app.input.layer_shift_press("dev1", 0x50);
+        app.input.layer_shift_press(&"dev1".parse().unwrap(), 0x50);
         let dev = Arc::new(MockDevice::new("dev1").with_key_remap_mappings(mappings));
         app.device_registry
             .write()
@@ -627,16 +652,16 @@ mod tests {
         let engine = test_engine(Arc::clone(&app));
         let mut held = HashMap::new();
         let mut pressed = HashMap::from([(
-            ("dev1".to_string(), 0x50),
+            ("dev1".parse().unwrap(), 0x50),
             PressedAction {
-                device_id: "dev1".to_string(),
+                device_id: "dev1".parse().unwrap(),
                 cid: 0x50,
                 resolved_action: ButtonAction::LayerShift,
-                pressed_at: std::time::Instant::now(),
+                pressed_at: tokio::time::Instant::now(),
             },
         )]);
         let event = ButtonEvent {
-            device_id: "dev1".to_string(),
+            device_id: "dev1".parse().unwrap(),
             pressed: vec![0x51],
             released: vec![0x50],
         };
@@ -655,18 +680,42 @@ mod tests {
         let mut held = HashMap::new();
 
         engine
-            .handle_button(&ButtonAction::LayerShift, true, 0x50, "dev_a", &mut held)
+            .handle_button(
+                &ButtonAction::LayerShift,
+                true,
+                0x50,
+                &"dev_a".parse().unwrap(),
+                &mut held,
+            )
             .await;
         engine
-            .handle_button(&ButtonAction::LayerShift, true, 0x50, "dev_b", &mut held)
+            .handle_button(
+                &ButtonAction::LayerShift,
+                true,
+                0x50,
+                &"dev_b".parse().unwrap(),
+                &mut held,
+            )
             .await;
         engine
-            .handle_button(&ButtonAction::LayerShift, false, 0x50, "dev_a", &mut held)
+            .handle_button(
+                &ButtonAction::LayerShift,
+                false,
+                0x50,
+                &"dev_a".parse().unwrap(),
+                &mut held,
+            )
             .await;
         assert!(engine.layer_shift_active(), "dev_b's token is still held");
 
         engine
-            .handle_button(&ButtonAction::LayerShift, false, 0x50, "dev_b", &mut held)
+            .handle_button(
+                &ButtonAction::LayerShift,
+                false,
+                0x50,
+                &"dev_b".parse().unwrap(),
+                &mut held,
+            )
             .await;
         assert!(!engine.layer_shift_active());
     }
@@ -678,18 +727,42 @@ mod tests {
         let mut held = HashMap::new();
 
         engine
-            .handle_button(&ButtonAction::LayerShift, false, 0x50, "dev", &mut held)
+            .handle_button(
+                &ButtonAction::LayerShift,
+                false,
+                0x50,
+                &"dev".parse().unwrap(),
+                &mut held,
+            )
             .await;
         assert!(!engine.layer_shift_active());
 
         engine
-            .handle_button(&ButtonAction::LayerShift, true, 0x50, "dev", &mut held)
+            .handle_button(
+                &ButtonAction::LayerShift,
+                true,
+                0x50,
+                &"dev".parse().unwrap(),
+                &mut held,
+            )
             .await;
         engine
-            .handle_button(&ButtonAction::LayerShift, false, 0x50, "dev", &mut held)
+            .handle_button(
+                &ButtonAction::LayerShift,
+                false,
+                0x50,
+                &"dev".parse().unwrap(),
+                &mut held,
+            )
             .await;
         engine
-            .handle_button(&ButtonAction::LayerShift, false, 0x50, "dev", &mut held)
+            .handle_button(
+                &ButtonAction::LayerShift,
+                false,
+                0x50,
+                &"dev".parse().unwrap(),
+                &mut held,
+            )
             .await;
         assert!(
             !engine.layer_shift_active(),
@@ -726,7 +799,7 @@ mod tests {
 
         // Step 1: press LayerShift on device A
         let event_a = ButtonEvent {
-            device_id: "dev_a".to_string(),
+            device_id: "dev_a".parse().unwrap(),
             pressed: vec![0x50],
             released: vec![],
         };
@@ -735,7 +808,7 @@ mod tests {
 
         // Step 2: press button on device B — must see layer_shift=true
         let event_b = ButtonEvent {
-            device_id: "dev_b".to_string(),
+            device_id: "dev_b".parse().unwrap(),
             pressed: vec![0x51],
             released: vec![],
         };
@@ -747,7 +820,7 @@ mod tests {
 
         // Step 3: release LayerShift on device A
         let event_a_rel = ButtonEvent {
-            device_id: "dev_a".to_string(),
+            device_id: "dev_a".parse().unwrap(),
             pressed: vec![],
             released: vec![0x50],
         };
@@ -773,7 +846,8 @@ mod tests {
             shifted.clone(),
         )];
         let app = Arc::new(AppState::new(Config::default()));
-        app.input.layer_shift_press("shift-btn", 0x50);
+        app.input
+            .layer_shift_press(&"shift-btn".parse().unwrap(), 0x50);
         let dev = Arc::new(MockDevice::new("dev1").with_key_remap_mappings(mappings));
         app.device_registry
             .write()
@@ -788,7 +862,7 @@ mod tests {
         engine
             .process_event(
                 ButtonEvent {
-                    device_id: "dev1".to_string(),
+                    device_id: "dev1".parse().unwrap(),
                     pressed: vec![0x51],
                     released: vec![],
                 },
@@ -798,20 +872,21 @@ mod tests {
             .await;
         assert_eq!(
             pressed
-                .get(&("dev1".to_string(), 0x51))
+                .get(&("dev1".parse().unwrap(), 0x51))
                 .map(|pa| &pa.resolved_action),
             Some(&shifted),
             "press must store the shifted action"
         );
 
         // Layer Shift drops before the button is released.
-        app.input.layer_shift_release("shift-btn", 0x50);
+        app.input
+            .layer_shift_release(&"shift-btn".parse().unwrap(), 0x50);
 
         // Release 0x51 → must use the stored shifted action, and clear it.
         engine
             .process_event(
                 ButtonEvent {
-                    device_id: "dev1".to_string(),
+                    device_id: "dev1".parse().unwrap(),
                     pressed: vec![],
                     released: vec![0x51],
                 },
@@ -842,7 +917,7 @@ mod tests {
         let mut held = HashMap::new();
         let mut pressed = HashMap::new();
         let press = || ButtonEvent {
-            device_id: "dev1".to_string(),
+            device_id: "dev1".parse().unwrap(),
             pressed: vec![0x51],
             released: vec![],
         };
@@ -872,7 +947,7 @@ mod tests {
         let mut held = HashMap::new();
         let mut pressed = HashMap::new();
         let release = || ButtonEvent {
-            device_id: "dev1".to_string(),
+            device_id: "dev1".parse().unwrap(),
             pressed: vec![],
             released: vec![0x51],
         };
@@ -880,7 +955,7 @@ mod tests {
         engine
             .process_event(
                 ButtonEvent {
-                    device_id: "dev1".to_string(),
+                    device_id: "dev1".parse().unwrap(),
                     pressed: vec![0x51],
                     released: vec![],
                 },
@@ -910,12 +985,12 @@ mod tests {
         let mut pressed = HashMap::new();
         for cid in [1u16, 2] {
             pressed.insert(
-                ("dev1".to_string(), cid),
+                ("dev1".parse().unwrap(), cid),
                 PressedAction {
-                    device_id: "dev1".to_string(),
+                    device_id: "dev1".parse().unwrap(),
                     cid,
                     resolved_action: ButtonAction::Native,
-                    pressed_at: std::time::Instant::now(),
+                    pressed_at: tokio::time::Instant::now(),
                 },
             );
         }

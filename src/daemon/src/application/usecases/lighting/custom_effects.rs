@@ -11,9 +11,12 @@ use halod_shared::effect_designer::{validate_effect_name, DesignerParams, DESIGN
 use halod_shared::types::{EffectDef, EffectParamValue};
 
 use crate::application::state::AppState;
+use crate::config;
+use crate::domain::events::Change;
+use crate::util::fs;
 
 pub fn custom_effects_dir() -> std::path::PathBuf {
-    crate::config::config_dir().join("effects")
+    config::config_dir().join("effects")
 }
 
 fn effect_path(name: &str) -> std::path::PathBuf {
@@ -34,7 +37,7 @@ pub fn list_custom_effects() -> Vec<EffectDef> {
     paths.sort();
     if paths.len() > MAX_CUSTOM_EFFECTS {
         log::warn!(
-            "[RGB] {} custom-effect files exceed the {MAX_CUSTOM_EFFECTS} cap; ignoring the rest",
+            "{} custom-effect files exceed the {MAX_CUSTOM_EFFECTS} cap; ignoring the rest",
             paths.len()
         );
         paths.truncate(MAX_CUSTOM_EFFECTS);
@@ -45,10 +48,10 @@ pub fn list_custom_effects() -> Vec<EffectDef> {
         .filter_map(|path| {
             let stem = path.file_stem()?.to_str()?;
             if !validate_effect_name(stem) {
-                log::warn!("[RGB] ignoring custom effect with invalid name: {stem}");
+                log::warn!("ignoring custom effect with invalid name: {stem}");
                 return None;
             }
-            let raw = crate::config::read_bounded(&path, "custom effect").ok()?;
+            let raw = config::read_bounded(&path, "custom effect").ok()?;
             let mut def = serde_yaml::from_str::<EffectDef>(&raw).ok()?;
             def.params = DesignerParams::from_params(&def.params).to_params();
             def.effect_id = DESIGNER_EFFECT_ID.to_string();
@@ -80,11 +83,10 @@ pub async fn save_custom_effect(
     };
     let path = effect_path(&name);
     let yaml = serde_yaml::to_string(&def)?;
-    tokio::task::spawn_blocking(move || crate::util::fs::atomic_write(&path, &yaml)).await??;
-    log::info!("[RGB] saved custom effect '{name}'");
+    tokio::task::spawn_blocking(move || fs::atomic_write(&path, &yaml)).await??;
+    log::info!("saved custom effect '{name}'");
     app.lighting.custom_effects.refresh().await;
-    app.record_change(crate::domain::events::Change::LightingCatalog)
-        .await;
+    app.record_change(Change::LightingCatalog).await;
     Ok(())
 }
 
@@ -93,13 +95,12 @@ pub async fn delete_custom_effect(name: String, app: Arc<AppState>) -> Result<()
         anyhow::bail!("invalid effect name");
     }
     match tokio::fs::remove_file(effect_path(&name)).await {
-        Ok(()) => log::info!("[RGB] deleted custom effect '{name}'"),
+        Ok(()) => log::info!("deleted custom effect '{name}'"),
         Err(e) if e.kind() == std::io::ErrorKind::NotFound => {}
         Err(e) => return Err(e.into()),
     }
     app.lighting.custom_effects.refresh().await;
-    app.record_change(crate::domain::events::Change::LightingCatalog)
-        .await;
+    app.record_change(Change::LightingCatalog).await;
     Ok(())
 }
 
@@ -110,11 +111,7 @@ mod tests {
     #[tokio::test]
     #[allow(clippy::await_holding_lock)]
     async fn save_list_delete_cycle() {
-        let _guard = crate::test_support::HALOD_CONFIG_DIR_LOCK
-            .lock()
-            .unwrap_or_else(|e| e.into_inner());
-        let dir = tempfile::tempdir().unwrap();
-        unsafe { std::env::set_var("HALOD_CONFIG_DIR", dir.path()) };
+        let _dir = crate::test_support::tmp_config_dir();
 
         let app = Arc::new(AppState::new(crate::config::Config::default()));
         save_custom_effect("My Effect".into(), HashMap::new(), app.clone())
@@ -128,35 +125,23 @@ mod tests {
 
         delete_custom_effect("My Effect".into(), app).await.unwrap();
         assert!(list_custom_effects().is_empty());
-
-        unsafe { std::env::remove_var("HALOD_CONFIG_DIR") };
     }
 
     #[tokio::test]
     #[allow(clippy::await_holding_lock)]
     async fn delete_missing_effect_is_a_noop() {
-        let _guard = crate::test_support::HALOD_CONFIG_DIR_LOCK
-            .lock()
-            .unwrap_or_else(|e| e.into_inner());
-        let dir = tempfile::tempdir().unwrap();
-        unsafe { std::env::set_var("HALOD_CONFIG_DIR", dir.path()) };
+        let _dir = crate::test_support::tmp_config_dir();
 
         let app = Arc::new(AppState::new(crate::config::Config::default()));
         delete_custom_effect("nonexistent".into(), app)
             .await
             .unwrap();
-
-        unsafe { std::env::remove_var("HALOD_CONFIG_DIR") };
     }
 
     #[tokio::test]
     #[allow(clippy::await_holding_lock)]
     async fn save_clamps_out_of_range_params_before_writing_to_disk() {
-        let _guard = crate::test_support::HALOD_CONFIG_DIR_LOCK
-            .lock()
-            .unwrap_or_else(|e| e.into_inner());
-        let dir = tempfile::tempdir().unwrap();
-        unsafe { std::env::set_var("HALOD_CONFIG_DIR", dir.path()) };
+        let _dir = crate::test_support::tmp_config_dir();
 
         let app = Arc::new(AppState::new(crate::config::Config::default()));
         let mut params = HashMap::new();
@@ -168,8 +153,6 @@ mod tests {
         let listed = list_custom_effects();
         let saved = DesignerParams::from_params(&listed[0].params);
         assert_eq!(saved.speed, 100.0);
-
-        unsafe { std::env::remove_var("HALOD_CONFIG_DIR") };
     }
 
     #[test]

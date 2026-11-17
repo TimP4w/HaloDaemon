@@ -14,6 +14,8 @@ use std::sync::{Arc, Mutex};
 use std::time::Duration;
 
 use super::{present, quit, render_icon_rgba, TrayModel};
+use crate::domain::state::HideState;
+use crate::domain::topic_store::TopicStore;
 use crate::runtime::ipc::CommandTx;
 
 /// Longest gap between retries when the tray service keeps failing to register.
@@ -48,7 +50,7 @@ impl PlatformTray {
         ctx: &egui::Context,
         cmd: CommandTx,
         force_quit: Arc<AtomicBool>,
-        hide_state: Arc<crate::domain::state::HideState>,
+        hide_state: Arc<HideState>,
     ) -> Self {
         let handle: Arc<Mutex<Option<ksni::blocking::Handle<HalodTray>>>> =
             Arc::new(Mutex::new(None));
@@ -107,10 +109,7 @@ impl PlatformTray {
     /// Feed the windowless tray directly from daemon state. At login there may
     /// be no egui frame at all, and desktop event loops are free to coalesce
     /// repaint wakeups, so tray data must not depend on window rendering.
-    pub fn watch_state(
-        &self,
-        mut state: tokio::sync::watch::Receiver<crate::domain::topic_store::TopicStore>,
-    ) {
+    pub fn watch_state(&self, mut state: tokio::sync::watch::Receiver<TopicStore>) {
         let handle = self.handle.clone();
         let latest = self.latest.clone();
         std::thread::spawn(move || loop {
@@ -130,7 +129,7 @@ struct HalodTray {
     ctx: egui::Context,
     cmd: CommandTx,
     force_quit: Arc<AtomicBool>,
-    hide_state: Arc<crate::domain::state::HideState>,
+    hide_state: Arc<HideState>,
     battery_lines: Vec<String>,
     profiles: Vec<String>,
     active: String,
@@ -142,7 +141,7 @@ impl HalodTray {
         ctx: egui::Context,
         cmd: CommandTx,
         force_quit: Arc<AtomicBool>,
-        hide_state: Arc<crate::domain::state::HideState>,
+        hide_state: Arc<HideState>,
         seed: TrayModel,
     ) -> Self {
         Self {

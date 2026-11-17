@@ -5,6 +5,7 @@ use halod_shared::types::DiscoveryPhase;
 use std::{future::Future, pin::Pin, sync::Arc};
 
 use crate::domain::plugin::DeviceSpec;
+use halod_shared::ids::PluginId;
 
 /// Pending rediscovery work. This is distinct from [`DiscoveryScope`], which
 /// describes the scanner currently running. `Full` dominates and plugin sets
@@ -13,7 +14,7 @@ use crate::domain::plugin::DeviceSpec;
 pub enum PendingRediscovery {
     #[default]
     Clean,
-    PluginSet(std::collections::HashSet<String>),
+    PluginSet(std::collections::HashSet<PluginId>),
     Full,
 }
 
@@ -35,10 +36,14 @@ impl PendingRediscovery {
 #[cfg(test)]
 mod pending_rediscovery_tests {
     use super::PendingRediscovery;
+    use halod_shared::ids::PluginId;
     use std::collections::HashSet;
 
-    fn ids(values: &[&str]) -> HashSet<String> {
-        values.iter().map(|value| (*value).to_owned()).collect()
+    fn ids(values: &[&str]) -> HashSet<PluginId> {
+        values
+            .iter()
+            .map(|value| (*value).parse().unwrap())
+            .collect()
     }
 
     #[test]
@@ -59,6 +64,12 @@ mod pending_rediscovery_tests {
         pending.merge(PendingRediscovery::Full);
         pending.merge(PendingRediscovery::PluginSet(ids(&["b"])));
         assert_eq!(pending, PendingRediscovery::Full);
+    }
+
+    #[test]
+    fn scanners_run_in_the_advertised_order() {
+        let details: Vec<_> = super::SCANNERS.iter().map(|s| s.detail.clone()).collect();
+        assert_eq!(details, halod_shared::types::DISCOVERY_STEPS);
     }
 
     #[test]
@@ -140,7 +151,7 @@ pub enum DiscoveryScope {
     /// (captured before + after `reload_registry`, since a deleted plugin's
     /// specs aren't derivable afterwards).
     PluginSet {
-        plugin_ids: std::collections::HashSet<String>,
+        plugin_ids: std::collections::HashSet<PluginId>,
         filter: Arc<DiscoveryFilter>,
     },
     /// An unscoped full rescan is in flight.
@@ -266,7 +277,8 @@ pub async fn discover_handle(
     if scoped && !app.handle_in_scope(&handle).await {
         return;
     }
-    if let Some(device) = app.registry.make_device(app, &handle) {
+    let known = app.device_registry.known_ids().await;
+    if let Some(device) = app.registry.make_device_unless_known(app, &handle, &known) {
         crate::application::usecases::registry::registration::register_device_and_children(
             app, device,
         )

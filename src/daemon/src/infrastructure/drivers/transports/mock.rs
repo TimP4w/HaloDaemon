@@ -4,10 +4,9 @@ pub mod test_transport {
     use crate::infrastructure::drivers::transports::{HidTransport, Transport};
     use crate::infrastructure::drivers::Metered;
     use anyhow::Result;
-    use async_trait::async_trait;
     use halod_shared::types::{WriteRateLimit, WriteRateStatus};
+    use parking_lot::Mutex;
     use std::collections::VecDeque;
-    use tokio::sync::Mutex;
 
     pub struct MockTransport {
         pub responses: Mutex<VecDeque<Vec<u8>>>,
@@ -31,28 +30,25 @@ pub mod test_transport {
         }
     }
 
-    #[async_trait]
     impl Transport for MockTransport {
-        async fn write(&self, data: &[u8]) -> Result<()> {
-            self.rate.write_access(data.len()).await?;
-            self.written.lock().await.push(data.to_vec());
+        fn write(&self, data: &[u8]) -> Result<()> {
+            self.rate.write_access(data.len())?;
+            self.written.lock().push(data.to_vec());
             Ok(())
         }
 
-        async fn read(&self, _size: usize) -> Result<Vec<u8>> {
+        fn read(&self, _size: usize) -> Result<Vec<u8>> {
             self.responses
                 .lock()
-                .await
                 .pop_front()
                 .ok_or_else(|| anyhow::anyhow!("MockTransport: no more responses queued"))
         }
 
-        async fn write_then_read(&self, data: &[u8], _size: usize) -> Result<Vec<u8>> {
-            self.rate.write_access(data.len()).await?;
-            self.written.lock().await.push(data.to_vec());
+        fn write_then_read(&self, data: &[u8], _size: usize) -> Result<Vec<u8>> {
+            self.rate.write_access(data.len())?;
+            self.written.lock().push(data.to_vec());
             self.responses
                 .lock()
-                .await
                 .pop_front()
                 .ok_or_else(|| anyhow::anyhow!("MockTransport: no more responses queued"))
         }
@@ -70,77 +66,72 @@ pub mod test_transport {
         }
     }
 
-    #[async_trait]
     impl HidTransport for MockTransport {
-        async fn feature_exchange(&self, data: &[u8], _response_size: usize) -> Result<Vec<u8>> {
-            self.rate.write_access(data.len()).await?;
-            self.written.lock().await.push(data.to_vec());
+        fn feature_exchange(&self, data: &[u8], _response_size: usize) -> Result<Vec<u8>> {
+            self.rate.write_access(data.len())?;
+            self.written.lock().push(data.to_vec());
             self.responses
                 .lock()
-                .await
                 .pop_front()
                 .ok_or_else(|| anyhow::anyhow!("MockTransport: no more responses queued"))
         }
 
-        async fn send_feature_report(&self, data: &[u8]) -> Result<()> {
-            self.rate.write_access(data.len()).await?;
-            self.written.lock().await.push(data.to_vec());
+        fn send_feature_report(&self, data: &[u8]) -> Result<()> {
+            self.rate.write_access(data.len())?;
+            self.written.lock().push(data.to_vec());
             Ok(())
         }
 
-        async fn get_feature_report(&self, _report_id: u8, _size: usize) -> Result<Vec<u8>> {
+        fn get_feature_report(&self, _report_id: u8, _size: usize) -> Result<Vec<u8>> {
             self.responses
                 .lock()
-                .await
                 .pop_front()
                 .ok_or_else(|| anyhow::anyhow!("MockTransport: no more responses queued"))
         }
 
-        async fn get_input_report(&self, _report_id: u8, _size: usize) -> Result<Vec<u8>> {
+        fn get_input_report(&self, _report_id: u8, _size: usize) -> Result<Vec<u8>> {
             self.responses
                 .lock()
-                .await
                 .pop_front()
                 .ok_or_else(|| anyhow::anyhow!("MockTransport: no more responses queued"))
         }
 
-        async fn defer_event(&self, _data: &[u8]) -> Result<()> {
+        fn defer_event(&self, _data: &[u8]) -> Result<()> {
             Ok(())
         }
 
-        async fn write_companion(&self, _data: &[u8]) -> Result<()> {
+        fn write_companion(&self, _data: &[u8]) -> Result<()> {
             anyhow::bail!("MockTransport: no companion collection")
         }
 
-        async fn read_companion(&self, _size: usize) -> Result<Vec<u8>> {
+        fn read_companion(&self, _size: usize) -> Result<Vec<u8>> {
             anyhow::bail!("MockTransport: no companion collection")
         }
     }
 
-    #[tokio::test]
-    async fn feature_exchange_records_sent_data_and_returns_response() {
+    #[test]
+    fn feature_exchange_records_sent_data_and_returns_response() {
         let transport = MockTransport::new(vec![vec![0xAA, 0xBB]]);
-        let response = transport.feature_exchange(&[0x01, 0x02], 2).await.unwrap();
+        let response = transport.feature_exchange(&[0x01, 0x02], 2).unwrap();
         assert_eq!(response, vec![0xAA, 0xBB]);
-        assert_eq!(*transport.written.lock().await, vec![vec![0x01u8, 0x02]]);
+        assert_eq!(*transport.written.lock(), vec![vec![0x01u8, 0x02]]);
     }
 
-    #[tokio::test]
-    async fn write_then_read_records_write_and_returns_queued_response() {
+    #[test]
+    fn write_then_read_records_write_and_returns_queued_response() {
         let transport = MockTransport::new(vec![vec![0xCC]]);
-        let response = transport.write_then_read(&[0x03, 0x04], 1).await.unwrap();
+        let response = transport.write_then_read(&[0x03, 0x04], 1).unwrap();
         assert_eq!(response, vec![0xCC]);
-        assert_eq!(*transport.written.lock().await, vec![vec![0x03u8, 0x04]]);
+        assert_eq!(*transport.written.lock(), vec![vec![0x03u8, 0x04]]);
     }
 
-    #[tokio::test]
-    async fn write_many_writes_all_packets_in_order() {
+    #[test]
+    fn write_many_writes_all_packets_in_order() {
         let transport = MockTransport::empty();
         transport
             .write_many(&[vec![0x01], vec![0x02], vec![0x03]])
-            .await
             .unwrap();
-        let written = transport.written.lock().await;
+        let written = transport.written.lock();
         assert_eq!(written.len(), 3);
         assert_eq!(written[0], vec![0x01]);
         assert_eq!(written[1], vec![0x02]);

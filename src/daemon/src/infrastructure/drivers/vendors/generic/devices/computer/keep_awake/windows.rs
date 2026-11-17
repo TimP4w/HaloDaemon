@@ -6,8 +6,8 @@
 
 use anyhow::Result;
 use async_trait::async_trait;
+use parking_lot::Mutex;
 use std::sync::mpsc::{self, Sender};
-use std::sync::Mutex;
 use std::thread::JoinHandle;
 use windows::Win32::System::Power::{
     SetThreadExecutionState, ES_CONTINUOUS, ES_DISPLAY_REQUIRED, ES_SYSTEM_REQUIRED,
@@ -25,11 +25,11 @@ pub struct WindowsKeepAwake {
 #[async_trait]
 impl KeepAwake for WindowsKeepAwake {
     fn is_active(&self) -> bool {
-        self.stop.lock().unwrap().is_some()
+        self.stop.lock().is_some()
     }
 
     async fn set(&self, on: bool) -> Result<()> {
-        let mut guard = self.stop.lock().unwrap();
+        let mut guard = self.stop.lock();
         if on {
             if guard.is_none() {
                 let (tx, rx) = mpsc::channel::<()>();
@@ -46,12 +46,12 @@ impl KeepAwake for WindowsKeepAwake {
                     }
                 });
                 *guard = Some(tx);
-                *self.handle.lock().unwrap() = Some(handle);
+                *self.handle.lock() = Some(handle);
             }
         } else {
             *guard = None;
             // Join the worker so ES_CONTINUOUS is cleared before we return.
-            if let Some(h) = self.handle.lock().unwrap().take() {
+            if let Some(h) = self.handle.lock().take() {
                 let _ = h.join();
             }
         }

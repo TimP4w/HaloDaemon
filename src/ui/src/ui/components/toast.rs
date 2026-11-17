@@ -3,7 +3,7 @@
 //! corner. Info/warning toasts auto-dismiss after a timeout; errors stay until
 //! the user dismisses them (matching the GTK frontend's toast priorities).
 
-use egui::{Align2, Color32, Pos2, Rect, Sense, Stroke, Vec2};
+use egui::{Align2, Color32, Pos2, Rect, Stroke, Vec2};
 use halod_shared::types::{Notification, NotificationCode, NotificationSeverity};
 
 use crate::domain::models::notifications::notification_text;
@@ -29,28 +29,21 @@ fn shows_details(code: &NotificationCode) -> bool {
 }
 
 /// Height of the optional action-button row.
-const DETAILS_ROW_H: f32 = 30.0;
+const DETAILS_ROW_H: f32 = 38.0;
 
 /// Extra card height for the Details row (0 when the code has no detail).
 fn details_extra_height(note: &Notification) -> f32 {
-    if shows_details(&note.code) || restore_slug(&note.code).is_some() {
+    if shows_details(&note.code) {
         DETAILS_ROW_H
     } else {
         0.0
     }
 }
 
-fn restore_slug(code: &NotificationCode) -> Option<&str> {
-    match code {
-        NotificationCode::RepositoryIntegrityError { restore_slug, .. } => restore_slug.as_deref(),
-        _ => None,
-    }
-}
-
 #[derive(Debug, Clone)]
 pub enum ToastEvent {
     Details(Notification),
-    RestoreRepository(String),
+    Open(Notification),
 }
 
 /// Accent color for a toast's severity indicator and title.
@@ -58,7 +51,7 @@ fn severity_color(severity: NotificationSeverity) -> Color32 {
     match severity {
         NotificationSeverity::Error => theme::TRAFFIC_RED,
         NotificationSeverity::Warning => theme::TRAFFIC_YELLOW,
-        NotificationSeverity::Info => theme::STAT_CYAN,
+        NotificationSeverity::Info => theme::CYAN,
     }
 }
 
@@ -78,21 +71,66 @@ impl Toast {
 /// screen.
 const MAX_TOASTS: usize = 5;
 
+/// Most notifications the bell keeps.
+const MAX_HISTORY: usize = 50;
+
+/// A notification kept for the bell's history.
+pub struct Logged {
+    pub note: Notification,
+    /// egui time it arrived.
+    pub received: f64,
+    pub read: bool,
+}
+
 #[derive(Default)]
 pub struct Toasts {
     items: Vec<Toast>,
+    history: std::collections::VecDeque<Logged>,
+    /// Whether the bell's history panel is open.
+    pub panel_open: bool,
+    opened: Option<Notification>,
 }
 
 impl Toasts {
+    pub fn open(&mut self, note: Notification) {
+        self.panel_open = false;
+        self.opened = Some(note);
+    }
+
     /// Queue freshly-received notifications, stamping each with `now`.
     pub fn ingest(&mut self, incoming: impl IntoIterator<Item = Notification>, now: f64) {
         for note in incoming {
+            self.history.push_front(Logged {
+                note: note.clone(),
+                received: now,
+                read: false,
+            });
             self.items.push(Toast { note, spawned: now });
         }
+        self.history.truncate(MAX_HISTORY);
         if self.items.len() > MAX_TOASTS {
             let drop = self.items.len() - MAX_TOASTS;
             self.items.drain(0..drop);
         }
+    }
+
+    /// Newest first.
+    pub fn history(&self) -> impl Iterator<Item = &Logged> {
+        self.history.iter()
+    }
+
+    pub fn unread(&self) -> usize {
+        self.history.iter().filter(|l| !l.read).count()
+    }
+
+    pub fn mark_all_read(&mut self) {
+        for logged in &mut self.history {
+            logged.read = true;
+        }
+    }
+
+    pub fn clear_history(&mut self) {
+        self.history.clear();
     }
 
     /// Drop timed-out toasts. Returns whether any remain (callers keep
@@ -107,6 +145,9 @@ impl Toasts {
     /// modal. Call once per frame after the page content so toasts overlay it.
     pub fn show(&mut self, ctx: &egui::Context) -> Option<ToastEvent> {
         let now = ctx.input(|i| i.time);
+        if let Some(note) = self.opened.take() {
+            return Some(ToastEvent::Open(note));
+        }
         if !self.prune(now) {
             return None;
         }
@@ -114,35 +155,35 @@ impl Toasts {
         ctx.request_repaint();
 
         let screen = ctx.content_rect();
-        const W: f32 = 320.0;
+        const W: f32 = 380.0;
         const GAP: f32 = 10.0;
         let mut dismiss: Option<usize> = None;
         let mut event = None;
 
-        egui::Area::new(egui::Id::new("toasts"))
+        egui::Area::new(egui::Id::unique("toasts"))
             .order(egui::Order::Foreground)
             .fixed_pos(Pos2::ZERO)
             .show(ctx, |ui| {
-                let mut bottom = screen.bottom() - 16.0;
+                let mut bottom = screen.bottom() - 20.0;
                 // Newest at the bottom, stacking upward.
                 for (i, toast) in self.items.iter().enumerate().rev() {
                     let h = toast_height(ui, &toast.note, W);
                     let rect = Rect::from_min_size(
-                        Pos2::new(screen.right() - 16.0 - W, bottom - h),
+                        Pos2::new(screen.right() - 20.0 - W, bottom - h),
                         Vec2::new(W, h),
                     );
-                    let action = toast_card(ui, rect, &toast.note, i);
+                    let left = toast_timeout(&toast.note.code)
+                        .map(|to| (1.0 - (now - toast.spawned) / to).clamp(0.0, 1.0) as f32);
+                    let action = toast_card(ui, rect, &toast.note, i, left);
                     if action.dismiss {
                         dismiss = Some(i);
                     }
+                    if action.open {
+                        dismiss = Some(i);
+                        event = Some(ToastEvent::Open(toast.note.clone()));
+                    }
                     if action.details {
                         event = Some(ToastEvent::Details(toast.note.clone()));
-                    }
-                    if action.restore {
-                        if let Some(slug) = restore_slug(&toast.note.code) {
-                            event = Some(ToastEvent::RestoreRepository(slug.to_owned()));
-                            dismiss = Some(i);
-                        }
                     }
                     bottom -= h + GAP;
                 }
@@ -155,17 +196,24 @@ impl Toasts {
     }
 }
 
+const PAD: f32 = 14.0;
+const ICON: f32 = 28.0;
+const TEXT_X: f32 = PAD + ICON + 12.0;
+
 /// Lay out the message body once to size the card to its wrapped text.
 fn message_galley(ui: &egui::Ui, note: &Notification, w: f32) -> std::sync::Arc<egui::Galley> {
     let (_, message) = notification_text(&note.code);
-    ui.painter()
-        .layout(message, theme::body_md(), theme::TEXT_DIM, w - 28.0)
+    ui.painter().layout(
+        message,
+        theme::body_md(),
+        theme::TEXT_DIM,
+        w - TEXT_X - 36.0,
+    )
 }
 
 fn toast_height(ui: &egui::Ui, note: &Notification, w: f32) -> f32 {
     let msg_h = message_galley(ui, note, w).size().y;
-    // top pad + title + gap + message + bottom pad.
-    14.0 + 16.0 + 6.0 + msg_h + 14.0 + details_extra_height(note)
+    PAD + 18.0 + 3.0 + msg_h + PAD + details_extra_height(note)
 }
 
 /// What a rendered toast card's controls were clicked this frame.
@@ -173,163 +221,132 @@ fn toast_height(ui: &egui::Ui, note: &Notification, w: f32) -> f32 {
 struct ToastAction {
     dismiss: bool,
     details: bool,
-    restore: bool,
+    open: bool,
 }
 
-/// Paint one toast, returning which of its controls were clicked.
-fn toast_card(ui: &mut egui::Ui, rect: Rect, note: &Notification, idx: usize) -> ToastAction {
+/// Severity tile: a tinted square with the severity glyph, shared by toasts
+/// and the notification history.
+pub fn paint_severity_icon(p: &egui::Painter, rect: Rect, severity: NotificationSeverity) {
+    let color = severity_color(severity);
+    p.rect_filled(rect, 7.0, a(color, 0.14));
+    let c = rect.center();
+    let stroke = Stroke::new(1.5, color);
+    match severity {
+        NotificationSeverity::Info => {
+            p.circle_stroke(c, 5.5, stroke);
+            p.line_segment([c + Vec2::new(0.0, -0.5), c + Vec2::new(0.0, 3.0)], stroke);
+            p.circle_filled(c + Vec2::new(0.0, -2.8), 0.9, color);
+        }
+        NotificationSeverity::Warning => {
+            p.add(egui::Shape::closed_line(
+                vec![
+                    c + Vec2::new(0.0, -5.5),
+                    c + Vec2::new(5.8, 4.7),
+                    c + Vec2::new(-5.8, 4.7),
+                ],
+                stroke,
+            ));
+            p.line_segment([c + Vec2::new(0.0, -1.5), c + Vec2::new(0.0, 1.5)], stroke);
+            p.circle_filled(c + Vec2::new(0.0, 3.2), 0.9, color);
+        }
+        NotificationSeverity::Error => {
+            p.circle_stroke(c, 5.5, stroke);
+            p.line_segment([c + Vec2::new(0.0, -3.0), c + Vec2::new(0.0, 0.8)], stroke);
+            p.circle_filled(c + Vec2::new(0.0, 2.8), 0.9, color);
+        }
+    }
+}
+
+/// Paint one toast, returning which of its controls were clicked. `left` is
+/// the remaining fraction of an auto-dismissing toast's lifetime.
+fn toast_card(
+    ui: &mut egui::Ui,
+    rect: Rect,
+    note: &Notification,
+    idx: usize,
+    left: Option<f32>,
+) -> ToastAction {
     let (title, _) = notification_text(&note.code);
-    let color = severity_color(note.code.severity());
-    let p = ui.painter();
-    theme::halo(p, rect, 12.0, a(Color32::BLACK, 0.5), 24.0);
-    p.rect_filled(rect, theme::RADIUS_LG, theme::CARD_BG);
-    p.rect_stroke(
+    let severity = note.code.severity();
+    let body = ui.interact(
         rect,
-        theme::RADIUS_LG,
-        Stroke::new(1.0, a(color, 0.34)),
-        egui::StrokeKind::Middle,
+        ui.scope_id().with(("toast_body", idx, note.timestamp_ms)),
+        egui::Sense::click(),
     );
-
-    // A compact severity dot keeps the color hint local to the title without
-    // splitting the card with a persistent vertical bar.
-    p.circle_filled(Pos2::new(rect.left() + 17.0, rect.top() + 21.0), 3.0, color);
-
+    let p = ui.painter();
+    theme::halo(p, rect, theme::RADIUS_MD, a(Color32::BLACK, 0.4), 24.0);
+    theme::paint_surface(
+        p,
+        rect,
+        theme::RADIUS_MD,
+        theme::RAISED_BG,
+        theme::BORDER_INNER,
+    );
+    paint_severity_icon(
+        p,
+        Rect::from_min_size(rect.min + Vec2::splat(PAD), Vec2::splat(ICON)),
+        severity,
+    );
     p.text(
-        Pos2::new(rect.left() + 28.0, rect.top() + 14.0),
+        Pos2::new(rect.left() + TEXT_X, rect.top() + PAD),
         Align2::LEFT_TOP,
         &title,
-        theme::heading(),
-        color,
+        theme::semibold(14.0),
+        theme::TEXT,
     );
     let galley = message_galley(ui, note, rect.width());
     ui.painter().galley(
-        Pos2::new(rect.left() + 14.0, rect.top() + 14.0 + 16.0 + 6.0),
+        Pos2::new(rect.left() + TEXT_X, rect.top() + PAD + 21.0),
         galley,
         theme::TEXT_DIM,
     );
-
-    // Dismiss button (top-right ×).
-    let x_rect = Rect::from_center_size(
-        Pos2::new(rect.right() - 14.0, rect.top() + 16.0),
-        Vec2::splat(18.0),
-    );
-    let resp = ui.interact(
-        x_rect,
-        ui.id().with(("toast_x", idx, note.timestamp_ms)),
-        Sense::click(),
-    );
-    let x_col = if resp.hovered() {
-        theme::TEXT
-    } else {
-        theme::TEXT_FAINT
-    };
-    if resp.hovered() {
-        ui.ctx().set_cursor_icon(egui::CursorIcon::PointingHand);
+    if let Some(left) = left {
+        let bar = Rect::from_min_size(
+            Pos2::new(rect.left() + 1.0, rect.bottom() - 3.0),
+            Vec2::new((rect.width() - 2.0) * left, 2.0),
+        );
+        ui.painter()
+            .rect_filled(bar, 1.0, a(severity_color(severity), 0.6));
     }
-    ui.painter().text(
-        x_rect.center(),
-        Align2::CENTER_CENTER,
-        "×",
-        theme::body_lg(),
-        x_col,
+
+    let x_rect = Rect::from_center_size(
+        Pos2::new(rect.right() - 20.0, rect.top() + 20.0),
+        Vec2::splat(24.0),
+    );
+    let resp = super::glyph_button_at(
+        ui,
+        x_rect,
+        ui.scope_id().with(("toast_x", idx, note.timestamp_ms)),
+        super::paint_close_glyph,
     );
 
     let mut action = ToastAction {
         dismiss: resp.clicked(),
-        details: false,
-        restore: false,
+        open: body.clicked() && !resp.clicked(),
+        ..Default::default()
     };
-
-    // Details action: a compact pill in the bottom-right, separated from the
-    // message copy so it reads as an intentional button rather than a loose
-    // link at the edge of the card.
     if shows_details(&note.code) {
         let label = t!("plugins.issue_details");
-        const DETAILS_W: f32 = 78.0;
-        let d_rect = Rect::from_min_size(
-            Pos2::new(
-                rect.right() - 14.0 - DETAILS_W,
-                rect.bottom() - DETAILS_ROW_H + 4.0,
-            ),
-            Vec2::new(DETAILS_W, 20.0),
+        let w = ui
+            .painter()
+            .layout_no_wrap(label.to_string(), theme::body_sm(), theme::TEXT)
+            .size()
+            .x
+            + 24.0;
+        let btn = Rect::from_min_size(
+            Pos2::new(rect.left() + TEXT_X, rect.bottom() - PAD - 30.0),
+            Vec2::new(w, 30.0),
         );
-        let d_resp = ui.interact(
-            d_rect,
-            ui.id().with(("toast_details", idx, note.timestamp_ms)),
-            Sense::click(),
-        );
-        let d_col = if d_resp.hovered() {
-            color
-        } else {
-            theme::TEXT_DIM
-        };
-        if d_resp.hovered() {
-            ui.ctx().set_cursor_icon(egui::CursorIcon::PointingHand);
-        }
-        let button_fill = if d_resp.hovered() {
-            a(color, 0.18)
-        } else {
-            a(color, 0.06)
-        };
-        ui.painter().rect_filled(d_rect, 8.0, button_fill);
-        ui.painter().rect_stroke(
-            d_rect,
-            8.0,
-            Stroke::new(1.0, a(color, if d_resp.hovered() { 0.55 } else { 0.28 })),
-            egui::StrokeKind::Middle,
-        );
-        ui.painter().text(
-            d_rect.center(),
-            Align2::CENTER_CENTER,
+        let clicked = super::button_at(
+            ui,
+            btn,
+            ui.scope_id().with(("toast_action", idx, note.timestamp_ms)),
             &label,
-            theme::subhead(),
-            d_col,
-        );
-        action.details = d_resp.clicked();
-    } else if restore_slug(&note.code).is_some() {
-        let label = t!("plugins.integrity_restore");
-        const RESTORE_W: f32 = 150.0;
-        let d_rect = Rect::from_min_size(
-            Pos2::new(
-                rect.right() - 14.0 - RESTORE_W,
-                rect.bottom() - DETAILS_ROW_H + 4.0,
-            ),
-            Vec2::new(RESTORE_W, 20.0),
-        );
-        let d_resp = ui.interact(
-            d_rect,
-            ui.id().with(("toast_restore", idx, note.timestamp_ms)),
-            Sense::click(),
-        );
-        let d_col = if d_resp.hovered() {
-            color
-        } else {
-            theme::TEXT_DIM
-        };
-        if d_resp.hovered() {
-            ui.ctx().set_cursor_icon(egui::CursorIcon::PointingHand);
-        }
-        ui.painter().rect_filled(
-            d_rect,
-            8.0,
-            a(color, if d_resp.hovered() { 0.18 } else { 0.06 }),
-        );
-        ui.painter().rect_stroke(
-            d_rect,
-            8.0,
-            Stroke::new(1.0, a(color, if d_resp.hovered() { 0.55 } else { 0.28 })),
-            egui::StrokeKind::Middle,
-        );
-        ui.painter().text(
-            d_rect.center(),
-            Align2::CENTER_CENTER,
-            &label,
-            theme::subhead(),
-            d_col,
-        );
-        action.restore = d_resp.clicked();
+            super::ButtonKind::Secondary,
+        )
+        .clicked();
+        action.details = clicked;
     }
-
     action
 }
 
@@ -361,7 +378,7 @@ mod tests {
         use halod_shared::types::NotificationCode;
         Notification {
             code: NotificationCode::PluginRuntimeError {
-                plugin: "wled".into(),
+                plugin: "wled".parse().unwrap(),
                 detail: "boom".into(),
             },
             show_native: false,
@@ -372,22 +389,9 @@ mod tests {
     fn device_write_error() -> Notification {
         Notification {
             code: NotificationCode::DeviceWriteFailed {
+                device_id: "kb-1".parse().unwrap(),
                 device: "keyboard".into(),
                 detail: "HID++ rejected write".into(),
-            },
-            show_native: false,
-            timestamp_ms: 0,
-        }
-    }
-
-    fn integrity_error() -> Notification {
-        Notification {
-            code: NotificationCode::RepositoryIntegrityError {
-                repository: Some("official".into()),
-                package: "halo_lcd".into(),
-                expected: "a".into(),
-                actual: "b".into(),
-                restore_slug: Some("official".into()),
             },
             show_native: false,
             timestamp_ms: 0,
@@ -420,15 +424,6 @@ mod tests {
     }
 
     #[test]
-    fn integrity_error_is_sticky_and_exposes_restore_action() {
-        let note = integrity_error();
-        assert_eq!(toast_timeout(&note.code), None);
-        assert!(!shows_details(&note.code));
-        assert_eq!(restore_slug(&note.code), Some("official"));
-        assert_eq!(details_extra_height(&note), DETAILS_ROW_H);
-    }
-
-    #[test]
     fn info_expires_after_its_timeout_but_not_before() {
         let t = Toast {
             note: note(NotificationSeverity::Info),
@@ -447,6 +442,28 @@ mod tests {
             spawned: 0.0,
         };
         assert!(!t.expired(1e9));
+    }
+
+    #[test]
+    fn opening_a_notification_emits_open_once_and_closes_the_panel() {
+        let ctx = egui::Context::default();
+        let mut toasts = Toasts {
+            panel_open: true,
+            ..Default::default()
+        };
+        toasts.open(note(NotificationSeverity::Info));
+        assert!(!toasts.panel_open);
+        let mut events = Vec::new();
+        for _ in 0..2 {
+            crate::ui::run_headless(&ctx, egui::RawInput::default(), |ui| {
+                events.push(
+                    toasts
+                        .show(ui.ctx())
+                        .map(|event| matches!(event, ToastEvent::Open(_))),
+                );
+            });
+        }
+        assert_eq!(events, [Some(true), None]);
     }
 
     #[test]
@@ -486,5 +503,29 @@ mod tests {
         assert_eq!(toasts.items.len(), MAX_TOASTS);
         // Oldest (timestamps 0..2) were dropped; newest kept.
         assert_eq!(toasts.items[0].note.timestamp_ms, 3);
+    }
+
+    #[test]
+    fn history_keeps_newest_first_and_tracks_unread() {
+        let mut toasts = Toasts::default();
+        toasts.ingest([note(NotificationSeverity::Info)], 1.0);
+        toasts.ingest([note(NotificationSeverity::Error)], 2.0);
+        let received: Vec<f64> = toasts.history().map(|l| l.received).collect();
+        assert_eq!(received, vec![2.0, 1.0]);
+        assert_eq!(toasts.unread(), 2);
+        toasts.mark_all_read();
+        assert_eq!(toasts.unread(), 0);
+        toasts.clear_history();
+        assert_eq!(toasts.history().count(), 0);
+    }
+
+    #[test]
+    fn history_is_bounded() {
+        let mut toasts = Toasts::default();
+        toasts.ingest(
+            (0..MAX_HISTORY + 5).map(|_| note(NotificationSeverity::Info)),
+            0.0,
+        );
+        assert_eq!(toasts.history().count(), MAX_HISTORY);
     }
 }

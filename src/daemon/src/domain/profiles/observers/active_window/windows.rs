@@ -1,11 +1,12 @@
 // SPDX-License-Identifier: GPL-3.0-or-later
 #![cfg(windows)]
 
+use parking_lot::Mutex;
 use std::ffi::OsString;
 use std::os::windows::ffi::OsStringExt;
 use std::path::Path;
 use std::sync::atomic::{AtomicU32, AtomicU64, Ordering};
-use std::sync::{Arc, Mutex, OnceLock};
+use std::sync::{Arc, OnceLock};
 use tokio::sync::mpsc;
 use windows::Win32::Foundation::{CloseHandle, HWND};
 use windows::Win32::System::Threading::{
@@ -35,7 +36,7 @@ unsafe extern "system" fn hook_proc(
     _time: u32,
 ) {
     log::trace!(
-        "[FocusWatcher/Windows] hook_proc fired: event=0x{:x} hwnd={:?} id_object={} id_child={}",
+        "hook_proc fired: event=0x{:x} hwnd={:?} id_object={} id_child={}",
         event,
         hwnd.0,
         id_object,
@@ -43,38 +44,36 @@ unsafe extern "system" fn hook_proc(
     );
     let event = resolve_foreground(hwnd);
     if let Some(guard) = BRIDGE.get() {
-        if let Ok(lock) = guard.lock() {
-            if let Some(tx) = &*lock {
-                match tx.send(event) {
-                    Ok(()) => log::trace!("[FocusWatcher/Windows] event sent to bridge"),
-                    Err(e) => log::warn!("[FocusWatcher/Windows] bridge send failed: {e}"),
-                }
-            } else {
-                log::warn!("[FocusWatcher/Windows] BRIDGE is None in hook_proc thread");
+        if let Some(tx) = &*guard.lock() {
+            match tx.send(event) {
+                Ok(()) => log::trace!("event sent to bridge"),
+                Err(e) => log::warn!("bridge send failed: {e}"),
             }
+        } else {
+            log::warn!("BRIDGE is None in hook_proc thread");
         }
     } else {
-        log::warn!("[FocusWatcher/Windows] BRIDGE not yet initialized in hook_proc thread");
+        log::warn!("BRIDGE not yet initialized in hook_proc thread");
     }
 }
 
 fn resolve_foreground(hwnd: HWND) -> FocusEvent {
     if hwnd.is_invalid() {
-        log::debug!("[FocusWatcher/Windows] resolve_foreground: hwnd invalid → NoApp");
+        log::debug!("resolve_foreground: hwnd invalid → NoApp");
         return FocusEvent::NoApp;
     }
     unsafe {
         let mut pid: u32 = 0;
         GetWindowThreadProcessId(hwnd, Some(&mut pid));
         if pid == 0 {
-            log::debug!("[FocusWatcher/Windows] resolve_foreground: pid=0 → NoApp");
+            log::debug!("resolve_foreground: pid=0 → NoApp");
             return FocusEvent::NoApp;
         }
         let handle = match OpenProcess(PROCESS_QUERY_LIMITED_INFORMATION, false, pid) {
             Ok(h) => h,
             Err(e) => {
                 log::debug!(
-                    "[FocusWatcher/Windows] resolve_foreground: OpenProcess(pid={}) failed: {e} → NoApp",
+                    "resolve_foreground: OpenProcess(pid={}) failed: {e} → NoApp",
                     pid
                 );
                 return FocusEvent::NoApp;
@@ -90,15 +89,11 @@ fn resolve_foreground(hwnd: HWND) -> FocusEvent {
         );
         let _ = CloseHandle(handle);
         if let Err(e) = &ok {
-            log::debug!(
-                "[FocusWatcher/Windows] resolve_foreground: QueryFullProcessImageNameW failed: {e} → NoApp"
-            );
+            log::debug!("resolve_foreground: QueryFullProcessImageNameW failed: {e} → NoApp");
             return FocusEvent::NoApp;
         }
         if size == 0 {
-            log::debug!(
-                "[FocusWatcher/Windows] resolve_foreground: QueryFullProcessImageNameW returned size=0 → NoApp"
-            );
+            log::debug!("resolve_foreground: QueryFullProcessImageNameW returned size=0 → NoApp");
             return FocusEvent::NoApp;
         }
         let path = OsString::from_wide(&buf[..size as usize]);
@@ -108,13 +103,10 @@ fn resolve_foreground(hwnd: HWND) -> FocusEvent {
             .map(super::normalize_name)
             .unwrap_or_default();
         if basename.is_empty() {
-            log::debug!("[FocusWatcher/Windows] resolve_foreground: empty basename → NoApp");
+            log::debug!("resolve_foreground: empty basename → NoApp");
             FocusEvent::NoApp
         } else {
-            log::debug!(
-                "[FocusWatcher/Windows] resolve_foreground: AppFocused process_name={}",
-                basename
-            );
+            log::debug!("resolve_foreground: AppFocused process_name={}", basename);
             FocusEvent::AppFocused {
                 process_name: basename,
             }
@@ -123,22 +115,19 @@ fn resolve_foreground(hwnd: HWND) -> FocusEvent {
 }
 
 pub async fn spawn() -> anyhow::Result<mpsc::Receiver<FocusEvent>> {
-    log::info!("[FocusWatcher/Windows] spawn() called, initializing WinEvent hook");
+    log::info!("spawn() called, initializing WinEvent hook");
     let (bridge_tx, bridge_rx) = std::sync::mpsc::sync_channel::<FocusEvent>(32);
     let (tx, rx) = mpsc::channel::<FocusEvent>(32);
     let generation = BRIDGE_GENERATION.fetch_add(1, Ordering::AcqRel) + 1;
-    *BRIDGE.get_or_init(|| Mutex::new(None)).lock().unwrap() = Some(bridge_tx);
+    *BRIDGE.get_or_init(|| Mutex::new(None)).lock() = Some(bridge_tx);
     let hook_thread_id = Arc::new(AtomicU32::new(0));
     let hook_thread_id_for_hook = Arc::clone(&hook_thread_id);
 
     std::thread::spawn(move || {
-        log::info!("[FocusWatcher/Windows] hook thread started");
+        log::info!("hook thread started");
         hook_thread_id_for_hook.store(unsafe { GetCurrentThreadId() }, Ordering::Release);
         let still_active = BRIDGE_GENERATION.load(Ordering::Acquire) == generation
-            && BRIDGE
-                .get()
-                .and_then(|bridge| bridge.lock().ok())
-                .is_some_and(|bridge| bridge.is_some());
+            && BRIDGE.get().is_some_and(|bridge| bridge.lock().is_some());
         if !still_active {
             return;
         }
@@ -154,40 +143,36 @@ pub async fn spawn() -> anyhow::Result<mpsc::Receiver<FocusEvent>> {
                 WINEVENT_OUTOFCONTEXT | WINEVENT_SKIPOWNPROCESS,
             );
             if hook.is_invalid() {
-                log::error!("[FocusWatcher/Windows] SetWinEventHook failed (hook handle invalid)");
+                log::error!("SetWinEventHook failed (hook handle invalid)");
                 return;
             }
             log::info!(
-                "[FocusWatcher/Windows] SetWinEventHook OK (hook={:?}); entering message loop",
+                "SetWinEventHook OK (hook={:?}); entering message loop",
                 hook.0
             );
             let mut msg = MSG::default();
             loop {
                 let ret = GetMessageW(&mut msg, None, 0, 0);
-                log::trace!(
-                    "[FocusWatcher/Windows] GetMessageW returned {} (msg={:#x})",
-                    ret.0,
-                    msg.message
-                );
+                log::trace!("GetMessageW returned {} (msg={:#x})", ret.0, msg.message);
                 if ret.0 == 0 {
-                    log::info!("[FocusWatcher/Windows] GetMessageW returned WM_QUIT, exiting loop");
+                    log::info!("GetMessageW returned WM_QUIT, exiting loop");
                     break;
                 }
                 if ret.0 == -1 {
-                    log::error!("[FocusWatcher/Windows] GetMessageW error, exiting loop");
+                    log::error!("GetMessageW error, exiting loop");
                     break;
                 }
                 let _ = TranslateMessage(&msg);
                 DispatchMessageW(&msg);
             }
-            log::warn!("[FocusWatcher/Windows] message loop exited; unhooking");
+            log::warn!("message loop exited; unhooking");
             let _ = UnhookWinEvent(hook);
         }
     });
 
     // Bridge: forward from std::sync::mpsc to tokio mpsc
     let bridge = tokio::task::spawn_blocking(move || {
-        log::debug!("[FocusWatcher/Windows] bridge forwarder task started");
+        log::debug!("bridge forwarder task started");
         loop {
             if tx.is_closed() {
                 break;
@@ -204,7 +189,7 @@ pub async fn spawn() -> anyhow::Result<mpsc::Receiver<FocusEvent>> {
         }
         if BRIDGE_GENERATION.load(Ordering::Acquire) == generation {
             if let Some(bridge) = BRIDGE.get() {
-                *bridge.lock().unwrap() = None;
+                *bridge.lock() = None;
             }
         }
         let thread_id = hook_thread_id.load(Ordering::Acquire);
@@ -214,11 +199,11 @@ pub async fn spawn() -> anyhow::Result<mpsc::Receiver<FocusEvent>> {
                     PostThreadMessageW(thread_id, WM_QUIT, Default::default(), Default::default());
             }
         }
-        log::warn!("[FocusWatcher/Windows] bridge forwarder exited (bridge_rx closed)");
+        log::warn!("bridge forwarder exited (bridge_rx closed)");
     });
     tokio::spawn(async move {
         if let Err(e) = bridge.await {
-            log::warn!("[FocusWatcher/Windows] bridge forwarder panicked: {e}");
+            log::warn!("bridge forwarder panicked: {e}");
         }
     });
 

@@ -23,13 +23,27 @@ use std::time::Duration;
 
 use crate::application::state::AppState;
 use crate::application::usecases::registry::registration::unregister_device_and_children;
+use crate::domain::events::Change;
+use crate::domain::plugin::engine::transport::PluginIo;
+use crate::domain::plugin::engine::worker;
+use crate::domain::plugin::engine::worker::DevMatch;
+use crate::domain::plugin::engine::worker::PluginHandle;
+use crate::domain::plugin::engine::worker::SetupHookResult;
+use crate::domain::plugin::manifest::HttpConfig;
+use crate::domain::plugin::manifest::IntegrationAuthConfig;
+use crate::domain::plugin::manifest::PluginManifest;
 use crate::domain::plugin::observers::integration_scan;
+use crate::domain::plugin::ResolvedConfig;
+use crate::infrastructure::http::HttpRequest;
+use crate::infrastructure::http::HttpRuntime;
+use crate::infrastructure::integration_discovery;
+use halod_shared::ids::{DeviceId, PluginId};
 
 async fn resolved_config(
     app: &Arc<AppState>,
-    id: &str,
+    id: &PluginId,
     granted: &[halod_shared::types::Permission],
-) -> Result<crate::domain::plugin::ResolvedConfig> {
+) -> Result<ResolvedConfig> {
     let app = Arc::clone(app);
     let id = id.to_owned();
     let granted = granted.to_vec();
@@ -41,35 +55,30 @@ async fn resolved_config(
     .context("secret-store task failed")
 }
 
-async fn setup_worker(
-    app: &Arc<AppState>,
-    manifest: &crate::domain::plugin::manifest::PluginManifest,
-) -> Result<crate::domain::plugin::engine::worker::PluginHandle> {
+async fn setup_worker(app: &Arc<AppState>, manifest: &PluginManifest) -> Result<PluginHandle> {
     let granted = app.registry.granted_for(&manifest.plugin_id);
     let config = resolved_config(app, &manifest.plugin_id, &granted).await?;
-    let http = crate::domain::plugin::engine::worker::http_runtime_for(manifest, &granted, &config);
-    let udp = crate::domain::plugin::engine::worker::udp_runtime_for(manifest, &granted, &config);
-    Ok(
-        crate::domain::plugin::engine::worker::PluginHandle::spawn_with_data(
-            manifest.script_source.clone(),
-            manifest.module_sources.clone(),
-            crate::domain::plugin::engine::transport::PluginIo::None,
-            crate::domain::plugin::engine::worker::DevMatch {
-                transport: "setup".into(),
-                ..Default::default()
-            },
-            granted,
-            config,
-            tokio::runtime::Handle::current(),
-            Default::default(),
-            Default::default(),
-            http,
-            udp,
-        ),
-    )
+    let http = worker::http_runtime_for(manifest, &granted, &config);
+    let udp = worker::udp_runtime_for(manifest, &granted, &config);
+    Ok(PluginHandle::spawn_with_data(
+        manifest.script_source.clone(),
+        manifest.module_sources.clone(),
+        PluginIo::None,
+        DevMatch {
+            transport: "setup".into(),
+            ..Default::default()
+        },
+        granted,
+        config,
+        tokio::runtime::Handle::current(),
+        Default::default(),
+        Default::default(),
+        http,
+        udp,
+    ))
 }
 
-async fn config_context(app: &Arc<AppState>, id: &str) -> Result<serde_json::Value> {
+async fn config_context(app: &Arc<AppState>, id: &PluginId) -> Result<serde_json::Value> {
     let granted = app.registry.granted_for(id);
     let values = resolved_config(app, id, &granted)
         .await?
@@ -79,14 +88,12 @@ async fn config_context(app: &Arc<AppState>, id: &str) -> Result<serde_json::Val
     Ok(json!({ "config": values }))
 }
 
-async fn publish_setup(app: &Arc<AppState>, id: &str, status: IntegrationSetupStatus) {
-    app.registry
-        .set_integration_setup_status(id.to_owned(), status);
-    app.record_change(crate::domain::events::Change::PluginTopology)
-        .await;
+async fn publish_setup(app: &Arc<AppState>, id: &PluginId, status: IntegrationSetupStatus) {
+    app.registry.set_integration_setup_status(id.into(), status);
+    app.record_change(Change::PluginTopology).await;
 }
 
-pub async fn begin_setup(id: String, app: Arc<AppState>) -> Result<()> {
+pub async fn begin_setup(id: PluginId, app: Arc<AppState>) -> Result<()> {
     let manifest = app
         .registry
         .setup_integration_manifest(&id)
@@ -97,7 +104,7 @@ pub async fn begin_setup(id: String, app: Arc<AppState>) -> Result<()> {
         .context("integration does not require an interactive setup flow")?;
     let locale = app.config.read().await.gui.language.clone();
     let (title, instructions) = match &setup.auth {
-        crate::domain::plugin::manifest::IntegrationAuthConfig::Button {
+        IntegrationAuthConfig::Button {
             title,
             instructions,
         } => (
@@ -122,6 +129,8 @@ pub async fn begin_setup(id: String, app: Arc<AppState>) -> Result<()> {
         ),
         _ => (None, vec![]),
     };
+    let scan_now = setup.auth.kind() == IntegrationAuthKind::None
+        && setup.modes.contains(&IntegrationSetupMode::Automatic);
     publish_setup(
         &app,
         &id,
@@ -134,17 +143,20 @@ pub async fn begin_setup(id: String, app: Arc<AppState>) -> Result<()> {
         },
     )
     .await;
+    if scan_now {
+        return select_setup_mode(id, IntegrationSetupMode::Automatic, app).await;
+    }
     Ok(())
 }
 
 /// Return an integration to its pre-setup state, removing both plaintext
 /// connection values and host-stored credentials, then open a fresh flow.
-pub async fn reset_setup(id: String, app: Arc<AppState>) -> Result<()> {
+pub async fn reset_setup(id: PluginId, app: Arc<AppState>) -> Result<()> {
     let manifest = app
         .registry
         .setup_integration_manifest(&id)
         .context("unknown, disabled, or unconsented integration")?;
-    if manifest.setup.is_none() {
+    if !manifest.needs_setup() {
         bail!("integration does not have an interactive setup flow");
     }
 
@@ -170,7 +182,7 @@ pub async fn reset_setup(id: String, app: Arc<AppState>) -> Result<()> {
         cfg.plugins.config.remove(&id);
         cfg.plugins
             .integrations_configured
-            .retain(|configured| configured != &id);
+            .retain(|configured| configured != id);
         cfg.plugins.integration_devices.remove(&id);
         app.registry.replace_policy(&cfg.plugins);
     }
@@ -179,7 +191,7 @@ pub async fn reset_setup(id: String, app: Arc<AppState>) -> Result<()> {
 }
 
 pub async fn select_setup_mode(
-    id: String,
+    id: PluginId,
     mode: IntegrationSetupMode,
     app: Arc<AppState>,
 ) -> Result<()> {
@@ -210,8 +222,7 @@ pub async fn select_setup_mode(
     status.candidates.clear();
     publish_setup(&app, &id, status.clone()).await;
     let candidates = match async {
-        let raw =
-            crate::infrastructure::integration_discovery::scan(setup.discovery.clone()).await?;
+        let raw = integration_discovery::scan(setup.discovery.clone()).await?;
         let candidates = setup_worker(&app, &manifest)
             .await?
             .setup_discover(raw)
@@ -240,7 +251,7 @@ pub async fn select_setup_mode(
 }
 
 fn validate_candidates(
-    manifest: &crate::domain::plugin::manifest::PluginManifest,
+    manifest: &PluginManifest,
     candidates: &[halod_shared::types::IntegrationSetupCandidate],
 ) -> Result<()> {
     let mut ids = std::collections::HashSet::new();
@@ -268,7 +279,7 @@ fn validate_candidates(
 }
 
 fn validate_pair_result_values(
-    manifest: &crate::domain::plugin::manifest::PluginManifest,
+    manifest: &PluginManifest,
     values: &HashMap<String, String>,
 ) -> Result<()> {
     for (key, value) in values {
@@ -285,7 +296,7 @@ fn validate_pair_result_values(
 }
 
 pub async fn submit_setup(
-    id: String,
+    id: PluginId,
     candidate_id: Option<String>,
     mut values: HashMap<String, String>,
     app: Arc<AppState>,
@@ -325,7 +336,7 @@ pub async fn submit_setup(
     Ok(())
 }
 
-pub async fn retry_pairing(id: String, app: Arc<AppState>) -> Result<()> {
+pub async fn retry_pairing(id: PluginId, app: Arc<AppState>) -> Result<()> {
     let manifest = app
         .registry
         .setup_integration_manifest(&id)
@@ -380,8 +391,8 @@ pub async fn retry_pairing(id: String, app: Arc<AppState>) -> Result<()> {
 }
 
 async fn finish_setup(
-    id: &str,
-    manifest: &crate::domain::plugin::manifest::PluginManifest,
+    id: &PluginId,
+    manifest: &PluginManifest,
     mut status: IntegrationSetupStatus,
     app: Arc<AppState>,
 ) -> Result<()> {
@@ -391,7 +402,7 @@ async fn finish_setup(
         .await
     {
         Ok(validation) => validation,
-        Err(error) => crate::domain::plugin::engine::worker::SetupHookResult {
+        Err(error) => SetupHookResult {
             ok: false,
             pending: false,
             reason: Some(error.to_string()),
@@ -415,7 +426,7 @@ async fn finish_setup(
                 .iter()
                 .any(|item| item == id)
             {
-                cfg.plugins.integrations_configured.push(id.to_owned());
+                cfg.plugins.integrations_configured.push(id.into());
             }
             if !cfg
                 .plugins
@@ -423,12 +434,12 @@ async fn finish_setup(
                 .iter()
                 .any(|item| item == id)
             {
-                cfg.plugins.integrations_enabled.push(id.to_owned());
+                cfg.plugins.integrations_enabled.push(id.into());
             }
             if let Some(candidate) = &status.selected_candidate {
                 cfg.plugins
                     .integration_devices
-                    .insert(id.to_owned(), candidate.clone());
+                    .insert(id.into(), candidate.clone());
             }
             app.registry.replace_policy(&cfg.plugins);
         }
@@ -440,11 +451,11 @@ async fn finish_setup(
 }
 
 async fn start_oauth(
-    manifest: crate::domain::plugin::manifest::PluginManifest,
+    manifest: PluginManifest,
     mut status: IntegrationSetupStatus,
     app: Arc<AppState>,
 ) -> Result<()> {
-    let crate::domain::plugin::manifest::IntegrationAuthConfig::Oauth2Pkce {
+    let IntegrationAuthConfig::Oauth2Pkce {
         authorization_url,
         token_url,
         client_id,
@@ -544,7 +555,7 @@ async fn start_oauth(
                     .append_pair("code_verifier", &verifier);
                 serializer.finish().into_bytes()
             };
-            let policy = crate::domain::plugin::manifest::HttpConfig {
+            let policy = HttpConfig {
                 origins: vec![origin.clone()],
                 host_key: None,
                 port_key: None,
@@ -556,8 +567,8 @@ async fn start_oauth(
                 allow_private: false,
                 tls: None,
             };
-            let runtime = crate::infrastructure::http::HttpRuntime::from_config(&policy, None, None, None)?;
-            let response = runtime.request(crate::infrastructure::http::HttpRequest {
+            let runtime = HttpRuntime::from_config(&policy, None, None, None)?;
+            let response = runtime.request(HttpRequest {
                 method: "POST".into(),
                 origin,
                 path: match token.query() {
@@ -610,16 +621,15 @@ async fn start_oauth(
     Ok(())
 }
 
-pub async fn cancel_setup(id: String, app: Arc<AppState>) -> Result<()> {
+pub async fn cancel_setup(id: PluginId, app: Arc<AppState>) -> Result<()> {
     app.registry.clear_integration_setup_status(&id);
-    app.record_change(crate::domain::events::Change::PluginTopology)
-        .await;
+    app.record_change(Change::PluginTopology).await;
     Ok(())
 }
 
 /// Close and drop `id`'s integration root (and the children it exposes) from
 /// `app.device_registry`, if currently registered. No-op otherwise.
-async fn disable_one(app: &Arc<AppState>, id: &str) -> Option<String> {
+async fn disable_one(app: &Arc<AppState>, id: &PluginId) -> Option<DeviceId> {
     // Integration enablement is an independent lifecycle gate. Tear down its
     // shared snapshots at the same boundary as its devices so consumers never
     // observe a still-fresh value from a stopped producer.
@@ -641,14 +651,18 @@ async fn disable_one(app: &Arc<AppState>, id: &str) -> Option<String> {
 
 /// Connect and register `id`'s integration root (and its children), if it's
 /// currently enabled and permission-satisfied. No-op otherwise.
-async fn enable_one(app: &Arc<AppState>, id: &str) {
+async fn enable_one(app: &Arc<AppState>, id: &PluginId) {
     let _ = integration_scan::discover_one(app, id).await;
 }
 
 /// Enable or disable a single integration, independent of the generic plugin
 /// toggle. Applies immediately and only touches this one integration's root
 /// + exposed devices — no global rediscovery.
-pub async fn set_integration_enabled(id: String, enabled: bool, app: Arc<AppState>) -> Result<()> {
+pub async fn set_integration_enabled(
+    id: PluginId,
+    enabled: bool,
+    app: Arc<AppState>,
+) -> Result<()> {
     if enabled {
         let manifest = app
             .registry
@@ -672,7 +686,7 @@ pub async fn set_integration_enabled(id: String, enabled: bool, app: Arc<AppStat
     }
     {
         let mut cfg = app.config.write().await;
-        cfg.plugins.integrations_enabled.retain(|x| x != &id);
+        cfg.plugins.integrations_enabled.retain(|x| x != id);
         if enabled {
             cfg.plugins.integrations_enabled.push(id.clone());
         }
@@ -686,8 +700,7 @@ pub async fn set_integration_enabled(id: String, enabled: bool, app: Arc<AppStat
         disable_one(&app, &id).await;
         app.registry.clear_integration_operational_errors(&id);
     }
-    app.record_change(crate::domain::events::Change::PluginTopology)
-        .await;
+    app.record_change(Change::PluginTopology).await;
     Ok(())
 }
 
@@ -695,7 +708,7 @@ pub async fn set_integration_enabled(id: String, enabled: bool, app: Arc<AppStat
 /// just that integration (e.g. a changed host/port takes effect immediately)
 /// — every other device is left untouched.
 pub async fn set_integration_config(
-    id: String,
+    id: PluginId,
     values: HashMap<String, String>,
     app: Arc<AppState>,
 ) -> Result<()> {
@@ -705,8 +718,7 @@ pub async fn set_integration_config(
     disable_one(&app, &id).await;
     app.registry.clear_integration_operational_errors(&id);
     enable_one(&app, &id).await;
-    app.record_change(crate::domain::events::Change::PluginTopology)
-        .await;
+    app.record_change(Change::PluginTopology).await;
     Ok(())
 }
 
@@ -734,34 +746,34 @@ mod tests {
         std::fs::create_dir_all(&plugin_dir).unwrap();
         std::fs::write(
             plugin_dir.join("plugin.yaml"),
-            "id: inttest\ntype: integration\npermissions: [network, secure_storage]\ntransports:\n  tcp:\n    host_key: host\n    port_key: port\n    timeout_ms: 50\nconfig:\n  fields:\n    - key: host\n      label: Host\n      kind: host\n      default: 127.0.0.1\n    - key: port\n      label: Port\n      kind: port\n      default: '12345'\n    - key: token\n      label: Token\n      secure: true\n",
+            "id: inttest\nversion: 1.0.0\napi: \"3.0\"\ntype: integration\ntransports:\n  tcp:\n    host_key: host\n    port_key: port\n    timeout_ms: 50\nconfig:\n  fields:\n    - key: host\n      label: Host\n      kind: host\n      default: 127.0.0.1\n    - key: port\n      label: Port\n      kind: port\n      default: '12345'\n    - key: token\n      label: Token\n      secure: true\n",
         )
         .unwrap();
         std::fs::write(plugin_dir.join("main.lua"), INTEGRATION_CONFIG_TEST_PLUGIN).unwrap();
-        app.registry.load_all(dir.path());
+        app.registry.load_dir(dir.path());
         f().await;
-        app.registry.load_all(std::path::Path::new("/nonexistent"));
+        app.registry.load_dir(std::path::Path::new("/nonexistent"));
     }
 
     #[tokio::test(flavor = "multi_thread", worker_threads = 1)]
     async fn resolving_secure_config_does_not_block_the_async_runtime() {
         struct BlockingSecrets {
             entered: std::sync::mpsc::Sender<()>,
-            release: std::sync::Mutex<std::sync::mpsc::Receiver<()>>,
+            release: parking_lot::Mutex<std::sync::mpsc::Receiver<()>>,
         }
 
         impl crate::infrastructure::secrets::SecretStore for BlockingSecrets {
-            fn set(&self, _plugin_id: &str, _key: &str, _plaintext: &str) -> Result<()> {
+            fn set(&self, _plugin_id: &PluginId, _key: &str, _plaintext: &str) -> Result<()> {
                 Ok(())
             }
 
-            fn get(&self, _plugin_id: &str, _key: &str) -> Result<Option<String>> {
+            fn get(&self, _plugin_id: &PluginId, _key: &str) -> Result<Option<String>> {
                 self.entered.send(()).unwrap();
-                self.release.lock().unwrap().recv().unwrap();
+                self.release.lock().recv().unwrap();
                 Ok(Some("secret".into()))
             }
 
-            fn delete(&self, _plugin_id: &str, _key: &str) -> Result<()> {
+            fn delete(&self, _plugin_id: &PluginId, _key: &str) -> Result<()> {
                 Ok(())
             }
         }
@@ -788,18 +800,18 @@ mod tests {
             AppState::new(crate::config::Config::default()).with_secret_store(Arc::new(
                 BlockingSecrets {
                     entered: entered_tx,
-                    release: std::sync::Mutex::new(release_rx),
+                    release: parking_lot::Mutex::new(release_rx),
                 },
             )),
         );
         with_integration_config_test_plugin(&app, || async {
-            let started = std::time::Instant::now();
+            let started = tokio::time::Instant::now();
             let task = tokio::spawn({
                 let app = app.clone();
                 async move {
                     resolved_config(
                         &app,
-                        "inttest",
+                        &"inttest".parse().unwrap(),
                         &[halod_shared::types::Permission::SecureStorage],
                     )
                     .await
@@ -844,7 +856,7 @@ mod tests {
                 )
                 .unwrap();
 
-            set_integration_enabled("openrgb".into(), false, app.clone())
+            set_integration_enabled("openrgb".parse().unwrap(), false, app.clone())
                 .await
                 .unwrap();
 
@@ -854,7 +866,7 @@ mod tests {
                 .await
                 .plugins
                 .integrations_enabled
-                .contains(&"openrgb".to_string()));
+                .contains(&"openrgb".parse().unwrap()));
             let remaining = app.device_registry.read().await;
             assert_eq!(
                 remaining.len(),
@@ -883,7 +895,7 @@ mod tests {
                 let mut values = HashMap::new();
                 values.insert("host".to_string(), "127.0.0.1".to_string());
                 values.insert("token".to_string(), "s3cr3t".to_string());
-                set_integration_config("inttest".into(), values, app.clone())
+                set_integration_config("inttest".parse().unwrap(), values, app.clone())
                     .await
                     .unwrap();
 
@@ -904,7 +916,9 @@ mod tests {
                 );
                 drop(cfg);
                 assert_eq!(
-                    app.secret_store.get("inttest", "token").unwrap(),
+                    app.secret_store
+                        .get(&"inttest".parse().unwrap(), "token")
+                        .unwrap(),
                     Some("s3cr3t".to_string())
                 );
             })
@@ -919,7 +933,7 @@ mod tests {
             let unrelated = Arc::new(MockDevice::new("other-device"));
             app.device_registry.write().await.push(unrelated.clone());
 
-            disable_one(&app, "does-not-exist").await;
+            disable_one(&app, &"does-not-exist".parse().unwrap()).await;
 
             assert_eq!(app.device_registry.read().await.len(), 1);
             assert!(!unrelated.closed.load(Ordering::SeqCst));
@@ -935,7 +949,7 @@ mod tests {
             std::fs::create_dir_all(&plugin_dir).unwrap();
             std::fs::write(
                 plugin_dir.join("plugin.yaml"),
-                "id: empty_pair\ntype: integration\npermissions: [network, secure_storage]\ntranslations:\n  it:\n    setup.auth.title: Associa\n    setup.auth.instructions.0: Premi il pulsante\ntransports:\n  http:\n    origins: [https://api.example.com]\n    methods: [POST]\nsetup:\n  modes: [manual]\n  auth:\n    kind: button\n    title: Pair\n    instructions: [Press the button]\nconfig:\n  fields:\n    - { key: host, label: Host, default: api.example.com }\n    - { key: token, label: Token, secure: true }\n",
+                "id: empty_pair\nversion: 1.0.0\napi: \"3.0\"\ntype: integration\ntranslations:\n  it:\n    setup.auth.title: Associa\n    setup.auth.instructions.0: Premi il pulsante\ntransports:\n  http:\n    origins: [https://api.example.com]\n    methods: [POST]\nsetup:\n  modes: [manual]\n  auth:\n    kind: button\n    title: Pair\n    instructions: [Press the button]\nconfig:\n  fields:\n    - { key: host, label: Host, default: api.example.com }\n    - { key: token, label: Token, secure: true }\n",
             )
             .unwrap();
             std::fs::write(
@@ -943,59 +957,47 @@ mod tests {
                 "return {\n  pair = function(_) return { ok = true, values = { token = '' } } end,\n  validate = function(_) return { ok = true } end,\n}",
             )
             .unwrap();
-            app.registry.load_all(dir.path());
+            app.registry.load_dir(dir.path());
 
-            let authority = app
-                .registry
-                .list(app.secret_store.as_ref())
-                .into_iter()
-                .find(|plugin| plugin.id == "empty_pair")
-                .unwrap()
-                .authority;
             {
-                // Keep the temporary registry loaded; the production enable
-                // helper reconciles from configured repository paths.
                 let mut cfg = app.config.write().await;
-                cfg.plugins
-                    .accepted_authorities
-                    .insert("empty_pair".into(), authority.normalized());
-                cfg.plugins.enabled.push("empty_pair".into());
+                cfg.plugins.enabled.push("empty_pair".parse().unwrap());
                 cfg.gui.language = "it".into();
                 app.registry.replace_policy(&cfg.plugins);
             }
 
-            begin_setup("empty_pair".into(), app.clone()).await.unwrap();
+            begin_setup("empty_pair".parse().unwrap(), app.clone()).await.unwrap();
             let localized = app
                 .registry
-                .integration_setup_status("empty_pair")
+                .integration_setup_status(&"empty_pair".parse().unwrap())
                 .unwrap();
             assert_eq!(localized.title.as_deref(), Some("Associa"));
             assert_eq!(localized.instructions, ["Premi il pulsante"]);
             select_setup_mode(
-                "empty_pair".into(),
+                "empty_pair".parse().unwrap(),
                 IntegrationSetupMode::Manual,
                 app.clone(),
             )
             .await
             .unwrap();
-            submit_setup("empty_pair".into(), None, HashMap::new(), app.clone())
+            submit_setup("empty_pair".parse().unwrap(), None, HashMap::new(), app.clone())
                 .await
                 .unwrap();
-            retry_pairing("empty_pair".into(), app.clone())
+            retry_pairing("empty_pair".parse().unwrap(), app.clone())
                 .await
                 .unwrap();
 
             let status = app
                 .registry
-                .integration_setup_status("empty_pair")
+                .integration_setup_status(&"empty_pair".parse().unwrap())
                 .unwrap();
             assert_eq!(status.phase, IntegrationSetupPhase::Pairing);
             assert!(status
                 .error
                 .as_deref()
                 .is_some_and(|error| error.contains("empty credential")));
-            assert_eq!(app.secret_store.get("empty_pair", "token").unwrap(), None);
-            assert!(!app.registry.integration_is_configured("empty_pair"));
+            assert_eq!(app.secret_store.get(&"empty_pair".parse().unwrap(), "token").unwrap(), None);
+            assert!(!app.registry.integration_is_configured(&"empty_pair".parse().unwrap()));
         })
         .await;
     }
@@ -1008,7 +1010,7 @@ mod tests {
             std::fs::create_dir_all(&plugin_dir).unwrap();
             std::fs::write(
                 plugin_dir.join("plugin.yaml"),
-                "id: resettable\ntype: integration\npermissions: [network, secure_storage]\ntransports:\n  http:\n    origins: [https://api.example.com]\nsetup:\n  modes: [manual]\n  auth: { kind: none }\nconfig:\n  fields:\n    - { key: host, label: Host, kind: host, default: controller.local }\n    - { key: token, label: Token, secure: true }\n",
+                "id: resettable\nversion: 1.0.0\napi: \"3.0\"\ntype: integration\ntransports:\n  http:\n    origins: [https://api.example.com]\nsetup:\n  modes: [manual]\n  auth: { kind: none }\nconfig:\n  fields:\n    - { key: host, label: Host, kind: host, default: controller.local }\n    - { key: token, label: Token, secure: true }\n",
             )
             .unwrap();
             std::fs::write(
@@ -1016,25 +1018,15 @@ mod tests {
                 "return { validate = function(_) return { ok = true } end }",
             )
             .unwrap();
-            app.registry.load_all(dir.path());
+            app.registry.load_dir(dir.path());
 
-            let authority = app
-                .registry
-                .list(app.secret_store.as_ref())
-                .into_iter()
-                .find(|plugin| plugin.id == "resettable")
-                .unwrap()
-                .authority;
             {
                 let mut cfg = app.config.write().await;
-                cfg.plugins
-                    .accepted_authorities
-                    .insert("resettable".into(), authority);
-                cfg.plugins.enabled.push("resettable".into());
+                cfg.plugins.enabled.push("resettable".parse().unwrap());
                 app.registry.replace_policy(&cfg.plugins);
             }
             crate::application::usecases::plugin::plugins::persist_config_values(
-                "resettable",
+                &"resettable".parse().unwrap(),
                 &HashMap::from([
                     ("host".into(), "192.0.2.10".into()),
                     ("token".into(), "secret-token".into()),
@@ -1045,34 +1037,82 @@ mod tests {
             .unwrap();
             {
                 let mut cfg = app.config.write().await;
-                cfg.plugins.integrations_configured.push("resettable".into());
-                cfg.plugins.integrations_enabled.push("resettable".into());
+                cfg.plugins.integrations_configured.push("resettable".parse().unwrap());
+                cfg.plugins.integrations_enabled.push("resettable".parse().unwrap());
                 cfg.plugins
                     .integration_devices
-                    .insert("resettable".into(), "device-1".into());
+                    .insert("resettable".parse().unwrap(), "device-1".into());
                 app.registry.replace_policy(&cfg.plugins);
             }
 
-            reset_setup("resettable".into(), app.clone()).await.unwrap();
+            reset_setup("resettable".parse().unwrap(), app.clone()).await.unwrap();
 
             let cfg = app.config.read().await;
             assert!(!cfg.plugins.config.contains_key("resettable"));
             assert!(!cfg
                 .plugins
                 .integrations_configured
-                .contains(&"resettable".to_owned()));
+                .contains(&"resettable".parse().unwrap()));
             assert!(!cfg.plugins.integration_devices.contains_key("resettable"));
             drop(cfg);
             assert_eq!(
-                app.secret_store.get("resettable", "token").unwrap(),
+                app.secret_store.get(&"resettable".parse().unwrap(), "token").unwrap(),
                 None
             );
             assert_eq!(
                 app.registry
-                    .integration_setup_status("resettable")
+                    .integration_setup_status(&"resettable".parse().unwrap())
                     .unwrap()
                     .phase,
                 IntegrationSetupPhase::Init
+            );
+        })
+        .await;
+    }
+
+    #[tokio::test]
+    async fn a_setup_without_pairing_scans_as_soon_as_it_opens() {
+        crate::test_support::with_tmp_config(|app| async move {
+            let listener = tokio::net::TcpListener::bind("127.0.0.1:0").await.unwrap();
+            let endpoint = listener.local_addr().unwrap();
+            let dir = tempfile::tempdir().unwrap();
+            let plugin_dir = dir.path().join("probed");
+            std::fs::create_dir_all(&plugin_dir).unwrap();
+            std::fs::write(
+                plugin_dir.join("plugin.yaml"),
+                format!("id: probed\nversion: 1.0.0\napi: \"3.0\"\ntype: integration\ntransports:\n  tcp:\n    host_key: host\n    port_key: port\nsetup:\n  modes: [automatic, manual]\n  discovery:\n    tcp: [\"{endpoint}\"]\n  auth: {{ kind: none }}\nconfig:\n  fields:\n    - {{ key: host, label: Host, kind: host }}\n    - {{ key: port, label: Port, kind: port }}\n"),
+            )
+            .unwrap();
+            std::fs::write(
+                plugin_dir.join("main.lua"),
+                "return {\n  discover = function(context)\n    local found = {}\n    for _, server in ipairs(context.tcp or {}) do\n      found[#found + 1] = { id = server.id, name = server.name, values = { host = server.host, port = tostring(server.port) } }\n    end\n    return found\n  end,\n  validate = function(_) return { ok = true } end,\n}",
+            )
+            .unwrap();
+            app.registry.load_dir(dir.path());
+            {
+                let mut cfg = app.config.write().await;
+                cfg.plugins.enabled.push("probed".parse().unwrap());
+                app.registry.replace_policy(&cfg.plugins);
+            }
+
+            begin_setup("probed".parse().unwrap(), app.clone()).await.unwrap();
+
+            let status = app
+                .registry
+                .integration_setup_status(&"probed".parse().unwrap())
+                .unwrap();
+            assert_eq!(status.selected_mode, Some(IntegrationSetupMode::Automatic));
+            assert_eq!(status.error, None);
+            assert_eq!(status.message, None);
+            let candidate = &status.candidates;
+            assert_eq!(candidate.len(), 1);
+            assert_eq!(candidate[0].id, endpoint.to_string());
+            assert_eq!(
+                candidate[0].values,
+                HashMap::from([
+                    ("host".to_owned(), "127.0.0.1".to_owned()),
+                    ("port".to_owned(), endpoint.port().to_string()),
+                ])
             );
         })
         .await;

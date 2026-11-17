@@ -5,21 +5,23 @@
 //! `debug_info` channel — not broadcast.
 
 use anyhow::Result;
-use serde_json::json;
+use halod_shared::messages::DaemonMessage;
 use std::sync::Arc;
 
 use crate::application::ipc::ClientHandle;
 use crate::application::state::AppState;
+use crate::domain::device::Device;
+use crate::domain::lcd::engine::video;
 use crate::infrastructure::drivers::transports::smbus::{BusInfo, SmBusTransport};
 use halod_shared::debug_info::{
     DebugInfo, DependencyRule, DependencyStatus, DeviceDebugInfo, HidEntryDebugInfo, OsKind,
     SmbusBusDebugInfo, SmbusBusKind, SystemDebugInfo,
 };
+use halod_shared::ids::DeviceId;
 
 pub async fn get_debug_info(client: ClientHandle, app: Arc<AppState>) -> Result<()> {
     let info = collect(app).await;
-    let value = serde_json::to_value(&info)?;
-    client.send_json(&json!({ "type": "debug_info", "data": value }));
+    client.send(&DaemonMessage::DebugInfo { data: info });
     Ok(())
 }
 
@@ -63,7 +65,7 @@ async fn collect(app: Arc<AppState>) -> DebugInfo {
 /// runs on. Only rows that apply to the current platform are emitted, so the
 /// UI never shows e.g. a Windows-only helper on Linux.
 async fn collect_dependencies(_app: &Arc<AppState>) -> Vec<DependencyStatus> {
-    let ffmpeg = crate::domain::lcd::engine::video::ffmpeg_available();
+    let ffmpeg = video::ffmpeg_available();
     #[cfg_attr(not(target_os = "linux"), allow(unused_mut))]
     let mut deps = tokio::task::spawn_blocking(move || collect_binary_dependencies(ffmpeg))
         .await
@@ -327,7 +329,7 @@ fn smbus_to_wire(b: BusInfo, kind: SmbusBusKind) -> SmbusBusDebugInfo {
 /// `(device_id, hid_key)` pairs for every device the HID transport is tracking.
 /// The HID key has the shape
 /// `vid:pid:serial` (all hex, serial may be empty).
-async fn snapshot_tracking_keys(app: &Arc<AppState>) -> Vec<(String, String)> {
+async fn snapshot_tracking_keys(app: &Arc<AppState>) -> Vec<(DeviceId, String)> {
     use crate::application::state::HidTrackingEntry;
     let tracking = app.hid.snapshot().await;
     let mut out = Vec::new();
@@ -355,8 +357,8 @@ fn matches_hid_key(key: &str, entry: &HidEntryDebugInfo) -> bool {
 }
 
 async fn build_device_debug(
-    device: &dyn crate::domain::device::Device,
-    tracking_keys: &[(String, String)],
+    device: &dyn Device,
+    tracking_keys: &[(DeviceId, String)],
     hid_entries: &[HidEntryDebugInfo],
 ) -> DeviceDebugInfo {
     let wire = device.serialize().await;
@@ -419,28 +421,28 @@ async fn build_device_debug(
 /// Ownership metadata is deliberately emitted for every device, not merely
 /// Lua-backed devices. It makes a debug export answer the practical question
 /// behind a duplicate report: which component is talking to this hardware?
-fn source_fields(device: &dyn crate::domain::device::Device) -> Vec<(String, String)> {
+fn source_fields(device: &dyn Device) -> Vec<(String, String)> {
     use crate::domain::registry::identity::DeviceOrigin;
 
     let origin = device.conflict_origin();
     let mut fields = match (&origin, device.integration_id()) {
         (_, Some(id)) => vec![
             ("source_kind".into(), "integration_root".into()),
-            ("integration_id".into(), id),
+            ("integration_id".into(), id.to_string()),
         ],
         (DeviceOrigin::Integration(id), None) => vec![
             ("source_kind".into(), "integration_controller".into()),
-            ("integration_id".into(), id.clone()),
+            ("integration_id".into(), id.to_string()),
         ],
         (DeviceOrigin::Plugin(id), None) => vec![
             ("source_kind".into(), "plugin".into()),
-            ("plugin_id".into(), id.clone()),
+            ("plugin_id".into(), id.to_string()),
         ],
         (DeviceOrigin::Builtin, None) => vec![("source_kind".into(), "builtin".into())],
     };
     if let Some(plugin_id) = device.owning_plugin_id() {
         if !fields.iter().any(|(key, _)| key == "plugin_id") {
-            fields.push(("plugin_id".into(), plugin_id));
+            fields.push(("plugin_id".into(), plugin_id.to_string()));
         }
     }
     fields
@@ -450,7 +452,7 @@ pub(crate) fn enumerate_hid() -> Vec<HidEntryDebugInfo> {
     let api = match hidapi::HidApi::new() {
         Ok(a) => a,
         Err(e) => {
-            log::warn!("[debug] HidApi::new failed: {e}");
+            log::warn!("HidApi::new failed: {e}");
             return Vec::new();
         }
     };

@@ -1,14 +1,14 @@
 // SPDX-License-Identifier: GPL-3.0-or-later
 #![cfg(target_os = "linux")]
 
+use crate::infrastructure::drivers::Metered;
 use anyhow::{Context, Result};
 use halod_shared::types::{WriteRateLimit, WriteRateStatus};
+use parking_lot::Mutex;
 use serde::Serialize;
 use std::collections::HashMap;
 use std::path::{Path, PathBuf};
-use std::sync::{Arc, Mutex};
-
-use crate::infrastructure::drivers::Metered;
+use std::sync::{Arc, OnceLock};
 
 #[derive(Debug, Clone, PartialEq, Eq, Serialize)]
 pub struct HwmonChipInfo {
@@ -40,7 +40,6 @@ impl HwmonChip {
             #[cfg(feature = "plugin-test")]
             HwmonStorage::Memory(values) => values
                 .lock()
-                .unwrap()
                 .get(attribute)
                 .cloned()
                 .ok_or_else(|| std::io::Error::from(std::io::ErrorKind::NotFound)),
@@ -52,7 +51,7 @@ impl HwmonChip {
             HwmonStorage::Fs(path) => std::fs::write(path.join(attribute), value),
             #[cfg(feature = "plugin-test")]
             HwmonStorage::Memory(values) => {
-                let mut values = values.lock().unwrap();
+                let mut values = values.lock();
                 if !values.contains_key(attribute) {
                     return Err(std::io::Error::from(std::io::ErrorKind::NotFound));
                 }
@@ -69,7 +68,7 @@ impl HwmonChip {
 pub struct HwmonTransport {
     chips: Metered<HashMap<String, HwmonChip>>,
     original_pwm_enable: Arc<Mutex<HashMap<(String, String), String>>>,
-    unrecoverable: Arc<Mutex<Option<String>>>,
+    unrecoverable: Arc<OnceLock<String>>,
 }
 
 impl HwmonTransport {
@@ -137,7 +136,7 @@ impl HwmonTransport {
         Ok(Self {
             chips: Metered::new(chips, limit),
             original_pwm_enable: Arc::new(Mutex::new(HashMap::new())),
-            unrecoverable: Arc::new(Mutex::new(None)),
+            unrecoverable: Arc::default(),
         })
     }
 
@@ -183,7 +182,7 @@ impl HwmonTransport {
         Self {
             chips: Metered::new(chips, None),
             original_pwm_enable: Arc::new(Mutex::new(HashMap::new())),
-            unrecoverable: Arc::new(Mutex::new(None)),
+            unrecoverable: Arc::default(),
         }
     }
 
@@ -214,7 +213,7 @@ impl HwmonTransport {
             Ok(value) => Ok(Some(value)),
             Err(error) if error.kind() == std::io::ErrorKind::PermissionDenied => {
                 let detail = format!("reading hwmon attribute {attribute}: {error}");
-                self.unrecoverable.lock().unwrap().get_or_insert(detail);
+                let _ = self.unrecoverable.set(detail);
                 Err(error).with_context(|| format!("reading hwmon attribute {attribute}"))
             }
             // ENODATA from a sleeping sensor, ELOOP from a removed device's stale sysfs link.
@@ -233,7 +232,7 @@ impl HwmonTransport {
         {
             return self.reject("hwmon value must be a bounded unsigned integer".into());
         }
-        let chips = self.chips.write_access_blocking(value.len())?;
+        let chips = self.chips.write_access(value.len())?;
         let chip = chips
             .get(key)
             .ok_or_else(|| anyhow::anyhow!("unknown hwmon device key"))?;
@@ -243,16 +242,13 @@ impl HwmonTransport {
             ));
         }
         if attribute.ends_with("_enable") {
-            let mut originals = self.original_pwm_enable.lock().unwrap();
+            let mut originals = self.original_pwm_enable.lock();
             let restore_key = (key.to_owned(), attribute.to_owned());
             if let std::collections::hash_map::Entry::Vacant(entry) = originals.entry(restore_key) {
                 let original = chip.read(attribute).map_err(|error| {
                     let detail = format!("reading original hwmon attribute {attribute}: {error}");
                     if error.kind() == std::io::ErrorKind::PermissionDenied {
-                        self.unrecoverable
-                            .lock()
-                            .unwrap()
-                            .get_or_insert(detail.clone());
+                        let _ = self.unrecoverable.set(detail.clone());
                     }
                     anyhow::anyhow!(detail)
                 })?;
@@ -264,15 +260,12 @@ impl HwmonTransport {
     }
 
     fn reject<T>(&self, detail: String) -> Result<T> {
-        self.unrecoverable
-            .lock()
-            .unwrap()
-            .get_or_insert(detail.clone());
+        let _ = self.unrecoverable.set(detail.clone());
         anyhow::bail!(detail)
     }
 
     pub fn unrecoverable_error(&self) -> Option<String> {
-        self.unrecoverable.lock().unwrap().clone()
+        self.unrecoverable.get().cloned()
     }
 
     /// Convert a failed write without turning a readable hwmon device into an
@@ -283,7 +276,6 @@ impl HwmonTransport {
         if error.kind() == std::io::ErrorKind::PermissionDenied {
             self.original_pwm_enable
                 .lock()
-                .unwrap()
                 .remove(&(key.to_owned(), attribute.to_owned()));
             anyhow::anyhow!(
                 "writing hwmon attribute {attribute}: permission denied; add the daemon user to the 'halod' group, reload the installed udev rules, and run `sudo udevadm trigger --action=change --subsystem-match=hwmon`"
@@ -294,7 +286,7 @@ impl HwmonTransport {
     }
 
     pub fn restore(&self) -> Result<()> {
-        let originals = std::mem::take(&mut *self.original_pwm_enable.lock().unwrap());
+        let originals = std::mem::take(&mut *self.original_pwm_enable.lock());
         let chips = self.chips.read_access();
         let mut first_error = None;
         let mut pending = HashMap::new();
@@ -312,7 +304,7 @@ impl HwmonTransport {
             }
         }
         if !pending.is_empty() {
-            self.original_pwm_enable.lock().unwrap().extend(pending);
+            self.original_pwm_enable.lock().extend(pending);
         }
         first_error.map_or(Ok(()), Err)
     }
@@ -451,7 +443,6 @@ mod tests {
         transport
             .original_pwm_enable
             .lock()
-            .unwrap()
             .insert(("0".to_owned(), "pwm1_enable".to_owned()), "2\n".to_owned());
         let error = transport.write_error(
             "0",
@@ -461,7 +452,7 @@ mod tests {
 
         assert!(error.to_string().contains("permission denied"));
         assert_eq!(transport.unrecoverable_error(), None);
-        assert!(transport.original_pwm_enable.lock().unwrap().is_empty());
+        assert!(transport.original_pwm_enable.lock().is_empty());
         assert!(transport.restore().is_ok());
         assert_eq!(
             transport.read("0", "pwm1").unwrap().as_deref(),

@@ -1,4 +1,6 @@
 // SPDX-License-Identifier: GPL-3.0-or-later
+use anyhow::Result;
+use parking_lot::Mutex;
 /// Cross-platform input injection for key remapper actions.
 ///
 /// Linux: evdev uinput — works on X11, Wayland, and headless. Requires /dev/uinput
@@ -6,11 +8,10 @@
 ///
 /// Windows: enigo, which drives SendInput via the Win32 API.
 use std::sync::atomic::{AtomicU64, Ordering};
-use std::sync::{Arc, Mutex};
-
-use anyhow::Result;
+use std::sync::Arc;
 
 use crate::application::state::AppState;
+use halod_shared::ids::DeviceId;
 use halod_shared::types::{ButtonAction, CycleDir, DpiMode, MacroAtom, MacroStep, MouseBtn};
 
 fn cycle_index(dir: &CycleDir, current: usize, len: usize) -> usize {
@@ -26,7 +27,7 @@ fn cycle_index(dir: &CycleDir, current: usize, len: usize) -> usize {
     }
 }
 
-async fn dpi_cycle(direction: &CycleDir, device_id: &str, app: Arc<AppState>) {
+async fn dpi_cycle(direction: &CycleDir, device_id: &DeviceId, app: Arc<AppState>) {
     let Some(device) = app.find_device_by_id(device_id).await else {
         return;
     };
@@ -43,7 +44,7 @@ async fn dpi_cycle(direction: &CycleDir, device_id: &str, app: Arc<AppState>) {
     }
 }
 
-async fn profile_cycle(direction: &CycleDir, device_id: &str, app: Arc<AppState>) {
+async fn profile_cycle(direction: &CycleDir, device_id: &DeviceId, app: Arc<AppState>) {
     let Some(device) = app.find_device_by_id(device_id).await else {
         return;
     };
@@ -143,7 +144,7 @@ enum MacroState {
 
 /// Claim the `Idle` slot for macro `id`, or refuse if one is already running.
 fn claim_macro_slot(state: &Mutex<MacroState>, id: u64, cancel: Arc<tokio::sync::Notify>) -> bool {
-    let mut state = state.lock().unwrap();
+    let mut state = state.lock();
     if !matches!(*state, MacroState::Idle) {
         return false;
     }
@@ -157,7 +158,7 @@ fn claim_macro_slot(state: &Mutex<MacroState>, id: u64, cancel: Arc<tokio::sync:
 
 /// `Running -> Cancelling`, preserving `held`; a no-op when idle.
 fn cancel_macro_state(state: &Mutex<MacroState>) {
-    let mut state = state.lock().unwrap();
+    let mut state = state.lock();
     if let MacroState::Running { id, held, cancel } = &*state {
         let (id, held, cancel) = (*id, held.clone(), cancel.clone());
         cancel.notify_one();
@@ -167,7 +168,7 @@ fn cancel_macro_state(state: &Mutex<MacroState>) {
 
 /// Apply one step to `state`'s live held-input set, if a macro is running.
 fn track_held(state: &Mutex<MacroState>, atom: &MacroAtom) {
-    match &mut *state.lock().unwrap() {
+    match &mut *state.lock() {
         MacroState::Running { held, .. } | MacroState::Cancelling { held, .. } => {
             apply_held(held, atom);
         }
@@ -177,7 +178,7 @@ fn track_held(state: &Mutex<MacroState>, atom: &MacroAtom) {
 
 /// Drain whatever's tracked as held so the caller can release exactly that.
 fn take_held(state: &Mutex<MacroState>) -> Vec<HeldInput> {
-    match &mut *state.lock().unwrap() {
+    match &mut *state.lock() {
         MacroState::Running { held, .. } | MacroState::Cancelling { held, .. } => {
             std::mem::take(held)
         }
@@ -350,7 +351,7 @@ mod platform {
     pub fn run_macro(
         steps: Vec<MacroStep>,
         exec: std::sync::Arc<Backend>,
-        state: std::sync::Arc<std::sync::Mutex<super::MacroState>>,
+        state: std::sync::Arc<parking_lot::Mutex<super::MacroState>>,
         cancel: std::sync::Arc<tokio::sync::Notify>,
     ) {
         tokio::spawn(async move {
@@ -549,7 +550,7 @@ mod platform {
     pub fn run_macro(
         steps: Vec<MacroStep>,
         exec: std::sync::Arc<Backend>,
-        state: std::sync::Arc<std::sync::Mutex<super::MacroState>>,
+        state: std::sync::Arc<parking_lot::Mutex<super::MacroState>>,
         cancel: std::sync::Arc<tokio::sync::Notify>,
     ) {
         tokio::spawn(async move {
@@ -624,7 +625,7 @@ struct MacroStateGuard(Arc<Mutex<MacroState>>);
 
 impl Drop for MacroStateGuard {
     fn drop(&mut self) {
-        let mut state = self.0.lock().unwrap();
+        let mut state = self.0.lock();
         let id = match &*state {
             MacroState::Running { id, .. } | MacroState::Cancelling { id, .. } => Some(*id),
             MacroState::Idle => None,
@@ -677,12 +678,12 @@ impl ActionExecutor {
     pub async fn shutdown(&self) {
         self.cancel_macro();
         let deadline = tokio::time::Instant::now() + std::time::Duration::from_secs(2);
-        while !matches!(*self.macro_state.lock().unwrap(), MacroState::Idle)
+        while !matches!(*self.macro_state.lock(), MacroState::Idle)
             && tokio::time::Instant::now() < deadline
         {
             tokio::time::sleep(std::time::Duration::from_millis(10)).await;
         }
-        if !matches!(*self.macro_state.lock().unwrap(), MacroState::Idle) {
+        if !matches!(*self.macro_state.lock(), MacroState::Idle) {
             log::error!("ActionExecutor: macro cleanup did not finish before shutdown timeout");
         }
     }
@@ -699,7 +700,7 @@ impl ActionExecutor {
         &self,
         action: &ButtonAction,
         pressed: bool,
-        device_id: &str,
+        device_id: &DeviceId,
         app: Arc<AppState>,
     ) {
         match action {
@@ -772,10 +773,10 @@ mod tests {
         let dev = Arc::new(MockDevice::new("dev1").with_dpi_initial(800));
         let app = app_with(vec![dev.clone()]);
 
-        dpi_cycle(&CycleDir::Up, "dev1", Arc::clone(&app)).await;
+        dpi_cycle(&CycleDir::Up, &"dev1".parse().unwrap(), Arc::clone(&app)).await;
 
         assert_eq!(
-            *dev.dpi_direct_last.as_ref().unwrap().lock().unwrap(),
+            *dev.dpi_direct_last.as_ref().unwrap().lock(),
             None,
             "dpi_cycle must not touch DPI when no steps are configured"
         );
@@ -838,7 +839,7 @@ mod tests {
         let cancel = Arc::new(tokio::sync::Notify::new());
         assert!(claim_macro_slot(&state, 0, cancel.clone()));
         drop(MacroStateGuard(Arc::clone(&state)));
-        assert!(matches!(*state.lock().unwrap(), MacroState::Idle));
+        assert!(matches!(*state.lock(), MacroState::Idle));
         assert!(claim_macro_slot(&state, 1, cancel));
     }
 
@@ -851,7 +852,7 @@ mod tests {
 
         cancel_macro_state(&state);
 
-        match &*state.lock().unwrap() {
+        match &*state.lock() {
             MacroState::Cancelling { id, held } => {
                 assert_eq!(*id, 7);
                 assert_eq!(held, &vec![HeldInput::Key(30)]);
@@ -873,7 +874,7 @@ mod tests {
     fn cancel_on_idle_is_a_no_op() {
         let state = Arc::new(Mutex::new(MacroState::Idle));
         cancel_macro_state(&state);
-        assert!(matches!(*state.lock().unwrap(), MacroState::Idle));
+        assert!(matches!(*state.lock(), MacroState::Idle));
     }
 
     #[test]
@@ -897,10 +898,7 @@ mod tests {
             vec![HeldInput::Key(1), HeldInput::Mouse(MouseBtn::Left)]
         );
         // Draining doesn't itself reset to Idle — that's MacroStateGuard's job.
-        assert!(matches!(
-            *state.lock().unwrap(),
-            MacroState::Cancelling { .. }
-        ));
+        assert!(matches!(*state.lock(), MacroState::Cancelling { .. }));
     }
 
     #[test]

@@ -10,6 +10,7 @@
 
 mod geometry;
 mod inspector;
+mod layers;
 mod library;
 mod sprites;
 mod stage;
@@ -19,16 +20,25 @@ use std::collections::{HashMap, HashSet};
 #[cfg(test)]
 use crate::domain::topic_store::TopicStore;
 use egui::{Pos2, Rect, Vec2};
-use halod_shared::commands::DaemonCommand;
+use halod_shared::commands::{DaemonCommand, DeviceOp};
 use halod_shared::lcd_custom::{CustomTemplateDef, WIDGETS_JSON_PARAM};
 use halod_shared::types::EffectParamValue;
 
 use inspector::{empty_selection_card, screen_style_card, selected_widget_card};
-use library::{delete_template_modal, library_card};
+use library::{delete_template_modal, library_card, save_template_modal};
 use stage::stage;
 
+use crate::domain::state::undo::{UndoAction, UndoStack};
+use crate::runtime::ipc;
 use crate::ui::components as widgets;
 use crate::ui::screens::device::{DeviceUi, LcdMediaTab, TabCtx};
+use crate::ui::theme;
+use crate::ui::theme::CYAN;
+use crate::ui::theme::RADIUS_MD;
+use crate::ui::theme::SPACE_4;
+use crate::ui::theme::SPACE_8;
+use crate::ui::theme::TEXT;
+use halod_shared::ids::DeviceId;
 
 /// Per-device editor state, held in `LcdTab`.
 #[derive(Default)]
@@ -73,10 +83,42 @@ pub struct EditorState {
     /// Active resize gesture's captured start state, so the outline/sprite can
     /// preview the new size instantly rather than lagging the daemon re-render.
     pub resize_preview: Option<ResizePreview>,
-    pub library_collapsed: bool,
+    pub save_open: bool,
+    pub history: UndoStack<CustomTemplateDef>,
 }
 
 impl EditorState {
+    pub(super) fn apply_layer(&mut self, id: &str, action: layers::LayerAction) -> bool {
+        match layers::apply(&mut self.def, id, action) {
+            layers::LayerOutcome::Unchanged => false,
+            layers::LayerOutcome::Changed => true,
+            layers::LayerOutcome::Selected(new_id) => {
+                self.select_only(new_id);
+                true
+            }
+            layers::LayerOutcome::Removed => {
+                self.selected.remove(id);
+                if self.editing_text.as_deref() == Some(id) {
+                    self.editing_text = None;
+                }
+                true
+            }
+        }
+    }
+
+    pub fn apply_history(&mut self, action: UndoAction) -> bool {
+        match self.history.apply(action, &self.def) {
+            Some(def) => {
+                self.def = def;
+                self.history.observe(&self.def, true);
+                self.selected
+                    .retain(|id| self.def.widgets.iter().any(|w| &w.id == id));
+                true
+            }
+            None => false,
+        }
+    }
+
     /// The sole selected widget id, iff exactly one is selected. Drives the
     /// inspector card and the per-widget resize/rotate/remove handles.
     pub fn primary(&self) -> Option<&String> {
@@ -126,10 +168,17 @@ pub fn show(
     ui: &mut egui::Ui,
     ctx: &TabCtx,
     st: &mut DeviceUi,
-    id: &str,
+    id: &DeviceId,
     lcd: &halod_shared::types::LcdStatus,
 ) {
     seed_if_needed(ctx, st, id);
+    if crate::ui::undo::settled(ui.ctx()) {
+        if let Some(action) = ui.input_mut(crate::ui::undo::undo_action) {
+            if st.lcd.editor.apply_history(action) {
+                send_def(ctx, st, id, true);
+            }
+        }
+    }
     if Some(LcdMediaTab::Template) != st.lcd.prev_mode_tab {
         send_def(ctx, st, id, true);
         st.lcd.prev_mode_tab = Some(LcdMediaTab::Template);
@@ -139,14 +188,16 @@ pub fn show(
         send_def(ctx, st, id, true);
     }
 
-    // Stage + persistent inspector. Keep object controls beside the stage so
-    // selecting a widget never causes a long form to appear below the canvas.
-    let avail = ui.available_width();
+    const ASIDE_W: f32 = 340.0;
+    let main_w = (ui.available_width() - ASIDE_W - 16.0).max(320.0);
     let mut left_column = Rect::NOTHING;
     let mut inspector_rect = Rect::NOTHING;
-    widgets::split_columns(ui, avail * 0.66, 16.0, |left, right| {
-        widgets::card(left, |ui| stage(ui, ctx, st, id, lcd));
-        // Drop selections whose widgets no longer exist (deleted this frame).
+    widgets::split_columns(ui, main_w, 16.0, |left, right| {
+        left.spacing_mut().item_spacing.y = SPACE_8;
+        widgets::card_with_margin(left, egui::Margin::same(24), |ui| {
+            ui.set_width(ui.available_width());
+            stage(ui, ctx, st, id, lcd);
+        });
         let live: HashSet<String> = st
             .lcd
             .editor
@@ -156,19 +207,18 @@ pub fn show(
             .map(|w| w.id.clone())
             .collect();
         st.lcd.editor.selected.retain(|s| live.contains(s));
-        // Selection is edited in the right-hand inspector below. The stage is
-        // deliberately the only content in the left column.
+        widgets::card_with_margin(left, egui::Margin::same(16), |ui| {
+            library_card(ui, ctx, st, id)
+        });
         left_column = left.min_rect();
 
+        right.spacing_mut().item_spacing.y = SPACE_8;
         let sel = st.lcd.editor.primary().cloned();
-        widgets::card(right, |ui| match &sel {
+        aside_card(right, |ui| match &sel {
             Some(sel) => selected_widget_card(ui, ctx, st, id, sel),
             None => empty_selection_card(ui),
         });
-        right.add_space(crate::ui::theme::SPACE_6);
-        widgets::card(right, |ui| library_card(ui, ctx, st, id));
-        right.add_space(crate::ui::theme::SPACE_6);
-        widgets::card(right, |ui| screen_style_card(ui, ctx, st, id, lcd));
+        aside_card(right, |ui| screen_style_card(ui, ctx, st, id, lcd));
         inspector_rect = right.min_rect();
     });
 
@@ -186,17 +236,14 @@ pub fn show(
                 .map(|descriptor| descriptor.name.as_str())
                 .unwrap_or("Widget");
             let ghost = Rect::from_center_size(pos, Vec2::new(80.0, 42.0));
-            ui.painter().rect_filled(
-                ghost,
-                crate::ui::theme::RADIUS_MD,
-                crate::ui::theme::a(crate::ui::theme::CYAN, 0.16),
-            );
+            ui.painter()
+                .rect_filled(ghost, RADIUS_MD, theme::a(CYAN, 0.16));
             ui.painter().text(
                 ghost.center(),
                 egui::Align2::CENTER_CENTER,
                 name,
-                crate::ui::theme::caption(),
-                crate::ui::theme::TEXT,
+                theme::caption(),
+                TEXT,
             );
         }
         if ui.input(|input| input.pointer.primary_released()) {
@@ -240,6 +287,20 @@ pub fn show(
     }
 
     delete_template_modal(ui, ctx, st);
+    save_template_modal(ui, ctx, st);
+    if st.lcd.editor.seeded {
+        let settled = crate::ui::undo::settled(ui.ctx()) && st.lcd.editor.dragging_new.is_none();
+        let editor = &mut st.lcd.editor;
+        editor.history.observe(&editor.def, settled);
+    }
+}
+
+fn aside_card(ui: &mut egui::Ui, body: impl FnOnce(&mut egui::Ui)) {
+    widgets::card_with_margin(ui, egui::Margin::same(18), |ui| {
+        ui.set_width(ui.available_width());
+        ui.spacing_mut().item_spacing.y = SPACE_4;
+        body(ui);
+    });
 }
 
 /// Seed the editor's local `def` from the daemon-reported params once per tab
@@ -247,7 +308,7 @@ pub fn show(
 /// Waits (unseeded) until the daemon reports params for this device at all, so
 /// a snapshot arriving after the tab opens still seeds instead of the default
 /// def silently replacing a saved layout on the first edit.
-fn seed_if_needed(ctx: &TabCtx, st: &mut DeviceUi, id: &str) {
+fn seed_if_needed(ctx: &TabCtx, st: &mut DeviceUi, id: &DeviceId) {
     if st.lcd.editor.seeded {
         return;
     }
@@ -272,7 +333,7 @@ fn apply_loaded_template(st: &mut DeviceUi, def: CustomTemplateDef) {
 }
 
 /// Serialize the local def and push it to the daemon as the "custom" template.
-fn send_def(ctx: &TabCtx, st: &mut DeviceUi, id: &str, immediate: bool) {
+fn send_def(ctx: &TabCtx, st: &mut DeviceUi, id: &DeviceId, immediate: bool) {
     // Any user edit makes the local def authoritative: block a later daemon
     // param snapshot (which may reflect an earlier send that's still in flight)
     // from re-seeding and clobbering edits made since. Seeding from a running
@@ -281,7 +342,7 @@ fn send_def(ctx: &TabCtx, st: &mut DeviceUi, id: &str, immediate: bool) {
     let json = match serde_json::to_string(&st.lcd.editor.def) {
         Ok(json) => json,
         Err(e) => {
-            log::warn!("[LCD editor] cannot serialize template def: {e}");
+            log::warn!("cannot serialize template def: {e}");
             return;
         }
     };
@@ -289,19 +350,23 @@ fn send_def(ctx: &TabCtx, st: &mut DeviceUi, id: &str, immediate: bool) {
     params.insert(WIDGETS_JSON_PARAM.to_string(), EffectParamValue::Str(json));
     if immediate {
         st.last_edit = ctx.time;
-        crate::runtime::ipc::send(
+        ipc::send(
             ctx.cmd,
-            halod_shared::commands::DaemonCommand::LcdEngineSetTemplate {
-                device_id: id.to_string(),
-                template_id: "custom".to_string(),
-                params,
+            halod_shared::commands::DaemonCommand::Device {
+                device_id: id.clone(),
+                op: DeviceOp::LcdEngineSetTemplate {
+                    template_id: "custom".to_string(),
+                    params,
+                },
             },
         );
     } else {
-        let cmd = DaemonCommand::LcdEngineSetTemplate {
-            device_id: id.to_string(),
-            template_id: "custom".to_string(),
-            params,
+        let cmd = DaemonCommand::Device {
+            device_id: id.clone(),
+            op: DeviceOp::LcdEngineSetTemplate {
+                template_id: "custom".to_string(),
+                params,
+            },
         };
         st.queue("lcd_editor_def", cmd, ctx.time);
     }
@@ -311,6 +376,43 @@ fn send_def(ctx: &TabCtx, st: &mut DeviceUi, id: &str, immediate: bool) {
 mod tests {
     use super::*;
     use halod_shared::types::WireDevice;
+
+    #[test]
+    fn deleting_the_selected_layer_clears_the_selection() {
+        let mut editor = EditorState::default();
+        editor.def.widgets = vec![widget("a", 0.2, 0.2), widget("b", 0.6, 0.6)];
+        editor.select_only("b".into());
+        editor.editing_text = Some("b".into());
+        assert!(editor.apply_layer("b", layers::LayerAction::Delete));
+        assert!(editor.selected.is_empty());
+        assert_eq!(editor.editing_text, None);
+        assert_eq!(editor.def.widgets.len(), 1);
+    }
+
+    #[test]
+    fn duplicating_selects_the_copy() {
+        let mut editor = EditorState::default();
+        editor.def.widgets = vec![widget("w1", 0.2, 0.2)];
+        editor.select_only("w1".into());
+        assert!(editor.apply_layer("w1", layers::LayerAction::Duplicate));
+        assert_eq!(editor.primary().map(String::as_str), Some("w2"));
+    }
+
+    #[test]
+    fn the_undo_shortcut_restores_the_previous_template() {
+        let mut editor = EditorState::default();
+        let before = editor.def.clone();
+        editor.history.observe(&before, true);
+        editor.def.widgets.push(widget("added", 0.5, 0.5));
+        editor.select_only("added".into());
+        let edited = editor.def.clone();
+        editor.history.observe(&edited, true);
+        assert!(editor.apply_history(UndoAction::Undo));
+        assert_eq!(editor.def, before);
+        assert!(editor.selected.is_empty());
+        assert!(editor.apply_history(UndoAction::Redo));
+        assert_eq!(editor.def, edited);
+    }
 
     fn widget(id: &str, x: f32, y: f32) -> halod_shared::lcd_custom::WidgetDef {
         halod_shared::lcd_custom::WidgetDef {
@@ -369,24 +471,24 @@ mod tests {
             .lcd
             .engine
             .device_template_params
-            .insert("lcd".to_string(), params_with(&def));
+            .insert("lcd".parse().unwrap(), params_with(&def));
         let (tx, _rx) = tokio::sync::mpsc::unbounded_channel();
         let dev = WireDevice::default();
         let ctx = test_ctx(&state, &dev, &tx);
 
-        let mut st = DeviceUi::new("lcd".into());
-        seed_if_needed(&ctx, &mut st, "lcd");
+        let mut st = DeviceUi::new("lcd".parse().unwrap());
+        seed_if_needed(&ctx, &mut st, &"lcd".parse().unwrap());
         assert!(st.lcd.editor.seeded);
         assert_eq!(st.lcd.editor.def, def);
 
         // A second snapshot must not re-seed (would drop edits made since).
         let mut later = TopicStore::default();
         later.lcd.engine.device_template_params.insert(
-            "lcd".to_string(),
+            "lcd".parse().unwrap(),
             params_with(&CustomTemplateDef::default()),
         );
         let ctx = test_ctx(&later, &dev, &tx);
-        seed_if_needed(&ctx, &mut st, "lcd");
+        seed_if_needed(&ctx, &mut st, &"lcd".parse().unwrap());
         assert_eq!(
             st.lcd.editor.def, def,
             "already-seeded editor must not re-seed"
@@ -402,8 +504,8 @@ mod tests {
         let dev = WireDevice::default();
         let ctx = test_ctx(&state, &dev, &tx);
 
-        let mut st = DeviceUi::new("lcd".into());
-        seed_if_needed(&ctx, &mut st, "lcd");
+        let mut st = DeviceUi::new("lcd".parse().unwrap());
+        seed_if_needed(&ctx, &mut st, &"lcd".parse().unwrap());
         assert!(!st.lcd.editor.seeded);
         // With no daemon params the editor stays at the default plugin template
         // rather than adopting anything — a later snapshot seeds.
@@ -417,12 +519,17 @@ mod tests {
         // not overwrite the edits made since.
         let (tx, _rx) = tokio::sync::mpsc::unbounded_channel();
         let dev = WireDevice::default();
-        let mut st = DeviceUi::new("lcd".into());
+        let mut st = DeviceUi::new("lcd".parse().unwrap());
         st.lcd.editor.def.widgets.clear();
         st.lcd.editor.def.widgets.push(widget("w1", 0.5, 0.5));
 
         let state = TopicStore::default();
-        send_def(&test_ctx(&state, &dev, &tx), &mut st, "lcd", true);
+        send_def(
+            &test_ctx(&state, &dev, &tx),
+            &mut st,
+            &"lcd".parse().unwrap(),
+            true,
+        );
         assert!(
             st.lcd.editor.seeded,
             "an edit makes the local def authoritative"
@@ -431,10 +538,14 @@ mod tests {
         // A stale (empty) snapshot arrives afterwards.
         let mut late = TopicStore::default();
         late.lcd.engine.device_template_params.insert(
-            "lcd".to_string(),
+            "lcd".parse().unwrap(),
             params_with(&CustomTemplateDef::default()),
         );
-        seed_if_needed(&test_ctx(&late, &dev, &tx), &mut st, "lcd");
+        seed_if_needed(
+            &test_ctx(&late, &dev, &tx),
+            &mut st,
+            &"lcd".parse().unwrap(),
+        );
         assert_eq!(
             st.lcd.editor.def.widgets.len(),
             1,
@@ -467,7 +578,7 @@ mod tests {
 
     #[test]
     fn apply_loaded_template_replaces_def_clears_selection_and_locks_out_reseed() {
-        let mut st = DeviceUi::new("lcd".into());
+        let mut st = DeviceUi::new("lcd".parse().unwrap());
         // Pre-existing local edit + selection that the load must overwrite.
         st.lcd.editor.def.widgets.push(widget("old", 0.1, 0.1));
         st.lcd.editor.select_only("old".to_string());
@@ -491,10 +602,14 @@ mod tests {
         let dev = WireDevice::default();
         let mut late = TopicStore::default();
         late.lcd.engine.device_template_params.insert(
-            "lcd".to_string(),
+            "lcd".parse().unwrap(),
             params_with(&CustomTemplateDef::default()),
         );
-        seed_if_needed(&test_ctx(&late, &dev, &tx), &mut st, "lcd");
+        seed_if_needed(
+            &test_ctx(&late, &dev, &tx),
+            &mut st,
+            &"lcd".parse().unwrap(),
+        );
         assert_eq!(
             st.lcd.editor.def, loaded,
             "loaded template survives a late snapshot"

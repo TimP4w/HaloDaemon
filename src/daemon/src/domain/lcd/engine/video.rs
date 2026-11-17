@@ -17,7 +17,9 @@ use tokio::task::JoinHandle;
 
 use super::FrameTx;
 use crate::application::state::AppState;
+use crate::application::usecases::lcd::runtime;
 use crate::domain::device::Device;
+use halod_shared::ids::DeviceId;
 use halod_shared::types::LcdHealth;
 
 fn set_device_health(device: &dyn Device, health: LcdHealth) {
@@ -77,7 +79,7 @@ enum VideoStream {
 
 pub struct VideoEngine {
     app: Arc<AppState>,
-    streams: Mutex<HashMap<String, VideoStream>>,
+    streams: Mutex<HashMap<DeviceId, VideoStream>>,
     lifecycle: Mutex<()>,
     /// Sender shared with the LCD engine so video preview frames appear on the
     /// same `lcd_engine_frame` IPC channel the UI already subscribes to.
@@ -95,7 +97,7 @@ impl VideoEngine {
     }
 
     /// Start (or restart) playback after fully stopping any prior stream.
-    pub async fn start(self: &Arc<Self>, device_id: &str, path: &str) -> Result<()> {
+    pub async fn start(self: &Arc<Self>, device_id: &DeviceId, path: &str) -> Result<()> {
         let _lifecycle = self.lifecycle.lock().await;
         let device = self
             .app
@@ -127,14 +129,14 @@ impl VideoEngine {
         self.streams
             .lock()
             .await
-            .insert(device_id.to_string(), VideoStream::Starting);
+            .insert(device_id.clone(), VideoStream::Starting);
 
         let (task, child) = match self.spawn_player(
             Arc::clone(&device),
             path.to_string(),
             w,
             h,
-            device_id.to_string(),
+            device_id.clone(),
         ) {
             Ok(stream) => stream,
             Err(error) => {
@@ -142,21 +144,21 @@ impl VideoEngine {
                 self.streams
                     .lock()
                     .await
-                    .insert(device_id.to_string(), VideoStream::Failed);
+                    .insert(device_id.clone(), VideoStream::Failed);
                 return Err(error);
             }
         };
         self.streams
             .lock()
             .await
-            .insert(device_id.to_string(), VideoStream::Playing { task, child });
+            .insert(device_id.clone(), VideoStream::Playing { task, child });
         set_device_health(device.as_ref(), LcdHealth::Stable);
-        log::info!("[Video] streaming {path} to {device_id} ({w}x{h})");
+        log::info!("streaming {path} to {device_id} ({w}x{h})");
         Ok(())
     }
 
     /// Stopping kills ffmpeg and awaits its exit, then joins the reader task.
-    pub async fn stop(self: &Arc<Self>, device_id: &str) {
+    pub async fn stop(self: &Arc<Self>, device_id: &DeviceId) {
         let _lifecycle = self.lifecycle.lock().await;
         self.stop_inner(device_id).await;
     }
@@ -168,12 +170,12 @@ impl VideoEngine {
         }
     }
 
-    async fn stop_inner(self: &Arc<Self>, device_id: &str) {
+    async fn stop_inner(self: &Arc<Self>, device_id: &DeviceId) {
         let playing = {
             let mut streams = self.streams.lock().await;
             match streams.get(device_id) {
                 Some(VideoStream::Playing { .. }) => {
-                    match streams.insert(device_id.to_string(), VideoStream::Stopping) {
+                    match streams.insert(device_id.clone(), VideoStream::Stopping) {
                         Some(VideoStream::Playing { task, child }) => Some((task, child)),
                         _ => None,
                     }
@@ -196,7 +198,7 @@ impl VideoEngine {
         match tokio::time::timeout(std::time::Duration::from_secs(2), &mut task).await {
             Ok(_) => {}
             Err(_) => {
-                log::warn!("[Video] reader task for {device_id} did not stop in time");
+                log::warn!("reader task for {device_id} did not stop in time");
                 task.abort();
                 let _ = task.await;
             }
@@ -204,11 +206,11 @@ impl VideoEngine {
         self.streams
             .lock()
             .await
-            .insert(device_id.to_string(), VideoStream::Stopped);
+            .insert(device_id.clone(), VideoStream::Stopped);
         if let Some(device) = device {
             set_device_health(device.as_ref(), LcdHealth::Stable);
         }
-        log::info!("[Video] stopped stream for {device_id}");
+        log::info!("stopped stream for {device_id}");
     }
 
     fn spawn_player(
@@ -217,7 +219,7 @@ impl VideoEngine {
         path: String,
         w: u32,
         h: u32,
-        device_id: String,
+        device_id: DeviceId,
     ) -> Result<(JoinHandle<()>, Arc<Mutex<tokio::process::Child>>)> {
         let frame_bytes = (w as usize) * (h as usize) * 4;
         // Scale to cover, then centre-crop to the exact panel square.
@@ -308,7 +310,7 @@ impl VideoEngine {
                     }
                 }
             };
-            log::warn!("[Video] {device_id}: {failure}");
+            log::warn!("{device_id}: {failure}");
             {
                 let mut child = child_guard.lock().await;
                 let _ = child.kill().await;
@@ -326,8 +328,7 @@ impl VideoEngine {
                 }
             };
             if changed {
-                crate::application::usecases::lcd::runtime::device_changed(&engine.app, &device_id)
-                    .await;
+                runtime::device_changed(&engine.app, &device_id).await;
             }
         });
         Ok((task, child))
@@ -350,7 +351,7 @@ fn spawn_preview_encode(
     buf: Vec<u8>,
     w: u32,
     h: u32,
-    device_id: String,
+    device_id: DeviceId,
     frame_id: u64,
     preview_tx: &super::FrameTx,
 ) {
@@ -425,7 +426,9 @@ mod tests {
     async fn start_returns_err_when_device_not_found() {
         let app = Arc::new(AppState::new(Config::default()));
         let engine = make_engine(Arc::clone(&app));
-        let result = engine.start("no_such_device", "/tmp/test.mp4").await;
+        let result = engine
+            .start(&"no_such_device".parse().unwrap(), "/tmp/test.mp4")
+            .await;
         assert!(result.is_err());
         assert!(
             result.unwrap_err().to_string().contains("not found"),
@@ -440,7 +443,10 @@ mod tests {
 
         let engine = make_engine(Arc::clone(&app));
         let result = engine
-            .start("lcd1", "/tmp/halod_test_nonexistent_file.mp4")
+            .start(
+                &"lcd1".parse().unwrap(),
+                "/tmp/halod_test_nonexistent_file.mp4",
+            )
             .await;
         assert!(result.is_err());
         let msg = result.unwrap_err().to_string();
@@ -455,7 +461,7 @@ mod tests {
         let app = Arc::new(AppState::new(Config::default()));
         let engine = make_engine(app);
         // Must be a no-op — no stream registered for this id.
-        engine.stop("no_such_device").await;
+        engine.stop(&"no_such_device".parse().unwrap()).await;
     }
 
     /// A tiny (2x2, 5-frame) local video file, built with the same `ffmpeg` the engine under test invokes.
@@ -508,10 +514,13 @@ mod tests {
             .push(Arc::clone(&dev) as Arc<dyn Device>);
 
         let engine = make_engine(Arc::clone(&app));
-        engine.start("lcd1", video.to_str().unwrap()).await.unwrap();
+        engine
+            .start(&"lcd1".parse().unwrap(), video.to_str().unwrap())
+            .await
+            .unwrap();
         tokio::time::sleep(std::time::Duration::from_millis(200)).await;
 
-        engine.stop("lcd1").await;
+        engine.stop(&"lcd1".parse().unwrap()).await;
 
         assert_eq!(
             lcd_health(&dev),
@@ -534,10 +543,16 @@ mod tests {
             .push(Arc::clone(&dev) as Arc<dyn Device>);
 
         let engine = make_engine(Arc::clone(&app));
-        engine.start("lcd1", video.to_str().unwrap()).await.unwrap();
-        engine.start("lcd1", video.to_str().unwrap()).await.unwrap();
+        engine
+            .start(&"lcd1".parse().unwrap(), video.to_str().unwrap())
+            .await
+            .unwrap();
+        engine
+            .start(&"lcd1".parse().unwrap(), video.to_str().unwrap())
+            .await
+            .unwrap();
 
-        engine.stop("lcd1").await;
+        engine.stop(&"lcd1".parse().unwrap()).await;
         assert_eq!(lcd_health(&dev), LcdHealth::Stable);
     }
 
@@ -557,7 +572,7 @@ mod tests {
 
         let engine = make_engine(Arc::clone(&app));
         engine
-            .start("lcd1", garbage.to_str().unwrap())
+            .start(&"lcd1".parse().unwrap(), garbage.to_str().unwrap())
             .await
             .unwrap();
 

@@ -1,8 +1,10 @@
 // SPDX-License-Identifier: GPL-3.0-or-later
+use crate::application::run_loop::{fps_tick_ms, EngineConfig};
+use crate::config::RgbConfig;
+use halod_shared::bus::{topic, BusValue};
 use std::{
     collections::{HashMap, HashSet},
     sync::{Arc, LazyLock},
-    time::Instant,
 };
 
 use base64::Engine as _;
@@ -18,11 +20,18 @@ use tokio::sync::{Mutex, Notify};
 use super::canvas::{self, FrameSource, Sampler};
 use super::color::linear_to_led;
 use super::direct::{self, DirectLedEffect};
+use crate::application::run_loop::EngineConfigReceiver;
+use crate::domain::plugin::EffectFrameInput;
+use crate::domain::plugin::EffectZoneInput;
+use crate::domain::plugin::LedCoord;
+use crate::domain::plugin::PluginEffectHandle;
+use crate::domain::plugin::Registry;
 use crate::{
     application::state::AppState,
     config::{CanvasState, PlacedZone},
     domain::device::Device,
 };
+use halod_shared::ids::DeviceId;
 
 const CANVAS_W: u32 = 400;
 const CANVAS_H: u32 = 300;
@@ -33,19 +42,102 @@ const DEFAULT_KEY: &str = "__default__";
 const IDLE_GRACE: Duration = Duration::from_secs(20);
 const IDLE_POLL_MS: u64 = 1000;
 
-fn idle_interval_ms(idle_since: Option<Instant>, now: Instant, base_ms: u64) -> u64 {
-    match idle_since {
-        Some(since) if now.duration_since(since) >= IDLE_GRACE => IDLE_POLL_MS,
-        _ => base_ms,
+struct CanvasFrameClock {
+    time: f32,
+    dt: f32,
+    id: u64,
+}
+
+struct CanvasPacing {
+    start: tokio::time::Instant,
+    last: tokio::time::Instant,
+    frame_id: u64,
+    idle_since: Option<tokio::time::Instant>,
+    probe_pending: bool,
+}
+
+impl CanvasPacing {
+    fn new(now: tokio::time::Instant) -> Self {
+        Self {
+            start: now,
+            last: now,
+            frame_id: 0,
+            idle_since: None,
+            probe_pending: false,
+        }
+    }
+
+    fn next_frame(&mut self, now: tokio::time::Instant) -> CanvasFrameClock {
+        let frame = CanvasFrameClock {
+            time: now.duration_since(self.start).as_secs_f32(),
+            dt: now.duration_since(self.last).as_secs_f32(),
+            id: self.frame_id,
+        };
+        self.last = now;
+        self.frame_id += 1;
+        frame
+    }
+
+    fn record(&mut self, had_work: bool, now: tokio::time::Instant) {
+        if had_work {
+            self.idle_since = None;
+        } else if self.idle_since.is_none() {
+            self.idle_since = Some(now);
+        }
+    }
+
+    fn woken(&mut self) {
+        self.probe_pending = true;
+    }
+
+    fn probe(&mut self) {
+        self.probe_pending = true;
+    }
+
+    fn has_work(&mut self, now: tokio::time::Instant) -> bool {
+        let within_grace = self
+            .idle_since
+            .is_none_or(|since| now.duration_since(since) < IDLE_GRACE);
+        within_grace || std::mem::take(&mut self.probe_pending)
     }
 }
 
-type RgbDeviceMap = HashMap<String, Arc<dyn Device>>;
+struct CanvasLoop {
+    engine: Arc<RgbEngine>,
+    pacing: CanvasPacing,
+}
+
+impl crate::application::run_loop::IdleEngine for CanvasLoop {
+    type Config = RgbConfig;
+
+    async fn tick(&mut self, _cfg: RgbConfig) {
+        let frame = self.pacing.next_frame(tokio::time::Instant::now());
+        let had_work = self.engine.tick(frame.time, frame.dt, frame.id).await;
+        self.pacing.record(had_work, tokio::time::Instant::now());
+    }
+
+    async fn wait_for_work(&mut self) {
+        tokio::select! {
+            () = self.engine.wake.notified() => self.pacing.woken(),
+            () = tokio::time::sleep(Duration::from_millis(IDLE_POLL_MS)) => self.pacing.probe(),
+        }
+    }
+
+    async fn has_work(&mut self) -> bool {
+        self.pacing.has_work(tokio::time::Instant::now())
+    }
+
+    async fn on_disabled(&mut self) {
+        self.engine.forget_engine_mode_intent().await;
+    }
+}
+
+type RgbDeviceMap = HashMap<DeviceId, Arc<dyn Device>>;
 type FrameTx = tokio::sync::broadcast::Sender<Arc<CanvasFrame>>;
 /// Per device: the transformed frames to write this tick, one entry per zone.
 type DeviceWrite = (Arc<dyn Device>, WriteGuard, Vec<(String, Vec<RgbColor>)>);
-type PendingWrites = HashMap<String, DeviceWrite>;
-type WriteGroups = HashMap<WriteSlotKey, Vec<(String, DeviceWrite)>>;
+type PendingWrites = HashMap<DeviceId, DeviceWrite>;
+type WriteGroups = HashMap<WriteSlotKey, Vec<(DeviceId, DeviceWrite)>>;
 type DirectDevice = (
     Arc<dyn Device>,
     String,
@@ -61,7 +153,7 @@ struct LivePixmap {
 
 enum PixmapRuntime {
     BuiltIn(Box<dyn FrameSource>),
-    Plugin(crate::domain::plugin::PluginEffectHandle),
+    Plugin(PluginEffectHandle),
     Off,
 }
 
@@ -73,22 +165,22 @@ struct LiveDirect {
 
 enum DirectRuntime {
     BuiltIn(Box<dyn DirectLedEffect>),
-    Plugin(crate::domain::plugin::PluginEffectHandle),
+    Plugin(PluginEffectHandle),
     Off,
 }
 
 pub struct RgbEngine {
     app_state: Arc<AppState>,
     live_pixmap: Mutex<HashMap<String, LivePixmap>>,
-    live_direct: Mutex<HashMap<String, LiveDirect>>,
+    live_direct: Mutex<HashMap<DeviceId, LiveDirect>>,
     frame_tx: FrameTx,
-    engine_mode_intent: Mutex<HashMap<String, bool>>,
+    engine_mode_intent: Mutex<HashMap<DeviceId, bool>>,
     /// Reusable srgb preview buffer, cleared and repopulated each tick.
     preview_srgb_buf: Mutex<Vec<u8>>,
     /// One in-flight write task per device. A device whose previous write is
     /// still running has its frame dropped this tick rather than queued, so a
     /// slow (e.g. rate-limited) device never paces the rest of the canvas.
-    write_slots: std::sync::Mutex<HashMap<WriteSlotKey, tokio::task::JoinHandle<()>>>,
+    write_slots: parking_lot::Mutex<HashMap<WriteSlotKey, tokio::task::JoinHandle<()>>>,
     tick_cache: Mutex<Option<TickStateCache>>,
     wake: Notify,
 }
@@ -115,7 +207,7 @@ enum WriteGuard {
 
 #[derive(Clone, Debug, Hash, PartialEq, Eq)]
 enum WriteSlotKey {
-    Device(String),
+    Device(DeviceId),
     Shared(usize),
 }
 
@@ -144,7 +236,7 @@ fn effect_rebuild_due(
         Option<&crate::util::backoff::FailureStreak>,
     )>,
     want: &EffectSignature,
-    now: std::time::Instant,
+    now: tokio::time::Instant,
 ) -> bool {
     match existing {
         None => true,
@@ -152,16 +244,6 @@ fn effect_rebuild_due(
         Some((_, respawn)) => {
             respawn.is_some_and(|streak| crate::util::backoff::respawn_due(streak, now))
         }
-    }
-}
-
-fn record_respawn(
-    respawn: &mut Option<crate::util::backoff::FailureStreak>,
-    now: std::time::Instant,
-) {
-    match respawn {
-        Some(streak) => streak.record(now),
-        None => *respawn = Some(crate::util::backoff::FailureStreak::first(now)),
     }
 }
 
@@ -294,7 +376,7 @@ fn prepare_zone(
         .iter()
         .zip(colors.iter())
         .map(|(led, color)| LedFrameEntry {
-            device_id: dev.id().to_string(),
+            device_id: dev.id().into(),
             channel_id: channel_id.to_string(),
             led_id: led.id,
             color: *color,
@@ -324,7 +406,7 @@ impl RgbEngine {
             frame_tx,
             engine_mode_intent: Mutex::new(HashMap::new()),
             preview_srgb_buf: Mutex::new(Vec::new()),
-            write_slots: std::sync::Mutex::new(HashMap::new()),
+            write_slots: parking_lot::Mutex::new(HashMap::new()),
             tick_cache: Mutex::new(None),
             wake: Notify::new(),
         })
@@ -342,9 +424,7 @@ impl RgbEngine {
     /// Built-in host effects plus plugin-declared pixmap effects. The built-in
     /// boundary is intentionally narrow; see `canvas::effects`. Not memoized
     /// because plugins can load/unload at runtime.
-    pub fn available_effect_descriptors(
-        registry: &crate::domain::plugin::Registry,
-    ) -> Vec<Animation> {
+    pub fn available_effect_descriptors(registry: &Registry) -> Vec<Animation> {
         let mut v = canvas::builtin_descriptors();
         v.extend(registry.pixmap_effect_descriptors());
         v
@@ -352,7 +432,7 @@ impl RgbEngine {
 
     /// Built-in host effects plus plugin-declared direct effects. See
     /// [`Self::available_effect_descriptors`] for why this isn't memoized.
-    pub fn direct_effect_descriptors(registry: &crate::domain::plugin::Registry) -> Vec<Animation> {
+    pub fn direct_effect_descriptors(registry: &Registry) -> Vec<Animation> {
         let mut v = direct::builtin_descriptors();
         v.extend(registry.direct_effect_descriptors());
         v
@@ -360,61 +440,19 @@ impl RgbEngine {
 
     pub async fn start(
         self: Arc<Self>,
-        cfg_rx: crate::application::run_loop::EngineConfigReceiver,
+        cfg_rx: EngineConfigReceiver<RgbConfig>,
     ) -> tokio::task::JoinHandle<()> {
         tokio::spawn(async move {
-            let engine_start = Instant::now();
-            let mut last = Instant::now();
-            let mut frame_id = 0u64;
-            let mut cfg_rx = cfg_rx;
-            let mut idle_since: Option<Instant> = None;
-
-            log::info!("Starting RGB engine");
-            loop {
-                let cfg = cfg_rx.current();
-                if !cfg.enabled {
-                    log::info!("[RGB] Engine disabled, waiting for re-enable");
-                    if !cfg_rx.changed().await {
-                        break;
-                    }
-                    continue;
-                }
-                let mut interval_ms = idle_interval_ms(idle_since, Instant::now(), cfg.tick_ms);
-                let mut interval = tokio::time::interval(Duration::from_millis(interval_ms));
-                interval.set_missed_tick_behavior(tokio::time::MissedTickBehavior::Skip);
-                loop {
-                    tokio::select! {
-                        _ = interval.tick() => {
-                            let now = Instant::now();
-                            let t = now.duration_since(engine_start).as_secs_f32();
-                            let dt = now.duration_since(last).as_secs_f32();
-                            last = now;
-                            let had_work = self.tick(t, dt, frame_id).await;
-                            frame_id += 1;
-                            if had_work {
-                                idle_since = None;
-                            } else if idle_since.is_none() {
-                                idle_since = Some(now);
-                            }
-
-                            let want_ms = idle_interval_ms(idle_since, now, cfg.tick_ms);
-                            if want_ms != interval_ms {
-                                interval_ms = want_ms;
-                                interval = tokio::time::interval(Duration::from_millis(interval_ms));
-                                interval.set_missed_tick_behavior(tokio::time::MissedTickBehavior::Skip);
-                            }
-                        }
-                        r = cfg_rx.changed() => {
-                            if !r { return; }
-                            break;
-                        }
-                        _ = self.wake.notified() => {
-                            idle_since = None;
-                            break;
-                        }
-                    }
-                }
-            }
+            crate::application::run_loop::engine_run_loop_idle(
+                "RGB",
+                cfg_rx,
+                tokio::time::MissedTickBehavior::Skip,
+                CanvasLoop {
+                    pacing: CanvasPacing::new(tokio::time::Instant::now()),
+                    engine: self,
+                },
+            )
+            .await;
         })
     }
 
@@ -430,7 +468,7 @@ impl RgbEngine {
         let mut pending: PendingWrites = HashMap::new();
         let mut led_colors: Vec<LedFrameEntry> = Vec::new();
         let sensor_snapshot = self.app_state.data_bus.sensors();
-        let effect_frame = crate::domain::plugin::EffectFrameInput {
+        let effect_frame = EffectFrameInput {
             time: t,
             dt,
             frame: frame_id,
@@ -481,7 +519,7 @@ impl RgbEngine {
         sampler: &Sampler,
         t: f32,
         dt: f32,
-        effect_frame: &crate::domain::plugin::EffectFrameInput,
+        effect_frame: &EffectFrameInput,
         pending: &mut PendingWrites,
         led_colors: &mut Vec<LedFrameEntry>,
     ) -> Option<Vec<u8>> {
@@ -505,7 +543,7 @@ impl RgbEngine {
         let mut live = self.live_pixmap.lock().await;
         live.retain(|k, _| pixmap_keys.contains(k));
         let mut built: Vec<String> = Vec::with_capacity(pixmap_keys.len());
-        let now = std::time::Instant::now();
+        let now = tokio::time::Instant::now();
         for key in &pixmap_keys {
             let def = &defs[key];
             let want = effect_signature(def.as_ref());
@@ -554,7 +592,10 @@ impl RgbEngine {
                             log::warn!(
                             "plugin pixmap effect '{key}' worker died: {e:#}; respawning with backoff"
                         );
-                            record_respawn(&mut lp.respawn, std::time::Instant::now());
+                            crate::util::backoff::FailureStreak::record_in(
+                                &mut lp.respawn,
+                                tokio::time::Instant::now(),
+                            );
                             true
                         }
                         Err(e) => {
@@ -628,21 +669,21 @@ impl RgbEngine {
     async fn direct_pass(
         &self,
         direct_devices: &[DirectDevice],
-        effect_frame: &crate::domain::plugin::EffectFrameInput,
+        effect_frame: &EffectFrameInput,
         sensor_snapshot: &HashMap<String, halod_shared::types::Sensor>,
         pending: &mut PendingWrites,
         led_colors: &mut Vec<LedFrameEntry>,
     ) {
         let mut live = self.live_direct.lock().await;
-        let active: HashSet<&str> = direct_devices.iter().map(|(d, _, _)| d.id()).collect();
-        live.retain(|k, _| active.contains(k.as_str()));
+        let active: HashSet<&DeviceId> = direct_devices.iter().map(|(d, _, _)| d.id()).collect();
+        live.retain(|k, _| active.contains(k));
 
         for (dev, id, params) in direct_devices {
             let want = EffectSignature {
                 effect_id: id.clone(),
                 params: params.clone(),
             };
-            let now = std::time::Instant::now();
+            let now = tokio::time::Instant::now();
             let existing = live
                 .get(dev.id())
                 .map(|ld| (&ld.signature, ld.respawn.as_ref()));
@@ -667,7 +708,7 @@ impl RgbEngine {
                     .and_then(|ld| (ld.signature == want).then_some(ld.respawn))
                     .flatten();
                 live.insert(
-                    dev.id().to_string(),
+                    dev.id().clone(),
                     LiveDirect {
                         signature: want.clone(),
                         runtime,
@@ -684,25 +725,23 @@ impl RgbEngine {
                 let handle = handle.clone();
                 for rgb_zone in &rgb.descriptor().channels {
                     let coords = zone_led_coords(rgb_zone);
-                    let leds: Vec<crate::domain::plugin::LedCoord> = coords
+                    let leds: Vec<LedCoord> = coords
                         .iter()
                         .zip(&rgb_zone.leds)
-                        .map(
-                            |(&(p, p_ring, nx, ny), led)| crate::domain::plugin::LedCoord {
-                                id: led.id,
-                                channel_id: rgb_zone.id.clone(),
-                                p,
-                                p_ring,
-                                nx,
-                                ny,
-                            },
-                        )
+                        .map(|(&(p, p_ring, nx, ny), led)| LedCoord {
+                            id: led.id,
+                            channel_id: rgb_zone.id.clone(),
+                            p,
+                            p_ring,
+                            nx,
+                            ny,
+                        })
                         .collect();
-                    let zone = crate::domain::plugin::EffectZoneInput {
+                    let zone = EffectZoneInput {
                         id: rgb_zone.id.clone(),
                         topology: zone_topology_name(&rgb_zone.topology).into(),
                         led_count: rgb_zone.leds.len(),
-                        device_id: dev.id().to_string(),
+                        device_id: dev.id().clone(),
                     };
                     let colors = match handle.led_colors(leds, effect_frame.clone(), zone).await {
                         Ok(out) if out.len() == coords.len() => out
@@ -728,7 +767,10 @@ impl RgbEngine {
                                 "plugin direct effect '{id}' worker died on {}: {e:#}; respawning with backoff",
                                 dev.id()
                             );
-                            record_respawn(&mut ld.respawn, std::time::Instant::now());
+                            crate::util::backoff::FailureStreak::record_in(
+                                &mut ld.respawn,
+                                tokio::time::Instant::now(),
+                            );
                             ld.runtime = DirectRuntime::Off;
                             break;
                         }
@@ -744,7 +786,7 @@ impl RgbEngine {
                     if let Some((colors, entries)) = prepare_zone(dev, &rgb_zone.id, colors) {
                         led_colors.extend(entries);
                         pending
-                            .entry(dev.id().to_string())
+                            .entry(dev.id().clone())
                             .or_insert_with(|| {
                                 (
                                     Arc::clone(dev),
@@ -768,7 +810,7 @@ impl RgbEngine {
                     if let Some((colors, entries)) = prepare_zone(dev, &rgb_zone.id, colors) {
                         led_colors.extend(entries);
                         pending
-                            .entry(dev.id().to_string())
+                            .entry(dev.id().clone())
                             .or_insert_with(|| {
                                 (
                                     Arc::clone(dev),
@@ -792,7 +834,7 @@ impl RgbEngine {
                 if let Some((colors, entries)) = prepare_zone(dev, &rgb_zone.id, colors) {
                     led_colors.extend(entries);
                     pending
-                        .entry(dev.id().to_string())
+                        .entry(dev.id().clone())
                         .or_insert_with(|| {
                             (
                                 Arc::clone(dev),
@@ -851,7 +893,7 @@ impl RgbEngine {
             let available: RgbDeviceMap = devices_guard
                 .iter()
                 .filter(|device| device.is_live() && device.as_lighting().is_some())
-                .map(|device| (device.id().to_owned(), Arc::clone(device)))
+                .map(|device| (device.id().clone(), Arc::clone(device)))
                 .collect();
             let devices = placed_zones
                 .iter()
@@ -899,8 +941,12 @@ impl RgbEngine {
     // Acts only when a device's desired mode differs from the intent last acted
     // on, so a write that fails every tick (e.g. an unplugged device) is retried
     // once, not forever.
+    async fn forget_engine_mode_intent(&self) {
+        self.engine_mode_intent.lock().await.clear();
+    }
+
     async fn reconcile_engine_mode(&self, canvas_state: &CanvasState) {
-        let engine_ids: HashSet<String> = canvas_state
+        let engine_ids: HashSet<DeviceId> = canvas_state
             .placed_zones
             .iter()
             .map(|z| z.device_id.clone())
@@ -960,7 +1006,7 @@ impl RgbEngine {
                 }
             }
 
-            intent.insert(device.id().to_string(), should_engine);
+            intent.insert(device.id().clone(), should_engine);
         }
     }
 
@@ -969,7 +1015,7 @@ impl RgbEngine {
     /// than queued, so awaiting a slow (e.g. rate-limited) device never paces
     /// the rest of the canvas — the freshest frame always wins.
     fn dispatch_writes(&self, pending: PendingWrites) {
-        let mut slots = self.write_slots.lock().expect("write slots poisoned");
+        let mut slots = self.write_slots.lock();
         slots.retain(|_, handle| !handle.is_finished());
         let mut groups: WriteGroups = HashMap::new();
         for (id, (dev, guard, channels)) in pending {
@@ -1016,7 +1062,7 @@ impl RgbEngine {
                         })
                         .collect();
                     if let Err(e) = rgb.write_frame_batch(&encoded).await {
-                        log::warn!("write_frame_batch failed for {}: {e}", dev.id());
+                        log::debug!("write_frame_batch failed for {}: {e}", dev.id());
                     }
                 }
             });
@@ -1029,7 +1075,6 @@ impl RgbEngine {
         let handles: Vec<_> = self
             .write_slots
             .lock()
-            .expect("write slots poisoned")
             .drain()
             .map(|(_, handle)| handle)
             .collect();
@@ -1054,6 +1099,25 @@ impl RgbEngine {
     }
 }
 
+impl EngineConfig for RgbConfig {
+    const TOPIC: &'static str = topic::LIGHTING;
+
+    fn enabled(&self) -> bool {
+        self.canvas_enabled
+    }
+
+    fn tick_ms(&self) -> u64 {
+        fps_tick_ms(self.canvas_fps)
+    }
+
+    fn from_bus(value: &BusValue) -> Option<Self> {
+        match value {
+            BusValue::Lighting(state) => Some(state.config.clone()),
+            _ => None,
+        }
+    }
+}
+
 #[cfg(test)]
 mod tests {
     use super::*;
@@ -1067,11 +1131,11 @@ mod tests {
     use halod_shared::types::{
         EffectParamValue, LedPosition, LightingChannel, LightingDescriptor, ZoneTopology,
     };
+    use parking_lot::Mutex as StdMutex;
     use std::sync::atomic::{AtomicBool, AtomicUsize, Ordering};
-    use std::sync::Mutex as StdMutex;
 
     struct MockRgbDevice {
-        device_id: String,
+        device_id: DeviceId,
         descriptor: LightingDescriptor,
         fail_write: bool,
         write_count: AtomicUsize,
@@ -1098,7 +1162,7 @@ mod tests {
                 })
                 .collect();
             Arc::new(Self {
-                device_id: device_id.to_string(),
+                device_id: device_id.parse().unwrap(),
                 descriptor: LightingDescriptor {
                     channels: vec![LightingChannel {
                         id: channel_id.to_string(),
@@ -1129,7 +1193,7 @@ mod tests {
 
         fn new_engine_mode(device_id: &str, channel_id: &str, fail_revert: bool) -> Arc<Self> {
             let dev = Self::new(device_id, channel_id, 3, false);
-            *dev.rgb_state.lock().unwrap() = Some(LightingState::Engine);
+            *dev.rgb_state.lock() = Some(LightingState::Engine);
             dev.fail_static_apply.store(fail_revert, Ordering::SeqCst);
             dev
         }
@@ -1149,7 +1213,7 @@ mod tests {
 
     #[async_trait]
     impl Device for MockRgbDevice {
-        fn id(&self) -> &str {
+        fn id(&self) -> &DeviceId {
             &self.device_id
         }
         fn name(&self) -> &str {
@@ -1189,7 +1253,7 @@ mod tests {
             let fail = matches!(state, LightingState::Static { .. })
                 && self.fail_static_apply.load(Ordering::SeqCst);
             if !(fail && self.skip_record_on_fail.load(Ordering::SeqCst)) {
-                *self.rgb_state.lock().unwrap() = Some(state);
+                *self.rgb_state.lock() = Some(state);
             }
             if fail {
                 anyhow::bail!("simulated static apply error");
@@ -1197,7 +1261,7 @@ mod tests {
             Ok(())
         }
         fn current_state(&self) -> Option<LightingState> {
-            self.rgb_state.lock().unwrap().clone()
+            self.rgb_state.lock().clone()
         }
         async fn write_frame(&self, _zone_id: &str, bytes: &[u8]) -> Result<()> {
             let colors: Vec<RgbColor> = bytes
@@ -1211,8 +1275,8 @@ mod tests {
                 })
                 .collect();
             self.write_count.fetch_add(1, Ordering::SeqCst);
-            *self.last_colors.lock().unwrap() = Some(colors.to_vec());
-            *self.last_frame.lock().unwrap() = colors.to_vec();
+            *self.last_colors.lock() = Some(colors.to_vec());
+            *self.last_frame.lock() = colors.to_vec();
             if self.fail_write {
                 anyhow::bail!("simulated write error");
             }
@@ -1236,7 +1300,7 @@ mod tests {
 
     fn make_zone(device_id: &str, channel_id: &str) -> PlacedZone {
         PlacedZone {
-            device_id: device_id.to_string(),
+            device_id: device_id.parse().unwrap(),
             channel_id: channel_id.to_string(),
             x: 0.0,
             y: 0.0,
@@ -1282,7 +1346,7 @@ mod tests {
     #[test]
     fn effect_rebuild_waits_out_the_respawn_backoff() {
         use crate::util::backoff::FailureStreak;
-        let now = std::time::Instant::now();
+        let now = tokio::time::Instant::now();
         let want = EffectSignature {
             effect_id: "plugin_fx".into(),
             params: HashMap::new(),
@@ -1563,7 +1627,7 @@ mod tests {
         );
         canvas.live.store(false, Ordering::SeqCst);
         let direct_dev = MockRgbDevice::new("dead1", "ring", 3, false);
-        *direct_dev.rgb_state.lock().unwrap() = Some(LightingState::DirectEffect {
+        *direct_dev.rgb_state.lock() = Some(LightingState::DirectEffect {
             id: "breathing".into(),
             params: HashMap::new(),
         });
@@ -1592,7 +1656,7 @@ mod tests {
         let dev_arc: Arc<dyn Device> = dev.clone();
         let mut pending: PendingWrites = HashMap::new();
         pending.insert(
-            "dev0".to_string(),
+            "dev0".parse().unwrap(),
             (
                 dev_arc,
                 WriteGuard::Engine,
@@ -1613,7 +1677,7 @@ mod tests {
     #[tokio::test]
     async fn sync_tick_state_collects_direct_effect_devices() {
         let dev = MockRgbDevice::new("dev0", "ring", 3, false);
-        *dev.rgb_state.lock().unwrap() = Some(LightingState::DirectEffect {
+        *dev.rgb_state.lock() = Some(LightingState::DirectEffect {
             id: "breathing".into(),
             params: HashMap::new(),
         });
@@ -1647,7 +1711,7 @@ mod tests {
     #[tokio::test]
     async fn disabled_direct_effect_device_is_never_collected_or_written() {
         let dev = MockRgbDevice::new("dev0", "ring", 3, false);
-        *dev.rgb_state.lock().unwrap() = Some(LightingState::DirectEffect {
+        *dev.rgb_state.lock() = Some(LightingState::DirectEffect {
             id: "breathing".into(),
             params: HashMap::new(),
         });
@@ -1673,7 +1737,7 @@ mod tests {
     #[tokio::test]
     async fn tick_direct_effect_writes_frame() {
         let dev = MockRgbDevice::new("dev0", "ring", 4, false);
-        *dev.rgb_state.lock().unwrap() = Some(LightingState::DirectEffect {
+        *dev.rgb_state.lock() = Some(LightingState::DirectEffect {
             id: "breathing".into(),
             params: HashMap::new(),
         });
@@ -1694,7 +1758,7 @@ mod tests {
         std::fs::create_dir_all(&plugin_dir).unwrap();
         std::fs::write(
             plugin_dir.join("plugin.yaml"),
-            "id: engine_sensor_fx\ntype: effect\nconsumes: [host.sensors.*]\neffects:\n  - kind: direct\n    id: probe\n    name: Probe\n",
+            "id: engine_sensor_fx\nversion: 1.0.0\napi: \"3.0\"\ntype: effect\nconsumes: [host.sensors.*]\neffects:\n  - kind: direct\n    id: probe\n    name: Probe\n",
         )
         .unwrap();
         std::fs::write(
@@ -1724,19 +1788,9 @@ mod tests {
             "#,
         )
         .unwrap();
-        app.registry.load_all(tmp.path());
+        app.registry.load_dir(tmp.path());
         app.registry.replace_policy(&crate::config::PluginPolicy {
-            enabled: vec!["engine_sensor_fx".into()],
-            accepted_authorities: [(
-                "engine_sensor_fx".into(),
-                halod_shared::types::PluginAuthority {
-                    permissions: vec![],
-                    transport_scopes: vec![],
-                    data_reads: vec!["host.sensors.*".into()],
-                },
-            )]
-            .into_iter()
-            .collect(),
+            enabled: vec!["engine_sensor_fx".parse().unwrap()],
             ..Default::default()
         });
         tmp
@@ -1757,7 +1811,7 @@ mod tests {
         let dev = MockRgbDevice::new("dev0", "ring", 2, false);
         let mut params = HashMap::new();
         params.insert("sensor".into(), EffectParamValue::Str("temp1".into()));
-        *dev.rgb_state.lock().unwrap() = Some(LightingState::DirectEffect {
+        *dev.rgb_state.lock() = Some(LightingState::DirectEffect {
             id: "engine_sensor_fx:probe".to_string(),
             params,
         });
@@ -1771,7 +1825,7 @@ mod tests {
         engine.tick(0.1, 1.0, 0).await;
         engine.drain_writes().await;
 
-        let colors = dev.last_colors.lock().unwrap().clone().unwrap();
+        let colors = dev.last_colors.lock().clone().unwrap();
         // 80.0 / 100.0 = 0.8, gamma-encoded on the way out.
         let expected_r = linear_to_led(0.8, LED_GAMMA);
         assert!(
@@ -1783,7 +1837,7 @@ mod tests {
     #[tokio::test]
     async fn tick_unknown_direct_effect_falls_back_to_off_and_caches() {
         let dev = MockRgbDevice::new("dev0", "ring", 4, false);
-        *dev.rgb_state.lock().unwrap() = Some(LightingState::DirectEffect {
+        *dev.rgb_state.lock() = Some(LightingState::DirectEffect {
             id: "sensor_gradient".into(),
             params: HashMap::new(),
         });
@@ -1796,7 +1850,7 @@ mod tests {
         engine.drain_writes().await;
 
         assert!(dev.write_count.load(Ordering::SeqCst) >= 2);
-        let frame = dev.last_frame.lock().unwrap().clone();
+        let frame = dev.last_frame.lock().clone();
         assert_eq!(frame.len(), 4);
         assert!(frame.iter().all(|c| (c.r, c.g, c.b) == (0, 0, 0)));
         // Cached under the same key, so the unknown id is built (and warned) once.
@@ -1807,7 +1861,7 @@ mod tests {
     #[tokio::test]
     async fn tick_prunes_direct_effect_when_reverted() {
         let dev = MockRgbDevice::new("dev0", "ring", 4, false);
-        *dev.rgb_state.lock().unwrap() = Some(LightingState::DirectEffect {
+        *dev.rgb_state.lock() = Some(LightingState::DirectEffect {
             id: "breathing".into(),
             params: HashMap::new(),
         });
@@ -1819,7 +1873,7 @@ mod tests {
         let after_first = dev.write_count.load(Ordering::SeqCst);
         assert!(after_first >= 1);
 
-        *dev.rgb_state.lock().unwrap() = Some(LightingState::Static {
+        *dev.rgb_state.lock() = Some(LightingState::Static {
             color: RgbColor { r: 1, g: 2, b: 3 },
         });
         engine.tick(0.2, 0.05, 1).await;
@@ -1830,6 +1884,26 @@ mod tests {
             "reverted device must not be driven by the direct pass"
         );
         assert!(engine.live_direct.lock().await.is_empty());
+    }
+
+    #[tokio::test]
+    async fn reenabled_engine_reclaims_devices_blanked_while_stopped() {
+        let dev = MockRgbDevice::new("dev0", "ring", 3, false);
+        let app = app_with(vec![dev.clone()]);
+        let engine = RgbEngine::new(app).await;
+        let mut placed = CanvasState::default();
+        placed.placed_zones.push(make_zone("dev0", "ring"));
+
+        engine.reconcile_engine_mode(&placed).await;
+        assert!(matches!(dev.current_state(), Some(LightingState::Engine)));
+
+        engine.forget_engine_mode_intent().await;
+        *dev.rgb_state.lock() = Some(LightingState::Static {
+            color: RgbColor { r: 0, g: 0, b: 0 },
+        });
+
+        engine.reconcile_engine_mode(&placed).await;
+        assert!(matches!(dev.current_state(), Some(LightingState::Engine)));
     }
 
     #[tokio::test]
@@ -1857,7 +1931,7 @@ mod tests {
         placed.placed_zones.push(make_zone("dev0", "ring"));
         engine.reconcile_engine_mode(&placed).await;
 
-        *dev.rgb_state.lock().unwrap() = Some(LightingState::DirectEffect {
+        *dev.rgb_state.lock() = Some(LightingState::DirectEffect {
             id: "breathing".into(),
             params: HashMap::new(),
         });
@@ -1924,7 +1998,7 @@ mod tests {
         let dev = MockRgbDevice::new_engine_mode("dev0", "ring", false);
         let mut pending: PendingWrites = HashMap::new();
         pending.insert(
-            "dev0".into(),
+            "dev0".parse().unwrap(),
             (
                 dev.clone() as Arc<dyn Device>,
                 WriteGuard::Engine,
@@ -1935,7 +2009,7 @@ mod tests {
         engine.drain_writes().await;
         assert_eq!(dev.batch_count.load(Ordering::SeqCst), 1);
         assert_eq!(dev.write_count.load(Ordering::SeqCst), 1);
-        assert_eq!(dev.last_frame.lock().unwrap().len(), 3);
+        assert_eq!(dev.last_frame.lock().len(), 3);
     }
 
     #[tokio::test]
@@ -1944,14 +2018,14 @@ mod tests {
         let dev = MockRgbDevice::new_engine_mode("dev0", "ring", false);
         let mut pending: PendingWrites = HashMap::new();
         pending.insert(
-            "dev0".into(),
+            "dev0".parse().unwrap(),
             (
                 dev.clone() as Arc<dyn Device>,
                 WriteGuard::Engine,
                 vec![("ring".into(), solid_colors(3))],
             ),
         );
-        *dev.rgb_state.lock().unwrap() = Some(LightingState::Static {
+        *dev.rgb_state.lock() = Some(LightingState::Static {
             color: RgbColor::default(),
         });
 
@@ -1971,20 +2045,20 @@ mod tests {
                 .into_iter()
                 .collect(),
         };
-        *dev.rgb_state.lock().unwrap() = Some(LightingState::DirectEffect {
+        *dev.rgb_state.lock() = Some(LightingState::DirectEffect {
             id: original.effect_id.clone(),
             params: original.params.clone(),
         });
         let mut pending: PendingWrites = HashMap::new();
         pending.insert(
-            "dev0".into(),
+            "dev0".parse().unwrap(),
             (
                 dev.clone() as Arc<dyn Device>,
                 WriteGuard::Direct(original),
                 vec![("ring".into(), solid_colors(3))],
             ),
         );
-        *dev.rgb_state.lock().unwrap() = Some(LightingState::DirectEffect {
+        *dev.rgb_state.lock() = Some(LightingState::DirectEffect {
             id: "breathing".into(),
             params: [("speed".into(), EffectParamValue::Float(2.0))]
                 .into_iter()
@@ -2009,12 +2083,11 @@ mod tests {
         engine
             .write_slots
             .lock()
-            .unwrap()
-            .insert(WriteSlotKey::Device("dev0".into()), handle);
+            .insert(WriteSlotKey::Device("dev0".parse().unwrap()), handle);
 
         let mut pending: PendingWrites = HashMap::new();
         pending.insert(
-            "dev0".into(),
+            "dev0".parse().unwrap(),
             (
                 dev.clone() as Arc<dyn Device>,
                 WriteGuard::Engine,
@@ -2045,7 +2118,6 @@ mod tests {
         engine
             .write_slots
             .lock()
-            .unwrap()
             .insert(WriteSlotKey::Shared(42), handle);
 
         let mut pending: PendingWrites = HashMap::new();
@@ -2080,26 +2152,54 @@ mod tests {
     }
 
     #[test]
-    fn idle_interval_ms_stays_at_base_with_work_or_before_grace() {
-        let now = Instant::now();
-        assert_eq!(idle_interval_ms(None, now, 50), 50);
-        assert_eq!(
-            idle_interval_ms(Some(now - Duration::from_secs(5)), now, 50),
-            50
-        );
+    fn pacing_keeps_working_until_the_idle_grace_runs_out() {
+        let start = tokio::time::Instant::now();
+        let mut pacing = CanvasPacing::new(start);
+        pacing.record(false, start);
+        assert!(pacing.has_work(start + Duration::from_secs(5)));
+        assert!(!pacing.has_work(start + IDLE_GRACE));
+        pacing.record(true, start + IDLE_GRACE);
+        assert!(pacing.has_work(start + IDLE_GRACE * 3));
     }
 
     #[test]
-    fn idle_interval_ms_drops_to_idle_poll_after_grace() {
-        let now = Instant::now();
-        assert_eq!(
-            idle_interval_ms(Some(now - IDLE_GRACE), now, 50),
-            IDLE_POLL_MS
-        );
-        assert_eq!(
-            idle_interval_ms(Some(now - Duration::from_secs(60)), now, 50),
-            IDLE_POLL_MS
-        );
+    fn an_idle_probe_grants_exactly_one_tick_and_a_wake_resumes_work() {
+        let start = tokio::time::Instant::now();
+        let idle = start + IDLE_GRACE * 2;
+        let mut pacing = CanvasPacing::new(start);
+        pacing.record(false, start);
+        pacing.probe();
+        assert!(pacing.has_work(idle));
+        assert!(!pacing.has_work(idle));
+        pacing.woken();
+        assert!(pacing.has_work(idle));
+        assert!(!pacing.has_work(idle));
+    }
+
+    #[test]
+    fn a_stale_wake_permit_buys_one_probe_not_a_new_grace() {
+        let start = tokio::time::Instant::now();
+        let mut pacing = CanvasPacing::new(start);
+        pacing.record(false, start);
+        let idle = start + IDLE_GRACE * 2;
+        pacing.woken();
+        assert!(pacing.has_work(idle));
+        pacing.record(false, idle);
+        assert!(!pacing.has_work(idle + Duration::from_millis(1)));
+        pacing.woken();
+        pacing.record(true, idle);
+        assert!(pacing.has_work(idle + IDLE_GRACE / 2));
+    }
+
+    #[test]
+    fn frames_count_up_with_the_elapsed_time_between_them() {
+        let start = tokio::time::Instant::now();
+        let mut pacing = CanvasPacing::new(start);
+        let first = pacing.next_frame(start + Duration::from_millis(16));
+        let second = pacing.next_frame(start + Duration::from_millis(48));
+        assert_eq!((first.id, second.id), (0, 1));
+        assert!((second.dt - 0.032).abs() < 1e-6);
+        assert!((second.time - 0.048).abs() < 1e-6);
     }
 
     #[tokio::test(start_paused = true)]
@@ -2107,16 +2207,14 @@ mod tests {
         let dev = MockRgbDevice::new("dev0", "ring", 4, false);
         let app = app_with(vec![dev.clone()]);
         let engine = RgbEngine::new(Arc::clone(&app)).await;
-        let cfg = crate::application::run_loop::EngineConfigReceiver::new(
-            Arc::clone(&app.data_bus),
-            crate::application::run_loop::EngineConfigTopic::Lighting,
-        );
+        let cfg =
+            crate::application::run_loop::EngineConfigReceiver::new(Arc::clone(&app.data_bus));
         let handle = Arc::clone(&engine).start(cfg).await;
 
         tokio::task::yield_now().await;
         tokio::time::advance(IDLE_GRACE + Duration::from_secs(1)).await;
         tokio::task::yield_now().await;
-        *dev.rgb_state.lock().unwrap() = Some(LightingState::DirectEffect {
+        *dev.rgb_state.lock() = Some(LightingState::DirectEffect {
             id: "breathing".into(),
             params: HashMap::new(),
         });
@@ -2155,7 +2253,7 @@ mod tests {
     #[tokio::test]
     async fn tick_reports_work_with_a_direct_effect_device() {
         let dev = MockRgbDevice::new("dev0", "ring", 4, false);
-        *dev.rgb_state.lock().unwrap() = Some(LightingState::DirectEffect {
+        *dev.rgb_state.lock() = Some(LightingState::DirectEffect {
             id: "breathing".into(),
             params: HashMap::new(),
         });
@@ -2182,7 +2280,7 @@ mod tests {
         std::fs::create_dir_all(&plugin_dir).unwrap();
         std::fs::write(
             plugin_dir.join("plugin.yaml"),
-            "id: engine_test_fx\ntype: effect\neffects:\n  - kind: pixmap\n    id: solid\n    name: Solid\n  - kind: direct\n    id: ramp\n    name: Ramp\n",
+            "id: engine_test_fx\nversion: 1.0.0\napi: \"3.0\"\ntype: effect\neffects:\n  - kind: pixmap\n    id: solid\n    name: Solid\n  - kind: direct\n    id: ramp\n    name: Ramp\n",
         )
         .unwrap();
         std::fs::write(
@@ -2203,9 +2301,9 @@ mod tests {
             "#,
         )
         .unwrap();
-        app.registry.load_all(tmp.path());
+        app.registry.load_dir(tmp.path());
         app.registry.replace_policy(&crate::config::PluginPolicy {
-            enabled: vec!["engine_test_fx".into()],
+            enabled: vec!["engine_test_fx".parse().unwrap()],
             ..Default::default()
         });
         tmp
@@ -2251,7 +2349,7 @@ mod tests {
         engine.tick(0.0, 0.016, 0).await;
         engine.drain_writes().await;
 
-        let colors = dev.last_colors.lock().unwrap().clone().unwrap();
+        let colors = dev.last_colors.lock().clone().unwrap();
         // The pixmap buffer holds linear-light bytes; the sampler gamma-encodes
         // on read (`linear_to_led`), so the raw fill (9,8,7) comes out as this.
         let expected = RgbColor {
@@ -2270,7 +2368,7 @@ mod tests {
         let app = app_with(vec![]);
         let _tmp = load_test_effect_plugin(&app);
         let dev = MockRgbDevice::new("dev0", "ring", 3, false);
-        *dev.rgb_state.lock().unwrap() = Some(LightingState::DirectEffect {
+        *dev.rgb_state.lock() = Some(LightingState::DirectEffect {
             id: "engine_test_fx:ramp".to_string(),
             params: HashMap::new(),
         });
@@ -2283,7 +2381,7 @@ mod tests {
         engine.tick(0.0, 0.016, 0).await;
         engine.drain_writes().await;
 
-        let colors = dev.last_colors.lock().unwrap().clone().unwrap();
+        let colors = dev.last_colors.lock().clone().unwrap();
         assert_eq!(colors.len(), 3);
         // led_effect_ramp returns r=p (chain fraction), gamma-encoded on the way out.
         assert_eq!(colors[0].r, 0);

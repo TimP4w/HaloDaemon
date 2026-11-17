@@ -4,7 +4,6 @@ settings:
 
 notify:
   error_title: Errore
-  unknown_error: Errore sconosciuto
   low_battery:
     title: "Batteria di %{device} quasi scarica"
     message: "%{battery} è al %{level}%."
@@ -14,15 +13,9 @@ notify:
   key_remap_unavailable:
     title: Rimappatura tasti non disponibile
     message: "Impossibile inizializzare il sistema di esecuzione delle azioni: %{detail}"
-  device_reconnect_failed:
-    title: Il dispositivo non si è riconnesso
-    message: "%{device} non è risultato disponibile dopo 6 tentativi di riconnessione."
   profile_switched:
     title: Profilo cambiato
     message: "Ora usi '%{profile}'"
-  chain_link_restore_failed:
-    title: "Impossibile ripristinare il collegamento \"%{name}\" della catena"
-    message: "%{detail}. Il collegamento è stato rimosso dalla disposizione salvata."
   device_init_failed:
     title: "Impossibile inizializzare %{device}"
     message: "%{detail}"
@@ -33,8 +26,6 @@ notify:
     title: "Ventola bloccata: %{fan}"
     message: "La ventola sembra esserere bloccata, il sensore indica che non gira. Controlla i cavi della ventola o sostituiscila."
   plugin_content_changed:
-    title: Plugin modificato su disco
-    message: "I file di %{plugin} sono cambiati su disco, quindi è stato disabilitato per sicurezza. Apri la schermata Plugin per rivederlo e riabilitarlo."
   plugin_runtime_error:
     title: "Si è verificato un errore nel plugin %{plugin}"
     message: "Apri Dettagli per l'errore completo."
@@ -45,46 +36,58 @@ notify:
   plugin_recommended:
     title: Plugin consigliato disponibile
     message: "%{plugin} è consigliato per questo sistema. Apri Plugin per attivarlo."
-  repository_integrity:
-    title: Errore di integrità del repository
-    message: "Qualcosa non va. Il pacchetto %{package} del repository %{repository} non ha superato la convalida e non è stato caricato."
+  plugin_update_needs_permissions:
+    title: "%{plugin} è stato aggiornato e richiede più permessi"
+    message: Resta disattivato finché non lo riattivi in Plugin, dove puoi controllarne i permessi.
 
 tray:
   open: Apri HaloDaemon
   quit: Esci
-  tooltip: HaloDaemon
   profile: Profilo
 
 onboarding:
+  feature_profiles_body: Cambia ogni impostazione insieme quando un gioco o un’app è in primo piano.
+  feature_profiles: Profili
+  feature_cooling_body: Curve di ventole e pompe guidate da qualsiasi sensore di temperatura.
+  feature_cooling: Raffreddamento
+  feature_lighting_body: Un unico canvas per ogni dispositivo RGB, con effetti che li attraversano tutti.
+  feature_lighting: Illuminazione
+  done_note: I plugin si aggiornano automaticamente. Puoi cambiare tutto in seguito da Plugin e Impostazioni.
+  done_sensors: sensori disponibili
+  done_plugins: plugin attivi
+  done_devices: dispositivi trovati
+  done_sub: HaloDaemon è in esecuzione e i tuoi dispositivi sono pronti.
+  skip: Salta per ora
+  recommended: Consigliato
+  language_sub: Puoi cambiarla in qualsiasi momento dalle Impostazioni
+  check_optional: "%{impact} · opzionale"
+  check_missing: Mancante
+  check_ready: Pronto
+  health_ok_optional: "Il sistema è pronto. Mancano %{n} elementi opzionali; disattivano solo le funzioni associate."
+  step_welcome: Benvenuto
+  step_system: Verifica
+  step_prefs: Preferenze
+  step_plugins: Plugin
+  step_done: Fine
   welcome_title: Benvenuto in HaloDaemon
-  welcome_body: "Gestisci luci, ventole, pompe e sensori da un unico posto. Sarà tutto pronto in circa un minuto."
-  health_title: Stato del sistema
-  health_sub: HaloDaemon verifica l'accesso al sistema necessario per gestire l'hardware. Gli elementi opzionali mancanti disabilitano solo le funzioni associate.
+  welcome_body: Gestisci luci, ventole, pompe e sensori da un unico posto. La configurazione richiede circa un minuto.
+  health_title: Verifica del sistema
+  health_sub: HaloDaemon verifica gli accessi di sistema di cui ha bisogno il tuo hardware. Gli elementi opzionali mancanti disattivano solo la funzione associata.
   health_checking: Controllo del sistema…
   health_ok: Il sistema è pronto.
   prefs_title: Alcune preferenze
   prefs_sub: Puoi modificarle in qualsiasi momento dalle Impostazioni.
-  tray_title: Chiudi nell'area di notifica
-  tray_desc: Nascondi la finestra invece di uscire dall'applicazione quando premi il pulsante di chiusura.
-  plugins_title: Plugin ufficiali e aggiornamenti
-  plugins_desc: Consenti a HaloDaemon di scaricare i plugin ufficiali da GitHub e controllare gli aggiornamenti all'avvio.
-  scanning: Ricerca plugin compatibili…
   plugins_page_title: Scegli i plugin
-  plugins_page_sub: I plugin consigliati sono già selezionati. Controlla l'accesso al sistema richiesto da ciascuno prima di attivarlo.
+  plugins_page_sub: Abbiamo scelto i plugin adatti all’hardware trovato. Controlla l’accesso di sistema richiesto da ciascuno prima di attivarlo.
   plugins_loading: Il download dei plugin ufficiali è ancora in corso. Potrai attivarli in seguito dalla scheda Plugin.
   plugins_error: Impossibile scaricare i plugin ufficiali. Controlla la connessione a Internet e riprova.
   plugins_retry: Riprova
-  plugins_retrying: Nuovo tentativo di download dei plugin ufficiali…
-  permissions_none: Non richiede accesso aggiuntivo al sistema.
   done_title: Tutto pronto
-  done_summary_plugins: "I plugin sono pronti e verranno aggiornati automaticamente.\nPuoi gestirli dalla scheda Plugin."
-  done_summary_basic: "HaloDaemon è pronto.\nPuoi attivare i plugin in seguito dalla scheda Plugin."
   back: Indietro
   please_wait: Ricerca in corso…
   p_get_started: Inizia
   p_scan: Trova plugin
-  p_finish_setup: Completa configurazione
-  p_grant_enable: Concedi e attiva
+  p_install: "Installa %{n}"
   p_finish: Completa
   p_enter: Apri HaloDaemon
   p_continue: Continua

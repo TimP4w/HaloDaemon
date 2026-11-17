@@ -132,7 +132,7 @@ mod tests {
         pixmap.fill(Color::from_rgba8(128, 0, 64, 255));
 
         let placed = PlacedZone {
-            device_id: "test".to_string(),
+            device_id: "test".parse().unwrap(),
             channel_id: "ring".to_string(),
             x: 0.0,
             y: 0.0,
@@ -235,7 +235,7 @@ mod tests {
 
     fn full_zone() -> PlacedZone {
         PlacedZone {
-            device_id: "d".into(),
+            device_id: "d".parse().unwrap(),
             channel_id: "z".into(),
             x: 0.0,
             y: 0.0,
@@ -268,7 +268,7 @@ mod tests {
         let pixmap = red_blue_pixmap(100, 100);
         let sampler = Sampler::new(1.0);
         let placed = PlacedZone {
-            device_id: "d".into(),
+            device_id: "d".parse().unwrap(),
             channel_id: "z".into(),
             x: 0.25,
             y: 0.25,

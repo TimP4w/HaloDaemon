@@ -8,12 +8,11 @@
 //! Covers HID/TCP streams, SMBus registers, and scoped USB endpoint/control
 //! collections against the first declared device without opening host hardware.
 
-use std::path::Path;
-use std::sync::{Arc, Mutex};
-
 use anyhow::{Context, Result};
-use async_trait::async_trait;
 use mlua::{Function, Lua, LuaSerdeExt, Table, Value};
+use parking_lot::Mutex;
+use std::path::Path;
+use std::sync::Arc;
 
 use crate::domain::device::chain::LightingDivisionAdapter;
 use crate::domain::device::LightingCapability;
@@ -30,26 +29,39 @@ use halod_shared::types::{
 };
 
 use super::engine::device::{LuaDevice, LuaDeviceParts, LuaDeviceSpawnParts, LuaDeviceWorker};
+use super::engine::ffi::{from_lua_err, to_lua_err};
 use super::engine::transport::{AddrScope, RegisterBus};
 use super::engine::transport::{CommandExecutor, CommandRunResult, PluginIo};
 use super::engine::worker::{DevMatch, PluginHandle};
 use super::manifest::{parse_manifest_from_dir, PluginManifest, TransportSpec, UsbConfig};
-
-/// `mlua::Error` isn't reliably `Send + Sync` (an `ExternalError` may box a
-/// non-Send/Sync inner error), so it can't flow through `anyhow::Result` via
-/// plain `?` — flatten it to a message first.
-trait LuaResultExt<T> {
-    fn anyhow(self) -> Result<T>;
-}
-impl<T> LuaResultExt<T> for mlua::Result<T> {
-    fn anyhow(self) -> Result<T> {
-        self.map_err(|e| anyhow::anyhow!("{e}"))
-    }
-}
-
-fn mlua_err(e: anyhow::Error) -> mlua::Error {
-    mlua::Error::RuntimeError(format!("{e:#}"))
-}
+use crate::application::bus::data_bus::DataBus;
+use crate::application::bus::data_bus::DataValue;
+use crate::domain::device::chain::LightingDivisionHost;
+use crate::domain::device::BatteryCapability;
+use crate::domain::device::BooleanCapability;
+use crate::domain::device::ChoiceCapability;
+use crate::domain::device::ConnectionCapability;
+use crate::domain::device::Controller;
+use crate::domain::device::CoolingCapability;
+use crate::domain::device::Device;
+use crate::domain::device::DpiCapability;
+use crate::domain::device::EqualizerCapability;
+use crate::domain::device::KeyRemapCapability;
+use crate::domain::device::KeyboardLayoutCapability;
+use crate::domain::device::LcdCapability;
+use crate::domain::device::OnboardProfilesCapability;
+use crate::domain::device::RangeCapability;
+use crate::domain::device::SensorCapability;
+use crate::domain::plugin::ResolvedConfig;
+use crate::domain::plugin::ResolvedConfigValue;
+use crate::infrastructure::drivers::transports::hwmon::HwmonTransport;
+use crate::infrastructure::drivers::transports::serial::SerialControl;
+use crate::infrastructure::drivers::transports::smbus::SmBusDevice;
+use crate::infrastructure::drivers::transports::smbus::SmBusSyncOps;
+use crate::infrastructure::drivers::transports::usb::UsbLocation;
+use crate::infrastructure::udp::UdpBackend;
+use crate::infrastructure::udp::UdpRuntime;
+use halod_shared::ids::DeviceId;
 
 /// One recorded write, tagged with the collection it was routed to so a test
 /// can assert long frames went to the companion and short frames to primary.
@@ -72,7 +84,7 @@ struct RecordingSmbus {
     written: Arc<Mutex<Vec<SmbusWriteRecord>>>,
 }
 
-impl crate::infrastructure::drivers::transports::smbus::SmBusSyncOps for RecordingSmbus {
+impl SmBusSyncOps for RecordingSmbus {
     fn read_byte(&mut self, _addr: u8) -> Result<u8> {
         self.reads
             .pop_front()
@@ -84,7 +96,7 @@ impl crate::infrastructure::drivers::transports::smbus::SmBusSyncOps for Recordi
             .context("no more scripted SMBus reads")
     }
     fn write_quick(&mut self, addr: u8) -> Result<bool> {
-        self.written.lock().unwrap().push(SmbusWriteRecord {
+        self.written.lock().push(SmbusWriteRecord {
             operation: "write_quick",
             addr,
             cmd: None,
@@ -94,7 +106,7 @@ impl crate::infrastructure::drivers::transports::smbus::SmBusSyncOps for Recordi
         Ok(true)
     }
     fn write_byte_data(&mut self, addr: u8, cmd: u8, value: u8) -> Result<()> {
-        self.written.lock().unwrap().push(SmbusWriteRecord {
+        self.written.lock().push(SmbusWriteRecord {
             operation: "write_byte_data",
             addr,
             cmd: Some(cmd),
@@ -104,7 +116,7 @@ impl crate::infrastructure::drivers::transports::smbus::SmBusSyncOps for Recordi
         Ok(())
     }
     fn write_word_data(&mut self, addr: u8, cmd: u8, value: u16) -> Result<()> {
-        self.written.lock().unwrap().push(SmbusWriteRecord {
+        self.written.lock().push(SmbusWriteRecord {
             operation: "write_word_data",
             addr,
             cmd: Some(cmd),
@@ -114,7 +126,7 @@ impl crate::infrastructure::drivers::transports::smbus::SmBusSyncOps for Recordi
         Ok(())
     }
     fn write_block_data(&mut self, addr: u8, cmd: u8, data: &[u8]) -> Result<()> {
-        self.written.lock().unwrap().push(SmbusWriteRecord {
+        self.written.lock().push(SmbusWriteRecord {
             operation: "write_block_data",
             addr,
             cmd: Some(cmd),
@@ -160,40 +172,32 @@ impl RecordingStream {
     }
 
     fn record(&self, endpoint: &'static str, data: &[u8]) {
-        self.written
-            .lock()
-            .expect("recording stream poisoned")
-            .push(WriteRecord {
-                endpoint,
-                data: data.to_vec(),
-            });
+        self.written.lock().push(WriteRecord {
+            endpoint,
+            data: data.to_vec(),
+        });
     }
 
     /// Push a report onto the event queue as if a reader thread had received it
     /// unsolicited — lets a test drive `event()` without a real device.
     fn queue_event(&self, data: Vec<u8>) {
-        self.deferred
-            .lock()
-            .expect("recording stream poisoned")
-            .push_back(data);
+        self.deferred.lock().push_back(data);
     }
 }
 
-#[async_trait]
 impl Transport for RecordingStream {
-    async fn write(&self, data: &[u8]) -> Result<()> {
+    fn write(&self, data: &[u8]) -> Result<()> {
         if let Some(error) = &self.write_error {
             anyhow::bail!(error.clone());
         }
-        self.rate.write_access(data.len()).await?;
+        self.rate.write_access(data.len())?;
         self.record("primary", data);
         Ok(())
     }
 
-    async fn read(&self, _size: usize) -> Result<Vec<u8>> {
+    fn read(&self, _size: usize) -> Result<Vec<u8>> {
         self.reads
             .lock()
-            .expect("recording stream poisoned")
             .pop_front()
             .ok_or_else(|| anyhow::anyhow!("no more scripted reads queued for this device"))
     }
@@ -202,9 +206,7 @@ impl Transport for RecordingStream {
         Some(self)
     }
 
-    fn as_serial(
-        &self,
-    ) -> Option<&dyn crate::infrastructure::drivers::transports::serial::SerialControl> {
+    fn as_serial(&self) -> Option<&dyn SerialControl> {
         Some(self)
     }
 
@@ -216,8 +218,8 @@ impl Transport for RecordingStream {
         self.rate.set_limit(limit);
     }
 
-    async fn drain_events(&self, limit: usize) -> Result<Vec<TransportEvent>> {
-        let mut deferred = self.deferred.lock().expect("recording stream poisoned");
+    fn drain_events(&self, limit: usize) -> Result<Vec<TransportEvent>> {
+        let mut deferred = self.deferred.lock();
         let count = deferred.len().min(limit);
         Ok(deferred
             .drain(..count)
@@ -229,42 +231,41 @@ impl Transport for RecordingStream {
     }
 }
 
-#[async_trait]
 impl HidTransport for RecordingStream {
-    async fn feature_exchange(&self, data: &[u8], size: usize) -> Result<Vec<u8>> {
-        self.write_then_read(data, size).await
+    fn feature_exchange(&self, data: &[u8], size: usize) -> Result<Vec<u8>> {
+        self.write_then_read(data, size)
     }
 
-    async fn send_feature_report(&self, data: &[u8]) -> Result<()> {
+    fn send_feature_report(&self, data: &[u8]) -> Result<()> {
         if let Some(error) = &self.write_error {
             anyhow::bail!(error.clone());
         }
-        self.rate.write_access(data.len()).await?;
+        self.rate.write_access(data.len())?;
         self.record("feature", data);
         Ok(())
     }
 
-    async fn get_feature_report(&self, _report_id: u8, size: usize) -> Result<Vec<u8>> {
-        self.read(size).await
+    fn get_feature_report(&self, _report_id: u8, size: usize) -> Result<Vec<u8>> {
+        self.read(size)
     }
 
-    async fn get_input_report(&self, _report_id: u8, size: usize) -> Result<Vec<u8>> {
-        self.read(size).await
+    fn get_input_report(&self, _report_id: u8, size: usize) -> Result<Vec<u8>> {
+        self.read(size)
     }
 
-    async fn write_companion(&self, data: &[u8]) -> Result<()> {
+    fn write_companion(&self, data: &[u8]) -> Result<()> {
         if !self.companion {
             anyhow::bail!("companion collection not available on this recording stream");
         }
         if let Some(error) = &self.write_error {
             anyhow::bail!(error.clone());
         }
-        self.rate.write_access(data.len()).await?;
+        self.rate.write_access(data.len())?;
         self.record("companion", data);
         Ok(())
     }
 
-    async fn defer_event(&self, data: &[u8]) -> Result<()> {
+    fn defer_event(&self, data: &[u8]) -> Result<()> {
         self.queue_event(data.to_vec());
         Ok(())
     }
@@ -273,41 +274,31 @@ impl HidTransport for RecordingStream {
         self.companion
     }
 
-    async fn read_companion(&self, size: usize) -> Result<Vec<u8>> {
-        self.read(size).await
+    fn read_companion(&self, size: usize) -> Result<Vec<u8>> {
+        self.read(size)
     }
 }
 
-impl crate::infrastructure::drivers::transports::serial::SerialControl for RecordingStream {
+impl SerialControl for RecordingStream {
     fn set_dtr(&self, level: bool) -> Result<()> {
-        self.serial_ops
-            .lock()
-            .expect("recording stream poisoned")
-            .push(format!("set_dtr({level})"));
+        self.serial_ops.lock().push(format!("set_dtr({level})"));
         Ok(())
     }
 
     fn set_rts(&self, level: bool) -> Result<()> {
-        self.serial_ops
-            .lock()
-            .expect("recording stream poisoned")
-            .push(format!("set_rts({level})"));
+        self.serial_ops.lock().push(format!("set_rts({level})"));
         Ok(())
     }
 
     fn send_break(&self, duration_ms: u64) -> Result<()> {
         self.serial_ops
             .lock()
-            .expect("recording stream poisoned")
             .push(format!("send_break({duration_ms})"));
         Ok(())
     }
 
     fn flush_input(&self) -> Result<()> {
-        self.serial_ops
-            .lock()
-            .expect("recording stream poisoned")
-            .push("flush_input".to_owned());
+        self.serial_ops.lock().push("flush_input".to_owned());
         Ok(())
     }
 }
@@ -348,7 +339,6 @@ impl RecordingUsb {
         let mut data = self
             .reads
             .lock()
-            .expect("recording USB poisoned")
             .pop_front()
             .ok_or_else(|| anyhow::anyhow!("no more scripted USB reads"))?;
         data.truncate(length);
@@ -377,17 +367,14 @@ impl UsbCollection for RecordingUsb {
         {
             anyhow::bail!("USB recording write exceeds endpoint policy");
         }
-        self.rate.write_access_blocking(data.len())?;
-        self.written
-            .lock()
-            .expect("recording USB poisoned")
-            .push(UsbWriteRecord {
-                device: device.id.clone(),
-                endpoint: Some(endpoint),
-                request_type: None,
-                request: None,
-                data: data.to_vec(),
-            });
+        self.rate.write_access(data.len())?;
+        self.written.lock().push(UsbWriteRecord {
+            device: device.id.clone(),
+            endpoint: Some(endpoint),
+            request_type: None,
+            request: None,
+            data: data.to_vec(),
+        });
         Ok(data.len())
     }
     fn read(
@@ -428,35 +415,24 @@ impl UsbCollection for RecordingUsb {
             .control
             .as_ref()
             .ok_or_else(|| anyhow::anyhow!("USB control outside recording allowlist"))?;
-        let length = bytes.len().max(read_length);
-        if length > policy.max_transfer_size
-            || timeout_ms == 0
-            || timeout_ms > policy.max_timeout_ms
-        {
-            anyhow::bail!("USB recording control exceeds policy");
-        }
+        policy.check(request_type, request, bytes.len(), read_length, timeout_ms)?;
         if request_type & 0x80 != 0 {
             return Ok(UsbControlResult::Read(self.scripted_read(read_length)?));
         }
-        self.rate.write_access_blocking(bytes.len())?;
-        self.written
-            .lock()
-            .expect("recording USB poisoned")
-            .push(UsbWriteRecord {
-                device: device.id.clone(),
-                endpoint: None,
-                request_type: Some(request_type),
-                request: Some(request),
-                data: bytes.to_vec(),
-            });
+        self.rate.write_access(bytes.len())?;
+        self.written.lock().push(UsbWriteRecord {
+            device: device.id.clone(),
+            endpoint: None,
+            request_type: Some(request_type),
+            request: Some(request),
+            data: bytes.to_vec(),
+        });
         Ok(UsbControlResult::Written(bytes.len()))
     }
     fn rate_status(&self) -> WriteRateStatus {
         self.rate.status()
     }
-    fn primary_location(
-        &self,
-    ) -> Option<crate::infrastructure::drivers::transports::usb::UsbLocation> {
+    fn primary_location(&self) -> Option<UsbLocation> {
         None
     }
 }
@@ -475,20 +451,12 @@ impl HttpBackend for RecordingHttp {
         req: &HttpRequest,
         _max_response_bytes: usize,
     ) -> anyhow::Result<HttpResponse> {
-        self.requests
-            .lock()
-            .expect("recording http poisoned")
-            .push(req.clone());
-        Ok(self
-            .responses
-            .lock()
-            .expect("recording http poisoned")
-            .pop_front()
-            .unwrap_or(HttpResponse {
-                status: 200,
-                headers: Vec::new(),
-                body: Vec::new(),
-            }))
+        self.requests.lock().push(req.clone());
+        Ok(self.responses.lock().pop_front().unwrap_or(HttpResponse {
+            status: 200,
+            headers: Vec::new(),
+            body: Vec::new(),
+        }))
     }
 }
 
@@ -500,24 +468,16 @@ struct RecordingUdp {
     inbound: Mutex<std::collections::VecDeque<Vec<u8>>>,
 }
 
-impl crate::infrastructure::udp::UdpBackend for RecordingUdp {
+impl UdpBackend for RecordingUdp {
     fn send(&self, data: &[u8]) -> Result<usize> {
-        self.sent
-            .lock()
-            .expect("recording udp poisoned")
-            .push(data.to_vec());
+        self.sent.lock().push(data.to_vec());
         Ok(data.len())
     }
     fn receive(&self, _timeout: std::time::Duration, max_bytes: usize) -> Result<Option<Vec<u8>>> {
-        Ok(self
-            .inbound
-            .lock()
-            .expect("recording udp poisoned")
-            .pop_front()
-            .map(|mut d| {
-                d.truncate(max_bytes);
-                d
-            }))
+        Ok(self.inbound.lock().pop_front().map(|mut d| {
+            d.truncate(max_bytes);
+            d
+        }))
     }
 }
 
@@ -526,10 +486,10 @@ impl crate::infrastructure::udp::UdpBackend for RecordingUdp {
 fn recording_udp_runtime(
     manifest: &PluginManifest,
     recording: &Option<Arc<RecordingUdp>>,
-) -> Option<crate::infrastructure::udp::UdpRuntime> {
+) -> Option<UdpRuntime> {
     let udp = manifest.transports.udp.as_ref()?;
     let recording = recording.clone()?;
-    Some(crate::infrastructure::udp::UdpRuntime::new(
+    Some(UdpRuntime::new(
         recording,
         udp.max_datagram_bytes,
         std::time::Duration::from_millis(udp.recv_timeout_ms),
@@ -546,35 +506,25 @@ fn attach_udp_methods(lua: &Lua, dev: &Table, recording: Option<Arc<RecordingUdp
     dev.set(
         "queue_udp_datagram",
         lua.create_function(move |_, (_self, data): (Table, mlua::LuaString)| {
-            inbound
-                .inbound
-                .lock()
-                .expect("recording udp poisoned")
-                .push_back(data.as_bytes().to_vec());
+            inbound.inbound.lock().push_back(data.as_bytes().to_vec());
             Ok(())
         })
-        .anyhow()?,
+        .map_err(from_lua_err)?,
     )
-    .anyhow()?;
+    .map_err(from_lua_err)?;
     let sent = recording;
     dev.set(
         "udp_sent",
         lua.create_function(move |lua, _self: Table| {
             let out = lua.create_table()?;
-            for (i, datagram) in sent
-                .sent
-                .lock()
-                .expect("recording udp poisoned")
-                .iter()
-                .enumerate()
-            {
+            for (i, datagram) in sent.sent.lock().iter().enumerate() {
                 out.set(i + 1, lua.create_string(datagram)?)?;
             }
             Ok(out)
         })
-        .anyhow()?,
+        .map_err(from_lua_err)?,
     )
-    .anyhow()?;
+    .map_err(from_lua_err)?;
     Ok(())
 }
 
@@ -582,27 +532,25 @@ fn attach_udp_methods(lua: &Lua, dev: &Table, recording: Option<Arc<RecordingUdp
 /// declares an http transport, so the harness never opens a real socket.
 fn recording_http_runtime(
     manifest: &PluginManifest,
-    config: &crate::domain::plugin::ResolvedConfig,
+    config: &ResolvedConfig,
     recording: &Option<Arc<RecordingHttp>>,
 ) -> Option<HttpRuntime> {
     let http = manifest.transports.http.as_ref()?;
     let recording = recording.clone()?;
-    let host = http.host_key.as_ref().and_then(|key| {
-        config
-            .get(key)
-            .map(crate::domain::plugin::ResolvedConfigValue::to_config_string)
-    });
-    let port = http.port_key.as_ref().and_then(|key| {
-        config
-            .get(key)
-            .map(crate::domain::plugin::ResolvedConfigValue::to_config_string)
-    });
+    let host = http
+        .host_key
+        .as_ref()
+        .and_then(|key| config.get(key).map(ResolvedConfigValue::to_config_string));
+    let port = http
+        .port_key
+        .as_ref()
+        .and_then(|key| config.get(key).map(ResolvedConfigValue::to_config_string));
     let identity = http
         .tls
         .as_ref()
         .and_then(|tls| tls.verify_identity.as_ref())
         .and_then(|key| config.get(key))
-        .map(crate::domain::plugin::ResolvedConfigValue::to_config_string)
+        .map(ResolvedConfigValue::to_config_string)
         .filter(|value| !value.trim().is_empty())
         // The recording backend performs no TLS. Falling back to the resolved
         // host keeps its captured URL stable when an identity has no fixture.
@@ -617,7 +565,7 @@ fn recording_http_runtime(
 /// A resolved config for the harness worker. Secure fields receive a non-empty
 /// test-only placeholder when their manifest default is blank, so a plugin can
 /// exercise its authenticated path without exposing or persisting a secret.
-fn default_resolved_config(manifest: &PluginManifest) -> crate::domain::plugin::ResolvedConfig {
+fn default_resolved_config(manifest: &PluginManifest) -> ResolvedConfig {
     manifest
         .config_fields()
         .iter()
@@ -625,7 +573,7 @@ fn default_resolved_config(manifest: &PluginManifest) -> crate::domain::plugin::
             if field.secure && field.default.is_empty() {
                 Some((
                     field.key.clone(),
-                    crate::domain::plugin::ResolvedConfigValue::String("plugin-test-secret".into()),
+                    ResolvedConfigValue::String("plugin-test-secret".into()),
                 ))
             } else {
                 super::resolved_config_value(field.kind, &field.default)
@@ -659,25 +607,21 @@ fn attach_http_methods(
                     ))
                 }
             };
-            queue
-                .responses
-                .lock()
-                .expect("recording http poisoned")
-                .push_back(HttpResponse {
-                    status,
-                    headers: Vec::new(),
-                    body,
-                });
+            queue.responses.lock().push_back(HttpResponse {
+                status,
+                headers: Vec::new(),
+                body,
+            });
             Ok(())
         })
-        .anyhow()?,
+        .map_err(from_lua_err)?,
     )
-    .anyhow()?;
+    .map_err(from_lua_err)?;
     let inspect = recording;
     dev.set(
         "http_requests",
         lua.create_function(move |lua, _self: Table| {
-            let requests = inspect.requests.lock().expect("recording http poisoned");
+            let requests = inspect.requests.lock();
             let out = lua.create_table()?;
             for (i, req) in requests.iter().enumerate() {
                 let item = lua.create_table()?;
@@ -689,9 +633,9 @@ fn attach_http_methods(
             }
             Ok(out)
         })
-        .anyhow()?,
+        .map_err(from_lua_err)?,
     )
-    .anyhow()?;
+    .map_err(from_lua_err)?;
     Ok(())
 }
 
@@ -724,10 +668,10 @@ pub fn run(handle: tokio::runtime::Handle, package: &Path) -> Result<i32> {
 
     let report = Arc::new(Mutex::new(Report::default()));
     let lua = Lua::new();
-    let halod = lua.create_table().anyhow()?;
-    lua.globals().set("halod", halod).anyhow()?;
+    let halod = lua.create_table().map_err(from_lua_err)?;
+    lua.globals().set("halod", halod).map_err(from_lua_err)?;
     super::engine::sandbox::install_package_modules(&lua, &manifest.module_sources)
-        .anyhow()
+        .map_err(from_lua_err)
         .context("installing package-local modules for test.lua")?;
     let harness = build_harness(&lua, &manifest, handle, report.clone())?;
 
@@ -735,14 +679,14 @@ pub fn run(handle: tokio::runtime::Handle, package: &Path) -> Result<i32> {
         .load(&test_src)
         .set_name(test_path.display().to_string())
         .eval()
-        .anyhow()
+        .map_err(from_lua_err)
         .with_context(|| format!("loading {}", test_path.display()))?;
     test_fn
         .call::<()>(harness)
-        .anyhow()
+        .map_err(from_lua_err)
         .with_context(|| format!("running {}", test_path.display()))?;
 
-    let report = report.lock().expect("report poisoned");
+    let report = report.lock();
     println!(
         "{}: {} passed, {} failed",
         manifest.plugin_id, report.passed, report.failed
@@ -761,10 +705,9 @@ fn validate_lcd_widgets(runtime: &tokio::runtime::Handle, manifest: &PluginManif
         manifest.script_source.clone(),
         manifest.module_sources.clone(),
         ids,
-        manifest.permissions.clone(),
         HashMap::new(),
         super::engine::data_api::DataRuntime::new(
-            Arc::new(crate::application::bus::data_bus::DataBus::default()),
+            Arc::new(DataBus::default()),
             manifest.plugin_id.clone(),
             &manifest.provides,
             manifest.consumes.clone(),
@@ -830,8 +773,8 @@ fn build_harness(
     handle: tokio::runtime::Handle,
     report: Arc<Mutex<Report>>,
 ) -> Result<Table> {
-    let h = lua.create_table().anyhow()?;
-    let data_bus = Arc::new(crate::application::bus::data_bus::DataBus::default());
+    let h = lua.create_table().map_err(from_lua_err)?;
+    let data_bus = Arc::new(DataBus::default());
 
     let assert_report = report.clone();
     h.set(
@@ -839,7 +782,7 @@ fn build_harness(
         // `h:assert(...)` passes `h` itself as the leading self argument.
         lua.create_function(
             move |_, (_self, cond, msg): (Table, bool, Option<String>)| {
-                let mut r = assert_report.lock().expect("report poisoned");
+                let mut r = assert_report.lock();
                 let msg = msg.unwrap_or_default();
                 if cond {
                     r.passed += 1;
@@ -851,9 +794,9 @@ fn build_harness(
                 Ok(())
             },
         )
-        .anyhow()?,
+        .map_err(from_lua_err)?,
     )
-    .anyhow()?;
+    .map_err(from_lua_err)?;
 
     h.set(
         "sleep_ms",
@@ -866,16 +809,16 @@ fn build_harness(
             std::thread::sleep(std::time::Duration::from_millis(ms));
             Ok(())
         })
-        .anyhow()?,
+        .map_err(from_lua_err)?,
     )
-    .anyhow()?;
+    .map_err(from_lua_err)?;
 
     let eq_report = report.clone();
     h.set(
         "assert_eq",
         lua.create_function(
             move |_, (_self, a, b, msg): (Table, Value, Value, Option<String>)| {
-                let mut r = eq_report.lock().expect("report poisoned");
+                let mut r = eq_report.lock();
                 let msg = msg.unwrap_or_default();
                 if lua_values_equal(&a, &b) {
                     r.passed += 1;
@@ -887,9 +830,9 @@ fn build_harness(
                 Ok(())
             },
         )
-        .anyhow()?,
+        .map_err(from_lua_err)?,
     )
-    .anyhow()?;
+    .map_err(from_lua_err)?;
 
     let open_manifest = manifest.clone();
     let open_handle = handle.clone();
@@ -904,11 +847,11 @@ fn build_harness(
                 open_bus.clone(),
                 spec,
             )
-            .map_err(mlua_err)
+            .map_err(to_lua_err)
         })
-        .anyhow()?,
+        .map_err(from_lua_err)?,
     )
-    .anyhow()?;
+    .map_err(from_lua_err)?;
 
     let integration_manifest = manifest.clone();
     let integration_bus = data_bus.clone();
@@ -922,19 +865,18 @@ fn build_harness(
                 integration_bus.clone(),
                 spec,
             )
-            .map_err(mlua_err)
+            .map_err(to_lua_err)
         })
-        .anyhow()?,
+        .map_err(from_lua_err)?,
     )
-    .anyhow()?;
+    .map_err(from_lua_err)?;
 
     let inject_bus = data_bus.clone();
     h.set(
         "inject_data",
         lua.create_function(
             move |_, (_self, key, value, stale_ms): (Table, String, Value, Option<u64>)| {
-                let value = crate::application::bus::data_bus::DataValue::from_lua(value)
-                    .map_err(mlua_err)?;
+                let value = DataValue::from_lua(value).map_err(to_lua_err)?;
                 inject_bus
                     .publish(
                         "test-host",
@@ -944,31 +886,31 @@ fn build_harness(
                             std::time::Duration::from_millis(stale_ms.unwrap_or(60_000)),
                         ),
                     )
-                    .map_err(mlua_err)
+                    .map_err(to_lua_err)
             },
         )
-        .anyhow()?,
+        .map_err(from_lua_err)?,
     )
-    .anyhow()?;
+    .map_err(from_lua_err)?;
     let inspect_bus = data_bus.clone();
     h.set(
         "data_record",
         lua.create_function(move |lua, (_self, key): (Table, String)| {
             crate::application::bus::data_bus::snapshot_to_lua(lua, &inspect_bus.read(&key))
         })
-        .anyhow()?,
+        .map_err(from_lua_err)?,
     )
-    .anyhow()?;
+    .map_err(from_lua_err)?;
     h.set(
         "invalidate_data",
         lua.create_function(move |_, (_self, key): (Table, String)| {
             data_bus
                 .invalidate("test-host", &key, "invalidated")
-                .map_err(mlua_err)
+                .map_err(to_lua_err)
         })
-        .anyhow()?,
+        .map_err(from_lua_err)?,
     )
-    .anyhow()?;
+    .map_err(from_lua_err)?;
 
     Ok(h)
 }
@@ -979,7 +921,7 @@ fn open_integration(
     lua: &Lua,
     manifest: &PluginManifest,
     handle: tokio::runtime::Handle,
-    data_bus: Arc<crate::application::bus::data_bus::DataBus>,
+    data_bus: Arc<DataBus>,
     spec_table: Option<Table>,
 ) -> Result<Table> {
     if manifest.plugin_type != halod_shared::types::PluginKind::Integration {
@@ -988,11 +930,9 @@ fn open_integration(
     let recording = Arc::new(RecordingStream::new(reads_from_spec(&spec_table)));
     #[cfg(target_os = "linux")]
     let hwmon = if manifest.transports.hwmon.is_some() {
-        Some(Arc::new(
-            crate::infrastructure::drivers::transports::hwmon::HwmonTransport::from_fixture(
-                hwmon_fixtures_from_spec(&spec_table)?,
-            ),
-        ))
+        Some(Arc::new(HwmonTransport::from_fixture(
+            hwmon_fixtures_from_spec(&spec_table)?,
+        )))
     } else {
         None
     };
@@ -1057,7 +997,7 @@ fn open_integration(
             transport: transport_kind.into(),
             ..Default::default()
         },
-        manifest.permissions.clone(),
+        manifest.declarations.uses.permissions.clone(),
         resolved_config,
         handle.clone(),
         Arc::new(Mutex::new(Vec::new())),
@@ -1070,7 +1010,7 @@ fn open_integration(
         http,
         udp,
     );
-    let dev = lua.create_table().anyhow()?;
+    let dev = lua.create_table().map_err(from_lua_err)?;
     attach_http_methods(lua, &dev, http_recording)?;
     attach_udp_methods(lua, &dev, udp_recording)?;
     {
@@ -1079,11 +1019,27 @@ fn open_integration(
         dev.set(
             "initialize",
             lua.create_function(move |_, _self: Table| {
-                Ok(handle.block_on(worker.initialize()).map_err(mlua_err)?.ok)
+                Ok(handle.block_on(worker.initialize()).map_err(to_lua_err)?.ok)
             })
-            .anyhow()?,
+            .map_err(from_lua_err)?,
         )
-        .anyhow()?;
+        .map_err(from_lua_err)?;
+    }
+    {
+        let worker = worker.clone();
+        let handle = handle.clone();
+        dev.set(
+            "discover",
+            lua.create_function(move |lua, (_self, context): (Table, Value)| {
+                let context: serde_json::Value = lua.from_value(context)?;
+                let candidates = handle
+                    .block_on(worker.setup_discover(context))
+                    .map_err(to_lua_err)?;
+                lua.to_value(&candidates)
+            })
+            .map_err(from_lua_err)?,
+        )
+        .map_err(from_lua_err)?;
     }
     {
         let worker = worker.clone();
@@ -1093,7 +1049,7 @@ fn open_integration(
             lua.create_function(move |lua, _self: Table| {
                 let controllers = handle
                     .block_on(worker.enumerate_controllers())
-                    .map_err(mlua_err)?;
+                    .map_err(to_lua_err)?;
                 let out = lua.create_table()?;
                 for (i, controller) in controllers.iter().enumerate() {
                     let item = lua.create_table()?;
@@ -1117,9 +1073,9 @@ fn open_integration(
                 }
                 Ok(out)
             })
-            .anyhow()?,
+            .map_err(from_lua_err)?,
         )
-        .anyhow()?;
+        .map_err(from_lua_err)?;
     }
     {
         let worker = worker.clone();
@@ -1129,7 +1085,7 @@ fn open_integration(
             lua.create_function(move |lua, (_self, wanted): (Table, u32)| {
                 let controllers = handle
                     .block_on(worker.enumerate_controllers())
-                    .map_err(mlua_err)?;
+                    .map_err(to_lua_err)?;
                 let controller = controllers
                     .into_iter()
                     .find(|controller| controller.index == wanted)
@@ -1144,36 +1100,36 @@ fn open_integration(
                 });
                 integration_child_table(lua, child, handle.clone())
             })
-            .anyhow()?,
+            .map_err(from_lua_err)?,
         )
-        .anyhow()?;
+        .map_err(from_lua_err)?;
     }
     #[cfg(target_os = "linux")]
     if let Some(hwmon) = hwmon {
         dev.set(
             "hwmon_read",
             lua.create_function(move |_, (_self, key, attribute): (Table, String, String)| {
-                hwmon.read(&key, &attribute).map_err(mlua_err)
+                hwmon.read(&key, &attribute).map_err(to_lua_err)
             })
-            .anyhow()?,
+            .map_err(from_lua_err)?,
         )
-        .anyhow()?;
+        .map_err(from_lua_err)?;
     }
     {
         let recording = recording.clone();
         dev.set(
             "writes",
             lua.create_function(move |lua, _self: Table| {
-                let written = recording.written.lock().expect("recording poisoned");
+                let written = recording.written.lock();
                 let out = lua.create_table()?;
                 for (i, rec) in written.iter().enumerate() {
                     out.set(i + 1, lua.create_sequence_from(rec.data.iter().copied())?)?;
                 }
                 Ok(out)
             })
-            .anyhow()?,
+            .map_err(from_lua_err)?,
         )
-        .anyhow()?;
+        .map_err(from_lua_err)?;
     }
     Ok(dev)
 }
@@ -1190,7 +1146,7 @@ fn integration_child_table(
         table.set(
             "initialize",
             lua.create_function(move |lua, _self: Table| {
-                let outcome = handle.block_on(child.initialize()).map_err(mlua_err)?;
+                let outcome = handle.block_on(child.initialize()).map_err(to_lua_err)?;
                 let channels = lua.create_table()?;
                 for (i, zone) in outcome.channels.unwrap_or_default().iter().enumerate() {
                     let item = lua.create_table()?;
@@ -1225,7 +1181,7 @@ fn integration_child_table(
                     .collect();
                 handle
                     .block_on(child.write_lighting_frame(&channel, &bytes))
-                    .map_err(mlua_err)
+                    .map_err(to_lua_err)
             })?,
         )?;
     }
@@ -1235,10 +1191,10 @@ fn integration_child_table(
         table.set(
             "apply",
             lua.create_function(move |_, (_self, state): (Table, Table)| {
-                let rgb_state = table_to_rgb_state(&state).map_err(mlua_err)?;
+                let rgb_state = table_to_rgb_state(&state).map_err(to_lua_err)?;
                 handle
                     .block_on(child.rgb_apply(rgb_state))
-                    .map_err(mlua_err)
+                    .map_err(to_lua_err)
             })?,
         )?;
     }
@@ -1248,7 +1204,7 @@ fn integration_child_table(
         table.set(
             "get_sensors",
             lua.create_function(move |lua, _self: Table| {
-                let sensors = handle.block_on(child.get_sensors()).map_err(mlua_err)?;
+                let sensors = handle.block_on(child.get_sensors()).map_err(to_lua_err)?;
                 lua.to_value(&sensors)
             })?,
         )?;
@@ -1261,7 +1217,7 @@ fn integration_child_table(
             lua.create_function(move |lua, (_self, channel_id): (Table, String)| {
                 let status = handle
                     .block_on(child.cooling_status(&channel_id))
-                    .map_err(mlua_err)?;
+                    .map_err(to_lua_err)?;
                 lua.to_value(&status)
             })?,
         )?;
@@ -1274,7 +1230,7 @@ fn integration_child_table(
             lua.create_function(move |_, (_self, channel_id, duty): (Table, String, u8)| {
                 handle
                     .block_on(child.cooling_set_duty(&channel_id, duty))
-                    .map_err(mlua_err)
+                    .map_err(to_lua_err)
             })?,
         )?;
     }
@@ -1301,20 +1257,20 @@ fn hwmon_fixtures_from_spec(
     fixtures
         .sequence_values::<Table>()
         .map(|fixture| {
-            let fixture = fixture.anyhow()?;
-            let stable_id = fixture.get::<String>("stable_id").anyhow()?;
-            let name = fixture.get::<String>("name").anyhow()?;
-            let attributes = fixture.get::<Table>("attributes").anyhow()?;
+            let fixture = fixture.map_err(from_lua_err)?;
+            let stable_id = fixture.get::<String>("stable_id").map_err(from_lua_err)?;
+            let name = fixture.get::<String>("name").map_err(from_lua_err)?;
+            let attributes = fixture.get::<Table>("attributes").map_err(from_lua_err)?;
             let mut values = std::collections::HashMap::new();
             for pair in attributes.pairs::<String, String>() {
-                let (attribute, value) = pair.anyhow()?;
+                let (attribute, value) = pair.map_err(from_lua_err)?;
                 values.insert(attribute, value);
             }
             let writable_attributes = match fixture.get::<Table>("writable_attributes") {
                 Ok(attributes) => attributes
                     .sequence_values::<String>()
                     .collect::<mlua::Result<Vec<_>>>()
-                    .anyhow()?,
+                    .map_err(from_lua_err)?,
                 Err(_) => values
                     .keys()
                     .filter(|attribute| attribute.starts_with("pwm"))
@@ -1378,15 +1334,19 @@ fn command_results_from_spec(spec: &Option<Table>) -> Result<Vec<CommandRunResul
     results
         .sequence_values::<Table>()
         .map(|result| {
-            let result = result.anyhow()?;
-            let stdout = result.get::<mlua::LuaString>("stdout").anyhow()?;
-            let stderr = result.get::<mlua::LuaString>("stderr").anyhow()?;
+            let result = result.map_err(from_lua_err)?;
+            let stdout = result
+                .get::<mlua::LuaString>("stdout")
+                .map_err(from_lua_err)?;
+            let stderr = result
+                .get::<mlua::LuaString>("stderr")
+                .map_err(from_lua_err)?;
             Ok(CommandRunResult {
-                success: result.get::<bool>("success").anyhow()?,
-                exit_code: result.get::<i32>("exit_code").anyhow()?,
+                success: result.get::<bool>("success").map_err(from_lua_err)?,
+                exit_code: result.get::<i32>("exit_code").map_err(from_lua_err)?,
                 stdout: stdout.as_bytes().to_vec(),
                 stderr: stderr.as_bytes().to_vec(),
-                timed_out: result.get::<bool>("timed_out").anyhow()?,
+                timed_out: result.get::<bool>("timed_out").map_err(from_lua_err)?,
             })
         })
         .collect()
@@ -1398,7 +1358,7 @@ fn open_device(
     lua: &Lua,
     manifest: &PluginManifest,
     handle: tokio::runtime::Handle,
-    data_bus: Arc<crate::application::bus::data_bus::DataBus>,
+    data_bus: Arc<DataBus>,
     spec_table: Option<Table>,
 ) -> Result<Table> {
     let spec = manifest
@@ -1478,9 +1438,7 @@ fn open_device(
                 reads: smbus_reads_from_spec(&spec_table).into(),
                 written: smbus_written.clone(),
             };
-            let bus = crate::infrastructure::drivers::transports::smbus::SmBusDevice::recording(
-                Box::new(ops),
-            );
+            let bus = SmBusDevice::recording(Box::new(ops));
             PluginIo::Register(RegisterBus::new(
                 bus,
                 AddrScope::single(smbus_addr.context("SMBus fixture has no address")?),
@@ -1495,11 +1453,11 @@ fn open_device(
     };
     let device = Arc::new_cyclic(|weak| {
         let mut device = LuaDevice::new(LuaDeviceParts {
-            id: "plugin-test".to_owned(),
+            id: DeviceId::sanitized("plugin-test"),
             manifest,
             spec: Some(spec),
             notify: std::sync::Weak::new(),
-            runtime: Some(Arc::new(std::sync::Mutex::new(
+            runtime: Some(Arc::new(parking_lot::Mutex::new(
                 super::engine::device::RuntimeState::OpeningTransport,
             ))),
             worker: LuaDeviceWorker::Spawn(Box::new(LuaDeviceSpawnParts {
@@ -1508,7 +1466,7 @@ fn open_device(
                 handle: handle.clone(),
                 // The harness grants every declared permission (so gated transports
                 // open), uses no config, and has no `AppState` to notify.
-                granted: manifest.permissions.clone(),
+                granted: manifest.declarations.uses.permissions.clone(),
                 config: std::collections::HashMap::new(),
                 data: super::engine::data_api::DataRuntime::new(
                     data_bus,
@@ -1528,11 +1486,11 @@ fn open_device(
     {
         let adapter: Arc<dyn crate::domain::device::chain::LightingDivisionAdapter> =
             device.clone();
-        let host = crate::domain::device::chain::LightingDivisionHost::new(adapter);
+        let host = LightingDivisionHost::new(adapter);
         device.install_chain_host(host);
     }
 
-    let dev_table = lua.create_table().anyhow()?;
+    let dev_table = lua.create_table().map_err(from_lua_err)?;
 
     {
         let device = device.clone();
@@ -1542,17 +1500,17 @@ fn open_device(
                 "initialize",
                 lua.create_function(move |_, _self: Table| {
                     let initialized = handle
-                        .block_on(crate::domain::device::Device::initialize(&*device))
-                        .map_err(mlua_err)?;
+                        .block_on(Device::initialize(&*device))
+                        .map_err(to_lua_err)?;
                     // Package tests drive status reads explicitly through
                     // `poll_sensors`; a live background ticker would race for
                     // the same scripted reports and make tests nondeterministic.
                     device.set_polling_paused(true);
                     Ok(initialized)
                 })
-                .anyhow()?,
+                .map_err(from_lua_err)?,
             )
-            .anyhow()?;
+            .map_err(from_lua_err)?;
     }
 
     {
@@ -1576,15 +1534,13 @@ fn open_device(
                             .sequence_values::<u8>()
                             .collect::<mlua::Result<Vec<_>>>()?;
                         handle
-                            .block_on(crate::domain::device::LcdCapability::stream_frame(
-                                &*device, &rgba, width, height,
-                            ))
-                            .map_err(mlua_err)
+                            .block_on(LcdCapability::stream_frame(&*device, &rgba, width, height))
+                            .map_err(to_lua_err)
                     },
                 )
-                .anyhow()?,
+                .map_err(from_lua_err)?,
             )
-            .anyhow()?;
+            .map_err(from_lua_err)?;
     }
 
     {
@@ -1594,16 +1550,13 @@ fn open_device(
             .set(
                 "keyboard_layout_status",
                 lua.create_function(move |lua, _self: Table| {
-                    let status = handle.block_on(
-                        crate::domain::device::KeyboardLayoutCapability::keyboard_layout_status(
-                            &*device,
-                        ),
-                    );
+                    let status =
+                        handle.block_on(KeyboardLayoutCapability::keyboard_layout_status(&*device));
                     lua.to_value(&status)
                 })
-                .anyhow()?,
+                .map_err(from_lua_err)?,
             )
-            .anyhow()?;
+            .map_err(from_lua_err)?;
     }
 
     {
@@ -1613,12 +1566,12 @@ fn open_device(
             .set(
                 "serialize",
                 lua.create_function(move |lua, _self: Table| {
-                    let wire = handle.block_on(crate::domain::device::Device::serialize(&*device));
+                    let wire = handle.block_on(Device::serialize(&*device));
                     lua.to_value(&wire)
                 })
-                .anyhow()?,
+                .map_err(from_lua_err)?,
             )
-            .anyhow()?;
+            .map_err(from_lua_err)?;
     }
 
     {
@@ -1631,9 +1584,9 @@ fn open_device(
                         &*device,
                     ))
                 })
-                .anyhow()?,
+                .map_err(from_lua_err)?,
             )
-            .anyhow()?;
+            .map_err(from_lua_err)?;
     }
 
     {
@@ -1644,14 +1597,14 @@ fn open_device(
                 "set_cooling_duty",
                 lua.create_function(move |_, (_self, channel, duty): (Table, String, u8)| {
                     handle
-                        .block_on(crate::domain::device::CoolingCapability::set_cooling_duty(
+                        .block_on(CoolingCapability::set_cooling_duty(
                             &*device, &channel, duty,
                         ))
-                        .map_err(mlua_err)
+                        .map_err(to_lua_err)
                 })
-                .anyhow()?,
+                .map_err(from_lua_err)?,
             )
-            .anyhow()?;
+            .map_err(from_lua_err)?;
     }
 
     {
@@ -1669,11 +1622,11 @@ fn open_device(
                         .block_on(crate::domain::device::LightingCapability::write_frame(
                             &*device, &channel, &bytes,
                         ))
-                        .map_err(mlua_err)
+                        .map_err(to_lua_err)
                 })
-                .anyhow()?,
+                .map_err(from_lua_err)?,
             )
-            .anyhow()?;
+            .map_err(from_lua_err)?;
     }
 
     {
@@ -1683,13 +1636,12 @@ fn open_device(
             .set(
                 "dpi_status",
                 lua.create_function(move |lua, _self: Table| {
-                    let status =
-                        handle.block_on(crate::domain::device::DpiCapability::dpi_status(&*device));
+                    let status = handle.block_on(DpiCapability::dpi_status(&*device));
                     lua.to_value(&status)
                 })
-                .anyhow()?,
+                .map_err(from_lua_err)?,
             )
-            .anyhow()?;
+            .map_err(from_lua_err)?;
     }
 
     {
@@ -1699,14 +1651,13 @@ fn open_device(
             .set(
                 "key_remap_status",
                 lua.create_function(move |lua, _self: Table| {
-                    let status = handle.block_on(
-                        crate::domain::device::KeyRemapCapability::get_key_remap_status(&*device),
-                    );
+                    let status =
+                        handle.block_on(KeyRemapCapability::get_key_remap_status(&*device));
                     lua.to_value(&status)
                 })
-                .anyhow()?,
+                .map_err(from_lua_err)?,
             )
-            .anyhow()?;
+            .map_err(from_lua_err)?;
     }
 
     {
@@ -1716,14 +1667,12 @@ fn open_device(
             .set(
                 "connection_status",
                 lua.create_function(move |lua, _self: Table| {
-                    let status = handle.block_on(
-                        crate::domain::device::ConnectionCapability::connection_status(&*device),
-                    );
+                    let status = handle.block_on(ConnectionCapability::connection_status(&*device));
                     lua.to_value(&status)
                 })
-                .anyhow()?,
+                .map_err(from_lua_err)?,
             )
-            .anyhow()?;
+            .map_err(from_lua_err)?;
     }
 
     {
@@ -1734,15 +1683,13 @@ fn open_device(
                 "get_equalizer",
                 lua.create_function(move |lua, _self: Table| {
                     let equalizer = handle
-                        .block_on(crate::domain::device::EqualizerCapability::get_equalizer(
-                            &*device,
-                        ))
-                        .map_err(mlua_err)?;
+                        .block_on(EqualizerCapability::get_equalizer(&*device))
+                        .map_err(to_lua_err)?;
                     lua.to_value(&equalizer)
                 })
-                .anyhow()?,
+                .map_err(from_lua_err)?,
             )
-            .anyhow()?;
+            .map_err(from_lua_err)?;
     }
 
     {
@@ -1756,14 +1703,12 @@ fn open_device(
                         .sequence_values::<f32>()
                         .collect::<mlua::Result<Vec<_>>>()?;
                     handle
-                        .block_on(crate::domain::device::EqualizerCapability::set_eq_bands(
-                            &*device, &values,
-                        ))
-                        .map_err(mlua_err)
+                        .block_on(EqualizerCapability::set_eq_bands(&*device, &values))
+                        .map_err(to_lua_err)
                 })
-                .anyhow()?,
+                .map_err(from_lua_err)?,
             )
-            .anyhow()?;
+            .map_err(from_lua_err)?;
     }
 
     {
@@ -1774,14 +1719,12 @@ fn open_device(
                 "set_boolean",
                 lua.create_function(move |_, (_self, key, value): (Table, String, bool)| {
                     handle
-                        .block_on(crate::domain::device::BooleanCapability::set_boolean(
-                            &*device, &key, value,
-                        ))
-                        .map_err(mlua_err)
+                        .block_on(BooleanCapability::set_boolean(&*device, &key, value))
+                        .map_err(to_lua_err)
                 })
-                .anyhow()?,
+                .map_err(from_lua_err)?,
             )
-            .anyhow()?;
+            .map_err(from_lua_err)?;
     }
 
     {
@@ -1793,16 +1736,12 @@ fn open_device(
                 lua.create_function(move |lua, (_self, mapping): (Table, Table)| {
                     let mapping = lua.from_value(Value::Table(mapping))?;
                     handle
-                        .block_on(
-                            crate::domain::device::KeyRemapCapability::set_button_mapping(
-                                &*device, mapping,
-                            ),
-                        )
-                        .map_err(mlua_err)
+                        .block_on(KeyRemapCapability::set_button_mapping(&*device, mapping))
+                        .map_err(to_lua_err)
                 })
-                .anyhow()?,
+                .map_err(from_lua_err)?,
             )
-            .anyhow()?;
+            .map_err(from_lua_err)?;
     }
 
     {
@@ -1813,14 +1752,12 @@ fn open_device(
                 "set_choice",
                 lua.create_function(move |_, (_self, key, selected): (Table, String, usize)| {
                     handle
-                        .block_on(crate::domain::device::ChoiceCapability::set_choice(
-                            &*device, &key, selected,
-                        ))
-                        .map_err(mlua_err)
+                        .block_on(ChoiceCapability::set_choice(&*device, &key, selected))
+                        .map_err(to_lua_err)
                 })
-                .anyhow()?,
+                .map_err(from_lua_err)?,
             )
-            .anyhow()?;
+            .map_err(from_lua_err)?;
     }
 
     {
@@ -1830,13 +1767,11 @@ fn open_device(
             .set(
                 "enumerate_controllers",
                 lua.create_function(move |lua, _self: Table| {
-                    let controllers = handle.block_on(
-                        crate::domain::device::Controller::discover_children(&*device),
-                    );
+                    let controllers = handle.block_on(Controller::discover_children(&*device));
                     let out = lua.create_table()?;
                     for (i, controller) in controllers.iter().enumerate() {
                         let item = lua.create_table()?;
-                        item.set("id", controller.id())?;
+                        item.set("id", controller.id().as_str())?;
                         item.set("name", controller.name())?;
                         item.set("device_type", lua.to_value(&controller.wire_device_type())?)?;
                         item.set("has_cooling", controller.as_cooling().is_some())?;
@@ -1845,9 +1780,9 @@ fn open_device(
                     }
                     Ok(out)
                 })
-                .anyhow()?,
+                .map_err(from_lua_err)?,
             )
-            .anyhow()?;
+            .map_err(from_lua_err)?;
     }
 
     {
@@ -1858,14 +1793,12 @@ fn open_device(
                 "set_dpi_steps",
                 lua.create_function(move |_, (_self, steps): (Table, Vec<u16>)| {
                     handle
-                        .block_on(crate::domain::device::DpiCapability::set_dpi_steps(
-                            &*device, steps,
-                        ))
-                        .map_err(mlua_err)
+                        .block_on(DpiCapability::set_dpi_steps(&*device, steps))
+                        .map_err(to_lua_err)
                 })
-                .anyhow()?,
+                .map_err(from_lua_err)?,
             )
-            .anyhow()?;
+            .map_err(from_lua_err)?;
     }
     {
         let device = device.clone();
@@ -1875,16 +1808,14 @@ fn open_device(
                 "set_profile_enabled",
                 lua.create_function(move |_, (_self, slot, enabled): (Table, u16, bool)| {
                     handle
-                        .block_on(
-                            crate::domain::device::OnboardProfilesCapability::set_profile_enabled(
-                                &*device, slot, enabled,
-                            ),
-                        )
-                        .map_err(mlua_err)
+                        .block_on(OnboardProfilesCapability::set_profile_enabled(
+                            &*device, slot, enabled,
+                        ))
+                        .map_err(to_lua_err)
                 })
-                .anyhow()?,
+                .map_err(from_lua_err)?,
             )
-            .anyhow()?;
+            .map_err(from_lua_err)?;
     }
 
     {
@@ -1895,14 +1826,12 @@ fn open_device(
                 "set_dpi",
                 lua.create_function(move |_, (_self, dpi): (Table, u16)| {
                     handle
-                        .block_on(crate::domain::device::DpiCapability::set_dpi_direct(
-                            &*device, dpi,
-                        ))
-                        .map_err(mlua_err)
+                        .block_on(DpiCapability::set_dpi_direct(&*device, dpi))
+                        .map_err(to_lua_err)
                 })
-                .anyhow()?,
+                .map_err(from_lua_err)?,
             )
-            .anyhow()?;
+            .map_err(from_lua_err)?;
     }
 
     {
@@ -1913,15 +1842,13 @@ fn open_device(
                 "get_batteries",
                 lua.create_function(move |lua, _self: Table| {
                     let batteries = handle
-                        .block_on(crate::domain::device::BatteryCapability::get_batteries(
-                            &*device,
-                        ))
-                        .map_err(mlua_err)?;
+                        .block_on(BatteryCapability::get_batteries(&*device))
+                        .map_err(to_lua_err)?;
                     lua.to_value(&batteries)
                 })
-                .anyhow()?,
+                .map_err(from_lua_err)?,
             )
-            .anyhow()?;
+            .map_err(from_lua_err)?;
     }
 
     {
@@ -1932,14 +1859,12 @@ fn open_device(
                 "set_range",
                 lua.create_function(move |_, (_self, key, value): (Table, String, i32)| {
                     handle
-                        .block_on(crate::domain::device::RangeCapability::set_range(
-                            &*device, &key, value,
-                        ))
-                        .map_err(mlua_err)
+                        .block_on(RangeCapability::set_range(&*device, &key, value))
+                        .map_err(to_lua_err)
                 })
-                .anyhow()?,
+                .map_err(from_lua_err)?,
             )
-            .anyhow()?;
+            .map_err(from_lua_err)?;
     }
 
     {
@@ -1949,12 +1874,12 @@ fn open_device(
             .set(
                 "apply",
                 lua.create_function(move |_, (_self, state): (Table, Table)| {
-                    let rgb_state = table_to_rgb_state(&state).map_err(mlua_err)?;
-                    handle.block_on(device.apply(rgb_state)).map_err(mlua_err)
+                    let rgb_state = table_to_rgb_state(&state).map_err(to_lua_err)?;
+                    handle.block_on(device.apply(rgb_state)).map_err(to_lua_err)
                 })
-                .anyhow()?,
+                .map_err(from_lua_err)?,
             )
-            .anyhow()?;
+            .map_err(from_lua_err)?;
     }
 
     {
@@ -1963,13 +1888,11 @@ fn open_device(
             .set(
                 "cached_cooling",
                 lua.create_function(move |lua, _self: Table| {
-                    lua.to_value(
-                        &crate::domain::device::CoolingCapability::cached_cooling_status(&*device),
-                    )
+                    lua.to_value(&CoolingCapability::cached_cooling_status(&*device))
                 })
-                .anyhow()?,
+                .map_err(from_lua_err)?,
             )
-            .anyhow()?;
+            .map_err(from_lua_err)?;
     }
 
     {
@@ -1978,7 +1901,7 @@ fn open_device(
             .set(
                 "writes",
                 lua.create_function(move |lua, _self: Table| {
-                    let written = recording.written.lock().expect("recording poisoned");
+                    let written = recording.written.lock();
                     let out = lua.create_table()?;
                     for (i, rec) in written.iter().enumerate() {
                         let entry = lua.create_table()?;
@@ -1988,9 +1911,9 @@ fn open_device(
                     }
                     Ok(out)
                 })
-                .anyhow()?,
+                .map_err(from_lua_err)?,
             )
-            .anyhow()?;
+            .map_err(from_lua_err)?;
     }
 
     {
@@ -1999,7 +1922,7 @@ fn open_device(
             .set(
                 "smbus_writes",
                 lua.create_function(move |lua, _self: Table| {
-                    let records = written.lock().expect("recording SMBus poisoned");
+                    let records = written.lock();
                     let out = lua.create_table()?;
                     for (i, record) in records.iter().enumerate() {
                         let entry = lua.create_table()?;
@@ -2015,9 +1938,9 @@ fn open_device(
                     }
                     Ok(out)
                 })
-                .anyhow()?,
+                .map_err(from_lua_err)?,
             )
-            .anyhow()?;
+            .map_err(from_lua_err)?;
     }
 
     {
@@ -2027,17 +1950,15 @@ fn open_device(
             .set(
                 "poll_sensors",
                 lua.create_function(move |lua, _self: Table| {
-                    handle.block_on(device.poll_once()).map_err(mlua_err)?;
+                    handle.block_on(device.poll_once()).map_err(to_lua_err)?;
                     let sensors = handle
-                        .block_on(crate::domain::device::SensorCapability::get_sensors(
-                            &*device,
-                        ))
-                        .map_err(mlua_err)?;
+                        .block_on(SensorCapability::get_sensors(&*device))
+                        .map_err(to_lua_err)?;
                     lua.to_value(&sensors)
                 })
-                .anyhow()?,
+                .map_err(from_lua_err)?,
             )
-            .anyhow()?;
+            .map_err(from_lua_err)?;
     }
 
     {
@@ -2049,16 +1970,12 @@ fn open_device(
                     let data = bytes
                         .sequence_values::<u8>()
                         .collect::<mlua::Result<Vec<_>>>()?;
-                    recording
-                        .reads
-                        .lock()
-                        .expect("recording poisoned")
-                        .push_back(data);
+                    recording.reads.lock().push_back(data);
                     Ok(())
                 })
-                .anyhow()?,
+                .map_err(from_lua_err)?,
             )
-            .anyhow()?;
+            .map_err(from_lua_err)?;
     }
 
     if let Some(usb) = usb_recording.clone() {
@@ -2066,7 +1983,7 @@ fn open_device(
             .set(
                 "usb_writes",
                 lua.create_function(move |lua, _self: Table| {
-                    let written = usb.written.lock().expect("recording USB poisoned");
+                    let written = usb.written.lock();
                     let out = lua.create_table()?;
                     for (i, rec) in written.iter().enumerate() {
                         let entry = lua.create_table()?;
@@ -2079,9 +1996,9 @@ fn open_device(
                     }
                     Ok(out)
                 })
-                .anyhow()?,
+                .map_err(from_lua_err)?,
             )
-            .anyhow()?;
+            .map_err(from_lua_err)?;
     }
 
     {
@@ -2097,11 +2014,11 @@ fn open_device(
                         .collect();
                     handle
                         .block_on(device.write_divided_frame(&channel, &composed))
-                        .map_err(mlua_err)
+                        .map_err(to_lua_err)
                 })
-                .anyhow()?,
+                .map_err(from_lua_err)?,
             )
-            .anyhow()?;
+            .map_err(from_lua_err)?;
     }
 
     {
@@ -2112,23 +2029,16 @@ fn open_device(
             .set(
                 "clear",
                 lua.create_function(move |_, _self: Table| {
-                    recording
-                        .written
-                        .lock()
-                        .expect("recording poisoned")
-                        .clear();
+                    recording.written.lock().clear();
                     if let Some(usb) = &usb {
-                        usb.written.lock().expect("recording USB poisoned").clear();
+                        usb.written.lock().clear();
                     }
-                    smbus_written
-                        .lock()
-                        .expect("recording SMBus poisoned")
-                        .clear();
+                    smbus_written.lock().clear();
                     Ok(())
                 })
-                .anyhow()?,
+                .map_err(from_lua_err)?,
             )
-            .anyhow()?;
+            .map_err(from_lua_err)?;
     }
 
     // Push an unsolicited report onto the event queue (as a reader thread
@@ -2145,9 +2055,9 @@ fn open_device(
                     recording.queue_event(data);
                     Ok(())
                 })
-                .anyhow()?,
+                .map_err(from_lua_err)?,
             )
-            .anyhow()?;
+            .map_err(from_lua_err)?;
     }
 
     {
@@ -2157,7 +2067,7 @@ fn open_device(
             .set(
                 "pump_events",
                 lua.create_function(move |lua, _self: Table| {
-                    let outcomes = handle.block_on(device.pump_events()).map_err(mlua_err)?;
+                    let outcomes = handle.block_on(device.pump_events()).map_err(to_lua_err)?;
                     let out = lua.create_table()?;
                     for (i, outcome) in outcomes.iter().enumerate() {
                         let item = lua.create_table()?;
@@ -2182,9 +2092,9 @@ fn open_device(
                     }
                     Ok(out)
                 })
-                .anyhow()?,
+                .map_err(from_lua_err)?,
             )
-            .anyhow()?;
+            .map_err(from_lua_err)?;
     }
 
     Ok(dev_table)
@@ -2215,13 +2125,13 @@ fn value_to_param(v: &Value) -> Option<EffectParamValue> {
 fn table_to_rgb_state(state: &Table) -> Result<LightingState> {
     let mode: String = state
         .get("mode")
-        .anyhow()
+        .map_err(from_lua_err)
         .context("state.mode is required")?;
     match mode.as_str() {
         "static" => {
             let color: Table = state
                 .get("color")
-                .anyhow()
+                .map_err(from_lua_err)
                 .context("static state needs a color")?;
             Ok(LightingState::Static {
                 color: table_to_color(&color),
@@ -2230,14 +2140,14 @@ fn table_to_rgb_state(state: &Table) -> Result<LightingState> {
         "per_led" => {
             let zones_t: Table = state
                 .get("channels")
-                .anyhow()
+                .map_err(from_lua_err)
                 .context("per_led state needs a channels table")?;
             let mut channels = HashMap::new();
             for pair in zones_t.pairs::<String, Table>() {
-                let (channel_id, leds_t) = pair.anyhow()?;
+                let (channel_id, leds_t) = pair.map_err(from_lua_err)?;
                 let mut leds = HashMap::new();
                 for led in leds_t.pairs::<String, Table>() {
-                    let (led_id, c) = led.anyhow()?;
+                    let (led_id, c) = led.map_err(from_lua_err)?;
                     leds.insert(led_id, table_to_color(&c));
                 }
                 channels.insert(channel_id, leds);
@@ -2247,12 +2157,12 @@ fn table_to_rgb_state(state: &Table) -> Result<LightingState> {
         "native_effect" | "direct_effect" => {
             let id: String = state
                 .get("id")
-                .anyhow()
+                .map_err(from_lua_err)
                 .with_context(|| format!("{mode} state needs an id"))?;
             let mut params = HashMap::new();
             if let Ok(params_t) = state.get::<Table>("params") {
                 for pair in params_t.pairs::<String, Value>() {
-                    let (key, v) = pair.anyhow()?;
+                    let (key, v) = pair.map_err(from_lua_err)?;
                     if let Some(pv) = value_to_param(&v) {
                         params.insert(key, pv);
                     }
@@ -2272,6 +2182,23 @@ fn table_to_rgb_state(state: &Table) -> Result<LightingState> {
 #[cfg(test)]
 mod tests {
     use super::*;
+
+    #[test]
+    fn recording_usb_control_rejects_undeclared_requests() {
+        let config: UsbConfig = serde_yaml::from_str(
+            "devices: [{ id: primary, control: { max_transfer_size: 64, max_timeout_ms: 1000, requests: [{ request_type: 0x21, request: 0x09 }] } }]",
+        )
+        .unwrap();
+        let usb = RecordingUsb::new(config, Vec::new());
+        let control = |request_type, request| {
+            UsbCollection::control(&usb, None, request_type, request, 0, 0, &[1], 0, 100)
+        };
+        assert!(control(0x21, 0x09).is_ok());
+        assert!(control(0x21, 0x01)
+            .err()
+            .is_some_and(|error| error.to_string().contains("is not declared")));
+        assert_eq!(usb.written.lock().len(), 1);
+    }
 
     #[test]
     fn table_to_rgb_state_supports_direct_effects() {
@@ -2304,24 +2231,22 @@ mod tests {
         ));
     }
 
-    #[tokio::test]
-    async fn recording_stream_injects_write_failures_without_recording_data() {
+    #[test]
+    fn recording_stream_injects_write_failures_without_recording_data() {
         let stream =
             RecordingStream::with_options(Vec::new(), true, Some("simulated write failure".into()));
 
-        assert!(Transport::write(&stream, &[1]).await.is_err());
-        assert!(HidTransport::send_feature_report(&stream, &[2])
-            .await
-            .is_err());
-        assert!(HidTransport::write_companion(&stream, &[3]).await.is_err());
-        assert!(stream.written.lock().unwrap().is_empty());
+        assert!(Transport::write(&stream, &[1]).is_err());
+        assert!(HidTransport::send_feature_report(&stream, &[2]).is_err());
+        assert!(HidTransport::write_companion(&stream, &[3]).is_err());
+        assert!(stream.written.lock().is_empty());
     }
 
     fn write_fixture(dir: &Path, test_lua: &str) {
         std::fs::create_dir_all(dir).unwrap();
         std::fs::write(
             dir.join("plugin.yaml"),
-            "id: fixture\npermissions: [hid]\ndevices:\n  - vendor: x\n    model: y\n    match:\n      hid: { vid: 1, pid: 2 }\ntransports:\n  hid: { report_size: 64, timeout_ms: 1000 }\n",
+            "id: fixture\nversion: 1.0.0\napi: \"3.0\"\ndevices:\n  - vendor: x\n    model: y\n    match:\n      hid: { vid: 1, pid: 2 }\ntransports:\n  hid: { report_size: 64, timeout_ms: 1000 }\n",
         )
         .unwrap();
         std::fs::write(
@@ -2360,7 +2285,7 @@ mod tests {
         std::fs::create_dir_all(&dir).unwrap();
         std::fs::write(
             dir.join("plugin.yaml"),
-            "id: fixture\npermissions: [hid]\nprovides:\n  - { key: fixture.current, stale_after_ms: 60000, min_notify_interval_ms: 250 }\nconsumes: [host.sensors.*]\ndevices:\n  - vendor: x\n    model: y\n    match: { hid: { vid: 1, pid: 2 } }\ntransports:\n  hid: {}\n",
+            "id: fixture\nversion: 1.0.0\napi: \"3.0\"\nprovides:\n  - { key: fixture.current, stale_after_ms: 60000, min_notify_interval_ms: 250 }\nconsumes: [host.sensors.*]\ndevices:\n  - vendor: x\n    model: y\n    match: { hid: { vid: 1, pid: 2 } }\ntransports:\n  hid: {}\n",
         )
         .unwrap();
         std::fs::write(
@@ -2424,7 +2349,7 @@ mod tests {
         std::fs::create_dir_all(&dir).unwrap();
         std::fs::write(
             dir.join("plugin.yaml"),
-            "id: fixture\npermissions: [hid]\ndevices:\n  - vendor: x\n    model: y\n    match:\n      hid: { vid: 1, pid: 2 }\ntransports:\n  hid: { report_size: 64, timeout_ms: 1000 }\n",
+            "id: fixture\nversion: 1.0.0\napi: \"3.0\"\ndevices:\n  - vendor: x\n    model: y\n    match:\n      hid: { vid: 1, pid: 2 }\ntransports:\n  hid: { report_size: 64, timeout_ms: 1000 }\n",
         )
         .unwrap();
         std::fs::write(dir.join("main.lua"), "return {}").unwrap();
@@ -2444,20 +2369,20 @@ mod tests {
         std::fs::create_dir_all(&dir).unwrap();
         std::fs::write(
             dir.join("plugin.yaml"),
-            "id: command_fixture\ntype: integration\npermissions: [command]\ntransports:\n  command:\n    commands: [nvidia-smi]\n",
+            "id: command_fixture\nversion: 1.0.0\napi: \"3.0\"\ntype: integration\ntransports:\n  command:\n    commands: [nvidia-smi]\n",
         )
         .unwrap();
         std::fs::write(
             dir.join("main.lua"),
             r#"return {
-                enumerate_controllers = function(_dev)
-                    local result = command.run("nvidia-smi", { "arg" })
+                enumerate_controllers = function(dev)
+                    local result = dev.transport:run("nvidia-smi", { "arg" })
                     return {{
                         index = result.exit_code,
                         id = tostring(result.success),
                         key = result.stdout,
                         name = result.stderr,
-                        location = tostring(result.timed_out),
+                        serial = tostring(result.timed_out),
                     }}
                 end,
             }"#,
@@ -2475,7 +2400,7 @@ mod tests {
                 h:assert_eq(result.index, 23, "exit code is structured")
                 h:assert_eq(result.key, "partial", "stdout is structured")
                 h:assert_eq(result.name, "failure detail", "stderr is structured")
-                h:assert_eq(result.location, "true", "timeout is structured")
+                h:assert_eq(result.serial, "true", "timeout is structured")
             end"#,
         )
         .unwrap();

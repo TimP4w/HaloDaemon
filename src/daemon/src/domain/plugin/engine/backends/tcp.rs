@@ -11,22 +11,22 @@ use halod_shared::types::Permission;
 
 use crate::domain::plugin::engine::backends::net_guard::resolve_vetted_addr;
 use crate::domain::plugin::engine::transport::{PluginIo, PluginTransportDescriptor};
+use crate::domain::plugin::engine::worker;
 use crate::domain::plugin::manifest::PluginManifest;
+use crate::domain::plugin::ResolvedConfig;
+use crate::domain::plugin::ResolvedConfigValue;
 use crate::domain::registry::observers::discovery::DiscoveryHandle;
 use crate::infrastructure::drivers::transports::tcp::TcpTransport;
+use crate::infrastructure::drivers::transports::Transport;
 
 fn open(
     manifest: &PluginManifest,
     _handle: &DiscoveryHandle<'_>,
-    config: &crate::domain::plugin::ResolvedConfig,
+    config: &ResolvedConfig,
     granted: &[Permission],
     limit: Option<halod_shared::types::WriteRateLimit>,
 ) -> Result<PluginIo> {
-    // A tcp transport reaches off the matched hardware onto the network, so it
-    // is gated on the explicit Network grant (defence in depth: validate_manifest
-    // also forces the manifest to declare it, which is what drives the consent
-    // prompt — this rejects the actual connect if the grant is somehow absent).
-    if !crate::domain::plugin::engine::worker::network_granted(granted) {
+    if !worker::network_granted(granted) {
         bail!(
             "plugin '{}': tcp transport requires the 'network' permission",
             manifest.plugin_id
@@ -35,7 +35,7 @@ fn open(
     let tcp = manifest.transports.tcp.clone().unwrap_or_default();
     let host = config
         .get(&tcp.host_key)
-        .map(crate::domain::plugin::ResolvedConfigValue::to_config_string)
+        .map(ResolvedConfigValue::to_config_string)
         .unwrap_or_default();
     if host.is_empty() {
         bail!(
@@ -46,7 +46,7 @@ fn open(
     }
     let port_str = config
         .get(&tcp.port_key)
-        .map(crate::domain::plugin::ResolvedConfigValue::to_config_string)
+        .map(ResolvedConfigValue::to_config_string)
         .unwrap_or_default();
     let port: u16 = port_str.parse().with_context(|| {
         format!(
@@ -56,30 +56,21 @@ fn open(
     })?;
     let addr = resolve_vetted_addr(&host, port, tcp.allow_private)?;
 
-    let transport =
-        TcpTransport::connect_addr_blocking(addr, tcp.timeout_ms).with_context(|| {
-            format!(
-                "plugin '{}': connecting to {host}:{port} ({addr})",
-                manifest.plugin_id
-            )
-        })?;
-    crate::infrastructure::drivers::transports::Transport::set_write_rate_limit(&transport, limit);
+    let transport = TcpTransport::connect(addr, tcp.timeout_ms).with_context(|| {
+        format!(
+            "plugin '{}': connecting to {host}:{port} ({addr})",
+            manifest.plugin_id
+        )
+    })?;
+    Transport::set_write_rate_limit(&transport, limit);
     Ok(PluginIo::Stream {
         transport: std::sync::Arc::new(transport),
         usb: None,
     })
 }
 
-// `tcp` is config-instantiated (an integration reads its host/port from config),
-// never discovery-matched, so it carries only `open` — `matches`/`id_suffix`/
-// `validate` are `None`. See `integration_scan`, which calls `open` directly.
-pub(super) const DESCRIPTOR: PluginTransportDescriptor = PluginTransportDescriptor {
-    kind: "tcp",
-    matches: None,
-    open,
-    id_suffix: None,
-    validate: None,
-};
+pub(super) const DESCRIPTOR: PluginTransportDescriptor =
+    PluginTransportDescriptor::Configured { kind: "tcp", open };
 
 #[cfg(test)]
 mod tests {
@@ -101,7 +92,7 @@ mod tests {
         std::fs::write(
             dir.join("plugin.yaml"),
             format!(
-                "id: tcptest\npermissions: [hid, network]\ntransports:\n  tcp:\n    host_key: host\n    port_key: port\n    timeout_ms: 200\n    allow_private: {allow_private}\nconfig:\n  fields:\n    - key: host\n      label: Host\n      kind: host\n    - key: port\n      label: Port\n      kind: port\ndevices:\n  - vendor: Test\n    model: TCP\n    match:\n      hid: {{ vid: 1, pid: 2 }}\n"
+                "id: tcptest\nversion: 1.0.0\napi: \"3.0\"\ntransports:\n  tcp:\n    host_key: host\n    port_key: port\n    timeout_ms: 200\n    allow_private: {allow_private}\nconfig:\n  fields:\n    - key: host\n      label: Host\n      kind: host\n    - key: port\n      label: Port\n      kind: port\ndevices:\n  - vendor: Test\n    model: TCP\n    match:\n      hid: {{ vid: 1, pid: 2 }}\n"
             ),
         )
         .unwrap();

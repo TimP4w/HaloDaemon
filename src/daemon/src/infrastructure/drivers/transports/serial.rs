@@ -15,13 +15,13 @@
 //!   settings before the error surfaces, so an unplug/replug of a USB adapter
 //!   recovers without tearing down the worker.
 
+use parking_lot::Mutex as SyncMutex;
 use std::collections::VecDeque;
 use std::sync::atomic::{AtomicBool, Ordering};
-use std::sync::{Arc, Mutex as StdMutex, Weak};
+use std::sync::{Arc, Weak};
 use std::time::Duration;
 
 use anyhow::{bail, Context, Result};
-use async_trait::async_trait;
 use halod_shared::types::{WriteRateLimit, WriteRateStatus};
 use serialport::SerialPort;
 
@@ -172,7 +172,7 @@ impl SerialSettings {
 /// Bounded queue of unsolicited inbound bytes plus a wake channel, mirroring the
 /// HID event queue so the worker's event loop drives HID and serial identically.
 struct SerialEvents {
-    bytes: StdMutex<VecDeque<TransportEvent>>,
+    bytes: SyncMutex<VecDeque<TransportEvent>>,
     wake: tokio::sync::watch::Sender<u64>,
     listening: AtomicBool,
 }
@@ -181,7 +181,7 @@ impl SerialEvents {
     fn new() -> Self {
         let (wake, _) = tokio::sync::watch::channel(0);
         Self {
-            bytes: StdMutex::new(VecDeque::with_capacity(EVENT_QUEUE_CAPACITY)),
+            bytes: SyncMutex::new(VecDeque::with_capacity(EVENT_QUEUE_CAPACITY)),
             wake,
             listening: AtomicBool::new(false),
         }
@@ -193,10 +193,10 @@ impl SerialEvents {
     }
 
     fn push(&self, data: Vec<u8>) {
-        let mut queue = self.bytes.lock().unwrap();
+        let mut queue = self.bytes.lock();
         if queue.len() == EVENT_QUEUE_CAPACITY {
             queue.pop_front();
-            log::debug!("[SerialTransport] event queue full; dropping oldest event");
+            log::debug!("event queue full; dropping oldest event");
         }
         queue.push_back(TransportEvent {
             endpoint: EVENT_ENDPOINT,
@@ -207,7 +207,7 @@ impl SerialEvents {
     }
 
     fn drain(&self, limit: usize) -> Vec<TransportEvent> {
-        let mut queue = self.bytes.lock().unwrap();
+        let mut queue = self.bytes.lock();
         let count = queue.len().min(limit);
         let events = queue.drain(..count).collect();
         let remaining = !queue.is_empty();
@@ -220,7 +220,7 @@ impl SerialEvents {
 }
 
 pub struct SerialTransport {
-    port: Metered<StdMutex<Box<dyn SerialPort>>>,
+    port: Metered<SyncMutex<Box<dyn SerialPort>>>,
     settings: SerialSettings,
     events: Arc<SerialEvents>,
     events_enabled: bool,
@@ -232,12 +232,12 @@ pub struct SerialTransport {
 impl SerialTransport {
     /// Open the configured port with the manifest's line settings. Blocking — a
     /// real open can stall, so callers run it off the async runtime.
-    pub fn open_blocking(path: &str, config: &SerialConfig) -> Result<Self> {
+    pub fn open_port(path: &str, config: &SerialConfig) -> Result<Self> {
         let settings = SerialSettings::from_config(path, config);
         let port = settings.open()?;
         Ok(Self {
             port: Metered::new(
-                StdMutex::new(port),
+                SyncMutex::new(port),
                 config
                     .max_bytes_per_sec
                     .map(|max_bytes_per_sec| WriteRateLimit { max_bytes_per_sec }),
@@ -266,7 +266,7 @@ impl SerialTransport {
     /// operation is never replayed.
     fn reopen(&self) -> Result<()> {
         let fresh = self.settings.open()?;
-        *self.port.read_access().lock().unwrap() = fresh;
+        *self.port.read_access().lock() = fresh;
         Ok(())
     }
 
@@ -280,9 +280,9 @@ impl SerialTransport {
         }
     }
 
-    fn read_exact_blocking(&self, size: usize) -> Result<Vec<u8>> {
+    fn read_exact(&self, size: usize) -> Result<Vec<u8>> {
         let timeout = self.read_timeout;
-        let mut guard = self.port.read_access().lock().unwrap();
+        let mut guard = self.port.read_access().lock();
         let mut buf = vec![0u8; size];
         let mut filled = 0;
         while filled < size {
@@ -325,15 +325,10 @@ fn is_disconnect(error: &std::io::Error) -> bool {
     matches!(error.raw_os_error(), Some(5 | 6 | 19))
 }
 
-#[async_trait]
 impl Transport for SerialTransport {
-    async fn write(&self, data: &[u8]) -> Result<()> {
+    fn write(&self, data: &[u8]) -> Result<()> {
         self.check_len(data.len())?;
-        // Apply the write-rate gate, then do blocking I/O on the worker's own
-        // thread (the caller `block_on`s this), mirroring the USB transport's
-        // documented blocking write contract.
-        self.port.write_access(data.len()).await?;
-        let mut guard = self.port.read_access().lock().unwrap();
+        let mut guard = self.port.write_access(data.len())?.lock();
         let result = match guard.write_all(data) {
             Ok(()) => guard.flush(),
             Err(e) => Err(e),
@@ -348,9 +343,9 @@ impl Transport for SerialTransport {
         Ok(())
     }
 
-    async fn read(&self, size: usize) -> Result<Vec<u8>> {
+    fn read(&self, size: usize) -> Result<Vec<u8>> {
         self.check_len(size)?;
-        self.read_exact_blocking(size)
+        self.read_exact(size)
     }
 
     fn as_serial(&self) -> Option<&dyn SerialControl> {
@@ -371,7 +366,7 @@ impl Transport for SerialTransport {
         self.events_enabled.then(|| self.events.wake.subscribe())
     }
 
-    async fn drain_events(&self, limit: usize) -> Result<Vec<TransportEvent>> {
+    fn drain_events(&self, limit: usize) -> Result<Vec<TransportEvent>> {
         Ok(self.events.drain(limit))
     }
 
@@ -398,11 +393,10 @@ impl Transport for SerialTransport {
 }
 
 /// Clone the primary handle into a short-timeout reader for the event thread.
-fn clone_reader(port: &Metered<StdMutex<Box<dyn SerialPort>>>) -> Result<Box<dyn SerialPort>> {
+fn clone_reader(port: &Metered<SyncMutex<Box<dyn SerialPort>>>) -> Result<Box<dyn SerialPort>> {
     let mut reader = port
         .read_access()
         .lock()
-        .unwrap()
         .try_clone()
         .context("cloning the serial handle for the event reader")?;
     reader
@@ -417,7 +411,7 @@ fn clone_reader(port: &Metered<StdMutex<Box<dyn SerialPort>>>) -> Result<Box<dyn
 /// `enable_event_listener` can restart cleanly.
 fn serial_event_loop(
     mut reader: Box<dyn SerialPort>,
-    port: Metered<StdMutex<Box<dyn SerialPort>>>,
+    port: Metered<SyncMutex<Box<dyn SerialPort>>>,
     settings: SerialSettings,
     reconnect: bool,
     events: Weak<SerialEvents>,
@@ -458,7 +452,7 @@ fn serial_event_loop(
             return;
         }
         if let Ok(opened) = settings.open() {
-            *port.read_access().lock().unwrap() = opened;
+            *port.read_access().lock() = opened;
             if let Ok(new_reader) = clone_reader(&port) {
                 reader = new_reader;
             }
@@ -468,30 +462,30 @@ fn serial_event_loop(
 
 impl SerialControl for SerialTransport {
     fn set_dtr(&self, level: bool) -> Result<()> {
-        let mut guard = self.port.read_access().lock().unwrap();
+        let mut guard = self.port.read_access().lock();
         guard
             .write_data_terminal_ready(level)
             .context("setting DTR")
     }
 
     fn set_rts(&self, level: bool) -> Result<()> {
-        let mut guard = self.port.read_access().lock().unwrap();
+        let mut guard = self.port.read_access().lock();
         guard.write_request_to_send(level).context("setting RTS")
     }
 
     fn send_break(&self, duration_ms: u64) -> Result<()> {
         {
-            let guard = self.port.read_access().lock().unwrap();
+            let guard = self.port.read_access().lock();
             guard.set_break().context("asserting BREAK")?;
         }
         // Bound the hold so a plugin can't wedge the worker thread on BREAK.
         std::thread::sleep(Duration::from_millis(duration_ms.min(5_000)));
-        let guard = self.port.read_access().lock().unwrap();
+        let guard = self.port.read_access().lock();
         guard.clear_break().context("clearing BREAK")
     }
 
     fn flush_input(&self) -> Result<()> {
-        let guard = self.port.read_access().lock().unwrap();
+        let guard = self.port.read_access().lock();
         guard
             .clear(serialport::ClearBuffer::Input)
             .context("clearing serial input")

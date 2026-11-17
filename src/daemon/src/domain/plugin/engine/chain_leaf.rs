@@ -14,17 +14,18 @@ use halod_shared::types::{
 };
 
 use crate::domain::device::chain::LightingDivisionHub;
+use crate::domain::device::lighting_segment::transformed_zone_frame;
 use crate::domain::device::{
     CapabilityRef, CoolingCapability, CoolingHub, CoolingStateSlot, Device, LightingCapability,
     LightingStateSlot, VisibilitySlot,
 };
-use crate::infrastructure::drivers::vendors::generic::devices::common::transformed_zone_frame;
+use halod_shared::ids::DeviceId;
 
 use super::manifest::AccessoryManifest;
 
 pub struct ChainLeaf {
-    id: String,
-    parent_id: String,
+    id: DeviceId,
+    parent_id: DeviceId,
     name: String,
     vendor: String,
     /// Chain channel this leaf sits on (string id used with the `LightingDivisionHub`).
@@ -42,8 +43,8 @@ pub struct ChainLeaf {
 
 impl ChainLeaf {
     pub fn new(
-        id: String,
-        parent_id: String,
+        id: DeviceId,
+        parent_id: DeviceId,
         vendor: String,
         channel_id: String,
         fan_channel: Option<String>,
@@ -110,7 +111,7 @@ impl ChainLeaf {
 
 #[async_trait]
 impl Device for ChainLeaf {
-    fn id(&self) -> &str {
+    fn id(&self) -> &DeviceId {
         &self.id
     }
     fn name(&self) -> &str {

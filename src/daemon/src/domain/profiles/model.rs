@@ -1,6 +1,7 @@
 // SPDX-License-Identifier: GPL-3.0-or-later
 use crate::config::Config;
 use crate::domain::lighting::model::ProfileLighting;
+use halod_shared::ids::DeviceId;
 use halod_shared::types::DEFAULT_PROFILE_NAME;
 use serde::{Deserialize, Serialize};
 use serde_json::Value;
@@ -9,7 +10,7 @@ use std::collections::HashMap;
 #[derive(Debug, Clone, Default, Serialize, Deserialize)]
 pub struct Profile {
     #[serde(default)]
-    pub device_states: HashMap<String, Value>,
+    pub device_states: HashMap<DeviceId, Value>,
 
     #[serde(default)]
     pub lighting: ProfileLighting,
@@ -85,7 +86,7 @@ impl Config {
     /// Effective per-device capability state: the default profile's object
     /// overlaid with the active profile's overrides (active wins per key).
     /// Returns `Value::Null` when neither profile has any state for the device.
-    pub fn effective_device_state(&self, device_id: &str) -> Value {
+    pub fn effective_device_state(&self, device_id: &DeviceId) -> Value {
         let default_obj = self
             .profiles
             .get(DEFAULT_PROFILE_NAME)
@@ -129,7 +130,9 @@ mod tests {
 
         // Only a non-default, non-active profile exists: falls back to it.
         let mut other = Profile::default();
-        other.device_states.insert("dev1".into(), Value::Bool(true));
+        other
+            .device_states
+            .insert("dev1".parse().unwrap(), Value::Bool(true));
         cfg.profiles.insert("other".into(), other);
         assert!(cfg.active_profile_data().device_states.contains_key("dev1"));
 
@@ -137,7 +140,7 @@ mod tests {
         let mut default_profile = Profile::default();
         default_profile
             .device_states
-            .insert("dev2".into(), Value::Bool(true));
+            .insert("dev2".parse().unwrap(), Value::Bool(true));
         cfg.profiles
             .insert(DEFAULT_PROFILE_NAME.to_string(), default_profile);
         assert!(cfg.active_profile_data().device_states.contains_key("dev2"));
@@ -146,7 +149,7 @@ mod tests {
         let mut active_profile = Profile::default();
         active_profile
             .device_states
-            .insert("dev3".into(), Value::Bool(true));
+            .insert("dev3".parse().unwrap(), Value::Bool(true));
         cfg.profiles.insert("ghost".into(), active_profile);
         assert!(cfg.active_profile_data().device_states.contains_key("dev3"));
     }
@@ -175,17 +178,18 @@ mod tests {
             .unwrap()
             .device_states
             .insert(
-                "dev1".into(),
+                "dev1".parse().unwrap(),
                 serde_json::json!({ "rgb": {"mode": "static"}, "fan_curve": {"a": 1} }),
             );
         let mut gaming = Profile::default();
-        gaming
-            .device_states
-            .insert("dev1".into(), serde_json::json!({ "fan_curve": {"a": 2} }));
+        gaming.device_states.insert(
+            "dev1".parse().unwrap(),
+            serde_json::json!({ "fan_curve": {"a": 2} }),
+        );
         cfg.profiles.insert("gaming".into(), gaming);
         cfg.active_profile = "gaming".into();
 
-        let eff = cfg.effective_device_state("dev1");
+        let eff = cfg.effective_device_state(&"dev1".parse().unwrap());
         // rgb inherited from default, fan_curve overridden by gaming
         assert_eq!(eff["rgb"]["mode"], "static");
         assert_eq!(eff["fan_curve"]["a"], 2);
@@ -198,15 +202,22 @@ mod tests {
             .get_mut(DEFAULT_PROFILE_NAME)
             .unwrap()
             .device_states
-            .insert("dev1".into(), serde_json::json!({ "fan_curve": {"a": 0} }));
+            .insert(
+                "dev1".parse().unwrap(),
+                serde_json::json!({ "fan_curve": {"a": 0} }),
+            );
         let mut g = Profile::default();
-        g.device_states
-            .insert("dev1".into(), serde_json::json!({ "fan_curve": {"a": 1} }));
+        g.device_states.insert(
+            "dev1".parse().unwrap(),
+            serde_json::json!({ "fan_curve": {"a": 1} }),
+        );
         g.lighting.canvas = Some(Default::default());
         cfg.profiles.insert("Gaming".into(), g);
         let mut w = Profile::default();
-        w.device_states
-            .insert("dev2".into(), serde_json::json!({ "rgb": {"m": "x"} }));
+        w.device_states.insert(
+            "dev2".parse().unwrap(),
+            serde_json::json!({ "rgb": {"m": "x"} }),
+        );
         cfg.profiles.insert("Work".into(), w);
         cfg.active_profile = "Gaming".into();
 

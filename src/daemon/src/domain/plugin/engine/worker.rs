@@ -28,15 +28,21 @@ use halod_shared::types::{
 };
 
 use super::bytebuf::ByteBuf;
-use super::ffi::to_lua_err;
+use super::ffi::lua_err;
 use super::manifest::{
     check_lcd_dims, check_led_count, check_zone_count, validate_accessories, validate_component,
     validate_short_text, AccessoryManifest, ActionDef, BooleanDef, ChoiceDef, RangeDef,
 };
 use super::sandbox;
-use super::transport::{command_result_table, AddrScope, CommandExecutor, PluginIo, RegisterBus};
+use super::transport::{AddrScope, PluginIo, RegisterBus};
 use super::transport_api::TransportApi;
+use crate::domain::input::validate;
+use crate::domain::plugin::manifest::PluginManifest;
+use crate::domain::plugin::ResolvedConfig;
+use crate::domain::plugin::ResolvedConfigValue;
 use crate::infrastructure::drivers::transports::smbus::SmBusDevice;
+use crate::infrastructure::http::HttpRuntime;
+use crate::infrastructure::udp::UdpRuntime;
 
 /// Maximum HID reports handled by one serialized Lua-worker job. Event input,
 /// RGB frames, status polling, and capability commands share that worker; a
@@ -465,7 +471,6 @@ fn default_true() -> bool {
 struct WorkerCtx {
     lua: Lua,
     transport: PluginIo,
-    handle: Handle,
     /// The `dev` argument every callback receives: exposes the transport and the
     /// matched-spec identity (`dev.match`), and caches `read_status` as `dev.status`.
     dev: Table,
@@ -582,10 +587,6 @@ fn required(manifest: &Table, name: &str) -> Result<Function> {
     })
 }
 
-fn lua_err(context: &str, e: mlua::Error) -> anyhow::Error {
-    anyhow!("plugin {context}: {e}")
-}
-
 /// Pace collection of native buffers created during live LCD callbacks.
 ///
 /// `ByteBuf` payload capacity is allocated by Rust rather than Lua, so automatic
@@ -667,14 +668,14 @@ impl PluginHandle {
     /// config values (including decrypted secrets if `SecureStorage` is
     /// granted) — both snapshotted at spawn time.
     #[allow(clippy::too_many_arguments)]
-    #[cfg_attr(not(test), allow(dead_code))]
+    #[cfg(test)]
     pub fn spawn(
         source: String,
         module_sources: std::collections::BTreeMap<String, String>,
         transport: PluginIo,
         dev_match: DevMatch,
         granted: Vec<Permission>,
-        config: crate::domain::plugin::ResolvedConfig,
+        config: ResolvedConfig,
         handle: Handle,
         audio_registry: super::audio_api::SinkRegistry,
     ) -> Self {
@@ -700,12 +701,12 @@ impl PluginHandle {
         transport: PluginIo,
         dev_match: DevMatch,
         granted: Vec<Permission>,
-        config: crate::domain::plugin::ResolvedConfig,
+        config: ResolvedConfig,
         handle: Handle,
         audio_registry: super::audio_api::SinkRegistry,
         data: super::data_api::DataRuntime,
-        http: Option<crate::infrastructure::http::HttpRuntime>,
-        udp: Option<crate::infrastructure::udp::UdpRuntime>,
+        http: Option<HttpRuntime>,
+        udp: Option<UdpRuntime>,
     ) -> Self {
         let worker = LuaWorker::spawn_vm(
             "halod-plugin",
@@ -895,7 +896,7 @@ impl PluginHandle {
                         }
                     }
                     if let Some(key_remap) = &t.key_remap {
-                        crate::domain::input::validate::validate_button_mappings(
+                        validate::validate_button_mappings(
                             &key_remap.buttons,
                             &key_remap.default_mappings,
                         )?;
@@ -1052,15 +1053,11 @@ impl PluginHandle {
                 PluginIo::Stream { transport, .. } => transport,
                 _ => return Ok(Vec::new()),
             };
-            let events = ctx
-                .handle
-                .block_on(transport.drain_events(EVENT_DISPATCH_BATCH))
+            let events = transport
+                .drain_events(EVENT_DISPATCH_BATCH)
                 .map_err(|e| anyhow!("draining transport events: {e:#}"))?;
             if !events.is_empty() {
-                log::trace!(
-                    "[plugin worker] drained {} transport event(s)",
-                    events.len()
-                );
+                log::trace!("drained {} transport event(s)", events.len());
             }
             let Some(callback) = func(&ctx.manifest, "event") else {
                 return Ok(Vec::new());
@@ -1097,10 +1094,10 @@ impl PluginHandle {
                     None => Value::Nil,
                 };
                 if matches!(route, Value::Boolean(false)) {
-                    log::trace!("[plugin worker] event_source dropped a report (reply/ack)");
+                    log::trace!("event_source dropped a report (reply/ack)");
                     continue;
                 }
-                log::trace!("[plugin worker] event_source route={route:?}");
+                log::trace!("event_source route={route:?}");
                 let targets = match route {
                     Value::Integer(0) => vec![(None, dev.clone())],
                     Value::Integer(index) if index > 0 => match u32::try_from(index).ok() {
@@ -1112,9 +1109,7 @@ impl PluginHandle {
                     _ => vec![(None, dev.clone())],
                 };
                 if targets.is_empty() {
-                    log::trace!(
-                        "[plugin worker] event route={route:?} matched no child dev; report dropped"
-                    );
+                    log::trace!("event route={route:?} matched no child dev; report dropped");
                 }
                 for (child_index, target) in targets {
                     let value: Value = match callback.call((target, event_table.clone())) {
@@ -1406,49 +1401,36 @@ fn validate_runtime_controls(controls: &InitControls) -> Result<()> {
     Ok(())
 }
 
-/// Build the live `halod.http` runtime for a manifest that declares a scoped
-/// http transport and holds the network grant. Returns `None` (with a log) when
-/// the transport is absent, ungranted, or its policy fails to build, so a plugin
-/// simply lacks `halod.http` rather than failing to spawn.
 pub(crate) fn network_granted(granted: &[Permission]) -> bool {
     granted.contains(&Permission::Network)
 }
 
+/// `None` (with a log) when the transport is absent, ungranted, or its policy
+/// fails to build, so a plugin simply lacks `halod.http` rather than failing to spawn.
 pub(crate) fn http_runtime_for(
-    manifest: &crate::domain::plugin::manifest::PluginManifest,
+    manifest: &PluginManifest,
     granted: &[Permission],
-    config: &crate::domain::plugin::ResolvedConfig,
-) -> Option<crate::infrastructure::http::HttpRuntime> {
+    config: &ResolvedConfig,
+) -> Option<HttpRuntime> {
     let http = manifest.transports.http.as_ref()?;
     if !network_granted(granted) {
         return None;
     }
-    let host = http.host_key.as_ref().and_then(|key| {
-        config
-            .get(key)
-            .map(crate::domain::plugin::ResolvedConfigValue::to_config_string)
-    });
-    let port = http.port_key.as_ref().and_then(|key| {
-        config
-            .get(key)
-            .map(crate::domain::plugin::ResolvedConfigValue::to_config_string)
-    });
+    let host = http
+        .host_key
+        .as_ref()
+        .and_then(|key| config.get(key).map(ResolvedConfigValue::to_config_string));
+    let port = http
+        .port_key
+        .as_ref()
+        .and_then(|key| config.get(key).map(ResolvedConfigValue::to_config_string));
     let identity = http
         .tls
         .as_ref()
         .and_then(|tls| tls.verify_identity.as_ref())
-        .and_then(|key| {
-            config
-                .get(key)
-                .map(crate::domain::plugin::ResolvedConfigValue::to_config_string)
-        })
+        .and_then(|key| config.get(key).map(ResolvedConfigValue::to_config_string))
         .filter(|value| !value.trim().is_empty());
-    match crate::infrastructure::http::HttpRuntime::from_config(
-        http,
-        host.as_deref(),
-        port.as_deref(),
-        identity.as_deref(),
-    ) {
+    match HttpRuntime::from_config(http, host.as_deref(), port.as_deref(), identity.as_deref()) {
         Ok(runtime) => Some(runtime),
         Err(e) => {
             log::error!(
@@ -1465,10 +1447,10 @@ pub(crate) fn http_runtime_for(
 /// ungranted, or its socket fails to connect — a plugin simply lacks `halod.udp`
 /// rather than failing to spawn.
 pub(crate) fn udp_runtime_for(
-    manifest: &crate::domain::plugin::manifest::PluginManifest,
+    manifest: &PluginManifest,
     granted: &[Permission],
-    config: &crate::domain::plugin::ResolvedConfig,
-) -> Option<crate::infrastructure::udp::UdpRuntime> {
+    config: &ResolvedConfig,
+) -> Option<UdpRuntime> {
     let udp = manifest.transports.udp.as_ref()?;
     if !network_granted(granted) {
         return None;
@@ -1476,7 +1458,7 @@ pub(crate) fn udp_runtime_for(
     let value = |key: &str| {
         config
             .get(key)
-            .map(crate::domain::plugin::ResolvedConfigValue::to_config_string)
+            .map(ResolvedConfigValue::to_config_string)
             .unwrap_or_default()
     };
     let host = value(&udp.host_key);
@@ -1491,7 +1473,7 @@ pub(crate) fn udp_runtime_for(
             return None;
         }
     };
-    match crate::infrastructure::udp::UdpRuntime::from_config(udp, &host, port) {
+    match UdpRuntime::from_config(udp, &host, port) {
         Ok(runtime) => Some(runtime),
         Err(e) => {
             log::error!(
@@ -1512,17 +1494,16 @@ fn build_ctx(
     transport: PluginIo,
     dev_match: DevMatch,
     granted: &[Permission],
-    config: &crate::domain::plugin::ResolvedConfig,
+    config: &ResolvedConfig,
     handle: Handle,
     audio_registry: super::audio_api::SinkRegistry,
     data: super::data_api::DataRuntime,
-    http: Option<crate::infrastructure::http::HttpRuntime>,
-    udp: Option<crate::infrastructure::udp::UdpRuntime>,
+    http: Option<HttpRuntime>,
+    udp: Option<UdpRuntime>,
 ) -> Result<WorkerCtx> {
     debug_assert!(!super::contract::active().tables.is_empty());
     let controller_index = dev_match.index;
-    let (lua, budget) =
-        super::lua_worker::bootstrap_worker_vm(granted, config, module_sources, data)?;
+    let (lua, budget) = super::lua_worker::bootstrap_worker_vm(config, module_sources, data)?;
     if let Some(http) = http {
         super::http_api::register(&lua, http).map_err(|e| lua_err("http API", e))?;
     }
@@ -1538,19 +1519,12 @@ fn build_ctx(
     // The `dev` argument every callback receives: exposes the transport and the
     // matched-spec identity (`dev.match`).
     let dev = lua.create_table().map_err(|e| lua_err("dev table", e))?;
-    let command = match &transport {
-        PluginIo::Command(command) => Some(command.clone()),
-        _ => None,
-    };
-    let api = TransportApi::new(transport.clone(), handle.clone());
+    let api = TransportApi::new(transport.clone());
     let api_ud = lua
         .create_userdata(api)
         .map_err(|e| lua_err("transport userdata", e))?;
     dev.set("transport", api_ud)
         .map_err(|e| lua_err("dev.transport", e))?;
-    if let Some(command) = command {
-        install_command_api(&lua, command)?;
-    }
     dev.set("match", build_match_table(&lua, &dev_match)?)
         .map_err(|e| lua_err("dev.match", e))?;
 
@@ -1561,7 +1535,7 @@ fn build_ctx(
             &lua,
             dev_match.vid,
             dev_match.pid,
-            handle.clone(),
+            handle,
             audio_registry.clone(),
         )
         .map_err(|e| lua_err("dev.audio", e))?;
@@ -1571,7 +1545,6 @@ fn build_ctx(
     Ok(WorkerCtx {
         lua,
         transport,
-        handle,
         dev,
         child_devs: RefCell::new(HashMap::new()),
         stub_children: RefCell::new(std::collections::HashSet::new()),
@@ -1579,23 +1552,6 @@ fn build_ctx(
         controller_index,
         budget,
     })
-}
-
-fn install_command_api(lua: &Lua, command: CommandExecutor) -> Result<()> {
-    let api = lua
-        .create_table()
-        .map_err(|e| lua_err("command table", e))?;
-    let run = lua
-        .create_function(move |lua, (executable, args): (String, Vec<String>)| {
-            let result = command.run(&executable, &args).map_err(to_lua_err)?;
-            command_result_table(lua, &result)
-        })
-        .map_err(|e| lua_err("command.run", e))?;
-    api.set("run", run).map_err(|e| lua_err("command.run", e))?;
-    lua.globals()
-        .set("command", api)
-        .map_err(|e| lua_err("command", e))?;
-    Ok(())
 }
 
 /// Run a plugin's `pre_scan(dev)` callback against a freshly opened SMBus bus,
@@ -1617,7 +1573,6 @@ pub fn run_pre_scan(
     bus: Arc<SmBusDevice>,
     scope_addrs: Vec<u8>,
     granted: &[Permission],
-    handle: Handle,
 ) -> Result<()> {
     let source = source.to_owned();
     let module_sources = module_sources.clone();
@@ -1632,7 +1587,6 @@ pub fn run_pre_scan(
                 bus,
                 scope_addrs,
                 &granted,
-                handle,
             ));
         })
         .map_err(|e| anyhow!("spawning pre_scan thread failed: {e}"))?;
@@ -1651,7 +1605,6 @@ fn run_pre_scan_inner(
     bus: Arc<SmBusDevice>,
     scope_addrs: Vec<u8>,
     granted: &[Permission],
-    handle: Handle,
 ) -> Result<()> {
     if !granted.contains(&Permission::Smbus) {
         bail!("pre_scan requires the `smbus` permission");
@@ -1660,7 +1613,6 @@ fn run_pre_scan_inner(
     // `pre_scan` is one-time bus preparation before a device is even matched,
     // not general plugin logic — it gets no `halod.config` (an empty map).
     let (lua, _budget) = sandbox::bootstrap_vm(
-        granted,
         &HashMap::new(),
         PLUGIN_VM_MEMORY_BYTES,
         PLUGIN_INSTRUCTION_BUDGET,
@@ -1680,7 +1632,7 @@ fn run_pre_scan_inner(
     let io = PluginIo::Register(RegisterBus::new(bus, AddrScope::new(scope_addrs)));
     let dev = lua.create_table().map_err(|e| lua_err("dev table", e))?;
     let api_ud = lua
-        .create_userdata(TransportApi::new(io, handle))
+        .create_userdata(TransportApi::new(io))
         .map_err(|e| lua_err("transport userdata", e))?;
     dev.set("transport", api_ud)
         .map_err(|e| lua_err("dev.transport", e))?;
@@ -1819,15 +1771,14 @@ mod tests {
     }
 
     struct TestEventTransport {
-        events: std::sync::Mutex<Vec<TransportEvent>>,
+        events: parking_lot::Mutex<Vec<TransportEvent>>,
     }
 
-    #[async_trait::async_trait]
     impl Transport for TestEventTransport {
-        async fn write(&self, _data: &[u8]) -> Result<()> {
+        fn write(&self, _data: &[u8]) -> Result<()> {
             Ok(())
         }
-        async fn read(&self, _size: usize) -> Result<Vec<u8>> {
+        fn read(&self, _size: usize) -> Result<Vec<u8>> {
             Ok(Vec::new())
         }
         fn as_hid(&self) -> Option<&dyn HidTransport> {
@@ -1837,25 +1788,24 @@ mod tests {
             Default::default()
         }
         fn set_write_rate_limit(&self, _limit: Option<halod_shared::types::WriteRateLimit>) {}
-        async fn drain_events(&self, limit: usize) -> Result<Vec<TransportEvent>> {
-            let mut events = self.events.lock().unwrap();
+        fn drain_events(&self, limit: usize) -> Result<Vec<TransportEvent>> {
+            let mut events = self.events.lock();
             let count = events.len().min(limit);
             Ok(events.drain(..count).collect())
         }
     }
 
-    #[async_trait::async_trait]
     impl HidTransport for TestEventTransport {
-        async fn feature_exchange(&self, _data: &[u8], _size: usize) -> Result<Vec<u8>> {
+        fn feature_exchange(&self, _data: &[u8], _size: usize) -> Result<Vec<u8>> {
             Ok(Vec::new())
         }
-        async fn defer_event(&self, _data: &[u8]) -> Result<()> {
+        fn defer_event(&self, _data: &[u8]) -> Result<()> {
             Ok(())
         }
-        async fn write_companion(&self, _data: &[u8]) -> Result<()> {
+        fn write_companion(&self, _data: &[u8]) -> Result<()> {
             Ok(())
         }
-        async fn read_companion(&self, _size: usize) -> Result<Vec<u8>> {
+        fn read_companion(&self, _size: usize) -> Result<Vec<u8>> {
             Ok(Vec::new())
         }
     }
@@ -1921,7 +1871,7 @@ mod tests {
             granted,
             HashMap::new(),
             Handle::current(),
-            std::sync::Arc::new(std::sync::Mutex::new(Vec::new())),
+            std::sync::Arc::new(parking_lot::Mutex::new(Vec::new())),
         )
     }
 
@@ -1938,7 +1888,7 @@ mod tests {
             vec![],
             HashMap::new(),
             Handle::current(),
-            std::sync::Arc::new(std::sync::Mutex::new(Vec::new())),
+            std::sync::Arc::new(parking_lot::Mutex::new(Vec::new())),
         )
     }
 
@@ -1998,7 +1948,7 @@ mod tests {
     #[tokio::test]
     async fn transport_events_route_to_a_child_on_the_root_worker() {
         let transport = Arc::new(TestEventTransport {
-            events: std::sync::Mutex::new(vec![TransportEvent {
+            events: parking_lot::Mutex::new(vec![TransportEvent {
                 endpoint: "primary",
                 data: vec![0x10, 2, 0xaa],
             }]),
@@ -2028,7 +1978,7 @@ mod tests {
             vec![],
             HashMap::new(),
             Handle::current(),
-            std::sync::Arc::new(std::sync::Mutex::new(Vec::new())),
+            std::sync::Arc::new(parking_lot::Mutex::new(Vec::new())),
         );
         let child = root.child(DevMatch {
             transport: "hid".into(),
@@ -2047,7 +1997,7 @@ mod tests {
     #[tokio::test]
     async fn transport_events_reach_a_child_never_touched_by_a_routed_call() {
         let transport = Arc::new(TestEventTransport {
-            events: std::sync::Mutex::new(vec![TransportEvent {
+            events: parking_lot::Mutex::new(vec![TransportEvent {
                 endpoint: "primary",
                 data: vec![0x10, 3, 0xaa],
             }]),
@@ -2077,7 +2027,7 @@ mod tests {
             vec![],
             HashMap::new(),
             Handle::current(),
-            std::sync::Arc::new(std::sync::Mutex::new(Vec::new())),
+            std::sync::Arc::new(parking_lot::Mutex::new(Vec::new())),
         );
         let outcomes = root.on_transport_events().await.unwrap();
         assert_eq!(outcomes.len(), 1);
@@ -2089,7 +2039,6 @@ mod tests {
     #[test]
     fn pre_scan_sleep_past_the_call_deadline_errors() {
         let (lua, _budget) = sandbox::bootstrap_vm(
-            &[],
             &HashMap::new(),
             PLUGIN_VM_MEMORY_BYTES,
             PLUGIN_INSTRUCTION_BUDGET,
@@ -2101,18 +2050,10 @@ mod tests {
         assert!(err.to_string().contains("deadline"), "{err}");
     }
 
-    #[test]
-    fn network_granted_matches_the_permission() {
-        assert!(network_granted(&[Permission::Network]));
-        assert!(network_granted(&[Permission::Hid, Permission::Network]));
-        assert!(!network_granted(&[]));
-        assert!(!network_granted(&[Permission::Hid]));
-    }
-
     #[tokio::test]
     async fn event_source_outside_u32_is_dropped() {
         let transport = Arc::new(TestEventTransport {
-            events: std::sync::Mutex::new(vec![TransportEvent {
+            events: parking_lot::Mutex::new(vec![TransportEvent {
                 endpoint: "primary",
                 data: vec![0x10],
             }]),
@@ -2135,10 +2076,33 @@ mod tests {
             vec![],
             HashMap::new(),
             Handle::current(),
-            std::sync::Arc::new(std::sync::Mutex::new(Vec::new())),
+            std::sync::Arc::new(parking_lot::Mutex::new(Vec::new())),
         );
         assert!(root.on_transport_events().await.unwrap().is_empty());
         root.close().await.unwrap();
+    }
+
+    #[tokio::test]
+    async fn undeclared_transports_leave_their_globals_nil() {
+        let source = tempfile::tempdir().unwrap();
+        let dir = crate::test_support::write_plugin_package(source.path(), "plain", "1.0.0", "3.0");
+        let manifest = crate::domain::plugin::parse_manifest_from_dir(&dir).unwrap();
+        let granted = manifest.declarations.uses.permissions.clone();
+        let config = HashMap::new();
+        assert!(http_runtime_for(&manifest, &granted, &config).is_none());
+        assert!(udp_runtime_for(&manifest, &granted, &config).is_none());
+
+        let h = spawn(
+            "return { initialize = function()
+                assert(halod.http == nil, 'halod.http')
+                assert(halod.udp == nil, 'halod.udp')
+                assert(command == nil, 'command')
+                return { ok = true }
+            end }",
+            granted,
+        );
+        assert!(h.initialize().await.unwrap().ok);
+        h.close().await.unwrap();
     }
 
     #[tokio::test]
@@ -2157,7 +2121,7 @@ mod tests {
             vec![],
             HashMap::new(),
             Handle::current(),
-            std::sync::Arc::new(std::sync::Mutex::new(Vec::new())),
+            std::sync::Arc::new(parking_lot::Mutex::new(Vec::new())),
         );
         assert_eq!(h.initialize().await.unwrap().model.as_deref(), Some("7"));
         h.close().await.unwrap();
@@ -2250,19 +2214,11 @@ mod tests {
     }
 
     #[tokio::test]
-    async fn permission_gated_global_is_absent_until_granted() {
+    async fn the_clock_needs_no_grant() {
         let src = r#"return {
             apply = function(dev, state) assert(os.time() > 0) end,
         }"#;
-
-        // Without Permission::Os the `os` table is stripped, so the callback errors.
-        assert!(spawn(src, vec![]).rgb_apply(static_state()).await.is_err());
-
-        // Granting it re-injects the read-only clock, so the same callback succeeds.
-        spawn(src, vec![Permission::Os])
-            .rgb_apply(static_state())
-            .await
-            .unwrap();
+        spawn(src, vec![]).rgb_apply(static_state()).await.unwrap();
     }
 
     #[tokio::test]
@@ -2273,7 +2229,7 @@ mod tests {
         assert!(
             err.to_string().contains(&format!(
                 "plugin API {} has no apply()",
-                crate::domain::plugin::PLUGIN_API
+                halod_plugin_signing::HOST_PLUGIN_API
             )),
             "unexpected error: {err}"
         );

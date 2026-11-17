@@ -1,0 +1,3862 @@
+// SPDX-License-Identifier: GPL-3.0-or-later
+//! The generic device a plugin instantiates. It sits behind the same `Device`
+//! seam as every built-in host device and forwards capability calls into the per-device
+//! Lua worker. The manifest defines the maximum capability set; `initialize`
+//! may narrow it to the subset supported by one physical device.
+
+use parking_lot::{Mutex, RwLock};
+use std::sync::atomic::{AtomicBool, Ordering};
+use std::sync::{Arc, OnceLock, Weak};
+use std::time::Duration;
+
+use anyhow::{Context, Result};
+use async_trait::async_trait;
+use halod_shared::keyboard::KeyboardLayoutStatus;
+use halod_shared::types::{
+    Action, Battery, Boolean, ButtonMapping, CategoryLayout, Choice, ConnectionStatus,
+    CoolingChannel, DeviceCapability, DeviceType, DpiStatus, Equalizer, KeyRemapStatus,
+    LcdDescriptor, LightingDescriptor, LightingState, Permission, PluginKind, Range,
+    ScreenRotation, Sensor, WriteRateStatus,
+};
+use halod_shared::zone_transform::build_permutation;
+
+use crate::domain::device::chain::{
+    ChannelDescriptor, LightingDivisionAdapter, LightingDivisionHost, LightingDivisionHub,
+};
+use crate::domain::device::{
+    ActionCapability, BatteryCapability, BoolStateCache, BooleanCapability, CapabilityRef,
+    ChoiceCapability, ChoiceStateCache, ConnectionCapability, Controller, CoolingCapability,
+    CoolingHub, CoolingStateSlot, Device, DpiCapability, EqualizerCapability, KeyRemapCapability,
+    KeyboardLayoutCapability, KeyboardLayoutSlot, LcdCapability, LcdStateSlot, LightingCapability,
+    LightingStateSlot, OnboardProfilesCapability, PairingCapability, RangeCapability,
+    RangeStateCache, SensorCapability, VisibilitySlot,
+};
+use halod_shared::ids::{DeviceId, PluginId};
+
+mod dpi;
+mod health;
+mod key_remap;
+mod lcd;
+mod lighting;
+mod status;
+
+use dpi::{DpiFacet, ModeSwitch};
+use health::Health;
+use key_remap::KeyRemapFacet;
+use lcd::LcdFacet;
+use lighting::LightingFacet;
+use status::StatusCache;
+
+use super::chain_leaf::ChainLeaf;
+use super::manifest::{
+    AccessoryManifest, ActionDef, BooleanDef, ChoiceDef, DeviceSpec, PluginManifest, RangeDef,
+};
+use super::transport::PluginIo;
+use super::worker::{DetectedController, DevMatch, InitControls, PluginHandle};
+use crate::domain::registry::identity::{DeviceIdentity, DeviceOrigin};
+use std::collections::{HashMap, HashSet};
+
+const POLL_FAILURE_DEGRADE_THRESHOLD: u8 = 3;
+
+/// Yields the transport one integration child drives its worker over. The `u32`
+/// is the controller index. Injectable so tests can back it with a mock
+/// transport instead of a real socket. Every controller shares the root's single
+/// connection, so their frame writes serialise behind one socket lock and stay
+/// in phase (see `integration_scan`).
+/// The capability sections a manifest can declare. Stored as `caps` on the
+/// device so `capabilities()` reads a single list instead of one boolean per
+/// kind; the mapping to `CapabilityRef` lives in `capabilities()`.
+#[derive(Clone, Copy, Debug, PartialEq, Eq)]
+enum Cap {
+    Lighting,
+    Cooling,
+    Sensor,
+    Lcd,
+    Dpi,
+    Choice,
+    Range,
+    Boolean,
+    Action,
+    Battery,
+    Connection,
+    Equalizer,
+    Pairing,
+    OnboardProfiles,
+    KeyRemap,
+    KeyboardLayout,
+    LightingDivision,
+}
+
+const CONTROL_CAPS: &[Cap] = &[Cap::Choice, Cap::Range, Cap::Boolean, Cap::Action];
+const CAPABILITY_NAMES: &[&str] = &[
+    "lighting",
+    "cooling",
+    "sensors",
+    "lcd",
+    "dpi",
+    "controls",
+    "battery",
+    "connection",
+    "equalizer",
+    "pairing",
+    "onboard_profiles",
+    "key_remap",
+    "keyboard_layout",
+    "lighting_division",
+];
+
+fn cap_for(name: &str) -> &'static [Cap] {
+    match name {
+        "lighting" => &[Cap::Lighting],
+        "cooling" => &[Cap::Cooling],
+        "sensors" => &[Cap::Sensor],
+        "lcd" => &[Cap::Lcd],
+        "dpi" => &[Cap::Dpi],
+        "controls" => CONTROL_CAPS,
+        "battery" => &[Cap::Battery],
+        "connection" => &[Cap::Connection],
+        "equalizer" => &[Cap::Equalizer],
+        "pairing" => &[Cap::Pairing],
+        "onboard_profiles" => &[Cap::OnboardProfiles],
+        "key_remap" => &[Cap::KeyRemap],
+        "keyboard_layout" => &[Cap::KeyboardLayout],
+        "lighting_division" => &[Cap::LightingDivision],
+        _ => &[],
+    }
+}
+
+/// Typed runtime capabilities permitted by the inert catalog. Descriptors and
+/// initial values still come from `initialize`; the catalog never supplies
+/// static runtime sections.
+fn declared_caps(manifest: &PluginManifest) -> Vec<Cap> {
+    CAPABILITY_NAMES
+        .iter()
+        .filter(|name| {
+            manifest
+                .capabilities
+                .iter()
+                .any(|declared| declared == **name)
+        })
+        .flat_map(|name| cap_for(name).iter().copied())
+        .collect()
+}
+
+/// The manifest-wide capability set, narrowed to a spec's declared subset when
+/// the matched device scopes one.
+fn device_caps(manifest: &PluginManifest, spec: Option<&DeviceSpec>) -> Vec<Cap> {
+    let declared = declared_caps(manifest);
+    match spec {
+        Some(spec) if !spec.capabilities.is_empty() => {
+            let scoped = caps_named(&spec.capabilities);
+            declared
+                .into_iter()
+                .filter(|cap| scoped.contains(cap))
+                .collect()
+        }
+        _ => declared,
+    }
+}
+
+fn caps_named(names: &[String]) -> Vec<Cap> {
+    let mut caps = Vec::new();
+    let mut add = |cap| {
+        if !caps.contains(&cap) {
+            caps.push(cap);
+        }
+    };
+    for name in names {
+        let mapped = cap_for(name);
+        if mapped.is_empty() {
+            log::warn!("Lua initialize returned unknown capability '{name}'");
+        } else {
+            mapped.iter().copied().for_each(&mut add);
+        }
+    }
+    caps
+}
+
+fn needs_status_poll(caps: &[Cap]) -> bool {
+    StatusPollCaps::from_caps(caps).any()
+}
+
+fn should_start_status_poll(
+    caps: &[Cap],
+    plugin_kind: PluginKind,
+    has_manifest_spec: bool,
+    has_controller_identity: bool,
+) -> bool {
+    let integration_root =
+        plugin_kind == PluginKind::Integration && !has_manifest_spec && !has_controller_identity;
+    needs_status_poll(caps) && !integration_root
+}
+
+#[derive(Clone, Copy, Default)]
+struct StatusPollCaps {
+    sensor: bool,
+    cooling: bool,
+    boolean: bool,
+    battery: bool,
+    connection: bool,
+    equalizer: bool,
+    always: bool,
+}
+
+impl StatusPollCaps {
+    fn from_caps(caps: &[Cap]) -> Self {
+        Self {
+            sensor: caps.contains(&Cap::Sensor),
+            cooling: caps.contains(&Cap::Cooling),
+            boolean: caps.contains(&Cap::Boolean),
+            battery: caps.contains(&Cap::Battery),
+            connection: caps.contains(&Cap::Connection),
+            equalizer: caps.contains(&Cap::Equalizer),
+            always: caps
+                .iter()
+                .any(|cap| matches!(cap, Cap::KeyRemap | Cap::LightingDivision)),
+        }
+    }
+
+    fn any(self) -> bool {
+        self.sensor
+            || self.cooling
+            || self.boolean
+            || self.battery
+            || self.connection
+            || self.equalizer
+            || self.always
+    }
+}
+
+#[cfg(test)]
+mod status_poll_tests {
+    use super::{needs_status_poll, should_start_status_poll, Cap};
+    use halod_shared::types::PluginKind;
+
+    #[test]
+    fn chain_root_polls_for_child_fan_telemetry() {
+        assert!(needs_status_poll(&[Cap::LightingDivision]));
+    }
+
+    #[test]
+    fn dynamic_integration_child_is_not_mistaken_for_the_root() {
+        assert!(should_start_status_poll(
+            &[Cap::Sensor],
+            PluginKind::Integration,
+            false,
+            true,
+        ));
+        assert!(!should_start_status_poll(
+            &[Cap::Sensor],
+            PluginKind::Integration,
+            false,
+            false,
+        ));
+    }
+}
+
+/// The four "control" capability groups (choice/range/boolean/action) share the
+/// same shape — a `Vec<Def>` of declared controls plus a value cache. Grouping
+/// them slims `LuaDevice` and hosts the repeated wire/lookup logic in one place.
+#[derive(Default)]
+struct Controls {
+    choices: Vec<ChoiceDef>,
+    choice_cache: Arc<ChoiceStateCache>,
+    ranges: Vec<RangeDef>,
+    range_cache: Arc<RangeStateCache>,
+    /// Boolean values are read live from `get_booleans`; the cache only backs
+    /// save/restore of the last-known write.
+    booleans: Vec<BooleanDef>,
+    bool_cache: BoolStateCache,
+    /// Fire-and-forget; no cached state.
+    actions: Vec<ActionDef>,
+}
+
+/// Shared shape of the `*_wire` snapshots: `None` when no controls are declared,
+/// else map each declared control to its wire type and wrap the batch in the
+/// matching [`DeviceCapability`] variant.
+fn wire_group<T, U>(
+    items: &[T],
+    wrap: impl Fn(Vec<U>) -> DeviceCapability,
+    f: impl Fn(&T) -> U,
+) -> Option<DeviceCapability> {
+    if items.is_empty() {
+        return None;
+    }
+    Some(wrap(items.iter().map(f).collect()))
+}
+
+impl Controls {
+    fn from_runtime(runtime: InitControls) -> Self {
+        Self {
+            choices: runtime.choices,
+            ranges: runtime.ranges,
+            booleans: runtime.booleans,
+            actions: runtime.actions,
+            ..Default::default()
+        }
+    }
+
+    /// Wire snapshot of the choice controls (cache overrides each default), or
+    /// `None` when none are declared.
+    fn choices_wire(&self) -> Option<DeviceCapability> {
+        wire_group(&self.choices, DeviceCapability::Choice, |c| Choice {
+            key: c.key.clone(),
+            label: c.label.clone(),
+            options: c.options.clone(),
+            selected: self.choice_cache.get(&c.key).unwrap_or(c.default),
+            category: c.category.clone(),
+            display: c.display.clone(),
+            visible_when: None,
+        })
+    }
+
+    /// Wire snapshot of the range controls (cache overrides each default), or
+    /// `None` when none are declared.
+    fn ranges_wire(&self) -> Option<DeviceCapability> {
+        wire_group(&self.ranges, DeviceCapability::Range, |r| Range {
+            key: r.key.clone(),
+            label: r.label.clone(),
+            min: r.min,
+            max: r.max,
+            step: r.step,
+            value: self.range_cache.get(&r.key).unwrap_or(r.default),
+            read_only: r.read_only,
+            category: r.category.clone(),
+            start_label: r.start_label.clone(),
+            end_label: r.end_label.clone(),
+            display: r.display.clone(),
+            visible_when: r.visible_when.clone(),
+        })
+    }
+
+    /// Wire snapshot of the action controls, or `None` when none are declared.
+    fn actions_wire(&self) -> Option<DeviceCapability> {
+        wire_group(&self.actions, DeviceCapability::Action, |a| Action {
+            key: a.key.clone(),
+            label: a.label.clone(),
+            category: a.category.clone(),
+            visible_when: None,
+        })
+    }
+
+    fn validate_choice(&self, key: &str, selected: usize) -> Result<()> {
+        let choice = self
+            .choices
+            .iter()
+            .find(|c| c.key == key)
+            .ok_or_else(|| anyhow::anyhow!("unknown choice key: {key}"))?;
+        if selected >= choice.options.len() {
+            anyhow::bail!("choice '{key}' selection {selected} out of range");
+        }
+        Ok(())
+    }
+
+    fn clamp_range(&self, key: &str, value: i32) -> Result<i32> {
+        let range = self
+            .ranges
+            .iter()
+            .find(|r| r.key == key)
+            .ok_or_else(|| anyhow::anyhow!("unknown range key: {key}"))?;
+        Ok(value.clamp(range.min, range.max))
+    }
+
+    /// Backfill empty `label`/`category` on live boolean reads from the manifest
+    /// decls (scripts may report only `{key, value}` pairs).
+    fn backfill_booleans(&self, live: &mut [Boolean]) {
+        for b in live {
+            if let Some(decl) = self.booleans.iter().find(|d| d.key == b.key) {
+                b.read_only = decl.read_only;
+                if b.label.is_empty() {
+                    b.label = decl.label.clone();
+                }
+                if b.category.is_empty() {
+                    b.category = decl.category.clone();
+                }
+            }
+        }
+    }
+
+    /// True if an action with `key` is declared.
+    fn has_action(&self, key: &str) -> bool {
+        self.actions.iter().any(|a| a.key == key)
+    }
+}
+
+/// Why a [`LuaDevice`] is [`RuntimeState::Degraded`].
+#[derive(Debug, Clone, Copy, PartialEq, Eq)]
+pub(in crate::domain::plugin) enum DegradeReason {
+    /// A tracked capability call (`track`) returned `Err`.
+    CallFailed,
+    /// `resync_children` couldn't enumerate the remote's controllers.
+    EnumerateFailed,
+}
+
+/// Runtime lifecycle of an integration [`LuaDevice`] (root or child), shared
+/// by a root and all its children — one socket pool, one state. Plain device
+/// plugins have none (`LuaDevice::runtime` is `None`) and are always live.
+///
+/// Transitions: `OpeningTransport -> Initializing -> Online <-> Degraded`
+/// (`track`/`resync_children` mirror the last call, self-healing on success)
+/// `-> Closing -> Closed` (terminal — a call landing after close can't
+/// resurrect the device).
+#[derive(Debug, Clone, Copy, PartialEq, Eq)]
+pub(in crate::domain::plugin) enum RuntimeState {
+    OpeningTransport,
+    Initializing,
+    Online,
+    Degraded(DegradeReason),
+    /// A deterministic failure (for example denied host access or a plugin
+    /// escaping its declared I/O scope). Automatic calls and reconnects stop
+    /// until an explicit lifecycle action constructs a fresh runtime.
+    Unrecoverable,
+    Closing,
+    Closed,
+}
+
+/// A device whose behaviour is defined by a plugin script rather than native
+/// Rust.
+pub struct LuaDevice {
+    id: DeviceId,
+    name: String,
+    vendor: String,
+    model: String,
+    plugin_id: PluginId,
+    plugin_type: PluginKind,
+    dynamic_children: bool,
+    device_type: DeviceType,
+    control_layout: Vec<CategoryLayout>,
+    visibility: VisibilitySlot,
+    identity: OnceLock<DeviceIdentity>,
+    transport_kind: &'static str,
+    dynamic_model: OnceLock<String>,
+    worker: Option<PluginHandle>,
+    transport: Option<PluginIo>,
+    /// The shared HTTP capability runtime (integration roots and their children
+    /// hold the same one) so throughput folds HTTP bytes into `write_rate_status`.
+    http: Option<crate::infrastructure::http::HttpRuntime>,
+    health: Arc<Health>,
+    /// For integration roots only: the manifest each controller child is
+    /// reported by the child's own `initialize` callback.
+    root_manifest: Option<Arc<PluginManifest>>,
+    /// Integration runtime lifecycle, shared by a root and all its children
+    /// (one socket pool → one state). `None` for non-integration devices
+    /// (always live). See [`RuntimeState`].
+    runtime: Option<Arc<Mutex<RuntimeState>>>,
+
+    /// Capability sections the manifest declared, in advertised order. Drives
+    /// `capabilities()` (chain also implies `Controller`; integration adds one).
+    allowed_caps: Vec<Cap>,
+    caps: Arc<RwLock<Vec<Cap>>>,
+
+    dpi: Option<DpiFacet>,
+
+    /// Declared choice/range/boolean/action controls + their value caches.
+    controls: Controls,
+    dynamic_controls: Arc<OnceLock<Controls>>,
+
+    status: Arc<StatusCache>,
+
+    key_remap: Option<KeyRemapFacet>,
+    keyboard_layout: KeyboardLayoutSlot,
+
+    lcd: Option<LcdFacet>,
+
+    lighting: LightingFacet,
+    rgb_slot: LightingStateSlot,
+    cooling_slot: CoolingStateSlot,
+
+    /// Host-run status poll: aborted on drop. `poll_paused` lets a future LCD
+    /// path silence polling during a bulk transfer without tearing it down.
+    poll_task: Option<tokio::task::JoinHandle<()>>,
+    poll_paused: Arc<AtomicBool>,
+    /// Event-driven transports wake this task when their bounded host queue
+    /// receives input. The task only enqueues work on the root Lua worker.
+    event_task: Option<tokio::task::JoinHandle<()>>,
+    event_paused: Arc<AtomicBool>,
+    event_resume: Arc<tokio::sync::Notify>,
+    dynamic_child_ids: Arc<RwLock<HashMap<u32, DeviceId>>>,
+
+    /// Host-owned virtual-audio sink registry, drained on close; the guard tears
+    /// remaining sinks down on drop even if the worker is dead.
+    audio_registry: Option<super::audio_api::SinkRegistry>,
+    audio_guard: Option<super::audio_api::AudioGuard>,
+
+    // ── chain / children (reported by initialize) ─────────────────────────
+    /// Set after construction (needs the `Arc<Self>`); `None` for non-chain devices.
+    chain_host: OnceLock<Arc<LightingDivisionHost>>,
+    /// Weak back-reference so `discover_children` can hand children a `FanHub`.
+    self_ref: Weak<LuaDevice>,
+    /// The `chainable` subset of the channels `initialize` reports (capacity is
+    /// known only at runtime, e.g. ARGB headers read from a config table).
+    dynamic_chain_channels: OnceLock<Vec<ChannelDescriptor>>,
+    accessories: Vec<AccessoryManifest>,
+    dynamic_accessories: OnceLock<Vec<AccessoryManifest>>,
+
+    /// Weak handle to `AppState` so a failed runtime callback can push a toast
+    /// (via `app.registry`) without the device owning `AppState`.
+    notify: Weak<crate::application::state::AppState>,
+}
+
+pub(in crate::domain::plugin) struct LuaDeviceParts<'a> {
+    pub id: DeviceId,
+    pub manifest: &'a PluginManifest,
+    pub spec: Option<&'a DeviceSpec>,
+    pub notify: Weak<crate::application::state::AppState>,
+    pub runtime: Option<Arc<Mutex<RuntimeState>>>,
+    pub worker: LuaDeviceWorker,
+}
+
+pub(in crate::domain::plugin) enum LuaDeviceWorker {
+    None,
+    Spawn(Box<LuaDeviceSpawnParts>),
+    Child(Box<LuaDeviceChildParts>),
+}
+
+pub(in crate::domain::plugin) struct LuaDeviceSpawnParts {
+    pub dev_match: DevMatch,
+    pub transport: PluginIo,
+    pub handle: tokio::runtime::Handle,
+    pub granted: Vec<Permission>,
+    pub config: crate::domain::plugin::ResolvedConfig,
+    pub data: super::data_api::DataRuntime,
+}
+
+pub(in crate::domain::plugin) struct LuaDeviceChildParts {
+    pub dev_match: DevMatch,
+    pub worker: PluginHandle,
+    pub transport: PluginIo,
+    pub http: Option<crate::infrastructure::http::HttpRuntime>,
+    pub name: String,
+    pub vendor: String,
+    pub device_type: DeviceType,
+    pub transport_kind: &'static str,
+}
+
+impl Drop for LuaDevice {
+    fn drop(&mut self) {
+        if let Some(task) = self.poll_task.take() {
+            task.abort();
+        }
+        if let Some(task) = self.event_task.take() {
+            task.abort();
+        }
+    }
+}
+
+impl LuaDevice {
+    fn transport_is_unrecoverable(&self) -> bool {
+        self.transport
+            .as_ref()
+            .and_then(PluginIo::unrecoverable_error)
+            .is_some()
+    }
+
+    fn is_dynamic_child(&self) -> bool {
+        self.worker.as_ref().is_some_and(|worker| worker.is_child())
+    }
+
+    fn enumerates_controllers(&self) -> bool {
+        (self.plugin_type == PluginKind::Integration || self.dynamic_children)
+            && !self.is_dynamic_child()
+    }
+
+    /// Record a call outcome against the device that made it: only a root
+    /// writes the shared runtime state.
+    fn record_call_outcome(&self, failed: bool, reason: DegradeReason) {
+        if self.is_dynamic_child() {
+            self.health.set_child_degraded(failed);
+            if failed && self.transport_is_unrecoverable() {
+                self.health.mark_unrecoverable();
+            }
+            return;
+        }
+        if !failed {
+            if let Some(runtime) = &self.runtime {
+                let mut state = runtime.lock();
+                if !matches!(
+                    *state,
+                    RuntimeState::Unrecoverable | RuntimeState::Closing | RuntimeState::Closed
+                ) {
+                    *state = RuntimeState::Online;
+                }
+            }
+            return;
+        }
+        self.set_call_failure_state(reason);
+    }
+
+    fn set_call_failure_state(&self, reason: DegradeReason) {
+        let unrecoverable = self.transport_is_unrecoverable();
+        if unrecoverable {
+            self.health.mark_unrecoverable();
+        }
+        if self.is_dynamic_child() {
+            self.health.set_child_degraded(true);
+            return;
+        }
+        if let Some(runtime) = &self.runtime {
+            let mut state = runtime.lock();
+            if !matches!(*state, RuntimeState::Closing | RuntimeState::Closed) {
+                *state = if unrecoverable {
+                    RuntimeState::Unrecoverable
+                } else {
+                    RuntimeState::Degraded(reason)
+                };
+            }
+        }
+    }
+
+    pub(in crate::domain::plugin) fn new(parts: LuaDeviceParts<'_>) -> Self {
+        let LuaDeviceParts {
+            id,
+            manifest,
+            spec,
+            notify,
+            runtime,
+            worker,
+        } = parts;
+        let LuaDeviceWorker::Spawn(spawn) = worker else {
+            return match worker {
+                LuaDeviceWorker::None => Self::build_base(id, manifest, spec, None, None, notify),
+                LuaDeviceWorker::Child(child) => {
+                    let LuaDeviceChildParts {
+                        dev_match,
+                        worker,
+                        transport,
+                        http,
+                        name,
+                        vendor,
+                        device_type,
+                        transport_kind,
+                    } = *child;
+                    let mut dev = Self::build_base(
+                        id,
+                        manifest,
+                        spec,
+                        Some(worker.child(dev_match)),
+                        Some(transport),
+                        notify,
+                    );
+                    dev.runtime = runtime;
+                    dev.http = http;
+                    dev.name = name;
+                    dev.vendor = vendor;
+                    dev.device_type = device_type;
+                    dev.transport_kind = transport_kind;
+                    dev
+                }
+                LuaDeviceWorker::Spawn(_) => unreachable!(),
+            };
+        };
+        let LuaDeviceSpawnParts {
+            dev_match,
+            transport,
+            handle,
+            granted,
+            config,
+            data,
+        } = *spawn;
+        let transport_kind = super::transport::descriptor_for(&dev_match.transport)
+            .map(|descriptor| descriptor.kind())
+            .unwrap_or("tcp");
+        if let Some(runtime) = &runtime {
+            *runtime.lock() = RuntimeState::Initializing;
+        }
+        let has_controller_identity = dev_match.index.is_some() || dev_match.key.is_some();
+        // Keep a handle to the (metered) transport so the device can report
+        // write-rate/throughput; the worker owns the one it does I/O through.
+        let rate_transport = transport.clone();
+        let event_receiver = match &rate_transport {
+            PluginIo::Stream { transport, .. } => transport.event_receiver(),
+            _ => None,
+        };
+        let audio_registry: super::audio_api::SinkRegistry =
+            std::sync::Arc::new(parking_lot::Mutex::new(Vec::new()));
+        let http = super::worker::http_runtime_for(manifest, &granted, &config);
+        let http_meter = http.clone();
+        let udp = super::worker::udp_runtime_for(manifest, &granted, &config);
+        let worker = PluginHandle::spawn_with_data(
+            manifest.script_source.clone(),
+            manifest.module_sources.clone(),
+            transport,
+            dev_match,
+            granted,
+            config,
+            handle.clone(),
+            audio_registry.clone(),
+            data,
+            http,
+            udp,
+        );
+        let poll_device_id = id.clone();
+        let poll_notify = notify.clone();
+        let mut dev = Self::build_base(
+            id,
+            manifest,
+            spec,
+            Some(worker.clone()),
+            Some(rate_transport),
+            notify,
+        );
+        dev.runtime = runtime;
+        dev.http = http_meter;
+        dev.transport_kind = transport_kind;
+        dev.audio_registry = Some(audio_registry.clone());
+        dev.audio_guard = Some(super::audio_api::AudioGuard::new(
+            audio_registry,
+            handle.clone(),
+        ));
+
+        if let Some(mut events) = event_receiver {
+            dev.event_paused.store(true, Ordering::Relaxed);
+            let paused = dev.event_paused.clone();
+            let resume = dev.event_resume.clone();
+            let health = Arc::clone(&dev.health);
+            let event_runtime = dev.runtime.clone();
+            let event_worker = worker.clone();
+            let event_notify = poll_notify.clone();
+            let root_id = poll_device_id.clone();
+            let child_ids = dev.dynamic_child_ids.clone();
+            dev.event_task = Some(handle.spawn(async move {
+                loop {
+                    tokio::select! {
+                        changed = events.changed() => {
+                            if changed.is_err() {
+                                break;
+                            }
+                        }
+                        _ = resume.notified() => {
+                            if health.is_closed() {
+                                break;
+                            }
+                            continue;
+                        }
+                    }
+                    if health.is_stopped()
+                        || event_runtime.as_ref().is_some_and(|runtime| {
+                            matches!(*runtime.lock(), RuntimeState::Unrecoverable)
+                        })
+                    {
+                        break;
+                    }
+                    while paused.load(Ordering::Acquire) {
+                        resume.notified().await;
+                        if health.is_closed() {
+                            return;
+                        }
+                    }
+                    let outcomes = match event_worker.on_transport_events().await {
+                        Ok(outcomes) => outcomes,
+                        Err(error) => {
+                            log::warn!(
+                                "plugin HID event dispatch failed for '{root_id}': {error:#}"
+                            );
+                            continue;
+                        }
+                    };
+                    let Some(app) = event_notify.upgrade() else {
+                        break;
+                    };
+                    for outcome in outcomes {
+                        let device_id = outcome
+                            .child_index
+                            .and_then(|index| child_ids.read().get(&index).cloned())
+                            .unwrap_or_else(|| root_id.clone());
+                        if outcome.children_changed {
+                            if let Some(root) = app.find_device_by_id(&root_id).await {
+                                // Receiver firmware may announce lock closure
+                                // before its pairing table exposes the new slot.
+                                // Retry briefly, as the built-in receiver does.
+                                for _ in 0..8 {
+                                    if crate::application::usecases::registry::receiver::reconcile_owned_children(
+                                        &root, &app,
+                                    )
+                                    .await
+                                    {
+                                        break;
+                                    }
+                                    tokio::time::sleep(Duration::from_millis(500)).await;
+                                }
+                                // An already-registered slot is neither added
+                                // nor gone, so the diff above skips it.
+                                crate::application::usecases::registry::receiver::revive_owned_children(
+                                    &root, &app,
+                                )
+                                .await;
+                            }
+                            crate::application::usecases::plugin::runtime::topology_changed(&app).await;
+                        }
+                        if outcome.state_changed {
+                            crate::application::usecases::plugin::runtime::device_changed(&app, &device_id).await;
+                        }
+                        if outcome.button_events.pressed.is_empty()
+                            && outcome.button_events.released.is_empty()
+                        {
+                            continue;
+                        }
+                        log::trace!(
+                            "button event device={device_id} child_index={:?} pressed={:?} released={:?}",
+                            outcome.child_index,
+                            outcome.button_events.pressed,
+                            outcome.button_events.released
+                        );
+                        app.input_events.publish(crate::application::state::ButtonEvent {
+                            device_id: device_id.clone(),
+                            pressed: outcome.button_events.pressed,
+                            released: outcome.button_events.released,
+                        });
+                    }
+                }
+            }));
+        }
+
+        // Sensor/fan refresh stays host-side (not in the serialized VM): a
+        // daemon-cadence ticker enqueues one status read at a time. Chain roots
+        // also need this: fan telemetry can belong exclusively to chained
+        // accessories, while read_status() and its cache live on the root.
+        // Start paused and let initialize() release it. This matters because a
+        // plugin device is constructed before central registration checks the
+        // persisted Disabled state.
+        if should_start_status_poll(
+            &dev.caps.read(),
+            manifest.plugin_type,
+            spec.is_some(),
+            has_controller_identity,
+        ) {
+            dev.poll_paused.store(true, Ordering::Relaxed);
+            let interval = Duration::from_millis(manifest.poll_interval_ms);
+            let paused = dev.poll_paused.clone();
+            let poll_caps = Arc::clone(&dev.caps);
+            let status = Arc::clone(&dev.status);
+            let dynamic_controls = Arc::clone(&dev.dynamic_controls);
+            let health = Arc::clone(&dev.health);
+            let runtime = dev.runtime.clone();
+            let poll_transport = dev.transport.clone();
+            let poll_plugin_id = dev.plugin_id.clone();
+            dev.poll_task = Some(handle.spawn(async move {
+                // `initialize()` seeds the status caches before it releases
+                // this task.  Wait a full interval before the next read rather
+                // than immediately polling the transport a second time.
+                let mut ticker = tokio::time::interval_at(
+                    tokio::time::Instant::now() + interval,
+                    interval,
+                );
+                ticker.set_missed_tick_behavior(tokio::time::MissedTickBehavior::Skip);
+                let mut consecutive_failures = 0u8;
+                loop {
+                    ticker.tick().await;
+                    if let Some(detail) = poll_transport
+                        .as_ref()
+                        .and_then(PluginIo::unrecoverable_error)
+                    {
+                        health.mark_unrecoverable();
+                        if let Some(runtime) = &runtime {
+                            *runtime.lock() = RuntimeState::Unrecoverable;
+                        }
+                        if let Some(app) = poll_notify.upgrade() {
+                            app.registry
+                                .report_runtime_error(
+                                    &app,
+                                    &poll_plugin_id,
+                                    &poll_device_id,
+                                    detail,
+                                )
+                                .await;
+                            crate::application::usecases::plugin::runtime::device_status_changed(
+                                &app,
+                                &poll_device_id,
+                            )
+                            .await;
+                        }
+                        break;
+                    }
+                    if health.is_stopped() {
+                        break;
+                    }
+                    if paused.load(Ordering::Relaxed) {
+                        continue;
+                    }
+                    let mut observed_changed = false;
+                    match worker.poll().await {
+                        Ok(events) => {
+                            if let Some(controls) = dynamic_controls.get() {
+                                for (key, value) in &events.ranges {
+                                    observed_changed |= controls.range_cache.record(key, *value);
+                                }
+                                for (key, selected) in &events.choices {
+                                    observed_changed |=
+                                        controls.choice_cache.record(key, *selected);
+                                }
+                            }
+                            if !events.cooling.is_empty() {
+                                observed_changed |=
+                                    status.observe_cooling(events.cooling.iter().cloned());
+                            }
+                            let recovered = consecutive_failures >= POLL_FAILURE_DEGRADE_THRESHOLD;
+                            consecutive_failures = 0;
+                            if recovered {
+                                if let Some(runtime) = &runtime {
+                                    let mut state = runtime.lock();
+                                    if !matches!(
+                                        *state,
+                                        RuntimeState::Unrecoverable
+                                            | RuntimeState::Closing
+                                            | RuntimeState::Closed
+                                    )
+                                    {
+                                        *state = RuntimeState::Online;
+                                    }
+                                }
+                                if let Some(app) = poll_notify.upgrade() {
+                                    crate::application::usecases::plugin::runtime::device_changed(
+                                        &app,
+                                        &poll_device_id,
+                                    )
+                                    .await;
+                                }
+                            }
+                            observed_changed |= events.state_changed;
+                            if !events.button_events.pressed.is_empty()
+                                || !events.button_events.released.is_empty()
+                            {
+                                if let Some(app) = poll_notify.upgrade() {
+                                    app.input_events.publish(crate::application::state::ButtonEvent {
+                                            device_id: poll_device_id.clone(),
+                                            pressed: events.button_events.pressed,
+                                            released: events.button_events.released,
+                                        });
+                                }
+                            }
+                        }
+                        Err(error) => {
+                            if poll_transport
+                                .as_ref()
+                                .and_then(PluginIo::unrecoverable_error)
+                                .is_some()
+                            {
+                                health.mark_unrecoverable();
+                                if let Some(runtime) = &runtime {
+                                    *runtime.lock() = RuntimeState::Unrecoverable;
+                                }
+                                let detail = format!("{error:#}");
+                                if let Some(app) = poll_notify.upgrade() {
+                                    app.registry
+                                        .report_runtime_error(
+                                            &app,
+                                            &poll_plugin_id,
+                                            &poll_device_id,
+                                            detail,
+                                        )
+                                        .await;
+                                    crate::application::usecases::plugin::runtime::device_status_changed(
+                                        &app,
+                                        &poll_device_id,
+                                    )
+                                    .await;
+                                }
+                                break;
+                            }
+                            consecutive_failures = consecutive_failures.saturating_add(1);
+                            if consecutive_failures == POLL_FAILURE_DEGRADE_THRESHOLD {
+                                log::warn!(
+                                    "plugin read_status failed {POLL_FAILURE_DEGRADE_THRESHOLD} consecutive times for '{poll_device_id}': {error:#}"
+                                );
+                                if let Some(runtime) = &runtime {
+                                    let mut state = runtime.lock();
+                                    if !matches!(*state, RuntimeState::Closing | RuntimeState::Closed)
+                                    {
+                                        *state = RuntimeState::Degraded(DegradeReason::CallFailed);
+                                    }
+                                }
+                                if let Some(app) = poll_notify.upgrade() {
+                                    crate::application::usecases::plugin::runtime::device_changed(
+                                        &app,
+                                        &poll_device_id,
+                                    )
+                                    .await;
+                                }
+                            }
+                            continue;
+                        }
+                    }
+                    let current_poll_caps = {
+                        let caps = poll_caps.read();
+                        StatusPollCaps::from_caps(&caps)
+                    };
+                    observed_changed |= status.sample(&worker, current_poll_caps).await;
+                    if observed_changed {
+                        if let Some(app) = poll_notify.upgrade() {
+                            crate::application::usecases::plugin::runtime::device_changed(
+                                &app,
+                                &poll_device_id,
+                            )
+                            .await;
+                        }
+                    }
+                }
+            }));
+        }
+        if manifest.dynamic_children || spec.is_none() {
+            dev.root_manifest = Some(Arc::new(manifest.clone()));
+        }
+        dev
+    }
+
+    fn build_base(
+        id: DeviceId,
+        manifest: &PluginManifest,
+        spec: Option<&DeviceSpec>,
+        worker: Option<PluginHandle>,
+        transport: Option<PluginIo>,
+        notify: Weak<crate::application::state::AppState>,
+    ) -> Self {
+        Self {
+            id,
+            name: spec
+                .map(|s| s.display_name().to_owned())
+                .unwrap_or_else(|| manifest.display_name()),
+            vendor: spec.map(|s| s.vendor.clone()).unwrap_or_default(),
+            model: spec.map(|s| s.model.clone()).unwrap_or_default(),
+            plugin_id: manifest.plugin_id.clone(),
+            plugin_type: manifest.plugin_type,
+            dynamic_children: manifest.dynamic_children,
+            device_type: spec.and_then(|s| s.device_type).unwrap_or_default(),
+            control_layout: spec.map(|s| s.control_layout.clone()).unwrap_or_default(),
+            visibility: VisibilitySlot::default(),
+            transport_kind: spec
+                .and_then(|s| super::transport::descriptor_for(s.transport.kind()))
+                .map(|d| d.kind())
+                .unwrap_or("tcp"),
+            identity: OnceLock::new(),
+            dynamic_model: OnceLock::new(),
+            worker,
+            transport,
+            http: None,
+            health: Arc::default(),
+            root_manifest: None,
+            runtime: None,
+            allowed_caps: device_caps(manifest, spec),
+            caps: Arc::new(RwLock::new(device_caps(manifest, spec))),
+            lcd: device_caps(manifest, spec)
+                .contains(&Cap::Lcd)
+                .then(LcdFacet::default),
+            dpi: device_caps(manifest, spec)
+                .contains(&Cap::Dpi)
+                .then(DpiFacet::default),
+            // Canonical package controls are runtime descriptors returned by
+            // initialize. Keep the pre-initialize surface empty.
+            controls: Controls::default(),
+            dynamic_controls: Arc::new(OnceLock::new()),
+            status: Arc::default(),
+            key_remap: device_caps(manifest, spec)
+                .contains(&Cap::KeyRemap)
+                .then(KeyRemapFacet::default),
+            keyboard_layout: KeyboardLayoutSlot::default(),
+            lighting: LightingFacet::default(),
+            rgb_slot: LightingStateSlot::default(),
+            cooling_slot: CoolingStateSlot::default(),
+            poll_task: None,
+            poll_paused: Arc::new(AtomicBool::new(false)),
+            event_task: None,
+            event_paused: Arc::new(AtomicBool::new(false)),
+            event_resume: Arc::new(tokio::sync::Notify::new()),
+            dynamic_child_ids: Arc::new(RwLock::new(HashMap::new())),
+            audio_registry: None,
+            audio_guard: None,
+            chain_host: OnceLock::new(),
+            self_ref: Weak::new(),
+            dynamic_chain_channels: OnceLock::new(),
+            accessories: Vec::new(),
+            dynamic_accessories: OnceLock::new(),
+            notify,
+        }
+    }
+
+    /// Set the weak self-reference (children need the parent as a `FanHub`).
+    /// Called from `build_device` inside `Arc::new_cyclic`.
+    pub(in crate::domain::plugin) fn set_identity(&self, identity: DeviceIdentity) {
+        let _ = self.identity.set(identity);
+    }
+
+    pub(in crate::domain::plugin) fn set_self_ref(&mut self, weak: Weak<LuaDevice>) {
+        self.self_ref = weak;
+    }
+
+    /// Install the chain host (built from `Arc<Self>` as the adapter).
+    pub(in crate::domain::plugin) fn install_chain_host(&self, host: Arc<LightingDivisionHost>) {
+        let _ = self.chain_host.set(host);
+    }
+
+    /// Pause/resume the background status poll (used when an exclusive transfer
+    /// must own the transport, e.g. an LCD bulk upload).
+    pub fn set_polling_paused(&self, paused: bool) {
+        self.poll_paused.store(paused, Ordering::Relaxed);
+    }
+
+    /// Surface a worker call's Lua runtime error to the user (deduplicated),
+    /// clearing the dedup flag on success. Background/engine paths (RGB apply,
+    /// fan duty, sensor poll) otherwise only log the failure, so a broken plugin
+    /// is invisible — this turns the first failure of an episode into one toast.
+    async fn track<T>(&self, result: Result<T>) -> Result<T> {
+        let unrecoverable = result.is_err() && self.transport_is_unrecoverable();
+        let first_failure = if result.is_err() {
+            self.health.begin_failure()
+        } else {
+            self.health.end_failure();
+            false
+        };
+        if unrecoverable {
+            self.health.mark_unrecoverable();
+        }
+        // Restore once when an error episode begins. Repeated engine calls can
+        // race with the state broadcast, so the health failure episode is the latch.
+        self.record_call_outcome(result.is_err(), DegradeReason::CallFailed);
+        if first_failure {
+            if let Some(transport) = &self.transport {
+                transport.restore_safety_state();
+            }
+        }
+        let Some(app) = self.notify.upgrade() else {
+            return result;
+        };
+        match result {
+            Ok(value) => {
+                app.registry.clear_runtime_error(&self.plugin_id, &self.id);
+                Ok(value)
+            }
+            Err(e) => {
+                let detail = format!("{e:#}");
+                if crate::domain::plugin::restore_in_flight() {
+                    log::debug!("[{}] restore call failed: {detail}", self.id);
+                } else {
+                    app.registry
+                        .report_runtime_error(&app, &self.plugin_id, &self.id, detail.clone())
+                        .await;
+                }
+                Err(crate::domain::plugin::SurfacedPluginError {
+                    plugin: self.plugin_id.clone(),
+                    detail,
+                }
+                .into())
+            }
+        }
+    }
+
+    /// Refresh the host-side sensor/fan caches from the worker. Driven by the
+    /// status poll (and `poll_once`); serialization never calls this.
+    async fn refresh_status_cache(&self) {
+        let Some(worker) = &self.worker else { return };
+        let caps = StatusPollCaps::from_caps(&self.caps.read());
+        self.status.sample(worker, caps).await;
+    }
+
+    #[cfg(feature = "plugin-test")]
+    pub(in crate::domain::plugin) async fn poll_once(&self) -> Result<()> {
+        let outcome = self.worker()?.poll().await?;
+        if let Some(controls) = self.dynamic_controls.get() {
+            for (key, value) in outcome.ranges {
+                controls.range_cache.record(&key, value);
+            }
+            for (key, selected) in outcome.choices {
+                controls.choice_cache.record(&key, selected);
+            }
+        }
+        if !outcome.cooling.is_empty() {
+            self.status.observe_cooling(outcome.cooling);
+        }
+        self.refresh_status_cache().await;
+        Ok(())
+    }
+
+    /// Drain the transport's queued events once through `event()`, returning the
+    /// per-target outcomes. Production drives this from the event watcher task;
+    /// the plugin-test harness calls it directly.
+    #[cfg(feature = "plugin-test")]
+    pub(in crate::domain::plugin) async fn pump_events(
+        &self,
+    ) -> Result<Vec<super::worker::PollOutcome>> {
+        self.worker()?.on_transport_events().await
+    }
+
+    fn worker(&self) -> Result<&PluginHandle> {
+        anyhow::ensure!(
+            !self.health.is_closed(),
+            "plugin device '{}' is closed",
+            self.id
+        );
+        self.worker
+            .as_ref()
+            .ok_or_else(|| anyhow::anyhow!("plugin '{}' has no worker", self.plugin_id))
+    }
+
+    fn active_controls(&self) -> &Controls {
+        self.dynamic_controls.get().unwrap_or(&self.controls)
+    }
+}
+
+#[async_trait]
+impl Device for LuaDevice {
+    fn id(&self) -> &DeviceId {
+        &self.id
+    }
+
+    fn name(&self) -> &str {
+        &self.name
+    }
+
+    fn vendor(&self) -> &str {
+        &self.vendor
+    }
+
+    fn model(&self) -> &str {
+        self.dynamic_model.get().unwrap_or(&self.model)
+    }
+
+    fn wire_device_type(&self) -> DeviceType {
+        self.device_type
+    }
+
+    fn control_layout(&self) -> Vec<CategoryLayout> {
+        self.control_layout.clone()
+    }
+
+    fn keyboard_layout_slot(&self) -> Option<&KeyboardLayoutSlot> {
+        self.allowed_caps
+            .contains(&Cap::KeyboardLayout)
+            .then_some(&self.keyboard_layout)
+    }
+
+    fn integration_id(&self) -> Option<PluginId> {
+        let is_child = self.worker.as_ref().is_some_and(|w| w.is_child());
+        integration_root_id(self.plugin_type, &self.plugin_id, is_child)
+    }
+
+    fn owning_plugin_id(&self) -> Option<PluginId> {
+        Some(self.plugin_id.clone())
+    }
+
+    fn usb_location(&self) -> Option<crate::infrastructure::drivers::transports::usb::UsbLocation> {
+        self.transport.as_ref().and_then(PluginIo::usb_location)
+    }
+
+    fn identity(&self) -> DeviceIdentity {
+        self.identity
+            .get()
+            .cloned()
+            .unwrap_or_else(|| DeviceIdentity::serial(None))
+    }
+
+    fn wire_serial_number(&self) -> Option<String> {
+        self.identity.get().and_then(|i| i.serial.clone())
+    }
+
+    fn conflict_origin(&self) -> DeviceOrigin {
+        let is_child = self.worker.as_ref().is_some_and(|w| w.is_child());
+        if is_child && self.plugin_type == PluginKind::Integration {
+            DeviceOrigin::Integration(self.plugin_id.clone())
+        } else {
+            DeviceOrigin::Plugin(self.plugin_id.clone())
+        }
+    }
+
+    async fn wire_connection_type(&self) -> Option<halod_shared::types::ConnectionType> {
+        ConnectionCapability::connection_status(self)
+            .await
+            .map(|status| status.connection_type)
+    }
+
+    fn visibility_slot(&self) -> Option<&VisibilitySlot> {
+        Some(&self.visibility)
+    }
+
+    fn is_live(&self) -> bool {
+        if self.health.blocks_liveness() {
+            return false;
+        }
+        self.runtime.as_ref().is_none_or(|r| match *r.lock() {
+            RuntimeState::OpeningTransport | RuntimeState::Initializing | RuntimeState::Online => {
+                true
+            }
+            RuntimeState::Degraded(_) => false,
+            RuntimeState::Unrecoverable => false,
+            RuntimeState::Closing | RuntimeState::Closed => false,
+        })
+    }
+
+    fn is_unrecoverable(&self) -> bool {
+        self.health.is_unrecoverable()
+            || self
+                .runtime
+                .as_ref()
+                .is_some_and(|runtime| matches!(*runtime.lock(), RuntimeState::Unrecoverable))
+    }
+
+    fn wire_device_connected(&self) -> bool {
+        self.is_live()
+    }
+
+    async fn initialize(&self) -> Result<bool> {
+        let Some(w) = &self.worker else {
+            return Ok(true);
+        };
+        let outcome = match w.initialize().await {
+            Ok(outcome) => outcome,
+            Err(error) => {
+                self.set_call_failure_state(DegradeReason::CallFailed);
+                if self.health.begin_failure() {
+                    if let Some(transport) = &self.transport {
+                        transport.restore_safety_state();
+                    }
+                }
+                return Err(error);
+            }
+        };
+        if let Some(names) = &outcome.capabilities {
+            let requested = caps_named(names);
+            let accepted: Vec<_> = requested
+                .into_iter()
+                .filter(|cap| {
+                    let declared = self.allowed_caps.contains(cap);
+                    if !declared {
+                        log::warn!(
+                            "plugin '{}' returned undeclared runtime capability {:?} for '{}'; ignoring it",
+                            self.plugin_id,
+                            cap,
+                            self.id
+                        );
+                    }
+                    declared
+                })
+                .collect();
+            *self.caps.write() = accepted;
+        }
+        if let Some(model) = outcome.model {
+            let _ = self.dynamic_model.set(model);
+        }
+        if let Some(keyboard) = outcome.keyboard {
+            self.lighting.install_keyboard(keyboard);
+        }
+        if let Some(channels) = outcome.channels {
+            let (chainable, plain): (Vec<_>, Vec<_>) =
+                channels.into_iter().partition(|channel| channel.chainable);
+            let _ = self.dynamic_chain_channels.set(
+                chainable
+                    .into_iter()
+                    .map(|c| ChannelDescriptor {
+                        channel_id: c.id,
+                        display_name: c.name,
+                        max_leds: c.max_leds,
+                        color_order: c.color_order,
+                        cooling_channel: c.cooling_channel,
+                    })
+                    .collect(),
+            );
+            self.lighting
+                .install_channels(plain, outcome.native_effects.unwrap_or_default());
+        }
+        if let (Some(lcd), Some(facet)) = (outcome.lcd, &self.lcd) {
+            facet.install(&lcd);
+        }
+        if let Some(accessories) = outcome.accessories {
+            let _ = self.dynamic_accessories.set(accessories);
+        }
+        if let Some(controls) = outcome.controls {
+            let _ = self.dynamic_controls.set(Controls::from_runtime(controls));
+        }
+        if let (Some(dpi), Some(facet)) = (outcome.dpi, &self.dpi) {
+            facet.install(&dpi);
+        }
+        if let Some(cooling) = outcome.cooling {
+            let _ = self.status.cooling_channels.set(
+                cooling
+                    .channels
+                    .into_iter()
+                    .map(|c| CoolingChannel {
+                        id: c.id,
+                        name: c.name,
+                        kind: c.kind,
+                        controllable: c.controllable,
+                        rpm: None,
+                        duty: None,
+                        visibility: Default::default(),
+                    })
+                    .collect(),
+            );
+        }
+        if let (Some(key_remap), Some(facet)) = (outcome.key_remap, &self.key_remap) {
+            let to_arm = facet.install(key_remap);
+            if !to_arm.is_empty() {
+                log::debug!(
+                    "[{}] re-arming {} active key mapping(s) on connect",
+                    self.id,
+                    to_arm.len()
+                );
+            }
+            for mapping in to_arm {
+                let cid = mapping.cid;
+                self.track(w.key_remap_set_mapping(mapping).await)
+                    .await
+                    .with_context(|| format!("re-arming key mapping for cid {cid}"))?;
+            }
+        }
+        // Seed the host range/choice caches with the values the device reported,
+        // so the UI shows live hardware state rather than manifest defaults.
+        if let Some(ranges) = outcome.ranges {
+            for (key, value) in ranges {
+                self.active_controls().range_cache.record(&key, value);
+            }
+        }
+        if let Some(choices) = outcome.choices {
+            for (key, selected) in choices {
+                self.active_controls().choice_cache.record(&key, selected);
+            }
+        }
+        if let Some(detail) = self
+            .transport
+            .as_ref()
+            .and_then(PluginIo::unrecoverable_error)
+        {
+            self.set_call_failure_state(DegradeReason::CallFailed);
+            if self.health.begin_failure() {
+                if let Some(transport) = &self.transport {
+                    transport.restore_safety_state();
+                }
+            }
+            anyhow::bail!("unrecoverable plugin transport error: {detail}");
+        }
+        if outcome.ok {
+            self.record_call_outcome(false, DegradeReason::CallFailed);
+            // Seed every wire-status cache before registration publishes the
+            // first snapshot (and before transport-conflict checks consult the
+            // cached connection type). Later refreshes run on the poll task.
+            self.refresh_status_cache().await;
+            match w.supports_events().await {
+                Ok(true) => {
+                    if let Some(PluginIo::Stream { transport, .. }) = &self.transport {
+                        if let Err(error) = transport.enable_event_listener() {
+                            log::warn!(
+                                "[{}] enabling event listener failed; treating as no events: {error:#}",
+                                self.id
+                            );
+                        }
+                    }
+                }
+                Ok(false) => {}
+                Err(error) => {
+                    log::warn!(
+                        "[{}] event support probe failed; treating as no events: {error:#}",
+                        self.id
+                    );
+                }
+            }
+            self.poll_paused.store(false, Ordering::Relaxed);
+            self.event_paused.store(false, Ordering::Relaxed);
+            self.event_resume.notify_one();
+        } else {
+            self.record_call_outcome(true, DegradeReason::CallFailed);
+        }
+        Ok(outcome.ok)
+    }
+
+    async fn close(&self) {
+        if self.health.close() {
+            return;
+        }
+        self.event_resume.notify_one();
+        let owns_root_resources = self.worker.as_ref().is_none_or(|worker| !worker.is_child());
+        if owns_root_resources {
+            if let Some(r) = &self.runtime {
+                *r.lock() = RuntimeState::Closing;
+            }
+        }
+        if let Some(w) = &self.worker {
+            if let Err(error) = w.close().await {
+                log::debug!(
+                    "plugin close hook did not complete for '{}': {error:#}",
+                    self.id
+                );
+            }
+        }
+        if owns_root_resources {
+            if let Some(transport) = &self.transport {
+                transport.restore_safety_state();
+            }
+        }
+        // Drain audio sinks on the device side so cleanup runs even if the
+        // worker's close request failed (wedged/dead worker).
+        if owns_root_resources {
+            if let Some(reg) = &self.audio_registry {
+                super::audio_api::drain_and_remove(reg).await;
+            }
+        }
+        if owns_root_resources {
+            if let Some(r) = &self.runtime {
+                *r.lock() = RuntimeState::Closed;
+            }
+        }
+    }
+
+    fn write_rate_status(&self) -> Option<WriteRateStatus> {
+        let transport = self.transport.as_ref().map(|t| t.rate_status());
+        let http = self.http.as_ref().map(|h| h.rate_status());
+        match (transport, http) {
+            (Some(t), Some(h)) => {
+                Some(crate::infrastructure::drivers::WriteRateLimiter::combine_status(t, h))
+            }
+            (t, h) => t.or(h),
+        }
+    }
+
+    fn debug_transport(&self) -> Option<&'static str> {
+        Some(self.transport_kind)
+    }
+
+    fn capabilities(&self) -> Vec<CapabilityRef<'_>> {
+        let mut caps = Vec::new();
+        let active = self.caps.read().clone();
+        for cap in &active {
+            match cap {
+                Cap::Lighting => caps.push(CapabilityRef::Lighting(self)),
+                Cap::Cooling if !self.cooling_channels().is_empty() => {
+                    caps.push(CapabilityRef::Cooling(self));
+                }
+                Cap::Cooling => {}
+                Cap::Sensor => caps.push(CapabilityRef::Sensor(self)),
+                Cap::Lcd => caps.push(CapabilityRef::Lcd(self)),
+                Cap::Dpi => caps.push(CapabilityRef::Dpi(self)),
+                Cap::Choice => caps.push(CapabilityRef::Choice(self)),
+                Cap::Range => caps.push(CapabilityRef::Range(self)),
+                Cap::Boolean => caps.push(CapabilityRef::Boolean(self)),
+                Cap::Action => caps.push(CapabilityRef::Action(self)),
+                Cap::Battery => caps.push(CapabilityRef::Battery(self)),
+                Cap::Connection => caps.push(CapabilityRef::Connection(self)),
+                Cap::Equalizer => caps.push(CapabilityRef::Equalizer(self)),
+                Cap::Pairing => caps.push(CapabilityRef::Pairing(self)),
+                Cap::OnboardProfiles => caps.push(CapabilityRef::OnboardProfiles(self)),
+                Cap::KeyRemap => caps.push(CapabilityRef::KeyRemap(self)),
+                Cap::KeyboardLayout => caps.push(CapabilityRef::KeyboardLayout(self)),
+                Cap::LightingDivision => {
+                    caps.push(CapabilityRef::Controller(self));
+                }
+            }
+        }
+        if self.enumerates_controllers() {
+            caps.push(CapabilityRef::Controller(self));
+        }
+        caps
+    }
+
+    fn chain_host(&self) -> Option<&Arc<LightingDivisionHost>> {
+        self.chain_host.get()
+    }
+}
+
+#[async_trait]
+impl LightingCapability for LuaDevice {
+    fn descriptor(&self) -> &LightingDescriptor {
+        self.lighting.descriptor(&self.keyboard_layout)
+    }
+
+    async fn apply(&self, state: LightingState) -> Result<()> {
+        let state = apply_per_led_transforms(self.descriptor(), &self.rgb_slot, state);
+        self.rgb_slot.set_state(Some(state.clone()));
+        let r = self.worker()?.rgb_apply(state).await;
+        self.track(r).await
+    }
+
+    async fn write_frame(&self, channel_id: &str, bytes: &[u8]) -> Result<()> {
+        let r = self.worker()?.write_lighting_frame(channel_id, bytes).await;
+        self.track(r).await
+    }
+
+    async fn write_frame_batch(&self, channels: &[(String, Vec<u8>)]) -> Result<()> {
+        for (channel_id, bytes) in channels {
+            self.write_frame(channel_id, bytes).await?;
+        }
+        Ok(())
+    }
+
+    fn write_group_key(&self) -> Option<usize> {
+        self.transport.as_ref().and_then(PluginIo::write_group_key)
+    }
+
+    fn lighting_state(&self) -> &LightingStateSlot {
+        &self.rgb_slot
+    }
+}
+
+/// Apply each zone's content transform to PerLed colour maps before handing the
+/// state to the plugin, so the plugin never needs to understand transforms.
+fn apply_per_led_transforms(
+    descriptor: &LightingDescriptor,
+    slot: &LightingStateSlot,
+    state: LightingState,
+) -> LightingState {
+    let LightingState::PerLed { channels } = state else {
+        return state;
+    };
+    let mut transformed = HashMap::new();
+    for (channel_id, led_map) in &channels {
+        let Some(zone) = descriptor.channels.iter().find(|z| &z.id == channel_id) else {
+            transformed.insert(channel_id.clone(), led_map.clone());
+            continue;
+        };
+        let transform = slot.transform_for(channel_id);
+        if transform.is_identity() {
+            transformed.insert(channel_id.clone(), led_map.clone());
+            continue;
+        }
+        let permutation = build_permutation(zone, &transform);
+        let new_map = (0..zone.leds.len())
+            .filter_map(|i| {
+                let source = permutation
+                    .get(i)
+                    .and_then(|&source| zone.leds.get(source))?;
+                let target = zone.leds.get(i)?;
+                let source_id = source.id.to_string();
+                led_map
+                    .get(&source_id)
+                    .map(|color| (target.id.to_string(), *color))
+            })
+            .collect();
+        transformed.insert(channel_id.clone(), new_map);
+    }
+    LightingState::PerLed {
+        channels: transformed,
+    }
+}
+
+#[async_trait]
+impl CoolingCapability for LuaDevice {
+    fn cooling_channels(&self) -> Vec<CoolingChannel> {
+        let mut channels = self
+            .status
+            .cooling_channels
+            .get()
+            .cloned()
+            .unwrap_or_default();
+        let claimed = self.claimed_cooling_channels();
+        channels.retain(|channel| !claimed.contains(&channel.id));
+        let observed = self.status.cooling.lock();
+        for channel in &mut channels {
+            if let Some(current) = observed.get(&channel.id) {
+                *channel = current.clone();
+            }
+        }
+        channels
+    }
+
+    async fn get_cooling_status(&self, channel_id: &str) -> Result<CoolingChannel> {
+        // Dynamically enumerated integration children currently have no
+        // dedicated poll task: sample them when the host telemetry loop asks.
+        // Otherwise their initialization cache remains frozen forever.
+        if self.poll_task.is_none() {
+            let worker = self.worker()?;
+            let polled = worker.poll().await;
+            self.track(polled).await?;
+            let channel = self.track(worker.cooling_status(channel_id).await).await?;
+            self.status
+                .cooling
+                .lock()
+                .insert(channel_id.to_owned(), channel.clone());
+            return Ok(channel);
+        }
+        if let Some(channel) = self.status.cooling.lock().get(channel_id).cloned() {
+            return Ok(channel);
+        }
+        self.track(self.worker()?.cooling_status(channel_id).await)
+            .await
+    }
+
+    async fn set_cooling_duty(&self, channel_id: &str, duty: u8) -> Result<()> {
+        self.track(self.worker()?.cooling_set_duty(channel_id, duty).await)
+            .await
+    }
+
+    fn cooling_state(&self) -> &CoolingStateSlot {
+        &self.cooling_slot
+    }
+
+    fn curves(&self) -> HashMap<String, crate::domain::cooling::model::FanCurveRecord> {
+        let mut curves = self.cooling_slot.curves();
+        let claimed = self.claimed_cooling_channels();
+        curves.retain(|channel_id, _| !claimed.contains(channel_id));
+        curves
+    }
+
+    fn save_state(&self) -> serde_json::Value {
+        let curves = self.curves();
+        if curves.is_empty() {
+            serde_json::Value::Null
+        } else {
+            serde_json::to_value(curves).unwrap_or(serde_json::Value::Null)
+        }
+    }
+
+    async fn restore_state(&self, value: &serde_json::Value) -> bool {
+        self.cooling_slot.load(value);
+        for channel_id in self.claimed_cooling_channels() {
+            self.cooling_slot.clear_curve(&channel_id);
+        }
+        true
+    }
+
+    fn cached_cooling_status(&self) -> Vec<CoolingChannel> {
+        let mut channels: Vec<_> = self.status.cooling.lock().values().cloned().collect();
+        let claimed = self.claimed_cooling_channels();
+        channels.retain(|channel| !claimed.contains(&channel.id));
+        channels
+    }
+}
+
+#[async_trait]
+impl SensorCapability for LuaDevice {
+    async fn get_sensors(&self) -> Result<Vec<Sensor>> {
+        // See `get_cooling_status`: integration controller children skip the
+        // root's background-task construction path, so telemetry is their poll
+        // driver. Run read_status first because some plugins derive sensors
+        // from the status table it updates.
+        if self.poll_task.is_none() {
+            let worker = self.worker()?;
+            let polled = worker.poll().await;
+            self.track(polled).await?;
+            let sensors = self.track(worker.get_sensors().await).await?;
+            self.status.observe_sensors(sensors.clone());
+            return Ok(sensors);
+        }
+        Ok(self.status.sensors.lock().clone())
+    }
+}
+
+// ── Chain / children: the parent surface ────────────────────────────────────
+//
+// Reuses the native `LightingDivisionHost` machinery. The script supplies only the probe
+// (`detect_accessories`), the per-accessory descriptor table, and the routing
+// callbacks (`write_frame` / cooling hub). The generic segment child and the
+// `LightingDivisionHost` frame composition are unchanged.
+
+#[async_trait]
+impl Controller for LuaDevice {
+    async fn discover_children(&self) -> Vec<Arc<dyn Device>> {
+        if self.enumerates_controllers() {
+            return self.discover_controllers().await;
+        }
+        let mut children = Vec::new();
+        for accessory in self.discover_chain_accessories().await {
+            if let Some(host) = self.chain_host.get() {
+                host.register_auto_link(&accessory.channel_id, accessory.device.clone())
+                    .await;
+            }
+            children.push(accessory.device);
+        }
+        children
+    }
+
+    /// Diff the live server's controllers against `existing`: build only new
+    /// ones, report departed ids, leave survivors untouched. `Err` greys the
+    /// integration (server dropped mid-enumerate).
+    async fn resync_children(
+        &self,
+        existing: &HashSet<DeviceId>,
+    ) -> Result<(Vec<Arc<dyn Device>>, Vec<DeviceId>)> {
+        if self.plugin_type != PluginKind::Integration && !self.dynamic_children {
+            return Ok((vec![], vec![]));
+        }
+        let detected = match self.worker()?.enumerate_controllers().await {
+            Ok(d) => d,
+            Err(e) => {
+                self.set_call_failure_state(DegradeReason::EnumerateFailed);
+                return Err(e);
+            }
+        };
+        let Some(ctx) = self.child_build_ctx() else {
+            anyhow::bail!("integration root missing child-build context");
+        };
+        let live_ids: HashSet<DeviceId> = detected
+            .iter()
+            .map(|c| child_device_id(&self.id, c))
+            .collect();
+        {
+            let mut routes = self.dynamic_child_ids.write();
+            routes.retain(|_, id| live_ids.contains(id));
+            for controller in &detected {
+                routes.insert(controller.index, child_device_id(&self.id, controller));
+            }
+        }
+        let mut added = Vec::new();
+        for controller in &detected {
+            let child_id = child_device_id(&self.id, controller);
+            if existing.contains(&child_id) {
+                continue;
+            }
+            if let Some(child) = self.build_child(controller, &ctx).await {
+                added.push(child);
+            }
+        }
+        let gone: Vec<DeviceId> = existing
+            .iter()
+            .filter(|id| !live_ids.contains(id.as_str()))
+            .cloned()
+            .collect();
+        Ok((added, gone))
+    }
+}
+
+/// Shared inputs `build_child` needs, gathered once from the root.
+struct ChildBuildCtx {
+    worker: PluginHandle,
+    transport: PluginIo,
+    root_manifest: Arc<PluginManifest>,
+    identity_scope: crate::domain::registry::identity::IdentityScope,
+}
+
+struct DiscoveredChainAccessory {
+    channel_id: String,
+    device: Arc<dyn Device>,
+}
+
+fn child_device_id(root: &DeviceId, controller: &DetectedController) -> DeviceId {
+    DeviceId::sanitized(
+        controller
+            .id
+            .as_deref()
+            .filter(|id| !id.is_empty())
+            .unwrap_or(&format!("{root}_ctrl_{}", controller.index)),
+    )
+}
+
+impl LuaDevice {
+    /// Cooling channels a detected chain child has taken over. They belong to
+    /// that child alone: the parent must not expose them anywhere.
+    fn claimed_cooling_channels(&self) -> HashSet<String> {
+        let Some(host) = self.chain_host.get() else {
+            return HashSet::new();
+        };
+        let detected = host.detected_channels();
+        self.dynamic_chain_channels
+            .get()
+            .into_iter()
+            .flatten()
+            .filter(|channel| detected.contains(&channel.channel_id))
+            .filter_map(|channel| channel.cooling_channel.clone())
+            .collect()
+    }
+
+    async fn discover_chain_accessories(&self) -> Vec<DiscoveredChainAccessory> {
+        let (Some(worker), Some(host)) = (&self.worker, self.chain_host.get()) else {
+            return Vec::new();
+        };
+        // Accessory detection does exclusive reads; pause the status poll so it
+        // doesn't race the detect reply.
+        self.set_polling_paused(true);
+        let detected = worker.detect_accessories().await;
+        self.set_polling_paused(false);
+        let detected = match detected {
+            Ok(d) => d,
+            Err(e) => {
+                log::warn!("plugin '{}' detect_accessories: {e:#}", self.plugin_id);
+                return Vec::new();
+            }
+        };
+        let Some(parent) = self.self_ref.upgrade() else {
+            return Vec::new();
+        };
+        let cooling_hub: Arc<dyn CoolingHub> = parent;
+        let chain_hub: Arc<dyn LightingDivisionHub> = host.clone();
+
+        let chainable = self
+            .dynamic_chain_channels
+            .get()
+            .cloned()
+            .unwrap_or_default();
+        let mut out = Vec::new();
+        for d in detected {
+            let Some(accessory) = self
+                .dynamic_accessories
+                .get()
+                .unwrap_or(&self.accessories)
+                .iter()
+                .find(|a| a.id == d.accessory)
+            else {
+                log::debug!(
+                    "plugin '{}': unknown accessory 0x{:02x}",
+                    self.plugin_id,
+                    d.accessory
+                );
+                continue;
+            };
+            let channel_str = d.channel.to_string();
+            let owned_cooling = chainable
+                .iter()
+                .find(|channel| channel.channel_id == channel_str)
+                .and_then(|channel| channel.cooling_channel.clone());
+            let leaf: Arc<dyn Device> = Arc::new(ChainLeaf::new(
+                DeviceId::sanitized(&format!("{}_acc_{}_{}", self.id, channel_str, d.accessory)),
+                self.id.clone(),
+                self.vendor.clone(),
+                channel_str.clone(),
+                owned_cooling,
+                accessory,
+                chain_hub.clone(),
+                cooling_hub.clone(),
+            ));
+            if let Err(e) = leaf.initialize().await {
+                log::warn!("plugin '{}' child init failed: {e:#}", self.plugin_id);
+                continue;
+            }
+            out.push(DiscoveredChainAccessory {
+                channel_id: channel_str,
+                device: leaf,
+            });
+        }
+        out
+    }
+
+    /// Integration path: one full `LuaDevice` per controller the plugin's
+    /// `enumerate_controllers` reports. Each controller advertises its own
+    /// capabilities (synthesized into a child manifest) and gets its own Lua VM,
+    /// seeded with the controller index so the shared script routes each call to
+    /// the right remote controller. All children share the root's single
+    /// connection, so their frame writes serialise behind one socket lock and
+    /// sibling controllers stay in phase.
+    async fn discover_controllers(&self) -> Vec<Arc<dyn Device>> {
+        let Some(worker) = &self.worker else {
+            return Vec::new();
+        };
+        let detected = match worker.enumerate_controllers().await {
+            Ok(d) => d,
+            Err(e) => {
+                log::warn!("plugin '{}' enumerate_controllers: {e:#}", self.plugin_id);
+                return Vec::new();
+            }
+        };
+        let Some(ctx) = self.child_build_ctx() else {
+            return Vec::new();
+        };
+        let mut out = Vec::new();
+        for controller in &detected {
+            if let Some(child) = self.build_child(controller, &ctx).await {
+                out.push(child);
+            }
+        }
+        out
+    }
+
+    /// `None` when the integration root is missing its factory/manifest (a bug).
+    fn child_build_ctx(&self) -> Option<ChildBuildCtx> {
+        let (Some(worker), Some(transport), Some(root_manifest)) = (
+            self.worker.clone(),
+            self.transport.clone(),
+            self.root_manifest.clone(),
+        ) else {
+            log::error!(
+                "plugin '{}': integration root missing child-worker factory or manifest — this is a daemon bug",
+                self.plugin_id
+            );
+            return None;
+        };
+        let config = match self.notify.upgrade() {
+            Some(app) => {
+                let granted = app.registry.granted_for(&root_manifest.plugin_id);
+                app.registry.resolved_config_for(
+                    app.secret_store.as_ref(),
+                    &root_manifest.plugin_id,
+                    &granted,
+                )
+            }
+            None => HashMap::new(),
+        };
+        let identity_scope = if self.plugin_type == PluginKind::Integration
+            && root_manifest.transports.tcp.is_some()
+        {
+            let tcp = root_manifest.transports.tcp.clone().unwrap_or_default();
+            crate::domain::registry::identity::integration_scope(
+                config
+                    .get(&tcp.host_key)
+                    .map(crate::domain::plugin::ResolvedConfigValue::to_config_string)
+                    .as_deref(),
+                config
+                    .get(&tcp.port_key)
+                    .map(crate::domain::plugin::ResolvedConfigValue::to_config_string)
+                    .as_deref(),
+            )
+        } else {
+            crate::domain::registry::identity::IdentityScope::Local
+        };
+        Some(ChildBuildCtx {
+            worker,
+            transport,
+            root_manifest,
+            identity_scope,
+        })
+    }
+
+    /// Build one integration controller as a child `LuaDevice` sharing the
+    /// root's [`RuntimeState`]. Initialization is deliberately deferred to the
+    /// central registration lifecycle, which first checks whether this child is
+    /// disabled. `None` on connect/build failure. Shared by first-time discovery
+    /// and `resync_children`.
+    async fn build_child(
+        &self,
+        controller: &DetectedController,
+        ctx: &ChildBuildCtx,
+    ) -> Option<Arc<dyn Device>> {
+        self.dynamic_child_ids
+            .write()
+            .insert(controller.index, child_device_id(&self.id, controller));
+        // `new_cyclic` so a controller that itself declares `chain` can hand its
+        // accessories a `FanHub` back-reference (nested chain).
+        let child = Arc::new_cyclic(|weak| {
+            let name = controller.name.clone();
+            let dev_match = DevMatch {
+                transport: self.transport_kind.to_owned(),
+                index: Some(controller.index),
+                key: controller.key.clone(),
+                name: Some(name.clone()),
+                extra: controller.extra.clone(),
+                ..Default::default()
+            };
+            let mut d = LuaDevice::new(LuaDeviceParts {
+                id: child_device_id(&self.id, controller),
+                manifest: &ctx.root_manifest,
+                spec: None,
+                notify: self.notify.clone(),
+                runtime: self.runtime.clone(),
+                worker: LuaDeviceWorker::Child(Box::new(LuaDeviceChildParts {
+                    dev_match,
+                    worker: ctx.worker.clone(),
+                    transport: ctx.transport.clone(),
+                    http: self.http.clone(),
+                    name,
+                    vendor: self.vendor.clone(),
+                    device_type: controller.device_type,
+                    transport_kind: self.transport_kind,
+                })),
+            });
+            d.set_self_ref(weak.clone());
+            d
+        });
+        let identity = DeviceIdentity {
+            scope: Some(ctx.identity_scope.clone()),
+            serial: crate::domain::registry::identity::normalize_serial(
+                controller.serial.as_deref(),
+            ),
+            location: controller
+                .location
+                .clone()
+                .and_then(super::worker::ControllerLocation::into_key),
+            usb: None,
+            usb_address: None,
+        };
+        child.set_identity(identity);
+        Some(child)
+    }
+}
+
+/// The `integration_id` a plugin device advertises: `Some(plugin_id)` only for
+/// the integration *root* (the SDK client the GUI hides under Integrations).
+/// The controllers it exposes as children report `None` so they stay listable
+/// and remain eligible for duplicate-device conflict detection against the
+/// native driver for the same hardware.
+fn integration_root_id(
+    plugin_type: PluginKind,
+    plugin_id: &PluginId,
+    is_child: bool,
+) -> Option<PluginId> {
+    (plugin_type == PluginKind::Integration && !is_child).then(|| plugin_id.clone())
+}
+
+struct PollPause<'a>(&'a LuaDevice);
+
+impl<'a> PollPause<'a> {
+    fn new(device: &'a LuaDevice) -> Self {
+        device.set_polling_paused(true);
+        PollPause(device)
+    }
+}
+
+impl Drop for PollPause<'_> {
+    fn drop(&mut self) {
+        self.0.set_polling_paused(false);
+    }
+}
+
+#[async_trait]
+impl LcdCapability for LuaDevice {
+    fn lcd_descriptor(&self) -> LcdDescriptor {
+        self.lcd
+            .as_ref()
+            .map(LcdFacet::descriptor)
+            .unwrap_or_else(|| LcdFacet::default().descriptor())
+    }
+
+    fn lcd_state(&self) -> &LcdStateSlot {
+        LcdFacet::slot(self.lcd.as_ref())
+    }
+
+    fn needs_rgb_restore_after_upload(&self) -> bool {
+        self.lcd.as_ref().is_some_and(LcdFacet::needs_rgb_restore)
+    }
+
+    /// One rendered engine frame. Rotation/brightness/mode live in the slot and
+    /// are passed to the plugin so it can pre-rotate and pick the stream path.
+    async fn stream_frame(&self, rgba: &[u8], width: u32, height: u32) -> Result<()> {
+        let rotation = self.lcd_state().rotation().degrees();
+        let raw = self.lcd_state().raw_streaming();
+        let brightness = self.lcd_state().brightness();
+        // The bulk transfer owns the transport; silence the status poll meanwhile.
+        let _pause = PollPause::new(self);
+        let result = self
+            .worker()?
+            .lcd_stream_frame(rgba.to_vec(), width, height, rotation, raw, brightness)
+            .await;
+        self.track(result).await
+    }
+
+    async fn set_image(&self, data: &[u8]) -> Result<()> {
+        let rotation = self.lcd_state().rotation().degrees();
+        let _pause = PollPause::new(self);
+        let result = self.worker()?.lcd_set_image(data.to_vec(), rotation).await;
+        self.track(result).await
+    }
+
+    async fn set_brightness(&self, brightness: u8) -> Result<()> {
+        let rotation = self.lcd_state().rotation().degrees();
+        let result = self
+            .worker()?
+            .lcd_set_brightness(brightness, rotation)
+            .await;
+        self.track(result).await?;
+        self.lcd_state().set_brightness(brightness);
+        Ok(())
+    }
+
+    async fn set_rotation(&self, degrees: u32) -> Result<()> {
+        let brightness = self.lcd_state().brightness();
+        let result = self.worker()?.lcd_set_rotation(brightness, degrees).await;
+        self.track(result).await?;
+        self.lcd_state()
+            .set_rotation(ScreenRotation::from_degrees(degrees));
+        Ok(())
+    }
+
+    async fn reset_to_default(&self) -> Result<()> {
+        let result = self.worker()?.lcd_reset().await;
+        self.track(result).await
+    }
+}
+
+impl LuaDevice {
+    fn dpi(&self) -> Result<&DpiFacet> {
+        self.dpi
+            .as_ref()
+            .ok_or_else(|| anyhow::anyhow!("'{}' does not declare dpi", self.id))
+    }
+
+    async fn refresh_dpi_status(&self) -> Result<()> {
+        let Some(facet) = &self.dpi else {
+            return Ok(());
+        };
+        if !self.caps.read().contains(&Cap::Dpi) {
+            return Ok(());
+        }
+        if let Some(dpi) = self.worker()?.dpi_status().await? {
+            if let Some(host_steps) = facet.refresh(&dpi) {
+                match facet.validate_steps(&host_steps) {
+                    Ok(()) => {
+                        let result = self.worker()?.dpi_set_steps(&host_steps).await;
+                        self.track(result).await?;
+                        facet.record_steps(host_steps);
+                    }
+                    Err(error) => log::warn!(
+                        "'{}' keeps the device's DPI steps: saved host steps {host_steps:?} are invalid: {error}",
+                        self.id
+                    ),
+                }
+            }
+        }
+        Ok(())
+    }
+}
+
+#[async_trait]
+impl DpiCapability for LuaDevice {
+    fn state_key(&self) -> &'static str {
+        "dpi"
+    }
+
+    fn save_state(&self) -> serde_json::Value {
+        self.dpi.as_ref().and_then(DpiFacet::host_steps).map_or(
+            serde_json::Value::Null,
+            |steps| serde_json::json!({ "steps": steps }),
+        )
+    }
+
+    async fn restore_state(&self, value: &serde_json::Value) -> bool {
+        let Some(steps) = value.get("steps") else {
+            return true;
+        };
+        let Ok(steps) = serde_json::from_value::<Vec<u16>>(steps.clone()) else {
+            return false;
+        };
+        let Ok(facet) = self.dpi() else {
+            return false;
+        };
+        if facet.validate_steps(&steps).is_err() {
+            return false;
+        }
+        if facet.is_onboard() {
+            facet.remember_host_steps(steps);
+            return true;
+        }
+        self.set_dpi_steps(steps).await.is_ok()
+    }
+
+    async fn dpi_status(&self) -> DpiStatus {
+        if let Err(error) = self.refresh_dpi_status().await {
+            log::debug!("[{}] refreshing DPI state: {error:#}", self.id);
+        }
+        self.dpi
+            .as_ref()
+            .map(DpiFacet::status)
+            .unwrap_or_else(|| DpiFacet::default().status())
+    }
+
+    async fn set_dpi_steps(&self, steps: Vec<u16>) -> Result<()> {
+        let facet = self.dpi()?;
+        facet.validate_steps(&steps)?;
+        let result = self.worker()?.dpi_set_steps(&steps).await;
+        self.track(result).await?;
+        facet.record_steps(steps);
+        self.refresh_dpi_status().await
+    }
+
+    async fn set_dpi_index(&self, index: usize) -> Result<()> {
+        let facet = self.dpi()?;
+        let value = facet.step_at(index)?;
+        let result = self.worker()?.dpi_set(value).await;
+        self.track(result).await?;
+        facet.record_index(index, value);
+        Ok(())
+    }
+
+    async fn set_dpi_direct(&self, dpi: u16) -> Result<()> {
+        let facet = self.dpi()?;
+        let value = facet.clamp(dpi);
+        let result = self.worker()?.dpi_set(value).await;
+        self.track(result).await?;
+        facet.record_current(value);
+        Ok(())
+    }
+}
+
+#[async_trait]
+impl ChoiceCapability for LuaDevice {
+    fn choice_cache(&self) -> &ChoiceStateCache {
+        &self.active_controls().choice_cache
+    }
+
+    async fn to_wire(&self) -> Option<DeviceCapability> {
+        self.active_controls().choices_wire()
+    }
+
+    async fn set_choice(&self, key: &str, selected: usize) -> Result<()> {
+        self.active_controls().validate_choice(key, selected)?;
+        let result = self.worker()?.choice_set(key, selected).await;
+        self.track(result).await?;
+        self.active_controls().choice_cache.record(key, selected);
+        Ok(())
+    }
+}
+
+#[async_trait]
+impl RangeCapability for LuaDevice {
+    fn range_cache(&self) -> &RangeStateCache {
+        &self.active_controls().range_cache
+    }
+
+    fn range_is_writable(&self, key: &str) -> bool {
+        !self
+            .active_controls()
+            .ranges
+            .iter()
+            .any(|range| range.key == key && range.read_only)
+    }
+
+    async fn to_wire(&self) -> Option<DeviceCapability> {
+        self.active_controls().ranges_wire()
+    }
+
+    async fn set_range(&self, key: &str, value: i32) -> Result<()> {
+        let value = self.active_controls().clamp_range(key, value)?;
+        let result = self.worker()?.range_set(key, value).await;
+        self.track(result).await?;
+        self.active_controls().range_cache.record(key, value);
+        Ok(())
+    }
+}
+
+#[async_trait]
+impl BooleanCapability for LuaDevice {
+    fn boolean_is_writable(&self, key: &str) -> bool {
+        !self
+            .active_controls()
+            .booleans
+            .iter()
+            .any(|boolean| boolean.key == key && boolean.read_only)
+    }
+
+    async fn get_booleans(&self) -> Result<Vec<Boolean>> {
+        let mut live = self.status.booleans.lock().clone();
+        self.active_controls().backfill_booleans(&mut live);
+        Ok(live)
+    }
+
+    async fn set_boolean(&self, key: &str, value: bool) -> Result<()> {
+        let result = self.worker()?.boolean_set(key, value).await;
+        self.track(result).await?;
+        self.active_controls().bool_cache.record(key, value);
+        if let Some(current) = self
+            .status
+            .booleans
+            .lock()
+            .iter_mut()
+            .find(|boolean| boolean.key == key)
+        {
+            current.value = value;
+        }
+        match self.dpi.as_ref().map_or(ModeSwitch::NotModeControl, |dpi| {
+            dpi.switch_mode(key, value)
+        }) {
+            ModeSwitch::NotModeControl => {}
+            ModeSwitch::Host(Some(steps)) => {
+                self.set_dpi_steps(steps).await?;
+                self.refresh_dpi_status().await?;
+            }
+            ModeSwitch::Host(None) | ModeSwitch::Onboard => self.refresh_dpi_status().await?,
+        }
+        Ok(())
+    }
+
+    fn bool_cache(&self) -> Option<&BoolStateCache> {
+        Some(&self.active_controls().bool_cache)
+    }
+}
+
+#[async_trait]
+impl ActionCapability for LuaDevice {
+    async fn trigger_action(&self, key: &str) -> Result<()> {
+        if !self.active_controls().has_action(key) {
+            anyhow::bail!("unknown action key: {key}");
+        }
+        let result = self.worker()?.action_trigger(key).await;
+        self.track(result).await
+    }
+
+    async fn to_wire(&self) -> Option<DeviceCapability> {
+        self.active_controls().actions_wire()
+    }
+}
+
+#[async_trait]
+impl BatteryCapability for LuaDevice {
+    async fn get_batteries(&self) -> Result<Vec<Battery>> {
+        Ok(self.status.batteries.lock().clone())
+    }
+}
+
+#[async_trait]
+impl ConnectionCapability for LuaDevice {
+    async fn connection_status(&self) -> Option<ConnectionStatus> {
+        self.status.connection.lock().clone()
+    }
+}
+
+#[async_trait]
+impl EqualizerCapability for LuaDevice {
+    async fn get_equalizer(&self) -> Result<Equalizer> {
+        self.status
+            .equalizer
+            .lock()
+            .clone()
+            .ok_or_else(|| anyhow::anyhow!("equalizer not sampled yet"))
+    }
+
+    async fn set_eq_preset(&self, preset_index: usize) -> Result<()> {
+        let worker = self.worker()?;
+        let result = worker.equalizer_set_preset(preset_index).await;
+        self.track(result).await?;
+        match worker.equalizer_get().await {
+            Ok(equalizer) => *self.status.equalizer.lock() = Some(equalizer),
+            Err(_) => {
+                if let Some(equalizer) = self.status.equalizer.lock().as_mut() {
+                    equalizer.selected_preset = preset_index;
+                }
+            }
+        }
+        Ok(())
+    }
+
+    async fn set_eq_bands(&self, values: &[f32]) -> Result<()> {
+        let worker = self.worker()?;
+        let result = worker.equalizer_set_bands(values).await;
+        self.track(result).await?;
+        if let Ok(equalizer) = worker.equalizer_get().await {
+            *self.status.equalizer.lock() = Some(equalizer);
+        }
+        Ok(())
+    }
+
+    fn current_state(&self) -> Option<Equalizer> {
+        self.status.equalizer.lock().clone()
+    }
+}
+
+#[async_trait]
+impl PairingCapability for LuaDevice {
+    async fn start_pairing(&self, timeout_secs: u8) -> Result<()> {
+        let result = self.worker()?.pairing_start(timeout_secs).await;
+        self.track(result).await
+    }
+
+    async fn stop_pairing(&self) -> Result<()> {
+        let result = self.worker()?.pairing_stop().await;
+        self.track(result).await
+    }
+
+    /// Runs the plugin's hardware-side unpair. The receiver use case follows
+    /// this by reconciling the controller's explicitly owned children, which
+    /// removes the departed paired slot from the registry.
+    async fn unpair(&self, slot: u8) -> Result<Option<Arc<dyn Device>>> {
+        let result = self.worker()?.pairing_unpair(slot).await;
+        self.track(result).await?;
+        Ok(None)
+    }
+
+    async fn to_wire(&self) -> Option<DeviceCapability> {
+        let status = self.worker().ok()?.pairing_status().await.ok()?;
+        Some(DeviceCapability::Pairing(status))
+    }
+}
+
+#[async_trait]
+impl OnboardProfilesCapability for LuaDevice {
+    async fn switch_profile(&self, slot: u16) -> Result<()> {
+        let result = self.worker()?.onboard_switch_profile(slot).await;
+        self.track(result).await?;
+        self.refresh_dpi_status().await
+    }
+
+    async fn restore_profile(&self, slot: u16) -> Result<()> {
+        let result = self.worker()?.onboard_restore_profile(slot).await;
+        self.track(result).await?;
+        self.refresh_dpi_status().await
+    }
+
+    async fn set_profile_enabled(&self, slot: u16, enabled: bool) -> Result<()> {
+        let result = self
+            .worker()?
+            .onboard_set_profile_enabled(slot, enabled)
+            .await;
+        self.track(result).await?;
+        self.refresh_dpi_status().await
+    }
+
+    async fn to_wire(&self) -> Option<DeviceCapability> {
+        let profiles = self.worker().ok()?.onboard_profiles_get().await.ok()?;
+        Some(DeviceCapability::OnboardProfiles(profiles))
+    }
+}
+
+impl LuaDevice {
+    fn key_remap(&self) -> Result<&KeyRemapFacet> {
+        self.key_remap
+            .as_ref()
+            .ok_or_else(|| anyhow::anyhow!("'{}' does not declare key_remap", self.id))
+    }
+}
+
+#[async_trait]
+impl KeyRemapCapability for LuaDevice {
+    fn state_key(&self) -> &'static str {
+        "key_remap"
+    }
+
+    fn save_state(&self) -> serde_json::Value {
+        let mappings = self
+            .key_remap
+            .as_ref()
+            .map(KeyRemapFacet::saved)
+            .unwrap_or_default();
+        serde_json::json!({ "mappings": mappings })
+    }
+
+    async fn restore_state(&self, value: &serde_json::Value) -> bool {
+        let Some(value) = value.get("mappings") else {
+            return true;
+        };
+        let Ok(mappings) = serde_json::from_value::<Vec<ButtonMapping>>(value.clone()) else {
+            return false;
+        };
+        let Ok(facet) = self.key_remap() else {
+            return false;
+        };
+        if mappings
+            .iter()
+            .any(|mapping| facet.validate(mapping).is_err())
+        {
+            return false;
+        }
+        let Ok(worker) = self.worker() else {
+            return false;
+        };
+        if self
+            .track(worker.key_remap_reset_all().await)
+            .await
+            .is_err()
+        {
+            return false;
+        }
+        facet.clear();
+        for mapping in mappings {
+            if self.set_button_mapping(mapping).await.is_err() {
+                return false;
+            }
+        }
+        true
+    }
+
+    async fn get_key_remap_status(&self) -> KeyRemapStatus {
+        let snapshot = self
+            .key_remap
+            .as_ref()
+            .map(KeyRemapFacet::snapshot)
+            .unwrap_or_else(|| KeyRemapFacet::default().snapshot());
+        let host_mode_active = match &self.worker {
+            Some(w) => w.key_remap_host_mode_active().await,
+            None => false,
+        };
+        KeyRemapStatus {
+            buttons: snapshot.buttons,
+            mappings: snapshot.mappings,
+            requires_host_mode: snapshot.requires_host_mode,
+            host_mode_active,
+        }
+    }
+
+    async fn set_button_mapping(&self, mapping: ButtonMapping) -> Result<()> {
+        let facet = self.key_remap()?;
+        facet.validate(&mapping)?;
+        let result = self.worker()?.key_remap_set_mapping(mapping.clone()).await;
+        self.track(result).await?;
+        facet.record(mapping);
+        Ok(())
+    }
+
+    async fn reset_button_mapping(&self, cid: u16) -> Result<()> {
+        let facet = self.key_remap()?;
+        if let Some(mapping) = facet.default_for(cid) {
+            self.set_button_mapping(mapping).await
+        } else {
+            let result = self.worker()?.key_remap_reset(cid).await;
+            self.track(result).await?;
+            facet.forget(cid);
+            Ok(())
+        }
+    }
+
+    async fn reset_all_button_mappings(&self) -> Result<()> {
+        let facet = self.key_remap()?;
+        let result = self.worker()?.key_remap_reset_all().await;
+        self.track(result).await?;
+        facet.clear();
+        for mapping in facet.defaults() {
+            self.set_button_mapping(mapping).await?;
+        }
+        Ok(())
+    }
+}
+
+#[async_trait]
+impl KeyboardLayoutCapability for LuaDevice {
+    async fn keyboard_layout_status(&self) -> KeyboardLayoutStatus {
+        self.lighting.layout_status(&self.keyboard_layout)
+    }
+}
+
+#[async_trait]
+impl LightingDivisionAdapter for LuaDevice {
+    fn parent_id(&self) -> DeviceId {
+        self.id.clone()
+    }
+    fn channels(&self) -> Vec<ChannelDescriptor> {
+        // `LightingDivisionHost` reads this live, so channels reported by
+        // `initialize` appear even though the host was built before it ran.
+        self.dynamic_chain_channels
+            .get()
+            .cloned()
+            .unwrap_or_default()
+    }
+    async fn write_divided_frame(&self, channel_id: &str, bytes: &[u8]) -> Result<()> {
+        let result = self.worker()?.write_lighting_frame(channel_id, bytes).await;
+        self.track(result).await
+    }
+}
+
+#[async_trait]
+impl CoolingHub for LuaDevice {
+    async fn get_cooling_status(&self, channel: &str) -> Result<CoolingChannel> {
+        if let Some(status) = self.status.cooling.lock().get(channel).cloned() {
+            return Ok(status);
+        }
+        self.track(self.worker()?.cooling_status(channel).await)
+            .await
+    }
+    async fn set_cooling_duty(&self, channel: &str, duty: u8) -> Result<()> {
+        self.track(self.worker()?.cooling_set_duty(channel, duty).await)
+            .await
+    }
+    fn cached_cooling_status(&self, channel: &str) -> Option<CoolingChannel> {
+        self.status.cooling.lock().get(channel).cloned()
+    }
+}
+
+#[cfg(test)]
+mod tests {
+    use super::*;
+    use crate::domain::device::LightingCapability;
+    use crate::infrastructure::drivers::transports::mock::test_transport::MockTransport;
+    use crate::infrastructure::drivers::transports::Transport;
+    use halod_shared::types::{ButtonAction, DpiMode};
+
+    fn test_manifest(
+        id: &str,
+        capabilities: &[&str],
+        script: &str,
+    ) -> (tempfile::TempDir, PluginManifest) {
+        let tmp = tempfile::tempdir().unwrap();
+        let dir = tmp.path().join(id);
+        std::fs::create_dir_all(&dir).unwrap();
+        let capabilities = capabilities.join(", ");
+        std::fs::write(
+            dir.join("plugin.yaml"),
+            format!(
+                "id: {id}\nversion: 1.0.0\napi: \"3.0\"\ncapabilities: [{capabilities}]\ntransports:\n  hid:\n    report_size: 8\ndevices:\n  - vendor: Test\n    model: Device\n    match:\n      hid: {{ vid: 1, pid: 2 }}\n"
+            ),
+        )
+        .unwrap();
+        std::fs::write(dir.join("main.lua"), script).unwrap();
+        let manifest = crate::domain::plugin::parse_manifest_from_dir(&dir).unwrap();
+        (tmp, manifest)
+    }
+
+    fn hid_match() -> DevMatch {
+        DevMatch {
+            transport: "hid".into(),
+            pid: Some(2),
+            ..Default::default()
+        }
+    }
+
+    fn hid_device(id: &str, manifest: &PluginManifest, transport: Arc<dyn Transport>) -> LuaDevice {
+        LuaDevice::new(LuaDeviceParts {
+            id: id.parse().unwrap(),
+            manifest,
+            spec: Some(&manifest.devices[0]),
+            notify: Weak::new(),
+            runtime: Some(Arc::new(Mutex::new(RuntimeState::OpeningTransport))),
+            worker: LuaDeviceWorker::Spawn(Box::new(LuaDeviceSpawnParts {
+                dev_match: hid_match(),
+                transport: PluginIo::Stream {
+                    transport,
+                    usb: None,
+                },
+                handle: tokio::runtime::Handle::current(),
+                granted: Vec::new(),
+                config: HashMap::new(),
+                data: Default::default(),
+            })),
+        })
+    }
+
+    #[tokio::test(flavor = "multi_thread", worker_threads = 2)]
+    async fn manifest_control_layout_reaches_the_wire_device() {
+        let tmp = tempfile::tempdir().unwrap();
+        let dir = tmp.path().join("layout_plug");
+        std::fs::create_dir_all(&dir).unwrap();
+        std::fs::write(
+            dir.join("plugin.yaml"),
+            "id: layout_plug\nversion: 1.0.0\napi: \"3.0\"\ncapabilities: [controls]\ntransports:\n  hid:\n    report_size: 8\ndevices:\n  - vendor: Test\n    model: Device\n    match:\n      hid: { vid: 1, pid: 2 }\n    control_layout:\n      - { category: Microphone, order: 0, column: 0 }\n      - { category: Noise Cancelling, order: 1, column: 1 }\n",
+        )
+        .unwrap();
+        std::fs::write(dir.join("main.lua"), "return {}").unwrap();
+        let manifest = crate::domain::plugin::parse_manifest_from_dir(&dir).unwrap();
+
+        let device = LuaDevice::new(LuaDeviceParts {
+            id: "layout_plug_0".parse().unwrap(),
+            manifest: &manifest,
+            spec: Some(&manifest.devices[0]),
+            notify: Weak::new(),
+            runtime: None,
+            worker: LuaDeviceWorker::None,
+        });
+
+        let wire = device.serialize().await;
+        assert_eq!(
+            wire.control_layout
+                .iter()
+                .map(|l| (l.category.as_str(), l.column, l.span))
+                .collect::<Vec<_>>(),
+            vec![("Microphone", 0, 1), ("Noise Cancelling", 1, 1)]
+        );
+    }
+
+    #[tokio::test(flavor = "multi_thread", worker_threads = 2)]
+    async fn wire_device_control_layout_is_empty_without_a_manifest_layout() {
+        let (_tmp, manifest) = test_manifest("no_layout", &["controls"], "return {}");
+        let device = LuaDevice::new(LuaDeviceParts {
+            id: "no_layout_0".parse().unwrap(),
+            manifest: &manifest,
+            spec: Some(&manifest.devices[0]),
+            notify: Weak::new(),
+            runtime: None,
+            worker: LuaDeviceWorker::None,
+        });
+
+        assert!(device.serialize().await.control_layout.is_empty());
+    }
+
+    #[tokio::test(flavor = "multi_thread", worker_threads = 2)]
+    async fn discovery_identity_reaches_conflict_detection_and_wire() {
+        let (_tmp, manifest) = test_manifest("identity", &["controls"], "return {}");
+        let device = LuaDevice::new(LuaDeviceParts {
+            id: "identity_0".parse().unwrap(),
+            manifest: &manifest,
+            spec: Some(&manifest.devices[0]),
+            notify: Weak::new(),
+            runtime: None,
+            worker: LuaDeviceWorker::None,
+        });
+        let identity = DeviceIdentity::serial(Some("ABC".into()));
+        device.set_identity(identity.clone());
+
+        assert_eq!(device.identity(), identity);
+        assert_eq!(
+            device.serialize().await.serial_number.as_deref(),
+            Some("abc")
+        );
+        assert_eq!(
+            device.conflict_origin(),
+            DeviceOrigin::Plugin("identity".parse().unwrap())
+        );
+    }
+
+    #[tokio::test(flavor = "multi_thread", worker_threads = 2)]
+    async fn spec_scoped_capabilities_narrow_the_device_surface() {
+        let tmp = tempfile::tempdir().unwrap();
+        let dir = tmp.path().join("scoped_caps");
+        std::fs::create_dir_all(&dir).unwrap();
+        std::fs::write(
+            dir.join("plugin.yaml"),
+            "id: scoped_caps\nversion: 1.0.0\napi: \"3.0\"\ncapabilities: [lighting, pairing]\ntransports:\n  hid:\n    report_size: 8\ndevices:\n  - vendor: Test\n    model: Receiver\n    capabilities: [pairing]\n    match:\n      hid: { vid: 1, pid: 2 }\n  - vendor: Test\n    model: Mouse\n    match:\n      hid: { vid: 1, pid: 3 }\n",
+        )
+        .unwrap();
+        std::fs::write(dir.join("main.lua"), "return {}").unwrap();
+        let manifest = crate::domain::plugin::parse_manifest_from_dir(&dir).unwrap();
+
+        let receiver = LuaDevice::new(LuaDeviceParts {
+            id: "scoped_caps_0".parse().unwrap(),
+            manifest: &manifest,
+            spec: Some(&manifest.devices[0]),
+            notify: Weak::new(),
+            runtime: None,
+            worker: LuaDeviceWorker::None,
+        });
+        assert!(matches!(
+            receiver.capabilities().as_slice(),
+            [CapabilityRef::Pairing(_)]
+        ));
+
+        let mouse = LuaDevice::new(LuaDeviceParts {
+            id: "scoped_caps_1".parse().unwrap(),
+            manifest: &manifest,
+            spec: Some(&manifest.devices[1]),
+            notify: Weak::new(),
+            runtime: None,
+            worker: LuaDeviceWorker::None,
+        });
+        assert!(matches!(
+            mouse.capabilities().as_slice(),
+            [CapabilityRef::Lighting(_), CapabilityRef::Pairing(_)]
+        ));
+    }
+
+    #[test]
+    fn declared_capabilities_expand_controls_and_preserve_order() {
+        let (_tmp, manifest) = test_manifest(
+            "declared_caps",
+            &["lighting", "controls", "cooling", "lighting_division"],
+            "return {}",
+        );
+        assert_eq!(
+            declared_caps(&manifest),
+            vec![
+                Cap::Lighting,
+                Cap::Cooling,
+                Cap::Choice,
+                Cap::Range,
+                Cap::Boolean,
+                Cap::Action,
+                Cap::LightingDivision,
+            ]
+        );
+    }
+
+    #[test]
+    fn runtime_capability_names_are_deduplicated_and_unknown_names_ignored() {
+        let caps = caps_named(&[
+            "controls".into(),
+            "lighting".into(),
+            "controls".into(),
+            "unknown".into(),
+        ]);
+        assert_eq!(
+            caps,
+            vec![
+                Cap::Choice,
+                Cap::Range,
+                Cap::Boolean,
+                Cap::Action,
+                Cap::Lighting,
+            ]
+        );
+    }
+
+    #[tokio::test]
+    async fn dpi_mode_and_profile_changes_refresh_stages() {
+        let script = r#"
+            local host = true
+            local software = { 400, 800, 1200 }
+            local onboard = { 800, 1200, 400, 2400, 3200 }
+            local function status()
+                return { min = 100, max = 3200, mode_control = "host_mode",
+                    steps = host and software or onboard, onboard = not host,
+                    current = host and 800 or onboard[1] }
+            end
+            return {
+                initialize = function() return { dpi = status() } end,
+                dpi_status = status,
+                set_boolean = function(dev, key, value) host = value end,
+                set_dpi_steps = function(dev, steps)
+                    if host then software = steps else onboard = steps end
+                end,
+                switch_profile = function(dev, slot) onboard = { 1600, 3200 } end,
+                restore_profile = function(dev, slot) onboard = { 400, 800 } end,
+            }
+        "#;
+        let (_tmp, manifest) = test_manifest(
+            "dpi_modes",
+            &["dpi", "controls", "onboard_profiles"],
+            script,
+        );
+        let dev = hid_device("dpi-0", &manifest, Arc::new(MockTransport::empty()));
+        assert!(dev.initialize().await.unwrap());
+        dev.set_boolean("host_mode", false).await.unwrap();
+        let status = dev.dpi_status().await;
+        assert_eq!(status.mode, DpiMode::Onboard);
+        assert_eq!(status.steps, vec![800, 1200, 400, 2400, 3200]);
+        assert_eq!(status.current_index, 0);
+        dev.set_dpi_steps(vec![400, 800, 1200, 2400, 3200])
+            .await
+            .unwrap();
+        dev.set_boolean("host_mode", true).await.unwrap();
+        assert_eq!(dev.dpi_status().await.steps, vec![400, 800, 1200]);
+        dev.set_boolean("host_mode", false).await.unwrap();
+        assert_eq!(
+            dev.dpi_status().await.steps,
+            vec![400, 800, 1200, 2400, 3200]
+        );
+        dev.switch_profile(2).await.unwrap();
+        assert_eq!(dev.dpi_status().await.steps, vec![1600, 3200]);
+        dev.restore_profile(2).await.unwrap();
+        assert_eq!(dev.dpi_status().await.steps, vec![400, 800]);
+        dev.close().await;
+    }
+
+    #[tokio::test]
+    async fn host_dpi_stages_survive_restart_in_saved_order() {
+        let script = r#"
+            return {
+                initialize = function()
+                    return { dpi = { min = 100, max = 3200,
+                        steps = { 800, 1200, 400, 2400, 3200 } } }
+                end,
+                set_dpi_steps = function(dev, steps) end,
+            }
+        "#;
+        let (_tmp, manifest) = test_manifest("dpi_persistence", &["dpi"], script);
+        let first = hid_device("dpi-0", &manifest, Arc::new(MockTransport::empty()));
+        assert!(first.initialize().await.unwrap());
+        let steps = vec![400, 800, 1200, 2400, 3200];
+        first.set_dpi_steps(steps.clone()).await.unwrap();
+        let saved = Device::save_state(&first).await;
+        first.close().await;
+
+        let restarted = hid_device("dpi-0", &manifest, Arc::new(MockTransport::empty()));
+        assert!(restarted.initialize().await.unwrap());
+        assert!(Device::load_state(&restarted, &saved).await);
+        assert_eq!(restarted.dpi_status().await.steps, steps);
+        assert!(
+            !DpiCapability::restore_state(&restarted, &serde_json::json!({ "steps": [70000] }))
+                .await
+        );
+        restarted.dpi.as_ref().unwrap().set_mode(DpiMode::Onboard);
+        assert_eq!(
+            DpiCapability::save_state(&restarted),
+            serde_json::json!({"steps": steps})
+        );
+        assert!(
+            DpiCapability::restore_state(&restarted, &serde_json::json!({ "steps": [1600] })).await
+        );
+        assert_eq!(restarted.dpi_status().await.steps, steps);
+        restarted.close().await;
+    }
+
+    #[tokio::test]
+    async fn remap_native_override_survives_restart_and_reset_rearms_default() {
+        let script = r#"
+            return {
+                initialize = function(dev)
+                    return { key_remap = {
+                        buttons = {{cid=5,label="DPI",divertable=true,group=0}},
+                        default_mappings = {{cid=5,base={type="dpi_cycle",direction="up"}}},
+                    } }
+                end,
+                set_button_mapping = function(dev,mapping)
+                    dev.transport:write(string.char(mapping.base.type=="native" and 0 or 1))
+                end,
+                reset_all_button_mappings = function(dev) dev.transport:write(string.char(2)) end,
+            }
+        "#;
+        let (_tmp, manifest) = test_manifest("remap_saved", &["key_remap"], script);
+        let first = hid_device("mouse", &manifest, Arc::new(MockTransport::empty()));
+        assert!(first.initialize().await.unwrap());
+        first
+            .set_button_mapping(ButtonMapping {
+                cid: 5,
+                base: ButtonAction::Native,
+                shifted: ButtonAction::Native,
+            })
+            .await
+            .unwrap();
+        let saved = Device::save_state(&first).await;
+        first.close().await;
+        let mock = Arc::new(MockTransport::empty());
+        let restarted = hid_device("mouse", &manifest, mock.clone());
+        assert!(restarted.initialize().await.unwrap());
+        assert!(Device::load_state(&restarted, &saved).await);
+        assert!(matches!(
+            restarted.get_key_remap_status().await.mappings[0].base,
+            ButtonAction::Native
+        ));
+        assert_eq!(*mock.written.lock(), vec![vec![1], vec![2], vec![0]]);
+        restarted.reset_button_mapping(5).await.unwrap();
+        assert!(matches!(
+            restarted.get_key_remap_status().await.mappings[0].base,
+            ButtonAction::DpiCycle { .. }
+        ));
+        assert_eq!(mock.written.lock().last(), Some(&vec![1]));
+        restarted.reset_all_button_mappings().await.unwrap();
+        assert_eq!(&mock.written.lock()[4..], &[vec![2], vec![1]]);
+        restarted.close().await;
+    }
+
+    #[tokio::test]
+    async fn saved_host_steps_survive_onboard_restart_and_mode_switch() {
+        let script = r#"
+            local host=false
+            local steps={400,800}
+            return {
+                initialize=function() return {
+                    dpi={min=100,max=3200,steps={400,800},current=800,onboard=true,mode_control="host_mode"},
+                    controls={booleans={{key="host_mode",label="Host mode"}}},booleans={host_mode=false}}
+                end,
+                set_boolean=function(dev,key,value) host=value end,
+                set_dpi_steps=function(dev,value) assert(host); steps=value end,
+                dpi_status=function() return {min=100,max=3200,steps=host and steps or {400,800},current=800,onboard=not host,mode_control="host_mode"} end,
+            }
+        "#;
+        let (_tmp, manifest) = test_manifest("dpi_modes", &["dpi", "controls"], script);
+        let dev = hid_device("mouse", &manifest, Arc::new(MockTransport::empty()));
+        assert!(dev.initialize().await.unwrap());
+        assert!(
+            DpiCapability::restore_state(&dev, &serde_json::json!({"steps":[1200,400,800]})).await
+        );
+        let saved = Device::save_state(&dev).await;
+        dev.close().await;
+        let restarted = hid_device("mouse", &manifest, Arc::new(MockTransport::empty()));
+        assert!(restarted.initialize().await.unwrap());
+        assert!(Device::load_state(&restarted, &saved).await);
+        assert_eq!(restarted.dpi_status().await.steps, vec![400, 800]);
+        restarted.set_boolean("host_mode", true).await.unwrap();
+        let status = restarted.dpi_status().await;
+        assert_eq!(status.steps, vec![1200, 400, 800]);
+        assert_eq!(status.current_dpi, 800);
+        assert_eq!(status.current_index, 2);
+        restarted.set_boolean("host_mode", false).await.unwrap();
+        assert_eq!(
+            DpiCapability::save_state(&restarted),
+            serde_json::json!({"steps":[1200,400,800]})
+        );
+        restarted.close().await;
+    }
+
+    #[tokio::test]
+    async fn host_steps_are_reapplied_after_the_plugin_reinitializes_them() {
+        let script = r#"
+            local steps={400,800,1600}
+            return {
+                initialize=function() return {
+                    dpi={min=100,max=3200,steps={400,800,1600},current=800,onboard=false},
+                    controls={booleans={{key="reinit",label="Reinit"}}},booleans={reinit=false}}
+                end,
+                set_boolean=function(dev,key,value) steps={400,800,1600} end,
+                set_dpi_steps=function(dev,value) steps=value end,
+                dpi_status=function() return {min=100,max=3200,steps=steps,current=800,onboard=false} end,
+            }
+        "#;
+        let (_tmp, manifest) = test_manifest("dpi_reinit", &["dpi", "controls"], script);
+        let dev = hid_device("mouse", &manifest, Arc::new(MockTransport::empty()));
+        assert!(dev.initialize().await.unwrap());
+        dev.set_dpi_steps(vec![1600, 400, 800]).await.unwrap();
+        dev.set_boolean("reinit", true).await.unwrap();
+        assert_eq!(dev.dpi_status().await.steps, vec![1600, 400, 800]);
+        assert_eq!(dev.dpi_status().await.steps, vec![1600, 400, 800]);
+        assert_eq!(
+            DpiCapability::save_state(&dev),
+            serde_json::json!({"steps":[1600,400,800]})
+        );
+        dev.close().await;
+    }
+
+    #[test]
+    fn every_manifest_capability_maps_to_a_runtime_capability() {
+        for name in crate::domain::plugin::manifest::SUPPORTED_CAPABILITIES {
+            assert!(
+                !cap_for(name).is_empty(),
+                "manifest capability '{name}' has no runtime mapping"
+            );
+        }
+    }
+
+    #[test]
+    fn every_runtime_capability_name_is_in_the_manifest_vocabulary() {
+        for name in CAPABILITY_NAMES {
+            assert!(
+                crate::domain::plugin::manifest::SUPPORTED_CAPABILITIES.contains(name),
+                "runtime capability '{name}' is not accepted by manifests"
+            );
+        }
+    }
+
+    #[test]
+    fn integration_id_names_only_the_root_not_child_controllers() {
+        // The root (non-child worker) is hidden under Integrations; the
+        // controllers it exposes as children stay listable and conflict-eligible.
+        assert_eq!(
+            integration_root_id(PluginKind::Integration, &"openrgb".parse().unwrap(), false)
+                .as_deref(),
+            Some("openrgb")
+        );
+        assert_eq!(
+            integration_root_id(PluginKind::Integration, &"openrgb".parse().unwrap(), true),
+            None
+        );
+        // A plain device plugin never claims an integration id.
+        assert_eq!(
+            integration_root_id(PluginKind::Device, &"acme".parse().unwrap(), false),
+            None
+        );
+    }
+
+    #[test]
+    fn device_only_keeps_plugin_identity_without_capabilities() {
+        let (_tmp, manifest) = test_manifest("identity_only", &[], "return {}");
+        let dev = LuaDevice::new(LuaDeviceParts {
+            id: "identity_only-0".parse().unwrap(),
+            manifest: &manifest,
+            spec: Some(&manifest.devices[0]),
+            notify: Weak::new(),
+            runtime: None,
+            worker: LuaDeviceWorker::None,
+        });
+        assert!(dev.capabilities().is_empty());
+        assert_eq!(dev.owning_plugin_id().as_deref(), Some("identity_only"));
+        assert!(dev.is_live());
+    }
+
+    #[test]
+    fn runtime_controls_validate_cache_and_render_wire_state() {
+        let runtime: InitControls = serde_yaml::from_str(
+            "choices:\n  - key: mode\n    label: Mode\n    options:\n      - { id: a, label: A }\n      - { id: b, label: B }\n    default: 0\nranges:\n  - key: hz\n    label: Hz\n    min: 100\n    max: 1000\n    default: 500\n    visible_when: { key: mode, equals: [1] }\nbooleans:\n  - key: snap\n    label: Angle Snap\n    category: Mouse\nactions:\n  - key: calibrate\n    label: Calibrate\n",
+        )
+        .unwrap();
+        let controls = Controls::from_runtime(runtime);
+
+        controls.validate_choice("mode", 1).unwrap();
+        controls.choice_cache.record("mode", 1);
+        assert!(controls.validate_choice("mode", 2).is_err());
+        let Some(DeviceCapability::Choice(choices)) = controls.choices_wire() else {
+            panic!("choice capability missing");
+        };
+        assert_eq!(choices[0].selected, 1);
+
+        let hz = controls.clamp_range("hz", 5000).unwrap();
+        assert_eq!(hz, 1000);
+        controls.range_cache.record("hz", hz);
+        assert!(controls.clamp_range("missing", 10).is_err());
+        let Some(DeviceCapability::Range(ranges)) = controls.ranges_wire() else {
+            panic!("range capability missing");
+        };
+        assert_eq!(ranges[0].value, 1000);
+        assert_eq!(ranges[0].visible_when.as_ref().unwrap().key, "mode");
+        assert_eq!(ranges[0].visible_when.as_ref().unwrap().equals, vec![1]);
+
+        let mut booleans = vec![Boolean {
+            key: "snap".into(),
+            value: true,
+            label: String::new(),
+            read_only: false,
+            category: String::new(),
+            visible_when: None,
+        }];
+        controls.backfill_booleans(&mut booleans);
+        assert_eq!(booleans[0].label, "Angle Snap");
+        assert_eq!(booleans[0].category, "Mouse");
+        assert!(controls.has_action("calibrate"));
+        assert!(!controls.has_action("missing"));
+    }
+
+    #[tokio::test(flavor = "multi_thread", worker_threads = 2)]
+    async fn initialize_narrows_capabilities_and_installs_runtime_descriptors() {
+        let script = r#"
+            return {
+              initialize = function(dev)
+                return {
+                  capabilities = { "lighting", "cooling" },
+                  channels = { { id = "ring", name = "Ring", led_count = 2,
+                              led_ids = { 7, 9 } } },
+                  cooling = { channels = {
+                    { id = "fan1", name = "Fan", kind = "fan", controllable = true },
+                  } },
+                }
+              end,
+            }
+        "#;
+        let (_tmp, manifest) = test_manifest(
+            "runtime_descriptors",
+            &["lighting", "cooling", "sensors"],
+            script,
+        );
+        let dev = hid_device(
+            "runtime_descriptors-0",
+            &manifest,
+            Arc::new(MockTransport::empty()),
+        );
+        assert!(dev.initialize().await.unwrap());
+        let caps = dev.capabilities();
+        assert!(caps
+            .iter()
+            .any(|cap| matches!(cap, CapabilityRef::Lighting(_))));
+        // Cooling channels stay on the device that declares them.
+        assert!(caps
+            .iter()
+            .any(|cap| matches!(cap, CapabilityRef::Cooling(_))));
+        assert!(!caps
+            .iter()
+            .any(|cap| matches!(cap, CapabilityRef::Controller(_))));
+        assert!(!caps
+            .iter()
+            .any(|cap| matches!(cap, CapabilityRef::Sensor(_))));
+        assert!(Controller::discover_children(&dev).await.is_empty());
+        assert_eq!(
+            LightingCapability::descriptor(&dev).channels[0].leds[0].id,
+            7
+        );
+        dev.close().await;
+    }
+
+    /// A chainable channel that declares `cooling_channel` and a plugin whose
+    /// `detect_accessories` reply is driven by `attached`.
+    fn owned_cooling_script(attached: bool) -> String {
+        format!(
+            r#"
+            return {{
+              initialize = function()
+                return {{
+                  channels = {{
+                    {{ id = "ring", name = "Pump Ring", topology = "ring", led_count = 24 }},
+                    {{ id = "0", name = "Fan chain", chainable = true, max_leds = 40,
+                       cooling_channel = "fan1" }},
+                  }},
+                  cooling = {{ channels = {{
+                    {{ id = "pump", name = "Pump", kind = "pump", controllable = true }},
+                    {{ id = "fan1", name = "Radiator fan", kind = "fan", controllable = true }},
+                  }} }},
+                  accessories = {{
+                    {{ id = 30, name = "F360 RGB Core", led_count = 24,
+                       topology = "rings", rings = 3, fan = true }},
+                  }},
+                }}
+              end,
+              detect_accessories = function()
+                return {}
+              end,
+              get_cooling_status = function(_, channel)
+                if channel ~= "pump" and channel ~= "fan1" then
+                  error("unknown cooling channel: " .. channel)
+                end
+                return {{ id = channel, name = channel, kind = "fan",
+                         controllable = true, duty = 50, rpm = 1000 }}
+              end,
+              set_cooling_duty = function(_, channel)
+                if channel ~= "pump" and channel ~= "fan1" then
+                  error("unknown cooling channel: " .. channel)
+                end
+              end,
+            }}
+        "#,
+            if attached {
+                "{ { channel = 0, accessory = 30 } }"
+            } else {
+                "{}"
+            }
+        )
+    }
+
+    async fn owned_cooling_device(
+        name: &str,
+        attached: bool,
+    ) -> (tempfile::TempDir, Arc<LuaDevice>) {
+        let script = owned_cooling_script(attached);
+        let (tmp, manifest) =
+            test_manifest(name, &["cooling", "lighting", "lighting_division"], &script);
+        let dev = Arc::new_cyclic(|weak| {
+            let mut dev = hid_device(
+                &format!("{name}-0"),
+                &manifest,
+                Arc::new(MockTransport::empty()),
+            );
+            dev.set_self_ref(weak.clone());
+            dev
+        });
+        let adapter: Arc<dyn crate::domain::device::chain::LightingDivisionAdapter> = dev.clone();
+        dev.install_chain_host(crate::domain::device::chain::LightingDivisionHost::new(
+            adapter,
+        ));
+        assert!(dev.initialize().await.unwrap());
+        (tmp, dev)
+    }
+
+    #[tokio::test(flavor = "multi_thread", worker_threads = 2)]
+    async fn detected_chain_child_takes_sole_ownership_of_its_declared_cooling_channel() {
+        let (_tmp, dev) = owned_cooling_device("owned_cooling_attached", true).await;
+        let children = Controller::discover_children(dev.as_ref()).await;
+
+        let fan = children
+            .iter()
+            .find(|child| child.id().contains("_acc_0_30"))
+            .expect("fan accessory was not discovered");
+        // The child drives the parent's "fan1" through its own single channel;
+        // the Lua script rejects any other source channel.
+        let cooling = fan.as_cooling().expect("fan child lost cooling");
+        assert_eq!(cooling.cooling_channels().len(), 1);
+        cooling.set_cooling_duty("fan", 65).await.unwrap();
+
+        // The parent keeps the pump and gives up the radiator fan entirely.
+        let root = dev.as_cooling().expect("root lost its pump");
+        assert_eq!(
+            root.cooling_channels()
+                .into_iter()
+                .map(|channel| channel.id)
+                .collect::<Vec<_>>(),
+            ["pump"]
+        );
+        assert!(root.cached_cooling_status().iter().all(|c| c.id != "fan1"));
+
+        root.restore_state(&serde_json::json!({
+            "pump": { "sensor_id": null, "points": [[30.0, 30.0], [80.0, 100.0]] },
+            "fan1": { "sensor_id": null, "points": [[30.0, 30.0], [80.0, 100.0]] }
+        }))
+        .await;
+        assert!(root.curve("pump").is_some());
+        assert!(root.curve("fan1").is_none());
+
+        dev.close().await;
+    }
+
+    #[tokio::test(flavor = "multi_thread", worker_threads = 2)]
+    async fn unclaimed_cooling_channel_stays_an_ordinary_parent_channel() {
+        let (_tmp, dev) = owned_cooling_device("owned_cooling_detached", false).await;
+        let children = Controller::discover_children(dev.as_ref()).await;
+        assert!(children.is_empty(), "nothing is attached to the chain");
+
+        let root = dev.as_cooling().expect("root lost its cooling");
+        assert_eq!(
+            root.cooling_channels()
+                .into_iter()
+                .map(|channel| channel.id)
+                .collect::<Vec<_>>(),
+            ["pump", "fan1"]
+        );
+        root.set_cooling_duty("fan1", 65).await.unwrap();
+
+        dev.close().await;
+    }
+
+    /// The sensor-hub shape: a `dynamic_children` root whose manifest
+    /// advertises cooling, but where only the enumerated `Fan N` children own
+    /// a PWM channel. The root must not present itself as a fan.
+    #[tokio::test(flavor = "multi_thread", worker_threads = 2)]
+    async fn a_dynamic_children_root_without_channels_is_not_a_cooling_device() {
+        let script = r#"
+            return {
+              initialize = function(dev)
+                if dev.match.key then
+                  return { ok = true, capabilities = { "cooling" },
+                    cooling = { channels = {
+                      { id = "fan", name = "Fan 1", kind = "fan", controllable = true },
+                    } } }
+                end
+                return { ok = true }
+              end,
+              enumerate_controllers = function(dev)
+                if dev.match.key then return {} end
+                return { { index = 0, key = "0", id = "superio_fan1", name = "Fan 1" } }
+              end,
+              get_cooling_status = function(_, channel)
+                return { id = channel, name = "Fan 1", kind = "fan",
+                         controllable = true, duty = 40, rpm = 900 }
+              end,
+              set_cooling_duty = function() end,
+            }
+        "#;
+        let (_tmp, mut manifest) = test_manifest("superio_root", &["sensors", "cooling"], script);
+        manifest.dynamic_children = true;
+        let dev = hid_device(
+            "superio_root-0",
+            &manifest,
+            Arc::new(MockTransport::empty()),
+        );
+        assert!(dev.initialize().await.unwrap());
+
+        let caps = dev.capabilities();
+        assert!(
+            !caps
+                .iter()
+                .any(|cap| matches!(cap, CapabilityRef::Cooling(_))),
+            "the controller declares no channel of its own"
+        );
+        assert!(caps
+            .iter()
+            .any(|cap| matches!(cap, CapabilityRef::Controller(_))));
+
+        let children = Controller::discover_children(&dev).await;
+        assert_eq!(children.len(), 1);
+        assert!(
+            children[0].as_controller().is_none(),
+            "only the root enumerates controllers"
+        );
+        dev.close().await;
+    }
+
+    #[tokio::test(flavor = "multi_thread", worker_threads = 2)]
+    async fn an_unreachable_child_degrades_alone() {
+        let script = r#"
+            local asleep = true
+            return {
+              initialize = function(dev)
+                if dev.match.key then
+                  return { ok = true, capabilities = { "lighting" },
+                    channels = { { id = "zone_0", name = "Zone", led_count = 1 } } }
+                end
+                return { ok = true }
+              end,
+              enumerate_controllers = function(dev)
+                if dev.match.key then return {} end
+                return {
+                  { index = 0, key = "0", id = "slot_one", name = "Slot One" },
+                  { index = 1, key = "1", id = "slot_two", name = "Slot Two" },
+                }
+              end,
+              apply = function(dev)
+                if dev.match.key == "0" and asleep then
+                  asleep = false
+                  error("device is asleep")
+                end
+              end,
+            }
+        "#;
+        let (_tmp, mut manifest) = test_manifest("receiver_root", &["lighting"], script);
+        manifest.dynamic_children = true;
+        let runtime = Arc::new(Mutex::new(RuntimeState::OpeningTransport));
+        let mut root = hid_device(
+            "receiver_root-0",
+            &manifest,
+            Arc::new(MockTransport::empty()),
+        );
+        root.runtime = Some(runtime.clone());
+        assert!(root.initialize().await.unwrap());
+
+        let children = Controller::discover_children(&root).await;
+        assert_eq!(children.len(), 2);
+        for child in &children {
+            assert!(child.initialize().await.unwrap());
+        }
+        let color = LightingState::Static {
+            color: halod_shared::types::RgbColor { r: 1, g: 2, b: 3 },
+        };
+        let unreachable = children[0].as_lighting().unwrap();
+        assert!(unreachable.apply(color.clone()).await.is_err());
+
+        assert!(!children[0].is_live(), "the failing child is degraded");
+        assert!(children[1].is_live(), "its sibling is untouched");
+        assert!(root.is_live(), "the receiver is untouched");
+        assert_eq!(*runtime.lock(), RuntimeState::Online);
+
+        assert!(unreachable.apply(color).await.is_ok());
+        assert!(children[0].is_live(), "a successful call revives the child");
+        root.close().await;
+    }
+
+    #[tokio::test(flavor = "multi_thread", worker_threads = 2)]
+    async fn chainable_channels_are_divisible_and_leave_the_plain_descriptor() {
+        let (_tmp, dev) = owned_cooling_device("chainable_descriptor", true).await;
+        let _ = Controller::discover_children(dev.as_ref()).await;
+
+        // The plain lighting descriptor holds only the non-chainable channel.
+        assert_eq!(
+            LightingCapability::descriptor(dev.as_ref())
+                .channels
+                .iter()
+                .map(|channel| channel.id.clone())
+                .collect::<Vec<_>>(),
+            ["ring"]
+        );
+
+        // The chain host mints the chainable one, and only it is divisible.
+        let host = dev.chain_host().expect("chainable device lost its host");
+        let chain = host.lighting_channels();
+        assert_eq!(chain.len(), 1);
+        assert_eq!(chain[0].id, "0");
+        assert!(matches!(
+            chain[0].division,
+            halod_shared::types::LightingDivision::Divisible { max_leds: 40, .. }
+        ));
+
+        dev.close().await;
+    }
+
+    #[tokio::test(flavor = "multi_thread", worker_threads = 2)]
+    async fn device_without_background_poll_refreshes_cooling_and_sensors_inline() {
+        let script = r#"
+            local sample = 0
+            return {
+              initialize = function()
+                return { cooling = { channels = {
+                  { id = "fan", name = "Fan", kind = "fan", controllable = true },
+                } } }
+              end,
+              read_status = function()
+                sample = sample + 1
+                return { sample = sample }
+              end,
+              get_cooling_status = function(dev, channel)
+                return { id = channel, name = "Fan", kind = "fan", controllable = true,
+                         duty = dev.status.sample }
+              end,
+              get_sensors = function(dev)
+                return {{ id = "temp", name = "Temperature", value = dev.status.sample,
+                          unit = "celsius", sensor_type = "temperature" }}
+              end,
+            }
+        "#;
+        let (_tmp, manifest) = test_manifest("inline_poll", &["cooling", "sensors"], script);
+        let mut dev = hid_device("inline_poll-0", &manifest, Arc::new(MockTransport::empty()));
+        assert!(dev.initialize().await.unwrap());
+        if let Some(task) = dev.poll_task.take() {
+            task.abort();
+            let _ = task.await;
+        }
+
+        let cooling = CoolingCapability::get_cooling_status(&dev, "fan")
+            .await
+            .unwrap();
+        let sensors = SensorCapability::get_sensors(&dev).await.unwrap();
+        assert_eq!(
+            sensors[0].value,
+            f64::from(cooling.duty.unwrap()) + 1.0,
+            "each inline telemetry request must run read_status first"
+        );
+        dev.close().await;
+    }
+
+    #[tokio::test]
+    async fn failed_key_mapping_arm_does_not_mark_device_ready() {
+        let script = r#"
+            local attempts = 0
+            return {
+                initialize = function(dev)
+                    return { key_remap = {
+                        buttons = { { cid = 5, label = "B5", divertable = true, group = 0 } },
+                        default_mappings = {
+                            { cid = 5, base = { type = "dpi_cycle", direction = "up" },
+                              shifted = { type = "native" } },
+                        },
+                    } }
+                end,
+                set_button_mapping = function(dev, mapping)
+                    attempts = attempts + 1
+                    if attempts == 1 then error("device still waking") end
+                    dev.transport:write(string.char(0xEE, mapping.cid))
+                end,
+            }
+        "#;
+        let (_tmp, manifest) = test_manifest("cold_rearm", &["key_remap"], script);
+        let mock = Arc::new(MockTransport::empty());
+        let dev = hid_device("cold_rearm-0", &manifest, mock.clone());
+        let error = dev.initialize().await.unwrap_err();
+        assert!(format!("{error:#}").contains("device still waking"));
+        assert!(!dev.is_live());
+        assert!(dev.initialize().await.unwrap());
+        assert!(dev.is_live());
+        assert_eq!(*mock.written.lock(), vec![vec![0xEE, 5]]);
+        dev.close().await;
+    }
+
+    #[tokio::test(flavor = "multi_thread", worker_threads = 2)]
+    async fn initialize_rearms_active_key_mappings_on_connect() {
+        let script = r#"
+            return {
+              initialize = function(dev)
+                return {
+                  key_remap = {
+                    buttons = { { cid = 5, label = "B5", divertable = true, group = 0 } },
+                    default_mappings = {
+                      { cid = 5, base = { type = "dpi_cycle", direction = "up" },
+                        shifted = { type = "native" } },
+                    },
+                  },
+                }
+              end,
+              set_button_mapping = function(dev, mapping)
+                dev.transport:write(string.char(0xEE, mapping.cid))
+              end,
+            }
+        "#;
+        let (_tmp, manifest) = test_manifest("rearm", &["key_remap"], script);
+        let mock = Arc::new(MockTransport::empty());
+        let dev = hid_device("rearm-0", &manifest, mock.clone());
+        assert!(dev.initialize().await.unwrap());
+        assert_eq!(
+            *mock.written.lock(),
+            vec![vec![0xEE, 5]],
+            "the seeded active default must be re-armed on the hardware at connect"
+        );
+        dev.close().await;
+    }
+
+    #[tokio::test(flavor = "multi_thread", worker_threads = 2)]
+    async fn rgb_frames_reach_the_transport_through_the_current_worker() {
+        let script = r#"
+            return {
+              initialize = function(dev)
+                return { channels = { { id = "ring", name = "Ring", led_count = 2 } } }
+              end,
+              write_frame = function(dev, channel, bytes)
+                assert(channel == "ring")
+                dev.transport:write(string.char(0xAB, table.unpack(bytes)))
+              end,
+            }
+        "#;
+        let (_tmp, manifest) = test_manifest("rgb_write", &["lighting"], script);
+        let mock = Arc::new(MockTransport::empty());
+        let dev = hid_device("rgb_write-0", &manifest, mock.clone());
+        assert!(dev.initialize().await.unwrap());
+        dev.write_frame("ring", &[1, 2, 3, 4, 5, 6]).await.unwrap();
+        assert_eq!(*mock.written.lock(), vec![vec![0xAB, 1, 2, 3, 4, 5, 6]]);
+        dev.close().await;
+    }
+
+    #[tokio::test(flavor = "multi_thread", worker_threads = 2)]
+    async fn failed_initialize_degrades_and_close_is_terminal() {
+        let (_tmp, manifest) = test_manifest(
+            "lifecycle",
+            &["lighting"],
+            "return { initialize = function(dev) error('broken') end }",
+        );
+        let runtime = Arc::new(Mutex::new(RuntimeState::OpeningTransport));
+        let mut dev = hid_device("lifecycle-0", &manifest, Arc::new(MockTransport::empty()));
+        dev.runtime = Some(runtime.clone());
+        assert!(dev.initialize().await.is_err());
+        assert_eq!(
+            *runtime.lock(),
+            RuntimeState::Degraded(DegradeReason::CallFailed)
+        );
+        dev.close().await;
+        assert_eq!(*runtime.lock(), RuntimeState::Closed);
+        assert!(!dev.is_live());
+        assert!(dev.initialize().await.is_err());
+    }
+
+    #[tokio::test(flavor = "multi_thread", worker_threads = 2)]
+    async fn deterministic_transport_error_makes_initialize_unrecoverable() {
+        let (_tmp, manifest) = test_manifest(
+            "fatal_init",
+            &[],
+            r#"return {
+                initialize = function(dev)
+                    dev.transport:run("sh", {})
+                    return true
+                end,
+            }"#,
+        );
+        let runtime = Arc::new(Mutex::new(RuntimeState::OpeningTransport));
+        let command = super::super::transport::CommandExecutor::new(["nvidia-smi".to_owned()]);
+        let dev = LuaDevice::new(LuaDeviceParts {
+            id: "fatal_init-0".parse().unwrap(),
+            manifest: &manifest,
+            spec: Some(&manifest.devices[0]),
+            notify: Weak::new(),
+            runtime: Some(runtime.clone()),
+            worker: LuaDeviceWorker::Spawn(Box::new(LuaDeviceSpawnParts {
+                dev_match: DevMatch {
+                    transport: "command".into(),
+                    ..Default::default()
+                },
+                transport: PluginIo::Command(command),
+                handle: tokio::runtime::Handle::current(),
+                granted: Vec::new(),
+                config: HashMap::new(),
+                data: Default::default(),
+            })),
+        });
+
+        assert!(dev.initialize().await.is_err());
+        assert!(dev.is_unrecoverable());
+        assert_eq!(*runtime.lock(), RuntimeState::Unrecoverable);
+        dev.close().await;
+    }
+
+    #[tokio::test(flavor = "multi_thread", worker_threads = 2)]
+    async fn initialize_false_stays_degraded_and_not_live() {
+        let (_tmp, manifest) = test_manifest(
+            "not_ready",
+            &["lighting"],
+            "return { initialize = function() return { ok = false } end }",
+        );
+        let runtime = Arc::new(Mutex::new(RuntimeState::OpeningTransport));
+        let mut dev = hid_device("not_ready-0", &manifest, Arc::new(MockTransport::empty()));
+        dev.runtime = Some(runtime.clone());
+
+        assert!(!dev.initialize().await.unwrap());
+        assert_eq!(
+            *runtime.lock(),
+            RuntimeState::Degraded(DegradeReason::CallFailed)
+        );
+        assert!(!dev.is_live());
+        dev.close().await;
+    }
+
+    #[tokio::test(flavor = "multi_thread", worker_threads = 2)]
+    async fn set_eq_preset_refreshes_cached_bands_to_the_new_preset() {
+        // Each preset carries a distinct curve; get_equalizer derives bands from the
+        // selected preset. Switching preset must leave the cache self-consistent —
+        // bands matching selected_preset, not the previously cached curve.
+        let script = r#"
+            local sel = 0
+            return {
+              initialize = function() return true end,
+              get_equalizer = function()
+                return {
+                  presets = { { id = "a", label = "A" }, { id = "b", label = "B" } },
+                  selected_preset = sel,
+                  editable = false,
+                  bands = { {
+                    index = 0, label = "60", min = -10, max = 10, step = 1,
+                    value = (sel == 0) and 0.0 or 5.0,
+                  } },
+                }
+              end,
+              set_eq_preset = function(dev, p) sel = p end,
+            }
+        "#;
+        let (_tmp, manifest) = test_manifest("eq_preset", &["equalizer"], script);
+        let dev = hid_device("eq_preset-0", &manifest, Arc::new(MockTransport::empty()));
+        assert!(dev.initialize().await.unwrap());
+
+        dev.refresh_status_cache().await;
+        assert_eq!(
+            dev.status.equalizer.lock().as_ref().unwrap().bands[0].value,
+            0.0
+        );
+
+        dev.set_eq_preset(1).await.unwrap();
+        let eq = dev.status.equalizer.lock().clone().unwrap();
+        assert_eq!(eq.selected_preset, 1);
+        assert_eq!(eq.bands[0].value, 5.0);
+        dev.close().await;
+    }
+
+    #[tokio::test(flavor = "multi_thread", worker_threads = 2)]
+    async fn set_eq_bands_caches_the_value_the_worker_applied_not_the_request() {
+        // The worker clamps to the device's dB range; the host cache must reflect
+        // what was applied, not the raw request. A request of -20 lands as -10.
+        let script = r#"
+            local applied = 0.0
+            return {
+              initialize = function() return true end,
+              get_equalizer = function()
+                return {
+                  presets = { { id = "custom", label = "Custom", is_custom = true } },
+                  selected_preset = 0, editable = true,
+                  bands = { {
+                    index = 0, label = "60", min = -10, max = 10, step = 1,
+                    value = applied,
+                  } },
+                }
+              end,
+              set_eq_bands = function(dev, values)
+                applied = math.max(-10, math.min(10, values[1]))
+              end,
+            }
+        "#;
+        let (_tmp, manifest) = test_manifest("eq_bands", &["equalizer"], script);
+        let dev = hid_device("eq_bands-0", &manifest, Arc::new(MockTransport::empty()));
+        assert!(dev.initialize().await.unwrap());
+        dev.refresh_status_cache().await;
+
+        dev.set_eq_bands(&[-20.0]).await.unwrap();
+        assert_eq!(
+            dev.status.equalizer.lock().as_ref().unwrap().bands[0].value,
+            -10.0
+        );
+        dev.close().await;
+    }
+
+    #[tokio::test(flavor = "multi_thread", worker_threads = 2)]
+    async fn initialize_unpauses_polling_and_events_on_the_online_path() {
+        let (_tmp, manifest) = test_manifest(
+            "unpause",
+            &["lighting"],
+            "return { initialize = function() return true end, event = function() end }",
+        );
+        let mut dev = hid_device("unpause-0", &manifest, Arc::new(MockTransport::empty()));
+        dev.runtime = Some(Arc::new(Mutex::new(RuntimeState::OpeningTransport)));
+        dev.poll_paused.store(true, Ordering::Relaxed);
+        dev.event_paused.store(true, Ordering::Relaxed);
+
+        assert!(dev.initialize().await.unwrap());
+        assert!(!dev.poll_paused.load(Ordering::Relaxed));
+        assert!(!dev.event_paused.load(Ordering::Relaxed));
+        dev.close().await;
+    }
+
+    #[tokio::test(flavor = "multi_thread", worker_threads = 2)]
+    async fn lcd_writes_do_not_leave_polling_paused_when_the_worker_is_gone() {
+        let (_tmp, manifest) = test_manifest("lcd_no_worker", &["lighting"], "return {}");
+        let dev = LuaDevice::new(LuaDeviceParts {
+            id: "lcd_no_worker-0".parse().unwrap(),
+            manifest: &manifest,
+            spec: Some(&manifest.devices[0]),
+            notify: Weak::new(),
+            runtime: None,
+            worker: LuaDeviceWorker::None,
+        });
+
+        assert!(dev.stream_frame(&[0; 4], 1, 1).await.is_err());
+        assert!(!dev.poll_paused.load(Ordering::Relaxed));
+        assert!(dev.set_image(&[0; 4]).await.is_err());
+        assert!(!dev.poll_paused.load(Ordering::Relaxed));
+    }
+
+    #[tokio::test(flavor = "multi_thread", worker_threads = 2)]
+    async fn control_caches_record_only_after_the_worker_accepts_the_write() {
+        let script = r#"
+            return {
+              initialize = function()
+                return {
+                  ok = true,
+                  capabilities = { "controls" },
+                  controls = {
+                    choices = { { key = "mode", label = "Mode",
+                      options = { { id = "a", label = "A" }, { id = "b", label = "B" } },
+                      default = 0 } },
+                    ranges = { { key = "hz", label = "Hz", min = 100, max = 1000, default = 500 } },
+                  },
+                }
+              end,
+              set_choice = function() error("choice rejected") end,
+              set_range = function() end,
+            }
+        "#;
+        let (_tmp, manifest) = test_manifest("record_after", &["controls"], script);
+        let dev = hid_device(
+            "record_after-0",
+            &manifest,
+            Arc::new(MockTransport::empty()),
+        );
+        assert!(dev.initialize().await.unwrap());
+
+        assert!(dev.set_choice("mode", 1).await.is_err());
+        assert_eq!(dev.active_controls().choice_cache.get("mode"), None);
+
+        assert!(dev.set_range("hz", 5000).await.is_ok());
+        assert_eq!(dev.active_controls().range_cache.get("hz"), Some(1000));
+        dev.close().await;
+    }
+
+    #[tokio::test(flavor = "multi_thread", worker_threads = 2)]
+    async fn a_failed_control_write_degrades_and_a_success_restores_online() {
+        let script = r#"
+            return {
+              initialize = function()
+                return {
+                  ok = true,
+                  capabilities = { "controls" },
+                  controls = {
+                    choices = { { key = "mode", label = "Mode",
+                      options = { { id = "a", label = "A" }, { id = "b", label = "B" } },
+                      default = 0 } },
+                    ranges = { { key = "hz", label = "Hz", min = 100, max = 1000, default = 500 } },
+                  },
+                }
+              end,
+              set_choice = function() error("choice rejected") end,
+              set_range = function() end,
+            }
+        "#;
+        let (_tmp, manifest) = test_manifest("tracked_controls", &["controls"], script);
+        let dev = hid_device(
+            "tracked_controls-0",
+            &manifest,
+            Arc::new(MockTransport::empty()),
+        );
+        assert!(dev.initialize().await.unwrap());
+
+        assert!(dev.set_choice("mode", 1).await.is_err());
+        assert!(matches!(
+            *dev.runtime.as_ref().unwrap().lock(),
+            RuntimeState::Degraded(DegradeReason::CallFailed)
+        ));
+        assert!(!dev.is_live());
+
+        assert!(dev.set_range("hz", 500).await.is_ok());
+        assert!(matches!(
+            *dev.runtime.as_ref().unwrap().lock(),
+            RuntimeState::Online
+        ));
+        assert!(dev.is_live());
+        dev.close().await;
+    }
+}

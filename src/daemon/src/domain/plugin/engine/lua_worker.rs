@@ -9,14 +9,16 @@
 //! Known bound: a [`request`](LuaWorker::request) timeout *abandons* the
 //! worker (transitions it to [`WorkerState::Wedged`] so later requests fail fast)
 
+use parking_lot::Mutex;
 use std::cell::Cell;
 use std::ops::ControlFlow;
 use std::panic::{self, AssertUnwindSafe};
 use std::rc::Rc;
 use std::sync::atomic::{AtomicU64, AtomicUsize, Ordering};
-use std::sync::{Arc, Mutex};
+use std::sync::Arc;
 use std::time::Duration;
 
+use crate::domain::plugin::ResolvedConfig;
 use anyhow::{anyhow, Result};
 use mlua::Lua;
 use tokio::sync::{mpsc, oneshot};
@@ -27,13 +29,11 @@ pub(super) trait VmCtx {
 }
 
 pub(super) fn bootstrap_worker_vm(
-    granted: &[halod_shared::types::Permission],
-    config: &crate::domain::plugin::ResolvedConfig,
+    config: &ResolvedConfig,
     modules: &std::collections::BTreeMap<String, String>,
     data: super::data_api::DataRuntime,
 ) -> Result<(Lua, Rc<Cell<u64>>)> {
     let (lua, budget) = super::sandbox::bootstrap_vm(
-        granted,
         config,
         super::PLUGIN_VM_MEMORY_BYTES,
         super::PLUGIN_INSTRUCTION_BUDGET,
@@ -173,7 +173,7 @@ impl<Cmd: Send + 'static> LuaWorker<Cmd> {
                 let _slot = WorkerSlot;
                 match build() {
                     Ok(ctx) => {
-                        *thread_state.lock().unwrap() = WorkerState::Healthy;
+                        *thread_state.lock() = WorkerState::Healthy;
                         let mut rx = rx;
                         while let Some(cmd) = rx.blocking_recv() {
                             match panic::catch_unwind(AssertUnwindSafe(|| handle(cmd, &ctx))) {
@@ -182,16 +182,16 @@ impl<Cmd: Send + 'static> LuaWorker<Cmd> {
                                 Err(payload) => {
                                     let message = panic_message(payload);
                                     log::error!("{label} worker panicked while handling a request: {message}");
-                                    *thread_state.lock().unwrap() = WorkerState::Panicked(message);
+                                    *thread_state.lock() = WorkerState::Panicked(message);
                                     return;
                                 }
                             }
                         }
-                        *thread_state.lock().unwrap() = WorkerState::Closing;
+                        *thread_state.lock() = WorkerState::Closing;
                     }
                     Err(e) => log::error!("{label} worker stopped: {e:#}"),
                 }
-                *thread_state.lock().unwrap() = WorkerState::Closed;
+                *thread_state.lock() = WorkerState::Closed;
             });
         if let Err(e) = spawned {
             WORKER_COUNT.fetch_sub(1, Ordering::Relaxed);
@@ -242,13 +242,13 @@ impl<Cmd: Send + 'static> LuaWorker<Cmd> {
     /// Snapshot of the current lifecycle state.
     #[cfg(test)]
     pub(super) fn state(&self) -> WorkerState {
-        self.state.lock().unwrap().clone()
+        self.state.lock().clone()
     }
 
     pub(super) fn is_usable(&self) -> bool {
         !self.tx.is_closed()
             && matches!(
-                *self.state.lock().unwrap(),
+                *self.state.lock(),
                 WorkerState::Starting | WorkerState::Healthy
             )
     }
@@ -261,7 +261,7 @@ impl<Cmd: Send + 'static> LuaWorker<Cmd> {
         make: impl FnOnce(oneshot::Sender<T>) -> Cmd,
     ) -> Result<T> {
         let req_id = self.next_req_id.fetch_add(1, Ordering::Relaxed);
-        match &*self.state.lock().unwrap() {
+        match &*self.state.lock() {
             WorkerState::Wedged(reason) => {
                 return Err(anyhow!(
                     "{} worker is wedged ({})",
@@ -281,7 +281,7 @@ impl<Cmd: Send + 'static> LuaWorker<Cmd> {
         self.tx.try_send(make(reply)).map_err(|e| match e {
             mpsc::error::TrySendError::Full(_) => anyhow!("{} worker is busy", self.label),
             mpsc::error::TrySendError::Closed(_) => {
-                *self.state.lock().unwrap() = WorkerState::Closed;
+                *self.state.lock() = WorkerState::Closed;
                 anyhow!("{} worker is gone", self.label)
             }
         })?;
@@ -289,7 +289,7 @@ impl<Cmd: Send + 'static> LuaWorker<Cmd> {
             Ok(Ok(value)) => Ok(value),
             Ok(Err(_)) => Err(self.dropped_reply_error(req_id).await),
             Err(_) => {
-                *self.state.lock().unwrap() = WorkerState::Wedged(WedgeReason::Timeout);
+                *self.state.lock() = WorkerState::Wedged(WedgeReason::Timeout);
                 Err(anyhow!(
                     "{} worker exceeded its {:?} call deadline (req {req_id})",
                     self.label,
@@ -307,7 +307,7 @@ impl<Cmd: Send + 'static> LuaWorker<Cmd> {
         make: impl FnOnce(oneshot::Sender<T>) -> Cmd,
     ) -> Result<T> {
         let req_id = self.next_req_id.fetch_add(1, Ordering::Relaxed);
-        match &*self.state.lock().unwrap() {
+        match &*self.state.lock() {
             WorkerState::Wedged(reason) => {
                 return Err(anyhow!(
                     "{} worker is wedged ({})",
@@ -329,7 +329,7 @@ impl<Cmd: Send + 'static> LuaWorker<Cmd> {
         // slow send can't hand the recv a fresh full budget.
         let deadline = tokio::time::Instant::now() + self.call_timeout;
         let wedged = |worker: &Self| {
-            *worker.state.lock().unwrap() = WorkerState::Wedged(WedgeReason::Timeout);
+            *worker.state.lock() = WorkerState::Wedged(WedgeReason::Timeout);
             anyhow!(
                 "{} worker exceeded its {:?} terminal deadline (req {req_id})",
                 worker.label,
@@ -339,7 +339,7 @@ impl<Cmd: Send + 'static> LuaWorker<Cmd> {
         match tokio::time::timeout_at(deadline, self.tx.send(command)).await {
             Err(_) => return Err(wedged(self)),
             Ok(Err(_)) => {
-                *self.state.lock().unwrap() = WorkerState::Closed;
+                *self.state.lock() = WorkerState::Closed;
                 return Err(anyhow!("{} worker is gone", self.label));
             }
             Ok(Ok(())) => {}
@@ -355,7 +355,7 @@ impl<Cmd: Send + 'static> LuaWorker<Cmd> {
 impl<Cmd> LuaWorker<Cmd> {
     async fn dropped_reply_error(&self, req_id: u64) -> anyhow::Error {
         for _ in 0..DROPPED_REPLY_GRACE_POLLS {
-            if let WorkerState::Panicked(message) = &*self.state.lock().unwrap() {
+            if let WorkerState::Panicked(message) = &*self.state.lock() {
                 return anyhow!(
                     "{} worker panicked while handling req {req_id}: {message}",
                     self.label

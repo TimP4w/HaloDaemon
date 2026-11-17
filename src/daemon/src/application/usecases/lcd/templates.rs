@@ -7,10 +7,14 @@ use crate::domain::events::ChangeSink as _;
 use std::sync::Arc;
 
 use anyhow::{anyhow, Result};
-use serde_json::json;
+use halod_shared::messages::DaemonMessage;
 
 use crate::application::ipc::ClientHandle;
 use crate::application::state::AppState;
+use crate::config;
+use crate::domain::events::Change;
+use crate::domain::plugin::Registry;
+use crate::util::fs;
 use halod_shared::lcd_custom::{
     CustomTemplateDef, OPACITY_PARAM, SCALE_Y_PARAM, TEXT_ITALIC_PARAM, TEXT_STRIKETHROUGH_PARAM,
     TEXT_UNDERLINE_PARAM, TEXT_WEIGHT_PARAM,
@@ -18,7 +22,7 @@ use halod_shared::lcd_custom::{
 use halod_shared::types::{EffectParamValue, LcdWidgetResize, ParamKind};
 
 pub fn lcd_templates_dir() -> std::path::PathBuf {
-    crate::config::config_dir().join("lcd")
+    config::config_dir().join("lcd")
 }
 
 /// Validate a user-supplied template name before joining it onto
@@ -71,10 +75,7 @@ pub fn validate_template(def: &CustomTemplateDef) -> Result<()> {
 
 /// Validate parameters against the active plugin catalog. Missing plugins are
 /// deliberately accepted so saved layouts can retain their placeholder.
-pub fn validate_template_catalog(
-    def: &CustomTemplateDef,
-    registry: &crate::domain::plugin::Registry,
-) -> Result<()> {
+pub fn validate_template_catalog(def: &CustomTemplateDef, registry: &Registry) -> Result<()> {
     for widget in &def.widgets {
         let Some(descriptor) = registry.widget_descriptor(&widget.widget) else {
             continue;
@@ -223,11 +224,10 @@ pub async fn save_template(name: String, def: CustomTemplateDef, app: Arc<AppSta
         "template too large"
     );
     let path = template_path(&name);
-    tokio::task::spawn_blocking(move || crate::util::fs::atomic_write(&path, &yaml)).await??;
-    log::info!("[LCD] saved template '{name}'");
+    tokio::task::spawn_blocking(move || fs::atomic_write(&path, &yaml)).await??;
+    log::info!("saved template '{name}'");
     app.lcd.refresh_templates().await;
-    app.record_change(crate::domain::events::Change::LcdCatalog)
-        .await;
+    app.record_change(Change::LcdCatalog).await;
     Ok(())
 }
 
@@ -244,20 +244,19 @@ pub async fn load_template(name: String, client: ClientHandle) -> Result<()> {
     let def: CustomTemplateDef = serde_yaml::from_str(&raw)
         .map_err(|e| anyhow!("failed to parse template '{name}': {e}"))?;
     validate_template(&def)?;
-    client.send_json(&json!({ "type": "lcd_template", "name": name, "def": def }));
+    client.send(&DaemonMessage::LcdTemplate { name, def });
     Ok(())
 }
 
 pub async fn delete_template(name: String, app: Arc<AppState>) -> Result<()> {
     validate_template_name(&name)?;
     match tokio::fs::remove_file(template_path(&name)).await {
-        Ok(()) => log::info!("[LCD] deleted template '{name}'"),
+        Ok(()) => log::info!("deleted template '{name}'"),
         Err(e) if e.kind() == std::io::ErrorKind::NotFound => {}
         Err(e) => return Err(e.into()),
     }
     app.lcd.refresh_templates().await;
-    app.record_change(crate::domain::events::Change::LcdCatalog)
-        .await;
+    app.record_change(Change::LcdCatalog).await;
     Ok(())
 }
 
@@ -321,8 +320,7 @@ mod tests {
             // Serialize against the tests that mutate `HALOD_CONFIG_DIR`, so the
             // config dir can't change between the two reads below.
             let _guard = crate::test_support::HALOD_CONFIG_DIR_LOCK
-                .lock()
-                .unwrap_or_else(|e| e.into_inner());
+                .lock();
             if validate_template_name(&name).is_ok() {
                 let path = template_path(&name);
                 assert!(path.starts_with(lcd_templates_dir()));
@@ -333,11 +331,7 @@ mod tests {
     #[tokio::test]
     #[allow(clippy::await_holding_lock)]
     async fn save_list_load_delete_cycle() {
-        let _guard = crate::test_support::HALOD_CONFIG_DIR_LOCK
-            .lock()
-            .unwrap_or_else(|e| e.into_inner());
-        let dir = tempfile::tempdir().unwrap();
-        unsafe { std::env::set_var("HALOD_CONFIG_DIR", dir.path()) };
+        let _dir = crate::test_support::tmp_config_dir();
 
         let app = Arc::new(AppState::new(crate::config::Config::default()));
         let def = CustomTemplateDef::default();
@@ -362,22 +356,14 @@ mod tests {
 
         delete_template("My Preset".into(), app).await.unwrap();
         assert!(list_templates().is_empty());
-
-        unsafe { std::env::remove_var("HALOD_CONFIG_DIR") };
     }
 
     #[tokio::test]
     #[allow(clippy::await_holding_lock)]
     async fn delete_template_noop_when_missing() {
-        let _guard = crate::test_support::HALOD_CONFIG_DIR_LOCK
-            .lock()
-            .unwrap_or_else(|e| e.into_inner());
-        let dir = tempfile::tempdir().unwrap();
-        unsafe { std::env::set_var("HALOD_CONFIG_DIR", dir.path()) };
+        let _dir = crate::test_support::tmp_config_dir();
 
         let app = Arc::new(AppState::new(crate::config::Config::default()));
         delete_template("nonexistent".into(), app).await.unwrap();
-
-        unsafe { std::env::remove_var("HALOD_CONFIG_DIR") };
     }
 }

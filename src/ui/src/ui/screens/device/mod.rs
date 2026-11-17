@@ -25,8 +25,18 @@ use halod_shared::debug_info::DebugInfo;
 use halod_shared::types::{ButtonAction, EffectParamValue, RgbColor, WireDevice};
 
 use crate::domain::models::device_tabs::{realign_tab, tab_label, tabs_for, TabKind};
+use crate::domain::state::Debouncer;
 use crate::domain::state::Page;
+use crate::domain::tour::AnchorId;
 use crate::runtime::ipc::CommandTx;
+use crate::runtime::ipc::DecodedEditorRender;
+use crate::runtime::ipc::DecodedFrame;
+use crate::ui::components;
+use crate::ui::screens::canvas::LedColorMap;
+use crate::ui::theme::SPACE_2;
+use crate::ui::theme::SPACE_6;
+use crate::ui::theme::SPACE_8;
+use halod_shared::ids::DeviceId;
 use header::header;
 
 /// Debounce window for coalesced slider/curve/paint commands.
@@ -37,7 +47,7 @@ const DEBOUNCE_SECS: f64 = 0.14;
 /// state rebroadcast (see [`editing`]).
 #[derive(Default)]
 pub struct DeviceUi {
-    pub id: String,
+    pub id: DeviceId,
     pub tab: usize,
     /// Selected tab tracked by kind, so the selection survives the tab set
     /// changing shape (e.g. adding the first chain link makes a "Devices" tab
@@ -49,7 +59,7 @@ pub struct DeviceUi {
     pub scratch: HashMap<String, f32>,
     /// Debounced outbound commands. Flushed by [`flush_pending`] once the
     /// user pauses.
-    pub pending: crate::domain::state::Debouncer,
+    pub pending: Debouncer,
     /// Whether a `GetDebugInfo` snapshot has been requested for this device.
     pub debug_requested: bool,
     /// Last time (egui seconds) the user touched an edit buffer.
@@ -61,6 +71,8 @@ pub struct DeviceUi {
     /// Set to true when rename editing starts; cleared after requesting focus
     /// so the TextEdit receives keyboard input on the first frame.
     pub rename_just_started: bool,
+    pub pending_unpair: Option<(u8, String)>,
+    pub pending_disable: Option<(DeviceId, String)>,
     pub lighting: LightingTab,
     pub cooling: CoolingTab,
     pub perf: PerfTab,
@@ -87,6 +99,7 @@ pub struct LightingTab {
     pub param_colors: HashMap<String, RgbColor>,
     /// Live Steps effect param values, keyed like `param_strs`.
     pub param_steps: HashMap<String, Vec<halod_shared::types::ColorStep>>,
+    pub color_slot: usize,
 }
 
 /// Per-tab edit state for the Cooling tab.
@@ -105,10 +118,8 @@ pub struct CoolingTab {
 /// Per-tab edit state for the Performance tab.
 #[derive(Default)]
 pub struct PerfTab {
-    /// DPI stage buffer + active stage index.
     pub dpi: Vec<u32>,
     pub dpi_seeded: bool,
-    pub dpi_active: usize,
 }
 
 /// Per-tab edit state for the Equalizer tab.
@@ -156,6 +167,9 @@ pub struct KeysTab {
         bool,
         std::sync::mpsc::Receiver<Option<std::path::PathBuf>>,
     )>,
+    layer: keys::Layer,
+    /// Armed key-chord capture for `(cid, layer)`.
+    chord_capture: Option<(u16, keys::Layer)>,
 }
 
 /// Which panel is shown in the Media card.
@@ -215,6 +229,12 @@ pub struct LcdTab {
     pub preview_keepalive_at: f64,
     /// Cached preview texture for the display card.
     pub preview_tex: Option<egui::TextureHandle>,
+    pub preview_rx: Option<std::sync::mpsc::Receiver<Option<lcd::gif::DecodedRgba>>>,
+    pub preview_attempt_len: Option<Option<u64>>,
+    pub thumb_rx: Option<(
+        String,
+        std::sync::mpsc::Receiver<Option<lcd::gif::DecodedRgba>>,
+    )>,
     /// Key identifying what `preview_tex` holds (e.g. `"frame:42"` or
     /// `"img:foo.png"`); the texture is rebuilt whenever the key changes.
     pub preview_key: String,
@@ -266,7 +286,7 @@ impl DeviceUi {
     }
 
     /// Fresh edit state for the device `id`.
-    pub fn new(id: String) -> Self {
+    pub fn new(id: DeviceId) -> Self {
         DeviceUi {
             id,
             ..Default::default()
@@ -344,13 +364,13 @@ pub struct FrameCtx<'a> {
     pub time: f64,
     pub debug: Option<&'a DebugInfo>,
     pub lcd_images: &'a [String],
-    pub lcd_preview: Option<crate::runtime::ipc::DecodedFrame>,
+    pub lcd_preview: Option<DecodedFrame>,
     pub lcd_upload: Option<halod_shared::types::LcdUploadProgress>,
     pub lcd_upload_terminal: Option<halod_shared::types::LcdUploadProgress>,
     pub lcd_template: Option<(String, halod_shared::lcd_custom::CustomTemplateDef)>,
-    pub lcd_editor_render: Option<crate::runtime::ipc::DecodedEditorRender>,
-    pub led_colors: &'a crate::ui::screens::canvas::LedColorMap,
-    pub write_rate_history: &'a HashMap<String, std::collections::VecDeque<f32>>,
+    pub lcd_editor_render: Option<DecodedEditorRender>,
+    pub led_colors: &'a LedColorMap,
+    pub write_rate_history: &'a HashMap<DeviceId, std::collections::VecDeque<f32>>,
     pub plugin_assets: &'a HashMap<String, Vec<u8>>,
 }
 
@@ -363,7 +383,7 @@ pub struct TabCtx<'a> {
     pub debug: Option<&'a DebugInfo>,
     pub lcd_images: &'a [String],
     /// Latest engine-rendered LCD preview for the open device (pre-decoded RGBA).
-    pub lcd_preview: Option<crate::runtime::ipc::DecodedFrame>,
+    pub lcd_preview: Option<DecodedFrame>,
     /// Stage/percent of the in-flight LCD image upload; `None` when idle.
     pub lcd_upload: Option<halod_shared::types::LcdUploadProgress>,
     /// A terminal (`Done`/`Failed`) upload signal, delivered as a one-shot edge:
@@ -373,9 +393,9 @@ pub struct TabCtx<'a> {
     pub lcd_template: Option<(String, halod_shared::lcd_custom::CustomTemplateDef)>,
     /// Latest on-demand LCD editor render (per-widget sprites) for the open
     /// device; the custom-template editor composites these.
-    pub lcd_editor_render: Option<crate::runtime::ipc::DecodedEditorRender>,
+    pub lcd_editor_render: Option<DecodedEditorRender>,
     /// Live per-LED colors from the latest canvas frame (lighting preview).
-    pub led_colors: &'a crate::ui::screens::canvas::LedColorMap,
+    pub led_colors: &'a LedColorMap,
     /// Rolling history of the device's effective write-rate throughput
     /// (bytes/sec). `None` until the first sample lands.
     pub write_rate_history: Option<&'a std::collections::VecDeque<f32>>,
@@ -386,7 +406,7 @@ pub struct TabCtx<'a> {
 /// `device_id` — the signal the LCD spinner gates clear on.
 pub(super) fn is_terminal_upload_for(
     terminal: Option<&halod_shared::types::LcdUploadProgress>,
-    device_id: &str,
+    device_id: &DeviceId,
 ) -> bool {
     use halod_shared::types::LcdUploadStage;
     matches!(
@@ -405,14 +425,13 @@ pub(crate) fn empty_plugin_assets() -> &'static std::collections::HashMap<String
 
 /// Shared empty LED-color map for contexts without live canvas frames (tests).
 #[cfg(test)]
-pub fn empty_led_colors() -> &'static crate::ui::screens::canvas::LedColorMap {
-    static EMPTY: std::sync::OnceLock<crate::ui::screens::canvas::LedColorMap> =
-        std::sync::OnceLock::new();
+pub fn empty_led_colors() -> &'static LedColorMap {
+    static EMPTY: std::sync::OnceLock<LedColorMap> = std::sync::OnceLock::new();
     EMPTY.get_or_init(Default::default)
 }
 
 fn pending_tab_id() -> egui::Id {
-    egui::Id::new("__halod_pending_device_tab")
+    egui::Id::unique("__halod_pending_device_tab")
 }
 
 pub fn request_cooling_tab(ctx: &egui::Context) {
@@ -422,7 +441,7 @@ pub fn request_cooling_tab(ctx: &egui::Context) {
 pub fn show(
     ui: &mut egui::Ui,
     frame: FrameCtx,
-    id: &str,
+    id: &DeviceId,
     ui_state: &mut DeviceUi,
     page: &mut Page,
 ) {
@@ -437,7 +456,7 @@ pub fn show(
         return;
     }
     if ui_state.id != id {
-        *ui_state = DeviceUi::new(id.to_string());
+        *ui_state = DeviceUi::new(id.into());
     }
     // Honour a one-shot tab request (e.g. Cooling page's "Open device").
     if ui
@@ -454,23 +473,24 @@ pub fn show(
     egui::ScrollArea::vertical()
         .auto_shrink([false, false])
         .show(ui, |ui| {
-            crate::ui::components::page_frame(ui, |ui| {
-                if crate::ui::components::back_link(ui, &t!("devtabs.back_all_devices")) {
+            components::page_frame(ui, |ui| {
+                if components::back_link(
+                    ui,
+                    &t!("devtabs.back_all_devices"),
+                    Some(AnchorId::DeviceBackLink),
+                ) {
                     *page = Page::Home;
                 }
+                ui.add_space(SPACE_2);
                 header(ui, dev, ui_state, cmd);
-                ui.add_space(crate::ui::theme::SPACE_4);
+                ui.add_space(SPACE_8);
 
                 let labels: Vec<std::borrow::Cow<'static, str>> =
                     tabs.iter().map(|t| tab_label(t.kind, dev)).collect();
                 let label_refs: Vec<&str> = labels.iter().map(|c| c.as_ref()).collect();
-                let tab_bar_rect =
-                    crate::ui::components::tab_bar(ui, &mut ui_state.tab, &label_refs);
-                crate::domain::tour::anchor(
-                    ui.ctx(),
-                    crate::domain::tour::AnchorId::DeviceTabBar,
-                    tab_bar_rect,
-                );
+                let tab_bar_rect = components::tab_bar(ui, &mut ui_state.tab, &label_refs);
+                crate::domain::tour::anchor(ui.ctx(), AnchorId::DeviceTabBar, tab_bar_rect);
+                ui.add_space(SPACE_6);
                 // Remember the selection by kind for the next frame's realign.
                 ui_state.tab_kind = tabs.get(ui_state.tab).map(|t| t.kind);
 
@@ -500,7 +520,7 @@ pub fn show(
                         TabKind::Performance => performance::show(ui, &ctx, ui_state),
                         TabKind::Controls => controls::show(ui, &ctx, ui_state),
                         TabKind::Onboard => onboard::show(ui, &ctx),
-                        TabKind::Pairing => children::pairing(ui, &ctx),
+                        TabKind::Pairing => children::pairing(ui, &ctx, ui_state),
                         TabKind::Chains => chains::show(ui, &ctx),
                         TabKind::Devices => children::show(ui, &ctx, page),
                         TabKind::Info => info::show(ui, &ctx, ui_state),
@@ -543,7 +563,7 @@ mod tests {
 
     #[test]
     fn editing_guard_expires_after_window() {
-        let mut st = DeviceUi::new("dev".into());
+        let mut st = DeviceUi::new("dev".parse().unwrap());
         st.last_edit = 10.0;
         assert!(editing(&st, 10.0));
         assert!(editing(&st, 11.4)); // still within the 1.5 s window
@@ -553,7 +573,7 @@ mod tests {
 
     #[test]
     fn guarded_returns_scratch_while_editing_else_live() {
-        let mut st = DeviceUi::new("dev".into());
+        let mut st = DeviceUi::new("dev".parse().unwrap());
         // Before any edit: always live.
         assert_eq!(st.guarded("b", 40.0, 0.0), 40.0);
         st.set("b", 75.0, 100.0);
@@ -568,7 +588,7 @@ mod tests {
     #[test]
     fn queue_and_flush_pending_respects_debounce() {
         let (tx, mut rx) = tokio::sync::mpsc::unbounded_channel();
-        let mut st = DeviceUi::new("dev".into());
+        let mut st = DeviceUi::new("dev".parse().unwrap());
         st.queue("k", DaemonCommand::GetDebugInfo, 10.0);
         // Not yet due — nothing flushed, command still pending.
         flush_pending(&mut st, &tx, 10.0 + DEBOUNCE_SECS - 0.01);
@@ -582,7 +602,7 @@ mod tests {
 
     #[test]
     fn queue_keeps_only_latest_value_per_key() {
-        let mut st = DeviceUi::new("dev".into());
+        let mut st = DeviceUi::new("dev".parse().unwrap());
         st.queue("k", DaemonCommand::GetDebugInfo, 1.0);
         st.queue("k", DaemonCommand::ListLcdImages, 2.0);
         assert_eq!(st.pending.len(), 1);
@@ -626,7 +646,7 @@ mod tests {
             ..Default::default()
         };
         let write_rate_history = HashMap::new();
-        let _ = ctx.run_ui(input, |ui| {
+        let _ = crate::ui::run_headless(&ctx, input, |ui| {
             show(
                 ui,
                 FrameCtx {
@@ -651,7 +671,7 @@ mod tests {
         });
 
         let stamped = ctx.data(|d| {
-            d.get_temp::<f64>(egui::Id::new(("pair_started", id.as_str())))
+            d.get_temp::<f64>(egui::Id::unique(("pair_started", id.as_str())))
                 .is_some()
         });
         assert!(stamped, "children::pairing did not run for the Pairing tab");

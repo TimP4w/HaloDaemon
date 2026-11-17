@@ -5,6 +5,7 @@ use tokio::sync::{Mutex, RwLock};
 
 use super::AppState;
 use crate::domain::device::Device;
+use halod_shared::ids::DeviceId;
 
 /// Value stored in a [`HidTracking`] map.
 pub enum HidTrackingEntry {
@@ -23,7 +24,7 @@ impl Clone for HidTrackingEntry {
 /// True when every device an entry tracks is in `ids` — so untracking its key
 /// can't strand a still-live device that shares the key. An empty `Primary`
 /// (no devices) is never owned.
-fn entry_owned_by(entry: &HidTrackingEntry, ids: &HashSet<String>) -> bool {
+fn entry_owned_by(entry: &HidTrackingEntry, ids: &HashSet<DeviceId>) -> bool {
     match entry {
         HidTrackingEntry::Primary(arcs) => {
             !arcs.is_empty() && arcs.iter().all(|d| ids.contains(d.id()))
@@ -32,7 +33,7 @@ fn entry_owned_by(entry: &HidTrackingEntry, ids: &HashSet<String>) -> bool {
 }
 
 /// Derives the set of device ids reachable over HID from a tracking map.
-fn compute_hid_ids(tracking: &HashMap<String, HidTrackingEntry>) -> HashSet<String> {
+fn compute_hid_ids(tracking: &HashMap<String, HidTrackingEntry>) -> HashSet<DeviceId> {
     let mut ids = HashSet::new();
     for entry in tracking.values() {
         let HidTrackingEntry::Primary(arcs) = entry;
@@ -50,7 +51,7 @@ pub struct HidTracking {
     tracking: Mutex<HashMap<String, HidTrackingEntry>>,
     /// Read on the broadcast hot path so it never contends with the
     /// discovery loop's lock on the tracking map itself.
-    ids: RwLock<HashSet<String>>,
+    ids: RwLock<HashSet<DeviceId>>,
 }
 
 impl HidTracking {
@@ -88,7 +89,7 @@ impl HidTracking {
     /// Untrack every HID key whose tracked device id(s) all appear in `ids`, so a
     /// subsequent scoped re-probe re-registers that hardware instead of skipping
     /// it as already-open. Returns the number of keys removed.
-    pub async fn untrack_devices(&self, ids: &HashSet<String>) -> usize {
+    pub async fn untrack_devices(&self, ids: &HashSet<DeviceId>) -> usize {
         let keys: Vec<String> = {
             let tracking = self.tracking.lock().await;
             tracking
@@ -121,13 +122,13 @@ impl HidTracking {
     /// Cached set of device ids reachable over HID, derived from the
     /// tracking map. The cache may lag the map by one tick, the same
     /// trade-off the effective-state projector accepts elsewhere.
-    pub async fn tracked_ids(&self) -> HashSet<String> {
+    pub async fn tracked_ids(&self) -> HashSet<DeviceId> {
         self.ids.read().await.clone()
     }
 }
 
 impl AppState {
-    pub async fn find_device_by_id(&self, id: &str) -> Option<Arc<dyn Device>> {
+    pub async fn find_device_by_id(&self, id: &DeviceId) -> Option<Arc<dyn Device>> {
         self.device_registry.find(id).await
     }
 

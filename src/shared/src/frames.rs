@@ -6,7 +6,7 @@ pub fn payload_exceeds_max(payload_len: u32) -> bool {
     payload_len > MAX_PAYLOAD
 }
 
-pub fn encode_json_frame(msg: &serde_json::Value) -> Option<Vec<u8>> {
+pub fn encode_json_frame<T: serde::Serialize + ?Sized>(msg: &T) -> Option<Vec<u8>> {
     let payload = serde_json::to_vec(msg).ok()?;
     let len = u32::try_from(payload.len()).ok()?;
     if payload_exceeds_max(len) {

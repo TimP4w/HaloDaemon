@@ -8,12 +8,13 @@ use halod_shared::bus::BusValue;
 use halod_shared::types::{BatteryStatus, DeviceCapability, NotificationCode, WireDevice};
 
 use crate::application::state::AppState;
+use halod_shared::ids::DeviceId;
 
 const THRESHOLDS: [u8; 3] = [5, 10, 20];
 
 #[derive(Default)]
 struct Tracker {
-    reported: HashMap<(String, String), u8>,
+    reported: HashMap<(DeviceId, String), u8>,
 }
 
 impl Tracker {
@@ -45,6 +46,7 @@ impl Tracker {
                 }
                 self.reported.insert(key, threshold);
                 notifications.push(NotificationCode::LowBattery {
+                    device_id: device.id.clone(),
                     device: device.name.clone(),
                     battery: battery.label.clone(),
                     level: battery.level,
@@ -105,7 +107,7 @@ mod tests {
 
     fn device(level: u8, status: BatteryStatus) -> WireDevice {
         WireDevice {
-            id: "mouse".into(),
+            id: "mouse".parse().unwrap(),
             name: "Mouse".into(),
             device_type: DeviceType::Mouse,
             capabilities: vec![DeviceCapability::Battery(vec![Battery {

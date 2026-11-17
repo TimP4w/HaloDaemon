@@ -1,7 +1,8 @@
 // SPDX-License-Identifier: GPL-3.0-or-later
 use std::collections::HashMap;
 use std::sync::{Arc, Weak};
-use std::time::{Duration, Instant};
+use std::time::Duration;
+use tokio::time::Instant;
 
 use futures_util::StreamExt as _;
 use image::RgbaImage;
@@ -9,6 +10,7 @@ use zbus::zvariant::{OwnedValue, Value};
 use zbus::{Connection, MatchRule, MessageStream};
 
 use super::{ArtCache, MediaHandle, MediaInfo, PlaybackStatus, ART_CACHE_CAP};
+use crate::infrastructure::http::NetGuardResolver;
 
 const MPRIS_PREFIX: &str = "org.mpris.MediaPlayer2.";
 const PLAYER_IFACE: &str = "org.mpris.MediaPlayer2.Player";
@@ -194,7 +196,7 @@ fn fetch_http_bytes(url: &str) -> Option<Vec<u8>> {
     let agent = ureq::Agent::with_parts(
         config,
         ureq::unversioned::transport::DefaultConnector::default(),
-        crate::infrastructure::http::NetGuardResolver::new(false, None),
+        NetGuardResolver::new(false, None),
     );
     let mut resp = agent.get(url).call().ok()?;
     let mut buf = Vec::new();
@@ -354,7 +356,7 @@ fn build_match_rule(
 
 pub async fn run(weak: Weak<MediaHandle>) {
     let Some(session) = Connection::session().await.ok() else {
-        log::warn!("[media/linux] failed to connect to session bus");
+        log::warn!("failed to connect to session bus");
         return;
     };
 
@@ -403,15 +405,15 @@ pub async fn run(weak: Weak<MediaHandle>) {
 
     let Ok(props_rule) = build_match_rule("org.freedesktop.DBus.Properties", "PropertiesChanged")
     else {
-        log::warn!("[media/linux] failed to build PropertiesChanged match rule");
+        log::warn!("failed to build PropertiesChanged match rule");
         return;
     };
     let Ok(seeked_rule) = build_match_rule(PLAYER_IFACE, "Seeked") else {
-        log::warn!("[media/linux] failed to build Seeked match rule");
+        log::warn!("failed to build Seeked match rule");
         return;
     };
     let Ok(name_owner_rule) = build_match_rule("org.freedesktop.DBus", "NameOwnerChanged") else {
-        log::warn!("[media/linux] failed to build NameOwnerChanged match rule");
+        log::warn!("failed to build NameOwnerChanged match rule");
         return;
     };
 
@@ -420,7 +422,7 @@ pub async fn run(weak: Weak<MediaHandle>) {
         MessageStream::for_match_rule(seeked_rule, &session, Some(32)).await,
         MessageStream::for_match_rule(name_owner_rule, &session, Some(32)).await,
     ) else {
-        log::warn!("[media/linux] failed to subscribe to MPRIS signals");
+        log::warn!("failed to subscribe to MPRIS signals");
         return;
     };
 
@@ -535,7 +537,7 @@ pub async fn run(weak: Weak<MediaHandle>) {
             }
         }
     }
-    log::debug!("[media/linux] watcher stopped (no more consumers)");
+    log::debug!("watcher stopped (no more consumers)");
 }
 
 /// Signal senders are unique connection names (`:1.42`); players are tracked

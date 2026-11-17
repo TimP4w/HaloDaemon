@@ -1,62 +1,97 @@
 settings:
+  language_sub: "Lingua dell’interfaccia"
+  credits_sub: "Persone e progetti che hanno reso possibile HaloDaemon"
+  version_sub: "Build %{build} · %{license}"
+  version_title: "Versione"
+  show_hidden_sub: "Includi i dispositivi nascosti dalla Home"
+  show_hidden_title: "Mostra dispositivi nascosti"
+  open_folder_button: "Apri cartella"
+  open_log_button: "Apri log"
+  log_file_title: "File di log"
+  log_debug: "Debug"
+  log_info: "Info"
+  log_warn: "Avviso"
+  log_error: "Errore"
+  daemon_stopped: "Non in esecuzione"
+  daemon_running: "In esecuzione"
+  daemon_disconnected_sub: "Non connesso"
+  daemon_connected_sub: "Connesso · versione %{version}"
+  fps_value: "%{n} fps"
+  failsafe_sub: "Usato quando il sensore di una curva manca da più di 10 s o è bloccato"
+  failsafe_title: "Duty di sicurezza ventole"
+  fan_ramp_up_title: "Velocità di accelerazione ventole"
+  fan_ramp_up_sub: "Quanto velocemente le ventole accelerano quando la temperatura sale"
+  fan_ramp_down_title: "Velocità di rallentamento ventole"
+  fan_ramp_down_sub: "Quanto velocemente le ventole rallentano quando la temperatura scende"
+  fan_hysteresis_title: "Isteresi ventole"
+  fan_hysteresis_sub: "Di quanto deve scendere la temperatura prima che le ventole rallentino"
+  fan_smoothing_title: "Livellamento temperatura"
+  fan_smoothing_sub: "Media le letture così i picchi brevi non accelerano le ventole"
+  fan_stale_title: "Rilevamento sensore bloccato"
+  fan_stale_sub: "Usa il duty di sicurezza quando un sensore smette di cambiare"
+  fan_instant: "Immediato"
+  fan_off: "Disattivato"
+  fan_rate_value: "%{n} %/s"
+  fan_celsius_value: "%{n} °C"
+  fan_seconds_value: "%{n} s"
+  fan_tick_value: "Ogni %{secs} s"
+  fan_engine_sub: "Con quale frequenza le curve leggono i sensori e impostano il duty"
+  fan_engine_title: "Curve ventole"
+  canvas_engine_sub: "Con quale frequenza il canvas campiona e invia i fotogrammi"
+  canvas_engine_title: "Canvas illuminazione"
+  section_application_sub: "Avvio, area di notifica e lingua"
+  section_engines_sub: "Con quale frequenza HaloDaemon aggiorna illuminazione, schermi e ventole"
+  section_devices_sub: "Rilevamento e connessione al servizio HaloDaemon"
+  section_healthcheck_sub: "Accessi di sistema di cui HaloDaemon ha bisogno per il tuo hardware"
+  section_logging_sub: "Dove HaloDaemon scrive il log e quanto dettaglio conserva"
+  section_about_sub: "HaloDaemon, un demone per controllare le periferiche"
+  recheck_title: "Esegui tutte le verifiche"
+  recheck_sub: "Controlla di nuovo gli accessi di sistema"
   title: Impostazioni
-  subtitle: Motori, avvio e integrazioni
-  section_application: APPLICAZIONE
-  section_engines: MOTORI
-  section_devices: DISPOSITIVI
-  section_logging: LOG
-  section_advanced: AVANZATE
-  section_debug: DEBUG
-  section_about: INFORMAZIONI
-  section_healthcheck: VERIFICA DEL SISTEMA
+  section_application: "Applicazione"
+  section_engines: "Motori"
+  section_devices: "Dispositivi"
+  section_logging: "Log"
+  section_about: "Informazioni"
+  section_healthcheck: "Verifica del sistema"
   start_on_boot_title: Avvia all'accesso
-  start_on_boot_sub: Avvia HaloDaemon nell'area di notifica quando accedi
+  start_on_boot_sub: "Avvia HaloDaemon nell’area di notifica all’accesso"
   start_on_boot_managed_sub: Questa opzione è gestita dalla configurazione di sistema. Modificala da lì.
   start_on_boot_managed_value: Controllato dal sistema
   close_to_tray_title: Chiudi nell'area di notifica
-  close_to_tray_sub: Quando premi il pulsante di chiusura, nascondi la finestra senza uscire dall'applicazione
+  close_to_tray_sub: "Nascondi la finestra invece di uscire quando la chiudi"
   low_battery_notifications_title: Notifiche batteria scarica
-  low_battery_notifications_sub: Avvisa una volta sotto il 20%, poi di nuovo sotto il 10% e il 5%
-  plugin_downloads_title: Plugin ufficiali e aggiornamenti
-  plugin_downloads_sub: Consenti a HaloDaemon di scaricare plugin ufficiali da GitHub e controllare gli aggiornamenti all'avvio
+  low_battery_notifications_sub: "Avvisa sotto il 20%, poi di nuovo sotto il 10% e il 5%"
   window_controls_title: Controlli finestra
-  window_controls_sub: Mostra i pulsanti Riduci a icona, Ingrandisci e Chiudi nella barra del titolo. Disattiva questa opzione se usi un window manager tiling.
-  startup_healthcheck_title: Verifica del sistema all'avvio
-  startup_healthcheck_sub: Avvisami all'avvio se una verifica non riesce
+  window_controls_sub: "Mostra riduci, ingrandisci e chiudi. Disattiva con i gestori di finestre a tiling."
+  startup_healthcheck_title: "Controlla all’avvio"
+  startup_healthcheck_sub: "Avvisa all’avvio se un controllo necessario non riesce"
   replay_tutorials_title: Ripeti i tutorial
-  replay_tutorials_sub: Mostra di nuovo il tour introduttivo la prossima volta che visiti ogni pagina
+  replay_tutorials_sub: "Mostra di nuovo la guida la prossima volta che apri ogni pagina"
   replay_button: Ripeti
-  lcd_engine_sub: Frame rate per i contenuti dinamici inviati agli schermi LCD dal motore LCD
-  daemon_title: Daemon
-  daemon_sub: Connessione al daemon HaloDaemon
-  daemon_connected: "● Connesso"
-  daemon_disconnected: "○ Disconnesso"
-  rediscover_title: Rileva dispositivi
-  rediscover_sub: Scansiona USB, HID, hwmon, SMBus per nuovi dispositivi
+  lcd_engine_sub: "Frequenza dei contenuti dinamici sugli LCD"
+  daemon_title: "Servizio HaloDaemon"
+  rediscover_title: "Rileva di nuovo i dispositivi"
+  rediscover_sub: "Cerca nuovi dispositivi su USB, HID, hwmon e SMBus"
   scan_now_button: Scansiona ora
   scanning_button: Scansione…
-  recheck_button: Ricontrolla
+  recheck_button: "Controlla di nuovo"
   running_healthcheck_title: Verifica del sistema in corso…
   running_healthcheck_sub: In attesa dello stato comunicato dal daemon
   no_checks_title: Nessun risultato disponibile
   no_checks_sub: Il daemon ha restituito un elenco di verifiche vuoto
-  dep_detected: "● Rilevato"
-  dep_missing: "● Mancante"
-  dep_not_found: "○ Non trovato"
-  dep_required: Obbligatorio
-  dep_optional: Facoltativo
-  log_level_sub: Livello di dettaglio dei log del daemon
-  config_folder_title: Cartella di configurazione
+  dep_detected: "Rilevato"
+  dep_missing: "Mancante"
+  dep_not_found: "Non trovato"
+  log_level_sub: "Dettaglio del log del demone"
+  config_folder_title: "Cartella di configurazione"
   unknown: Sconosciuto
-  open_external_button: "Apri ↗"
-  diagnostics_title: Diagnostica di sistema e dispositivi
-  diagnostics_sub: Mostra tutti i dispositivi HID collegati, quelli riconosciuti e lo stato dei privilegi
-  open_button: Apri…
-  app_tagline: Daemon per il controllo delle periferiche
-  credits_button: Crediti…
-  third_party_title: Licenze di terze parti
-  third_party_sub: Componenti open source usati da HaloDaemon
-  view_button: Visualizza…
+  diagnostics_title: "Diagnostica di sistema e dispositivi"
+  diagnostics_sub: "Ogni dispositivo HID connesso, quali sono stati riconosciuti e il livello di accesso attuale"
+  open_button: "Apri"
+  third_party_title: "Licenze di terze parti"
+  third_party_sub: "Componenti open source usati da HaloDaemon"
+  view_button: "Visualizza"
   repository_title: Repository
   licenses_modal_body: Componenti open source inclusi o utilizzati da HaloDaemon, raggruppati per licenza.
   credits_title: Crediti

@@ -86,17 +86,17 @@ fn overlay(
     step_count: usize,
 ) -> Option<Event> {
     let cutout = spotlight_rect(anchor, screen);
-    let fade = ctx.animate_bool_with_time(egui::Id::new("tour_fade"), true, 0.15);
+    let fade = ctx.animate_bool_with_time(egui::Id::unique("tour_fade"), true, 0.15);
     let mut event = None;
 
-    egui::Area::new(egui::Id::new("tour_overlay"))
+    egui::Area::new(egui::Id::unique("tour_overlay"))
         .order(egui::Order::Foreground)
         .fixed_pos(Pos2::ZERO)
         .show(ctx, |ui| {
             // Swallow all input so only the bubble's own buttons are clickable.
             ui.interact(
                 screen,
-                ui.id().with("tour_barrier"),
+                ui.scope_id().with("tour_barrier"),
                 Sense::click_and_drag(),
             );
 
@@ -163,14 +163,14 @@ fn overlay(
             let skip_resp = widgets::button_at(
                 ui,
                 skip_rect,
-                ui.id().with("tour_skip"),
+                ui.scope_id().with("tour_skip"),
                 &t!("tour.skip"),
-                ButtonKind::Ghost,
+                ButtonKind::Secondary,
             );
             let next_resp = widgets::button_at(
                 ui,
                 next_rect,
-                ui.id().with("tour_next"),
+                ui.scope_id().with("tour_next"),
                 &if is_last {
                     t!("tour.done")
                 } else {

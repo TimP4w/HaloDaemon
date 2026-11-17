@@ -1,7 +1,8 @@
 // SPDX-License-Identifier: GPL-3.0-or-later
+use parking_lot::Mutex;
 use std::sync::{
     atomic::{AtomicBool, Ordering},
-    Arc, Mutex,
+    Arc,
 };
 
 /// How the buffer's pixels are oriented relative to the monitor. The buffer stays in
@@ -30,10 +31,6 @@ pub struct RawFrame {
 }
 
 pub struct MonitorInfo {
-    // Set per-monitor on both backends and asserted by the Linux enumerate test,
-    // but not otherwise read; kept as part of the monitor descriptor.
-    #[allow(dead_code)]
-    pub index: usize,
     /// Human-readable label for the UI dropdown, e.g. "Monitor 0: 1920×1080".
     pub label: String,
 }
@@ -45,7 +42,7 @@ pub struct CaptureHandle {
 
 impl CaptureHandle {
     pub fn latest_frame(&self) -> Option<RawFrame> {
-        let guard = self.frame_slot.lock().unwrap_or_else(|e| e.into_inner());
+        let guard = self.frame_slot.lock();
         guard.clone()
     }
 }
@@ -76,7 +73,7 @@ pub fn list_monitors() -> Vec<MonitorInfo> {
 
 /// Spawns the platform capture backend. Returns immediately; frames arrive
 /// asynchronously and can be read via `CaptureHandle::latest_frame()`.
-pub fn start_capture(monitor_index: usize) -> Result<CaptureHandle, String> {
+pub fn start_capture(monitor_index: usize) -> anyhow::Result<CaptureHandle> {
     let frame_slot: Arc<Mutex<Option<RawFrame>>> = Arc::new(Mutex::new(None));
     let stop = Arc::new(AtomicBool::new(false));
 
@@ -87,7 +84,9 @@ pub fn start_capture(monitor_index: usize) -> Result<CaptureHandle, String> {
     windows::start(monitor_index, Arc::clone(&frame_slot), Arc::clone(&stop))?;
 
     #[cfg(not(any(target_os = "linux", target_os = "windows")))]
-    return Err("screen capture is not supported on this platform".into());
+    return Err(anyhow::anyhow!(
+        "screen capture is not supported on this platform"
+    ));
 
     Ok(CaptureHandle { frame_slot, stop })
 }
@@ -135,7 +134,7 @@ mod tests {
     fn latest_frame_arc_clone_shares_data_with_stored_frame() {
         let frame_slot = Arc::new(Mutex::new(Some(make_frame(4, 4))));
         let stored_ptr = {
-            let guard = frame_slot.lock().unwrap();
+            let guard = frame_slot.lock();
             Arc::as_ptr(&guard.as_ref().unwrap().data)
         };
         let handle = CaptureHandle {

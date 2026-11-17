@@ -8,17 +8,13 @@
 //! so a plugin can't leak them. Creation is scoped to the device's *own* USB id,
 //! so a plugin can never open sinks for hardware it doesn't drive.
 
-use std::sync::atomic::{AtomicBool, Ordering};
-use std::sync::{Arc, Mutex};
-
 use mlua::{AnyUserData, Lua, UserData, UserDataMethods};
+use parking_lot::Mutex;
+use std::sync::atomic::{AtomicBool, Ordering};
+use std::sync::Arc;
 use tokio::runtime::Handle;
 
 use crate::infrastructure::audio::sink::{register_sink, Sink};
-
-fn lock<T>(m: &Mutex<T>) -> std::sync::MutexGuard<'_, T> {
-    m.lock().unwrap_or_else(|e| e.into_inner())
-}
 
 /// A host-created sink plus a one-shot removal guard, so an explicit `:remove()`
 /// and the worker's teardown never double-unload the backing pactl modules.
@@ -72,7 +68,7 @@ impl UserData for AudioApi {
                     "sink name must be 1..={MAX_SINK_NAME} bytes"
                 )));
             }
-            if lock(&this.registry).len() >= MAX_SINKS {
+            if this.registry.lock().len() >= MAX_SINKS {
                 return Err(mlua::Error::RuntimeError(format!(
                     "at most {MAX_SINKS} sinks per plugin"
                 )));
@@ -83,7 +79,7 @@ impl UserData for AudioApi {
                         sink,
                         removed: AtomicBool::new(false),
                     });
-                    lock(&this.registry).push(managed.clone());
+                    this.registry.lock().push(managed.clone());
                     Ok(Some(SinkHandle {
                         sink: managed,
                         handle: this.handle.clone(),
@@ -111,7 +107,7 @@ impl UserData for SinkHandle {
         });
         methods.add_method("remove", |_, this, ()| {
             this.handle.block_on(this.sink.remove_once());
-            lock(&this.registry).retain(|s| !Arc::ptr_eq(s, &this.sink));
+            this.registry.lock().retain(|s| !Arc::ptr_eq(s, &this.sink));
             Ok(())
         });
     }
@@ -136,7 +132,7 @@ pub fn build(
 /// Remove every sink still in the registry, awaiting each teardown. Runs on the
 /// owning device (Send side), so it works even when the Lua worker is dead.
 pub async fn drain_and_remove(registry: &SinkRegistry) {
-    let sinks: Vec<Arc<ManagedSink>> = std::mem::take(&mut *lock(registry));
+    let sinks: Vec<Arc<ManagedSink>> = std::mem::take(&mut *registry.lock());
     for sink in sinks {
         sink.remove_once().await;
     }
@@ -159,7 +155,7 @@ impl AudioGuard {
 
 impl Drop for AudioGuard {
     fn drop(&mut self) {
-        let sinks: Vec<Arc<ManagedSink>> = std::mem::take(&mut *lock(&self.registry));
+        let sinks: Vec<Arc<ManagedSink>> = std::mem::take(&mut *self.registry.lock());
         if sinks.is_empty() {
             return;
         }

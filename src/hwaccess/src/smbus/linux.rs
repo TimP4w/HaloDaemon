@@ -81,7 +81,7 @@ impl SmBusInner {
         let ret = unsafe { libc::ioctl(fd, I2C_TIMEOUT, 5i64) };
         if ret < 0 {
             log::warn!(
-                "[SmBus] I2C_TIMEOUT ioctl failed (bus will use kernel-default timeout): {}",
+                "I2C_TIMEOUT ioctl failed (bus will use kernel-default timeout): {}",
                 std::io::Error::last_os_error()
             );
         }
@@ -89,7 +89,7 @@ impl SmBusInner {
         let ret = unsafe { libc::ioctl(fd, I2C_FUNCS, &mut funcs as *mut libc::c_ulong) };
         if ret < 0 {
             log::debug!(
-                "[SmBus] I2C_FUNCS ioctl failed: {}",
+                "I2C_FUNCS ioctl failed: {}",
                 std::io::Error::last_os_error()
             );
         }
@@ -294,7 +294,7 @@ fn read_pci_ids(num: u8) -> Option<(u16, u16, u16, u16)> {
     let link = format!("/sys/bus/i2c/devices/i2c-{}", num);
     let real = std::fs::canonicalize(&link)
         .inspect_err(|e| {
-            log::debug!("[SmBusTransport] canonicalize({link}) failed: {e}");
+            log::debug!("canonicalize({link}) failed: {e}");
         })
         .ok()?;
 
@@ -313,7 +313,7 @@ fn read_pci_ids(num: u8) -> Option<(u16, u16, u16, u16)> {
         dir = d.parent().map(std::path::Path::to_path_buf);
     }
     log::debug!(
-        "[SmBusTransport] i2c-{num}: no PCI device found in ancestry; \
+        "i2c-{num}: no PCI device found in ancestry; \
          canonical path was {real:?}"
     );
     None

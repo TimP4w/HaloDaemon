@@ -1,12 +1,13 @@
 cooling:
+  rpm_duty: "rpm · %{duty}% di duty"
+  now_summary: "%{sensor} %{temp} °C → %{duty}% di duty"
   title: Raffreddamento
-  subtitle: "Curve delle ventole e controllo delle pompe su %{count} dispositivi"
+  subtitle: "%{channels} canali su %{devices} dispositivi"
   empty_title: Nessun dispositivo di raffreddamento connesso
   empty_subtitle: Collega un controller per ventole o pompe per gestire il raffreddamento
   curve_sensor: Sensore della curva
-  curve_sensor_caps: SENSORE CURVA
+  sensor: Sensore
   no_sensor: Nessun sensore
-  rpm_vs: "RPM vs %{sensor}"
   open_device: Apri dispositivo
   fan_curve: Curva della ventola
   celsius_now: "°C attuali"
@@ -14,7 +15,6 @@ cooling:
   fan_duty: Ciclo di lavoro della ventola
   rpm: "%{v} RPM"
   percent: "%{v}%"
-  preset: "Preset…"
   preset_name:
     balanced: Bilanciata
     silent: Silenziosa
@@ -33,4 +33,5 @@ cooling:
   enable_channel: Abilita canale
   disable_channel: Disabilita canale
   show_disabled: Mostra disattivati
+  show_disabled_channels: Mostra canali disattivati
   hide_disabled: Nascondi disattivati

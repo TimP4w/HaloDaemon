@@ -16,11 +16,12 @@ use unicode_segmentation::UnicodeSegmentation;
 use halod_shared::lcd_custom::{
     TEXT_ITALIC_PARAM, TEXT_STRIKETHROUGH_PARAM, TEXT_UNDERLINE_PARAM, TEXT_WEIGHT_PARAM,
 };
-use halod_shared::types::{EffectParamValue, Permission, RgbColor};
+use halod_shared::types::{EffectParamValue, RgbColor};
 
 use super::bytebuf::{alloc_zeroed, ByteBuf};
 use super::lua_worker::LuaWorker;
 use super::raster;
+use crate::domain::plugin::ResolvedConfig;
 
 const MAX_WIDGET_SIDE: u32 = 1024;
 const MAX_DRAW_TEXT_BYTES: usize = halod_shared::lcd_custom::MAX_WIDGET_TEXT_BYTES;
@@ -94,30 +95,21 @@ impl super::lua_worker::VmCtx for WidgetCtx {
 pub struct PluginWidgetHandle(LuaWorker<WidgetCall>);
 
 impl PluginWidgetHandle {
-    #[cfg_attr(not(test), allow(dead_code))]
+    #[cfg(test)]
     pub fn spawn(
         source: String,
         modules: BTreeMap<String, String>,
         widget_ids: Vec<String>,
-        granted: Vec<Permission>,
-        config: crate::domain::plugin::ResolvedConfig,
+        config: ResolvedConfig,
     ) -> Self {
-        Self::spawn_with_data(
-            source,
-            modules,
-            widget_ids,
-            granted,
-            config,
-            Default::default(),
-        )
+        Self::spawn_with_data(source, modules, widget_ids, config, Default::default())
     }
 
     pub fn spawn_with_data(
         source: String,
         modules: BTreeMap<String, String>,
         widget_ids: Vec<String>,
-        granted: Vec<Permission>,
-        config: crate::domain::plugin::ResolvedConfig,
+        config: ResolvedConfig,
         data: super::data_api::DataRuntime,
     ) -> Self {
         let (ready_tx, ready_rx) = std::sync::mpsc::channel::<()>();
@@ -126,14 +118,7 @@ impl PluginWidgetHandle {
             "LCD widget",
             CALL_TIMEOUT,
             move || {
-                let ctx = build_ctx(
-                    &source,
-                    &modules,
-                    &widget_ids,
-                    &granted,
-                    &config,
-                    data.clone(),
-                );
+                let ctx = build_ctx(&source, &modules, &widget_ids, &config, data.clone());
                 let _ = ready_tx.send(());
                 ctx
             },
@@ -165,12 +150,10 @@ fn build_ctx(
     source: &str,
     modules: &BTreeMap<String, String>,
     widget_ids: &[String],
-    granted: &[Permission],
-    config: &crate::domain::plugin::ResolvedConfig,
+    config: &ResolvedConfig,
     data: super::data_api::DataRuntime,
 ) -> Result<WidgetCtx> {
-    let (lua, budget) =
-        super::lua_worker::bootstrap_worker_vm(granted, config, modules, data.clone())?;
+    let (lua, budget) = super::lua_worker::bootstrap_worker_vm(config, modules, data.clone())?;
     let manifest: Table = lua
         .load(source)
         .eval()
@@ -690,11 +673,10 @@ impl UserData for RenderCtx {
             },
         );
         methods.add_method("local_time", |lua, this, ()| {
-            use chrono::{Datelike as _, Timelike as _};
             let (year, month, day, hour, minute, second, weekday) = if this.preview {
                 (2026, 1, 15, 10, 9, 36, "Thu".to_owned())
             } else {
-                let now = chrono::Local::now();
+                let now = jiff::Zoned::now();
                 (
                     now.year(),
                     now.month(),
@@ -702,7 +684,7 @@ impl UserData for RenderCtx {
                     now.hour(),
                     now.minute(),
                     now.second(),
-                    now.format("%a").to_string(),
+                    now.strftime("%a").to_string(),
                 )
             };
             let table = lua.create_table()?;
@@ -1966,7 +1948,6 @@ mod tests {
             source.to_owned(),
             BTreeMap::new(),
             vec!["meter".to_owned()],
-            vec![],
             HashMap::new(),
         );
         assert_eq!(worker.render(input(false)).await.unwrap()[0], 11);
@@ -1976,7 +1957,6 @@ mod tests {
             "return { render_widget_meter = function() end }".to_owned(),
             BTreeMap::new(),
             vec!["meter".to_owned()],
-            vec![],
             HashMap::new(),
         );
         assert!(missing.render(input(true)).await.is_err());
@@ -1999,7 +1979,6 @@ mod tests {
             source.to_owned(),
             BTreeMap::new(),
             vec!["meter".to_owned()],
-            vec![],
             HashMap::new(),
         );
         let mut render = input(true);
@@ -2031,7 +2010,6 @@ mod tests {
             source.to_owned(),
             BTreeMap::new(),
             vec!["meter".to_owned()],
-            vec![],
             HashMap::new(),
         );
         let first = worker.render(input(true)).await.unwrap();
@@ -2058,7 +2036,6 @@ mod tests {
             source.to_owned(),
             BTreeMap::new(),
             vec!["meter".to_owned()],
-            vec![],
             HashMap::new(),
         );
         let mut live = input(false);
@@ -2083,7 +2060,6 @@ mod tests {
             missing_source.to_owned(),
             BTreeMap::new(),
             vec!["meter".to_owned()],
-            vec![],
             HashMap::new(),
         );
         missing.render(input(false)).await.unwrap();
@@ -2105,7 +2081,6 @@ mod tests {
             source.to_owned(),
             BTreeMap::new(),
             vec!["meter".to_owned()],
-            vec![],
             HashMap::new(),
         );
         let pixels = worker.render(input(true)).await.unwrap();
@@ -2140,7 +2115,6 @@ mod tests {
             source.to_owned(),
             BTreeMap::new(),
             vec!["meter".to_owned()],
-            vec![],
             HashMap::new(),
         );
         let pixels = worker.render(input(true)).await.unwrap();
@@ -2193,7 +2167,6 @@ mod tests {
             source.to_owned(),
             BTreeMap::new(),
             vec!["meter".to_owned()],
-            vec![],
             HashMap::new(),
         );
         assert_eq!(worker.render(input(true)).await.unwrap()[3], 255);
@@ -2224,7 +2197,6 @@ mod tests {
             source.to_owned(),
             BTreeMap::new(),
             vec!["meter".to_owned()],
-            vec![],
             HashMap::new(),
         );
         let pixels = worker.render(input(true)).await.unwrap();
@@ -2267,7 +2239,6 @@ mod tests {
             source.to_owned(),
             BTreeMap::new(),
             vec!["meter".to_owned()],
-            vec![],
             HashMap::new(),
         );
         assert_eq!(worker.render(input(true)).await.unwrap()[3], 255);
@@ -2322,7 +2293,6 @@ mod tests {
             source.to_owned(),
             BTreeMap::new(),
             vec!["meter".to_owned()],
-            vec![],
             HashMap::new(),
         );
         let normal = worker.render(input(true)).await.unwrap();
@@ -2371,7 +2341,6 @@ mod tests {
             source.to_owned(),
             BTreeMap::new(),
             vec!["meter".to_owned()],
-            vec![],
             HashMap::new(),
         );
         let pixels = worker.render(input(true)).await.unwrap();
@@ -2445,7 +2414,6 @@ mod tests {
             source.to_owned(),
             BTreeMap::new(),
             vec!["meter".to_owned()],
-            vec![],
             HashMap::new(),
         );
         let red = WidgetImageInput {
@@ -2483,7 +2451,6 @@ mod tests {
             source.to_owned(),
             BTreeMap::new(),
             vec!["meter".to_owned()],
-            vec![],
             HashMap::new(),
         );
         let mut render = input(true);
@@ -2519,7 +2486,6 @@ mod tests {
             source.to_owned(),
             BTreeMap::new(),
             vec!["meter".to_owned()],
-            vec![],
             HashMap::new(),
         );
         assert_eq!(worker.render(input(true)).await.unwrap()[3], 255);

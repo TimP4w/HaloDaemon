@@ -7,8 +7,10 @@ use std::sync::Arc;
 
 use crate::application::state::AppState;
 use crate::domain::device::Device;
+use crate::domain::events::Change;
 use crate::domain::profiles::device_state::persist_device_state;
 use crate::domain::registry::require_device_owned_id;
+use halod_shared::ids::DeviceId;
 
 /// Wire-level parameters for the "look up a device, apply a value to one
 /// capability, maybe persist/broadcast" family of usecases. One variant per
@@ -29,7 +31,7 @@ struct Effects {
 }
 
 pub async fn set_capability_param(
-    id: String,
+    id: DeviceId,
     param: CapabilityParam,
     app: Arc<AppState>,
 ) -> Result<()> {
@@ -39,8 +41,7 @@ pub async fn set_capability_param(
     if effects.persist {
         persist_device_state(&app, dev.as_ref()).await;
     }
-    app.record_change(crate::domain::events::Change::Device(id))
-        .await;
+    app.record_change(Change::Device(id)).await;
     Ok(())
 }
 
@@ -157,7 +158,7 @@ mod tests {
         }]));
         let app = app_with(vec![dev.clone()]);
         set_capability_param(
-            "dev1".into(),
+            "dev1".parse().unwrap(),
             CapabilityParam::Boolean {
                 key: "sidetone".into(),
                 value: true,
@@ -166,14 +167,7 @@ mod tests {
         )
         .await
         .unwrap();
-        let last = dev
-            .bool_last_set
-            .as_ref()
-            .unwrap()
-            .lock()
-            .unwrap()
-            .clone()
-            .unwrap();
+        let last = dev.bool_last_set.as_ref().unwrap().lock().clone().unwrap();
         assert_eq!(last, ("sidetone".to_string(), true));
     }
 
@@ -187,7 +181,7 @@ mod tests {
     async fn toggle_host_mode(dev: Arc<MockDevice>) {
         let app = app_with(vec![dev]);
         set_capability_param(
-            "dev1".into(),
+            "dev1".parse().unwrap(),
             CapabilityParam::Boolean {
                 key: "host_mode".into(),
                 value: false,
@@ -239,7 +233,7 @@ mod tests {
         }]));
         let app = app_with(vec![dev.clone()]);
         let err = set_capability_param(
-            "dev1".into(),
+            "dev1".parse().unwrap(),
             CapabilityParam::Boolean {
                 key: "muted".into(),
                 value: false,
@@ -250,12 +244,7 @@ mod tests {
         .unwrap_err();
         assert!(err.to_string().contains("read-only"), "got: {err}");
         assert!(
-            dev.bool_last_set
-                .as_ref()
-                .unwrap()
-                .lock()
-                .unwrap()
-                .is_none(),
+            dev.bool_last_set.as_ref().unwrap().lock().is_none(),
             "set_boolean should not have been called"
         );
     }
@@ -268,7 +257,7 @@ mod tests {
         let app = app_with(vec![dev.clone()]);
 
         set_capability_param(
-            "dev1".into(),
+            "dev1".parse().unwrap(),
             CapabilityParam::Range {
                 key: "nc_level".into(),
                 value: 50,
@@ -278,14 +267,7 @@ mod tests {
         .await
         .unwrap();
 
-        let last = dev
-            .range_last_set
-            .as_ref()
-            .unwrap()
-            .lock()
-            .unwrap()
-            .clone()
-            .unwrap();
+        let last = dev.range_last_set.as_ref().unwrap().lock().clone().unwrap();
         assert_eq!(last, ("nc_level".to_string(), 50));
     }
 
@@ -297,7 +279,7 @@ mod tests {
         {
             let mut cfg = app.config.write().await;
             cfg.active_profile_data_mut().device_states.insert(
-                "dev1".into(),
+                "dev1".parse().unwrap(),
                 serde_json::json!({ "range": { "nc_level": 0 } }),
             );
             cfg.profiles.insert("Gaming".into(), Default::default());
@@ -306,7 +288,7 @@ mod tests {
         let mut transactions = app.data_bus.subscribe_transactions();
 
         set_capability_param(
-            "dev1".into(),
+            "dev1".parse().unwrap(),
             CapabilityParam::Range {
                 key: "nc_level".into(),
                 value: 50,
@@ -339,7 +321,7 @@ mod tests {
         let app = app_with(vec![dev.clone()]);
 
         set_capability_param(
-            "dev1".into(),
+            "dev1".parse().unwrap(),
             CapabilityParam::Choice {
                 key: "nc_mode".into(),
                 selected: 2,
@@ -354,7 +336,6 @@ mod tests {
             .as_ref()
             .unwrap()
             .lock()
-            .unwrap()
             .clone()
             .unwrap();
         assert_eq!(last, ("nc_mode".to_string(), 2));
@@ -368,7 +349,7 @@ mod tests {
         {
             let mut cfg = app.config.write().await;
             cfg.active_profile_data_mut().device_states.insert(
-                "dev1".into(),
+                "dev1".parse().unwrap(),
                 serde_json::json!({ "choice": { "nc_mode": 0 } }),
             );
             cfg.profiles.insert("Gaming".into(), Default::default());
@@ -377,7 +358,7 @@ mod tests {
         let mut transactions = app.data_bus.subscribe_transactions();
 
         set_capability_param(
-            "dev1".into(),
+            "dev1".parse().unwrap(),
             CapabilityParam::Choice {
                 key: "nc_mode".into(),
                 selected: 2,
@@ -410,7 +391,7 @@ mod tests {
         let app = app_with(vec![dev.clone()]);
 
         set_capability_param(
-            "dev1".into(),
+            "dev1".parse().unwrap(),
             CapabilityParam::Action {
                 key: "pixel_refresh".into(),
             },
@@ -420,12 +401,7 @@ mod tests {
         .unwrap();
 
         assert_eq!(
-            dev.action_last_key
-                .as_ref()
-                .unwrap()
-                .lock()
-                .unwrap()
-                .as_deref(),
+            dev.action_last_key.as_ref().unwrap().lock().as_deref(),
             Some("pixel_refresh")
         );
     }
@@ -438,7 +414,7 @@ mod tests {
         let app = app_with(vec![dev.clone()]);
 
         set_capability_param(
-            "dev1".into(),
+            "dev1".parse().unwrap(),
             CapabilityParam::DpiSteps {
                 steps: vec![400, 800, 1600],
             },
@@ -447,7 +423,7 @@ mod tests {
         .await
         .unwrap();
 
-        let recorded = dev.dpi_last_steps.as_ref().unwrap().lock().unwrap().clone();
+        let recorded = dev.dpi_last_steps.as_ref().unwrap().lock().clone();
         assert_eq!(recorded, Some(vec![400u16, 800, 1600]));
     }
 
@@ -457,7 +433,7 @@ mod tests {
         let app = app_with(vec![dev.clone()]);
 
         let err = set_capability_param(
-            "dev1".into(),
+            "dev1".parse().unwrap(),
             CapabilityParam::DpiSteps {
                 steps: vec![400, 800],
             },
@@ -507,17 +483,14 @@ mod tests {
         let app = app_with(vec![dev.clone()]);
 
         set_capability_param(
-            "dev1".into(),
+            "dev1".parse().unwrap(),
             CapabilityParam::EqPreset { preset_index: 2 },
             app,
         )
         .await
         .unwrap();
 
-        assert_eq!(
-            *dev.eq_last_preset.as_ref().unwrap().lock().unwrap(),
-            Some(2)
-        );
+        assert_eq!(*dev.eq_last_preset.as_ref().unwrap().lock(), Some(2));
     }
 
     #[tokio::test]
@@ -527,7 +500,7 @@ mod tests {
         let mut transactions = app.data_bus.subscribe_transactions();
 
         set_capability_param(
-            "headset".into(),
+            "headset".parse().unwrap(),
             CapabilityParam::EqPreset { preset_index: 2 },
             app,
         )
@@ -560,7 +533,7 @@ mod tests {
         let app = app_with(vec![dev.clone()]);
 
         set_capability_param(
-            "dev1".into(),
+            "dev1".parse().unwrap(),
             CapabilityParam::EqPreset { preset_index: 1 },
             app.clone(),
         )
@@ -582,17 +555,15 @@ mod tests {
         let app = app_with(vec![dev.clone()]);
 
         let values = vec![1.0f32; 10];
-        set_capability_param("dev2".into(), CapabilityParam::EqBands { values }, app)
-            .await
-            .unwrap();
+        set_capability_param(
+            "dev2".parse().unwrap(),
+            CapabilityParam::EqBands { values },
+            app,
+        )
+        .await
+        .unwrap();
 
-        assert!(dev
-            .eq_last_bands
-            .as_ref()
-            .unwrap()
-            .lock()
-            .unwrap()
-            .is_some());
+        assert!(dev.eq_last_bands.as_ref().unwrap().lock().is_some());
     }
 
     #[tokio::test]
@@ -602,7 +573,7 @@ mod tests {
 
         // set a preset first so current_state is non-null
         set_capability_param(
-            "dev2".into(),
+            "dev2".parse().unwrap(),
             CapabilityParam::EqPreset { preset_index: 4 },
             app.clone(),
         )
@@ -610,7 +581,7 @@ mod tests {
         .unwrap();
         let values = vec![0.5f32; 10];
         set_capability_param(
-            "dev2".into(),
+            "dev2".parse().unwrap(),
             CapabilityParam::EqBands { values },
             app.clone(),
         )
@@ -631,7 +602,7 @@ mod tests {
 
         // device reports 10 bands; sending 5 must fail
         let result = set_capability_param(
-            "dev3".into(),
+            "dev3".parse().unwrap(),
             CapabilityParam::EqBands {
                 values: vec![0.0f32; 5],
             },
@@ -648,8 +619,12 @@ mod tests {
 
         let mut values = vec![0.0f32; 10];
         values[3] = f32::NAN;
-        let result =
-            set_capability_param("dev4".into(), CapabilityParam::EqBands { values }, app).await;
+        let result = set_capability_param(
+            "dev4".parse().unwrap(),
+            CapabilityParam::EqBands { values },
+            app,
+        )
+        .await;
         assert!(result.is_err(), "NaN band value must be rejected");
     }
 }

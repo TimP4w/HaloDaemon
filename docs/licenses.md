@@ -19,7 +19,7 @@ audit has a single starting point.
 | Bundled fonts and icons | `.ttf` and third-party `.svg` files embedded in the GUI/daemon | `REUSE.toml` overrides + SVG SPDX headers | GUI *About* dialog "Bundled assets" | `build.rs` |
 | PawnIO blobs | Windows kernel-access `.bin` files | `REUSE.toml` `pwnio/**` | Windows installer (`PawnIO-LICENSE.txt`) | `stage-release.ps1` |
 | External tools | FFmpeg (subprocess, bundled on Windows) | `packaging/windows/FFmpeg-*` + `REUSE.toml` | Windows installer (`ffmpeg.exe` + `FFmpeg-LICENSE.md`) | - |
-| Official plugins | Signed Lua package snapshot embedded in release `halod` | Plugin manifests, SPDX headers, `LICENSES/`, and generated `licenses.txt` | About → Licenses, release archives, Windows installer, Linux packages | Plugin repo `scripts/generate-licenses.py` |
+| Official plugins | Signed Lua packages downloaded from the official catalog | Plugin manifests, SPDX headers, `LICENSES/`, and generated `licenses.txt` | `licenses.txt` beside the published catalog | Plugin repo `scripts/generate-licenses.py` |
 
 The single most complete artifact is the GUI **About → Licenses** dialog: it stitches
 together protocol references, every Rust crate license, and the bundled asset licenses
@@ -111,28 +111,24 @@ file is, so there is deliberately **no** `LICENSES/MIT.txt`.
 All embedded fonts live in one place, [`src/assets/fonts/`](../src/assets/fonts/),
 shared by the daemon (LCD text rendering) and the GUI (egui):
 
-- NotoSans, JetBrains Mono, Inter Tight: all **OFL-1.1**.
+- NotoSans, JetBrains Mono, Inter Tight, Geist: all **OFL-1.1**.
 - Attributed via `override` annotations in [`REUSE.toml`](../REUSE.toml).
 - Loaded with `include_bytes!` from [`daemon/src/domain/lcd/engine/templates.rs`](../src/daemon/src/domain/lcd/engine/templates.rs)
   and [`ui/src/ui/theme/mod.rs`](../src/ui/src/ui/theme/mod.rs).
 - Credited in the About dialog "Bundled assets" section, which ships the full OFL-1.1
   text (see `append_bundled_asset_licenses()` in [`ui/build.rs`](../src/ui/build.rs)).
 
-## 4a. Bundled icons: Apache-2.0, MIT, and CC-BY-4.0
+## 4a. Bundled icons: Apache-2.0 and MIT
 
 The GUI embeds a small SVG icon set from [`ui/assets/icons/`](../src/ui/assets/icons/).
 Most glyphs are original HaloDaemon assets and inherit the project license. The SVGs
 that came from Pictogrammers Material Design Icons or Google Material Icons carry
 their own `Apache-2.0` SPDX header and copyright attribution. The About dialog names
 both icon projects and includes the full Apache-2.0 text from `LICENSES/`.
-The verified-publisher badge comes from
-[Boxicons](https://github.com/box-icons/boxicons-core), carries its own `MIT`
-SPDX attribution, and is accompanied by the MIT text in `LICENSES/` and the
+The computer device glyph comes from
+[Bootstrap Icons](https://github.com/twbs/icons), is attributed as `MIT` in
+`REUSE.toml`, and is accompanied by the MIT text in `LICENSES/` and the
 About dialog.
-The repository-integrity shield comes from Microsoft's
-[Visual Studio Code Codicons](https://github.com/microsoft/vscode-codicons),
-is licensed under [CC-BY-4.0](https://github.com/microsoft/vscode-codicons/blob/main/LICENSE),
-and retains its source and attribution in the SVG and About dialog.
 
 ## 5. PawnIO kernel blobs: LGPL-2.1-or-later
 
@@ -196,26 +192,13 @@ is a **GPL** build of FFmpeg (GPL-3.0-compatible with this project).
 - The **full** third-party license text (crates + protocol references + fonts/icons) travels
   inside the binary and is viewable at runtime in **About → Licenses**.
 
-## 8. Embedded official plugins
+## 8. Official plugins
 
-Official release builds embed a deterministic, signed snapshot of the official
-Lua plugin repository. The release workflow validates the selected repository
-commit, packages its scripts, `REUSE.toml`, and complete `LICENSES/` directory,
-and passes the archive to the daemon build. At first launch the daemon validates
-the signature and indexed package hashes again before extracting any script.
-
-The plugin publication workflow generates `licenses.txt` from every manifest's
-declared plugin license and every SPDX license/copyright found inside that
-package. Plugin CI rejects a stale notice. HaloDaemon verifies that file and
-its SHA-256 through the signed repository index, then copies the plugin-owned
-artifact into each build/package; no generated copy is kept in the HaloDaemon
-repository.
-
-The GUI appends the notice to **About → Licenses**. Windows shows it on the
-installer license page and installs it under `ThirdPartyLicenses/Plugins`;
-Linux tarballs, debs, RPMs, Arch, and Nix install it under their normal shared
-license path. The same source tree and license texts also travel inside the
-plugin bundle embedded in `halod`.
+Official plugins are not part of HaloDaemon builds. The plugin repository
+publishes them, with their SPDX headers, `REUSE.toml` and `LICENSES/`, as one
+archive per package beside a signed `catalog.yaml`. Its `licenses.txt`, generated
+from every manifest's declared license and every SPDX license and copyright in
+each package, is published alongside; plugin CI rejects a stale notice.
 
 ## Reference clones: `refs/`
 

@@ -21,7 +21,8 @@ use crate::domain::device::{
     BooleanCapability, CapabilityRef, ChoiceCapability, ChoiceStateCache, Device, SensorCapability,
     VisibilitySlot,
 };
-use crate::infrastructure::drivers::vendors::generic::devices::common::TaskHandle;
+use crate::util::task::TaskHandle;
+use halod_shared::ids::DeviceId;
 use halod_shared::types::{
     Boolean, Choice, ChoiceDisplay, ChoiceOption, DeviceCapability, DeviceType, Sensor,
 };
@@ -47,7 +48,7 @@ fn os_label() -> &'static str {
 
 /// The PC/OS device. Grows a new field + capability impl per OS-specific feature.
 pub struct ComputerDevice {
-    id: String,
+    id: DeviceId,
     /// `None` when the host exposes no switchable power profile.
     power_profile: Option<Box<dyn PowerProfileBackend>>,
     choice_cache: ChoiceStateCache,
@@ -67,7 +68,7 @@ impl ComputerDevice {
         keep_awake: Box<dyn KeepAwake>,
     ) -> Self {
         Self {
-            id: "computer".to_string(),
+            id: DeviceId::sanitized("computer"),
             power_profile,
             choice_cache: ChoiceStateCache::default(),
             selected_profile: Mutex::new(1),
@@ -82,7 +83,7 @@ impl ComputerDevice {
 
 #[async_trait]
 impl Device for ComputerDevice {
-    fn id(&self) -> &str {
+    fn id(&self) -> &DeviceId {
         &self.id
     }
     fn name(&self) -> &str {
@@ -118,9 +119,9 @@ impl Device for ComputerDevice {
                 *cache.lock().await = metrics::to_sensors(&snapshot);
             }
         });
-        *self.poll_task.lock().await = Some(TaskHandle::new(handle));
+        *self.poll_task.lock().await = Some(TaskHandle(handle));
 
-        log::info!("[ComputerDevice] initialized ({})", os_label());
+        log::info!("initialized ({})", os_label());
         Ok(true)
     }
 
@@ -128,7 +129,7 @@ impl Device for ComputerDevice {
         self.poll_task.lock().await.take();
         if self.keep_awake.is_active() {
             if let Err(e) = self.keep_awake.set(false).await {
-                log::warn!("[ComputerDevice] failed to release keep-awake on close: {e:#}");
+                log::warn!("failed to release keep-awake on close: {e:#}");
             }
         }
     }
@@ -241,7 +242,7 @@ mod tests {
     use super::*;
 
     struct MockPower {
-        applied: std::sync::Mutex<Vec<String>>,
+        applied: parking_lot::Mutex<Vec<String>>,
         current: Option<&'static str>,
     }
 
@@ -251,7 +252,7 @@ mod tests {
             self.current
         }
         async fn apply(&self, id: &str) -> Result<()> {
-            self.applied.lock().unwrap().push(id.to_string());
+            self.applied.lock().push(id.to_string());
             Ok(())
         }
     }
@@ -287,7 +288,7 @@ mod tests {
         ComputerDevice::new(
             power.map(|c| {
                 Box::new(MockPower {
-                    applied: std::sync::Mutex::new(Vec::new()),
+                    applied: parking_lot::Mutex::new(Vec::new()),
                     current: Some(c),
                 }) as Box<dyn PowerProfileBackend>
             }),

@@ -1,23 +1,29 @@
 // SPDX-License-Identifier: GPL-3.0-or-later
-//! Platform-adaptive title bar: native-style window controls (circular on
-//! GNOME/Adwaita, flat caption buttons on Windows), the logo, and the profile
+//! Platform-adaptive title bar: window controls (compact flat buttons, or
+//! full-height caption buttons on Windows), the logo, and the profile
 //! button. Also hosts the daemon-down overlay and the native-drag
 //! pointer-release workaround shared by both window backends.
 
 use crate::domain::topic_store::TopicStore;
-use egui::{Align2, Color32, Pos2, Rect, Sense, Stroke, Vec2};
+use egui::{Color32, Pos2, Rect, Sense, Stroke, Vec2};
 
+use crate::domain::lifecycle;
 use crate::domain::state::Page;
+use crate::domain::tour;
+use crate::domain::tour::AnchorId;
 use crate::runtime::ipc::CommandTx;
+use crate::ui::components::toast::Toasts;
 use crate::ui::screens::profile;
+use crate::ui::screens::settings;
+use crate::ui::screens::settings::LOG_FILE;
 use crate::ui::theme::{self, a};
 
 /// Window-chrome style for the title-bar controls, auto-detected per OS so the
 /// buttons match platform convention.
 #[derive(Clone, Copy, PartialEq, Debug)]
 pub enum ChromeStyle {
-    /// GNOME/Adwaita-style circular buttons (the non-Windows default).
-    Circular,
+    /// Compact flat buttons (the non-Windows default).
+    Flat,
     /// Windows-style flat, full-height caption buttons.
     Windows,
 }
@@ -28,7 +34,7 @@ impl ChromeStyle {
         if cfg!(target_os = "windows") {
             Self::Windows
         } else {
-            Self::Circular
+            Self::Flat
         }
     }
 }
@@ -239,22 +245,25 @@ fn window_controls_layout(bar: Rect, cfg: &ChromeConfig) -> (WindowControlRects,
         return (Vec::new(), None);
     }
     let rects: Vec<(WinCtl, Rect)> = match cfg.style {
-        ChromeStyle::Circular => {
-            let cy = bar.center().y;
-            let r = 12.0_f32;
-            const GAP: f32 = 34.0;
-            const EDGE: f32 = 30.0; // center inset from the near edge
+        ChromeStyle::Flat => {
+            const W: f32 = 36.0;
+            const H: f32 = 32.0;
+            const GAP: f32 = 2.0;
+            const EDGE: f32 = 12.0;
+            let top = bar.center().y - H / 2.0;
             cfg.buttons
                 .iter()
                 .enumerate()
                 .map(|(i, &c)| {
-                    let cx = match cfg.side {
-                        Side::Right => bar.right() - EDGE - (n - 1 - i) as f32 * GAP,
-                        Side::Left => bar.left() + EDGE + i as f32 * GAP,
+                    let left = match cfg.side {
+                        Side::Right => {
+                            bar.right() - EDGE - (n - i) as f32 * W - (n - 1 - i) as f32 * GAP
+                        }
+                        Side::Left => bar.left() + EDGE + i as f32 * (W + GAP),
                     };
                     (
                         c,
-                        Rect::from_center_size(Pos2::new(cx, cy), Vec2::splat(r * 2.0)),
+                        Rect::from_min_size(Pos2::new(left, top), Vec2::new(W, H)),
                     )
                 })
                 .collect()
@@ -289,31 +298,25 @@ fn span_of(rects: &[(WinCtl, Rect)]) -> Option<(f32, f32)> {
     Some((left, right))
 }
 
-/// Paint a GNOME/Adwaita-style circular window-control button: a subtle
-/// translucent circle with a centered symbolic glyph. Glyphs are stroked (not
-/// text) so they stay crisp and truly centered regardless of the font, and all
-/// three share one neutral colour — Adwaita doesn't tint the close button.
-fn paint_circular(p: &egui::Painter, rect: Rect, ctl: WinCtl, hovered: bool, maximized: bool) {
-    let center = rect.center();
-    let fill = if hovered {
-        a(Color32::WHITE, 0.14)
-    } else {
-        a(Color32::WHITE, 0.07)
-    };
-    p.circle_filled(center, rect.width() / 2.0, fill);
-    let stroke = Stroke::new(1.5, theme::TEXT_MUT);
-    let c = center;
-    let s = 4.0_f32;
+/// Paint a compact flat window-control button: a hover fill behind a stroked
+/// glyph, so the glyphs stay crisp regardless of the font.
+fn paint_flat(p: &egui::Painter, rect: Rect, ctl: WinCtl, hovered: bool, maximized: bool) {
+    if hovered {
+        p.rect_filled(rect, theme::RADIUS_XS + 2.0, theme::ROW_ACTIVE);
+    }
+    let stroke = Stroke::new(1.3, theme::TEXT_DIM);
+    let c = rect.center();
     match ctl {
         WinCtl::Minimize => {
-            let y = c.y + s;
-            p.line_segment([Pos2::new(c.x - s, y), Pos2::new(c.x + s, y)], stroke);
+            p.line_segment(
+                [Pos2::new(c.x - 4.0, c.y), Pos2::new(c.x + 4.0, c.y)],
+                stroke,
+            );
         }
         WinCtl::Maximize if maximized => {
-            // Restore: a front square with a second square peeking behind it.
             let d = 1.5;
             let front =
-                Rect::from_min_size(Pos2::new(c.x - s, c.y - s + d), Vec2::splat(s * 2.0 - d));
+                Rect::from_min_size(Pos2::new(c.x - 3.5, c.y - 3.5 + d), Vec2::splat(7.0 - d));
             p.rect_stroke(front, 0.0, stroke, egui::StrokeKind::Middle);
             let tl = Pos2::new(front.left() + d, front.top() - d);
             let tr = Pos2::new(front.right() + d, front.top() - d);
@@ -322,10 +325,15 @@ fn paint_circular(p: &egui::Painter, rect: Rect, ctl: WinCtl, hovered: bool, max
             p.line_segment([tr, br], stroke);
         }
         WinCtl::Maximize => {
-            let sq = Rect::from_center_size(c, Vec2::splat(s * 2.0));
-            p.rect_stroke(sq, 0.0, stroke, egui::StrokeKind::Middle);
+            p.rect_stroke(
+                Rect::from_center_size(c, Vec2::splat(7.0)),
+                0.0,
+                stroke,
+                egui::StrokeKind::Middle,
+            );
         }
         WinCtl::Close => {
+            let s = 3.0;
             p.line_segment(
                 [Pos2::new(c.x - s, c.y - s), Pos2::new(c.x + s, c.y + s)],
                 stroke,
@@ -398,11 +406,18 @@ fn paint_windows(p: &egui::Painter, rect: Rect, ctl: WinCtl, hovered: bool, maxi
     }
 }
 
-fn title_bar_chrome(ui: &mut egui::Ui, state: &TopicStore) -> (ChromeConfig, Option<(f32, f32)>) {
+fn title_bar_chrome(
+    ui: &mut egui::Ui,
+    state: &TopicStore,
+) -> (ChromeConfig, Option<(f32, f32)>, f32) {
     let rect = ui.max_rect();
 
     // Drag the whole bar to move the window; double-click toggles maximize.
-    let drag = ui.interact(rect, egui::Id::new("title_drag"), Sense::click_and_drag());
+    let drag = ui.interact(
+        rect,
+        egui::Id::unique("title_drag"),
+        Sense::click_and_drag(),
+    );
     if drag.drag_started() {
         ui.ctx().send_viewport_cmd(egui::ViewportCommand::StartDrag);
         arm_pointer_release_workaround(ui.ctx());
@@ -423,16 +438,16 @@ fn title_bar_chrome(ui: &mut egui::Ui, state: &TopicStore) -> (ChromeConfig, Opt
     let cy = rect.center().y;
 
     // Window controls (minimize / maximize / close). Style/order/side follow the
-    // desktop: flat caption buttons on Windows, circular buttons elsewhere; on
+    // desktop: flat caption buttons on Windows, compact flat buttons elsewhere; on
     // GNOME the `button-layout` preference decides which buttons show, their order
     // and side. The user can hide them entirely (tiling window managers).
     let cfg = ChromeConfig::resolve(state.gui.hide_window_controls);
     let maximized = ui.ctx().input(|i| i.viewport().maximized.unwrap_or(false));
     let (buttons, ctl_span) = window_controls_layout(rect, &cfg);
     for (ctl, btn_rect) in &buttons {
-        let resp = ui.interact(*btn_rect, egui::Id::new(ctl.id()), Sense::click());
+        let resp = ui.interact(*btn_rect, egui::Id::unique(ctl.id()), Sense::click());
         match cfg.style {
-            ChromeStyle::Circular => paint_circular(p, *btn_rect, *ctl, resp.hovered(), maximized),
+            ChromeStyle::Flat => paint_flat(p, *btn_rect, *ctl, resp.hovered(), maximized),
             ChromeStyle::Windows => paint_windows(p, *btn_rect, *ctl, resp.hovered(), maximized),
         }
         if resp.hovered() {
@@ -443,13 +458,10 @@ fn title_bar_chrome(ui: &mut egui::Ui, state: &TopicStore) -> (ChromeConfig, Opt
         }
     }
 
-    // Logo mark + wordmark. When the controls sit on the left, start the logo
-    // clear of them so they don't overlap.
     let logo_left = match (cfg.side, ctl_span) {
-        (Side::Left, Some((_, right))) => right + 14.0,
-        _ => rect.left() + 16.0,
+        (Side::Left, Some((_, right))) => right + 20.0,
+        _ => rect.left() + 20.0,
     };
-    let time = ui.input(|i| i.time) as f32;
     let logo_size = crate::ui::components::logo_size(p, 18.0, 14.0);
     crate::ui::components::paint_logo(
         p,
@@ -457,17 +469,15 @@ fn title_bar_chrome(ui: &mut egui::Ui, state: &TopicStore) -> (ChromeConfig, Opt
         Pos2::new(logo_left, cy - logo_size.y / 2.0),
         18.0,
         14.0,
-        time,
     );
-    ui.ctx().request_repaint();
 
-    (cfg, ctl_span)
+    (cfg, ctl_span, logo_left + logo_size.x)
 }
 
 /// The title bar without the profile button — window controls and logo only.
 /// Used by the discovery radar overlay, which has no active profile to show.
 pub fn title_bar_plain(ui: &mut egui::Ui, state: &TopicStore) {
-    title_bar_chrome(ui, state);
+    let _ = title_bar_chrome(ui, state);
 }
 
 pub fn title_bar(
@@ -476,23 +486,23 @@ pub fn title_bar(
     cmd: &CommandTx,
     profile_ui: &mut profile::ProfileUi,
     page: &mut Page,
+    udev_status: Option<&halod_shared::types::UdevRulesStatus>,
+    toasts: &mut Toasts,
 ) {
     let rect = ui.max_rect();
     let cy = rect.center().y;
-    let (cfg, ctl_span) = title_bar_chrome(ui, state);
+    let (cfg, ctl_span, logo_right) = title_bar_chrome(ui, state);
+    super::nav::nav_tabs(ui, logo_right + 20.0, cy, state, page, udev_status);
 
     // Profile button — right edge sits clear of any right-side window controls,
     // otherwise it hugs the right edge.
     let profile_right = match (cfg.side, ctl_span) {
-        (Side::Right, Some((left, _))) => left - 13.0,
-        _ => rect.right() - 16.0,
+        (Side::Right, Some((left, _))) => left - 20.0,
+        _ => rect.right() - 12.0,
     };
     let btn_rect = profile::title_button(ui, state, profile_ui, profile_right, cy);
-    crate::domain::tour::anchor(
-        ui.ctx(),
-        crate::domain::tour::AnchorId::HomeProfile,
-        btn_rect,
-    );
+    super::bell::bell(ui, btn_rect.left() - 20.0, cy, toasts);
+    tour::anchor(ui.ctx(), AnchorId::HomeProfile, btn_rect);
 
     // Dropdown rendered as a Foreground Area (must be called every frame)
     profile::title_dropdown(ui.ctx(), state, cmd, profile_ui, page, btn_rect);
@@ -508,64 +518,62 @@ pub fn daemon_overlay(ui: &mut egui::Ui) {
     let area = ui.max_rect();
     // Swallow all pointer input over the content area so clicks/drags don't fall
     // through to the page rendered behind the scrim. Registered before the card,
-    // so the "Start daemon" button below is allocated on top and stays clickable.
+    // so its buttons are allocated on top and stay clickable.
     ui.interact(
         area,
-        ui.id().with("daemon_overlay_barrier"),
+        ui.scope_id().with("daemon_overlay_barrier"),
         Sense::click_and_drag(),
     );
-    let p = ui.painter();
-    p.rect_filled(area, 0.0, a(theme::MAIN_BG, 0.82));
-
-    let card = Rect::from_center_size(area.center(), Vec2::new(420.0, 220.0));
-    theme::paint_card_rect(p, card, 16.0);
-
-    let cx = card.center().x;
-    let dot = Pos2::new(cx, card.top() + 40.0);
-    theme::glow(p, dot, 10.0, theme::OFFLINE, 0.5);
-    p.circle_filled(dot, 6.0, theme::OFFLINE);
-    p.text(
-        Pos2::new(cx, card.top() + 78.0),
-        Align2::CENTER_CENTER,
-        t!("shell.daemon_not_running"),
-        theme::bold(18.0),
-        theme::TEXT,
-    );
-    p.text(
-        Pos2::new(cx, card.top() + 106.0),
-        Align2::CENTER_CENTER,
-        t!("shell.daemon_unreachable"),
-        theme::body_md(),
-        theme::TEXT_MUT,
-    );
-    p.text(
-        Pos2::new(cx, card.top() + 124.0),
-        Align2::CENTER_CENTER,
-        t!("shell.daemon_start_hint"),
-        theme::body_md(),
-        theme::TEXT_MUT,
-    );
-
-    let btn_rect =
-        Rect::from_center_size(Pos2::new(cx, card.bottom() - 42.0), Vec2::new(170.0, 38.0));
-    let mut btn_ui = ui.new_child(egui::UiBuilder::new().max_rect(btn_rect).layout(
-        egui::Layout::centered_and_justified(egui::Direction::LeftToRight),
-    ));
-    if crate::ui::components::button(
-        &mut btn_ui,
-        &t!("shell.start_daemon"),
-        crate::ui::components::ButtonKind::Primary,
-        btn_rect.size(),
-    )
-    .clicked()
-    {
-        crate::domain::lifecycle::ensure_daemon_up();
-    }
+    ui.painter().rect_filled(area, 0.0, a(theme::MAIN_BG, 0.82));
+    let card = Rect::from_center_size(area.center(), Vec2::new(512.0, 230.0));
+    ui.scope_builder(egui::UiBuilder::new().max_rect(card), |ui| {
+        egui::Frame::NONE
+            .fill(theme::MODAL_BG)
+            .stroke(Stroke::new(1.0, theme::BORDER_INNER))
+            .corner_radius(theme::RADIUS_XL)
+            .inner_margin(egui::Margin::same(26))
+            .show(ui, |ui| {
+                ui.set_width(ui.available_width());
+                ui.label(
+                    egui::RichText::new(t!("shell.daemon_not_running"))
+                        .font(theme::semibold(20.0))
+                        .color(theme::TEXT),
+                );
+                ui.add_space(theme::SPACE_5);
+                ui.label(
+                    egui::RichText::new(t!("shell.daemon_unreachable"))
+                        .font(theme::body_lg())
+                        .color(theme::TEXT_DIM),
+                );
+                ui.add_space(theme::SPACE_5);
+                ui.label(
+                    egui::RichText::new(t!("shell.daemon_reconnecting"))
+                        .font(theme::body_md())
+                        .color(theme::TEXT_MUT),
+                );
+                ui.add_space(theme::SPACE_10);
+                ui.horizontal(|ui| {
+                    let size = Vec2::new(0.0, 36.0);
+                    use crate::ui::components::{button, ButtonKind};
+                    if button(ui, &t!("shell.start_daemon"), ButtonKind::Primary, size).clicked() {
+                        lifecycle::ensure_daemon_up();
+                    }
+                    if button(ui, &t!("shell.open_log"), ButtonKind::Secondary, size).clicked() {
+                        settings::open_path(
+                            &halod_shared::app::config_dir()
+                                .join(LOG_FILE)
+                                .display()
+                                .to_string(),
+                        );
+                    }
+                });
+            });
+    });
 }
 
 /// Memory key for [`arm_pointer_release_workaround`].
 fn pointer_release_id() -> egui::Id {
-    egui::Id::new("halod_native_drag_pointer_release")
+    egui::Id::unique("halod_native_drag_pointer_release")
 }
 
 /// Workaround for egui#7959: a native window drag (`StartDrag`) or resize
@@ -594,7 +602,7 @@ mod tests {
         if cfg!(target_os = "windows") {
             assert_eq!(s, ChromeStyle::Windows);
         } else {
-            assert_eq!(s, ChromeStyle::Circular);
+            assert_eq!(s, ChromeStyle::Flat);
         }
     }
 
@@ -632,12 +640,10 @@ mod tests {
     }
 
     #[test]
-    fn circular_controls_are_minimize_maximize_close_left_to_right() {
+    fn flat_controls_are_minimize_maximize_close_left_to_right() {
         let bar = Rect::from_min_max(Pos2::new(0.0, 0.0), Pos2::new(1000.0, 46.0));
-        let (buttons, span) = window_controls_layout(
-            bar,
-            &cfg(ChromeStyle::Circular, Side::Right, &DEFAULT_ORDER),
-        );
+        let (buttons, span) =
+            window_controls_layout(bar, &cfg(ChromeStyle::Flat, Side::Right, &DEFAULT_ORDER));
         // Order left-to-right is minimize, maximize, close.
         let order: Vec<WinCtl> = buttons.iter().map(|(c, _)| *c).collect();
         assert_eq!(
@@ -656,11 +662,11 @@ mod tests {
     }
 
     #[test]
-    fn left_side_circular_controls_start_at_the_left_edge_in_order() {
+    fn left_side_flat_controls_start_at_the_left_edge_in_order() {
         let bar = Rect::from_min_max(Pos2::new(0.0, 0.0), Pos2::new(1000.0, 46.0));
         let order = [WinCtl::Close, WinCtl::Minimize, WinCtl::Maximize];
         let (buttons, span) =
-            window_controls_layout(bar, &cfg(ChromeStyle::Circular, Side::Left, &order));
+            window_controls_layout(bar, &cfg(ChromeStyle::Flat, Side::Left, &order));
         assert_eq!(
             buttons.iter().map(|(c, _)| *c).collect::<Vec<_>>(),
             order.to_vec()
@@ -676,7 +682,7 @@ mod tests {
     fn hidden_controls_produce_no_buttons_and_no_span() {
         let bar = Rect::from_min_max(Pos2::new(0.0, 0.0), Pos2::new(1000.0, 46.0));
         let (buttons, span) =
-            window_controls_layout(bar, &cfg(ChromeStyle::Circular, Side::Right, &[]));
+            window_controls_layout(bar, &cfg(ChromeStyle::Flat, Side::Right, &[]));
         assert!(buttons.is_empty());
         assert_eq!(span, None);
     }

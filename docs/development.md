@@ -83,7 +83,7 @@ The Rust workspace is under `src/`:
 | `halod-shared` | Shared IPC, device, capability, engine, and rendering types |
 | `halod-hwaccess` | Low-level privileged hardware-access primitives and broker protocol |
 | `halod-broker` | Windows-only privileged hardware-access helper |
-| `halod-plugin-signing` | Plugin repository validation, indexing, and signing tools |
+| `halod-plugin-signing` | Plugin catalog building, signing, and verification |
 
 The daemon and GUI communicate over a Unix socket on Linux and a named pipe on
 Windows. For a deeper overview, see [Architecture](architecture.md).
@@ -114,8 +114,7 @@ The usual workflow is:
 2. Implement the device protocol and capability callbacks in `main.lua`.
 3. Add `test.lua` coverage for encoding, parsing, and transport traffic where
    possible.
-4. Document the protocol alongside the plugin and update the plugin repository
-   index.
+4. Document the protocol alongside the plugin and bump its `version`.
 5. If a Linux HID or USB device needs an ACL, add its VID:PID to
    the plugin's HID/USB/SMBus declarations. Use `halod udev-rules` to print the
    assembled baseline and installed-plugin rules.

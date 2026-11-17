@@ -178,7 +178,7 @@ pub fn resize_gif(
     drop(encoder);
 
     log::debug!(
-        "[LCD] resize_gif: {} frames {}×{} → {}×{} ({} bytes)",
+        "resize_gif: {} frames {}×{} → {}×{} ({} bytes)",
         frame_count,
         src_w,
         src_h,

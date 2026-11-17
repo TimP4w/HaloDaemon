@@ -43,6 +43,7 @@ mod tests {
         send(
             &app,
             NotificationCode::DeviceInitFailed {
+                device_id: "cooler-1".parse().unwrap(),
                 device: "Cooler".into(),
                 detail: "thing exploded".into(),
             },
@@ -56,7 +57,7 @@ mod tests {
         assert!(notification.timestamp_ms > 0);
         assert!(matches!(
             &notification.code,
-            NotificationCode::DeviceInitFailed { device, detail }
+            NotificationCode::DeviceInitFailed { device, detail, .. }
                 if device == "Cooler" && detail == "thing exploded"
         ));
     }

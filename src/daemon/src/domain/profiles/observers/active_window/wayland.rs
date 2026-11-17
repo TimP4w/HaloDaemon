@@ -147,14 +147,14 @@ pub async fn spawn() -> anyhow::Result<mpsc::Receiver<FocusEvent>> {
         let conn = match Connection::connect_to_env() {
             Ok(c) => c,
             Err(e) => {
-                log::warn!("[FocusWatcher/Wayland] connect failed: {e}");
+                log::warn!("connect failed: {e}");
                 return;
             }
         };
         let (globals, mut event_queue) = match registry_queue_init::<AppData>(&conn) {
             Ok(r) => r,
             Err(e) => {
-                log::warn!("[FocusWatcher/Wayland] registry_queue_init: {e}");
+                log::warn!("registry_queue_init: {e}");
                 return;
             }
         };
@@ -162,7 +162,7 @@ pub async fn spawn() -> anyhow::Result<mpsc::Receiver<FocusEvent>> {
         let _manager = match globals.bind::<ZwlrForeignToplevelManagerV1, _, _>(&qh, 1..=3, ()) {
             Ok(m) => m,
             Err(e) => {
-                log::warn!("[FocusWatcher/Wayland] bind failed in watcher thread: {e}");
+                log::warn!("bind failed in watcher thread: {e}");
                 return;
             }
         };

@@ -1,23 +1,25 @@
 // SPDX-License-Identifier: GPL-3.0-or-later
 //! Cross-domain semantic changes emitted after successful state mutations.
 
+use halod_shared::ids::DeviceId;
+
 #[derive(Debug, Clone, PartialEq, Eq)]
 pub enum Change {
     Bootstrap,
     DiscoveryTopology,
-    Device(String),
-    Devices(Vec<String>),
-    SensorTelemetry(Vec<String>),
+    Device(DeviceId),
+    Devices(Vec<DeviceId>),
+    SensorTelemetry(Vec<DeviceId>),
     Lighting,
-    LightingDevice(String),
+    LightingDevice(DeviceId),
     LightingCatalog,
     LightingTopology,
     Canvas,
-    CanvasDevice(String),
+    CanvasDevice(DeviceId),
     Cooling,
-    CoolingDevice(String),
+    CoolingDevice(DeviceId),
     Lcd,
-    LcdDevice(String),
+    LcdDevice(DeviceId),
     LcdCatalog,
     Gui,
     Profiles,
@@ -25,7 +27,7 @@ pub enum Change {
     ProfileSwitch,
     PluginTopology,
     PluginData,
-    PluginDeviceStatus(String),
+    PluginDeviceStatus(DeviceId),
 }
 
 #[async_trait::async_trait]

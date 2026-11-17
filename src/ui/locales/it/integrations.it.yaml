@@ -1,27 +1,16 @@
 integrations:
-  title: Integrazioni
-  subtitle: Collega HaloDaemon ad altre applicazioni. I dispositivi delle integrazioni attive saranno disponibili nell'area di lavoro.
-  empty_title: Nessuna integrazione disponibile
-  empty_hint: Al momento non hai integrazioni.
-  configure: Configura
-  hide_configure: Nascondi
   reset_setup: Reimposta configurazione
   reset_setup_title: Reimpostare la configurazione dell'integrazione?
   reset_setup_confirm: "Questa operazione rimuove la configurazione e le credenziali salvate per %{name}. L'integrazione rimarrà disattivata finché la nuova configurazione non sarà completata."
   reset_setup_action: Reimposta e configura
-  status_connected: Connessa
   status_connecting: Non connessa
-  status_disabled: Disattivata
-  status_unconfigured: Non configurata
   status_configured: Configurata
   status_active: Attiva
-  devices_exposed: "%{count} dispositivi"
-  issue_connect_failed: Connessione non riuscita
-  issue_runtime_error: Errore di esecuzione
   issue_details: Dettagli
   issue_modal_title: "Problema dell'integrazione: %{integration}"
   # finestra di associazione / configurazione
   setup_connect: "Connetti %{name}"
+  setup_step_configure: Configura
   setup_step_discover: Cerca
   setup_step_prepare: Configura
   setup_step_pair: Associa
@@ -57,3 +46,20 @@ integrations:
   setup_connected_sub: Il dispositivo è ora disponibile nell'area di lavoro.
   setup_failed: Configurazione non riuscita
   setup_finish: Chiudi
+  # pannello nella pagina Plugin
+  paused: Questa integrazione è in pausa.
+  resume: Riprendi
+  not_set_up: Non ancora configurata. Configurala per connetterti e aggiungere i suoi dispositivi.
+  set_up: Configura
+  cancel_setup: Annulla configurazione
+  connection: Connessione
+  devices: Dispositivi
+  status: Stato
+  sensors: Sensori
+  sensors_title: Sensori da questa integrazione
+  devices_title: Dispositivi da questa integrazione
+  open_device: Apri
+  save_reconnect: Salva e riconnetti
+  connected_to: "Connessa a %{address}. %{count} dispositivi e %{sensors} sensori aggiunti."
+  connected: "Connessa. %{count} dispositivi e %{sensors} sensori aggiunti."
+  setup_step_of: "Passo %{current} di %{total}"

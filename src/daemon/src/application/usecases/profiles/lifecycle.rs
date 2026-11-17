@@ -4,10 +4,14 @@ use crate::domain::events::ChangeSink as _;
 use anyhow::Result;
 use std::sync::Arc;
 
+use crate::application::notifications;
 use crate::application::state::AppState;
+use crate::application::usecases::registry::registration;
+use crate::domain::events::Change;
 use crate::domain::profiles::device_state::persist_device_state;
 use crate::domain::profiles::model::Profile;
 use crate::domain::profiles::observers::active_window::ControlMsg;
+use halod_shared::ids::DeviceId;
 use halod_shared::types::DEFAULT_PROFILE_NAME;
 
 /// Applies the active profile's stored device states to all currently-connected devices.
@@ -31,14 +35,9 @@ pub async fn load_active_profile(app: Arc<AppState>) {
             lcd_engine.remove_device(device.id()).await;
         }
     }
-    log::info!(
-        "[Profile] Loading '{}' onto {} device(s)",
-        active_name,
-        devices.len()
-    );
+    log::info!("Loading '{}' onto {} device(s)", active_name, devices.len());
     for device in &devices {
-        crate::application::usecases::registry::registration::restore_saved_state(&app, device)
-            .await;
+        registration::restore_saved_state(&app, device).await;
         if let Some(record) = known_devices.get(device.id()) {
             device.set_active_state(record.active_state.clone());
         }
@@ -71,14 +70,11 @@ pub async fn load_active_profile(app: Arc<AppState>) {
             };
             if std::path::Path::new(&path).is_file() {
                 if let Err(e) = video.start(device.id(), &path).await {
-                    log::warn!(
-                        "[Profile] Failed to replay LCD video for '{}': {e:#}",
-                        device.name()
-                    );
+                    log::warn!("Failed to replay LCD video for '{}': {e:#}", device.name());
                 }
             } else {
                 log::warn!(
-                    "[Profile] Saved LCD video '{path}' for '{}' no longer exists; clearing",
+                    "Saved LCD video '{path}' for '{}' no longer exists; clearing",
                     device.name()
                 );
                 lcd.set_video_path(None);
@@ -95,16 +91,15 @@ pub async fn switch_profile_direct(name: String, app: Arc<AppState>) {
     {
         let mut cfg = app.config.write().await;
         if !cfg.profiles.contains_key(&name) {
-            log::warn!("[FocusWatcher] Profile '{name}' not found, skipping switch");
+            log::warn!("Profile '{name}' not found, skipping switch");
             return;
         }
         cfg.active_profile = name;
     }
     load_active_profile(app.clone()).await;
-    app.record_change(crate::domain::events::Change::ProfileSwitch)
-        .await;
+    app.record_change(Change::ProfileSwitch).await;
     let profile = app.config.read().await.active_profile.clone();
-    crate::application::notifications::send(
+    notifications::send(
         &app,
         halod_shared::types::NotificationCode::ProfileSwitched { profile },
     )
@@ -117,15 +112,14 @@ pub async fn switch_profile(name: String, app: Arc<AppState>) -> Result<()> {
         if !cfg.profiles.contains_key(&name) {
             anyhow::bail!("profile not found: {name}");
         }
-        log::info!("[Profile] Switching to '{name}'");
+        log::info!("Switching to '{name}'");
         cfg.active_profile = name;
         cfg.clone()
     };
     app.request_config_save();
     load_active_profile(app.clone()).await;
-    app.record_change(crate::domain::events::Change::ProfileSwitch)
-        .await;
-    crate::application::notifications::send(
+    app.record_change(Change::ProfileSwitch).await;
+    notifications::send(
         &app,
         halod_shared::types::NotificationCode::ProfileSwitched {
             profile: snap.active_profile.clone(),
@@ -150,7 +144,7 @@ pub async fn add_profile(name: String, app: Arc<AppState>) -> Result<()> {
         if cfg.profiles.contains_key(&name) {
             anyhow::bail!("profile already exists: {name}");
         }
-        log::info!("[Profile] Adding '{name}'");
+        log::info!("Adding '{name}'");
         cfg.profiles.insert(name.clone(), Profile::default());
         cfg.active_profile = name.clone();
     }
@@ -159,8 +153,7 @@ pub async fn add_profile(name: String, app: Arc<AppState>) -> Result<()> {
     app.focus
         .notify(ControlMsg::ManualSwitch { profile: name })
         .await;
-    app.record_change(crate::domain::events::Change::ProfileSwitch)
-        .await;
+    app.record_change(Change::ProfileSwitch).await;
     Ok(())
 }
 
@@ -174,7 +167,7 @@ pub async fn remove_profile(name: String, app: Arc<AppState>) -> Result<()> {
         if !cfg.profiles.contains_key(&name) {
             anyhow::bail!("profile not found: {name}");
         }
-        log::info!("[Profile] Removing '{name}'");
+        log::info!("Removing '{name}'");
         cfg.profiles.remove(&name);
         let active_removed = cfg.active_profile == name;
         if active_removed {
@@ -190,11 +183,9 @@ pub async fn remove_profile(name: String, app: Arc<AppState>) -> Result<()> {
                 profile: DEFAULT_PROFILE_NAME.to_string(),
             })
             .await;
-        app.record_change(crate::domain::events::Change::ProfileSwitch)
-            .await;
+        app.record_change(Change::ProfileSwitch).await;
     } else {
-        app.record_change(crate::domain::events::Change::Profiles)
-            .await;
+        app.record_change(Change::Profiles).await;
     }
     Ok(())
 }
@@ -218,7 +209,7 @@ pub async fn rename_profile(old_name: String, new_name: String, app: Arc<AppStat
         if cfg.profiles.contains_key(&new_name) {
             anyhow::bail!("profile already exists: {new_name}");
         }
-        log::info!("[Profile] Renaming '{old_name}' → '{new_name}'");
+        log::info!("Renaming '{old_name}' → '{new_name}'");
         let profile = cfg.profiles.remove(&old_name).unwrap();
         cfg.profiles.insert(new_name.clone(), profile);
         let active_renamed = cfg.active_profile == old_name;
@@ -233,15 +224,14 @@ pub async fn rename_profile(old_name: String, new_name: String, app: Arc<AppStat
             .notify(ControlMsg::ManualSwitch { profile: new_name })
             .await;
     }
-    app.record_change(crate::domain::events::Change::Profiles)
-        .await;
+    app.record_change(Change::Profiles).await;
     Ok(())
 }
 
 /// Persist the RGB Lighting view's device/zone selection in the active profile.
 pub async fn set_lighting_targets(
-    device_ids: Vec<String>,
-    channels: std::collections::HashMap<String, Vec<String>>,
+    device_ids: Vec<DeviceId>,
+    channels: std::collections::HashMap<DeviceId, Vec<String>>,
     app: Arc<AppState>,
 ) -> Result<()> {
     let cap = halod_shared::types::MAX_LIGHTING_TARGET_IDS;
@@ -261,8 +251,7 @@ pub async fn set_lighting_targets(
         channels,
     };
     app.request_config_save();
-    app.record_change(crate::domain::events::Change::Lighting)
-        .await;
+    app.record_change(Change::Lighting).await;
     Ok(())
 }
 
@@ -276,8 +265,8 @@ mod tests {
         let app = app_with(vec![]);
         add_profile("Gaming".into(), app.clone()).await.unwrap();
         set_lighting_targets(
-            vec!["dev1".into()],
-            std::collections::HashMap::from([("dev1".to_string(), vec!["z0".to_string()])]),
+            vec!["dev1".parse().unwrap()],
+            std::collections::HashMap::from([("dev1".parse().unwrap(), vec!["z0".into()])]),
             app.clone(),
         )
         .await
@@ -414,18 +403,19 @@ mod tests {
                 .unwrap()
                 .device_states
                 .insert(
-                    "dev1".into(),
+                    "dev1".parse().unwrap(),
                     serde_json::json!({ "rgb": {"m": "static"}, "fan_curve": {"a": 1} }),
                 );
             let mut gaming = Profile::default();
-            gaming
-                .device_states
-                .insert("dev1".into(), serde_json::json!({ "fan_curve": {"a": 2} }));
+            gaming.device_states.insert(
+                "dev1".parse().unwrap(),
+                serde_json::json!({ "fan_curve": {"a": 2} }),
+            );
             cfg.profiles.insert("Gaming".into(), gaming);
             cfg.active_profile = "Gaming".into();
         }
         let cfg = app.config.read().await;
-        let eff = cfg.effective_device_state("dev1");
+        let eff = cfg.effective_device_state(&"dev1".parse().unwrap());
         assert_eq!(eff["rgb"]["m"], "static");
         assert_eq!(eff["fan_curve"]["a"], 2);
     }
@@ -443,14 +433,18 @@ mod tests {
             .active_profile_data_mut()
             .device_states
             .insert(
-                "lcd0".into(),
+                "lcd0".parse().unwrap(),
                 serde_json::json!({ "lcd": { "template_id": "custom" } }),
             );
 
         load_active_profile(app.clone()).await;
 
         assert!(
-            app.lcd.engine().unwrap().has_slot("lcd0").await,
+            app.lcd
+                .engine()
+                .unwrap()
+                .has_slot(&"lcd0".parse().unwrap())
+                .await,
             "engine must re-activate the restored template"
         );
     }
@@ -467,7 +461,7 @@ mod tests {
             .active_profile_data_mut()
             .device_states
             .insert(
-                "lcd0".into(),
+                "lcd0".parse().unwrap(),
                 serde_json::json!({ "lcd": { "template_id": "custom" } }),
             );
 
@@ -476,13 +470,17 @@ mod tests {
         app.lcd
             .engine()
             .unwrap()
-            .set_template_active("lcd0", "custom", &Default::default())
+            .set_template_active(&"lcd0".parse().unwrap(), "custom", &Default::default())
             .await;
 
         load_active_profile(app.clone()).await;
 
         assert!(
-            app.lcd.engine().unwrap().has_slot("lcd0").await,
+            app.lcd
+                .engine()
+                .unwrap()
+                .has_slot(&"lcd0".parse().unwrap())
+                .await,
             "template must survive the remove+re-add cycle"
         );
         assert_eq!(
@@ -503,7 +501,7 @@ mod tests {
             .active_profile_data_mut()
             .device_states
             .insert(
-                "lcd0".into(),
+                "lcd0".parse().unwrap(),
                 serde_json::json!({
                     "lcd": { "mode": "video", "video_path": "/nonexistent/gone.mp4" }
                 }),
@@ -538,7 +536,7 @@ mod tests {
             .active_profile_data_mut()
             .device_states
             .insert(
-                "lcd0".into(),
+                "lcd0".parse().unwrap(),
                 serde_json::json!({
                     "lcd": { "mode": "video", "video_path": path_str.clone() }
                 }),
@@ -562,7 +560,10 @@ mod tests {
                 .get_mut(DEFAULT_PROFILE_NAME)
                 .unwrap()
                 .device_states
-                .insert("fan_0".into(), serde_json::json!({ "fan_curve": {"a": 1} }));
+                .insert(
+                    "fan_0".parse().unwrap(),
+                    serde_json::json!({ "fan_curve": {"a": 1} }),
+                );
         }
         add_profile("Gaming".into(), app.clone()).await.unwrap();
         let cfg = app.config.read().await;

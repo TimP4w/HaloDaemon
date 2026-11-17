@@ -1,7 +1,8 @@
 // SPDX-License-Identifier: GPL-3.0-or-later
+use parking_lot::Mutex;
 use std::sync::{
     atomic::{AtomicBool, AtomicU32, Ordering},
-    Arc, Mutex,
+    Arc,
 };
 
 use super::{dsp, dsp::SpectrumAnalyzer, AudioHandle, StopGuard, SESSION_RETRY_MS};
@@ -124,8 +125,7 @@ fn run_session(handle: &Arc<AudioHandle>) {
             if rate > 0 {
                 sample_rate_pc.store(rate, Ordering::Relaxed);
                 channels_pc.store(chans.max(1), Ordering::Relaxed);
-                *analyzer_pc.lock().unwrap_or_else(|e| e.into_inner()) =
-                    Some(SpectrumAnalyzer::new(rate));
+                *analyzer_pc.lock() = Some(SpectrumAnalyzer::new(rate));
                 log::info!("Audio capture: negotiated {rate} Hz, {chans} channel(s)");
             }
         })
@@ -142,7 +142,7 @@ fn run_session(handle: &Arc<AudioHandle>) {
             let chans = channels.load(Ordering::Relaxed).max(1) as usize;
             let mono = dsp::downmix_to_mono(dsp::le_f32_samples(bytes), chans);
 
-            let mut guard = analyzer.lock().unwrap_or_else(|e| e.into_inner());
+            let mut guard = analyzer.lock();
             if let Some(a) = guard.as_mut() {
                 for frame in a.feed(&mono) {
                     handle_process.publish(frame);
@@ -193,7 +193,7 @@ fn run_session(handle: &Arc<AudioHandle>) {
         if quit_flag_watcher.load(Ordering::Relaxed)
             || handle_watcher.idle_expired(super::monotonic_ms())
         {
-            let guard = ml_ptr_watcher.lock().unwrap_or_else(|e| e.into_inner());
+            let guard = ml_ptr_watcher.lock();
             if let Some(MainLoopPtr(ptr)) = *guard {
                 unsafe {
                     pipewire::sys::pw_main_loop_quit(ptr);
@@ -205,11 +205,11 @@ fn run_session(handle: &Arc<AudioHandle>) {
 
     ml.run();
 
-    *ml_ptr.lock().unwrap_or_else(|e| e.into_inner()) = None;
+    *ml_ptr.lock() = None;
 }
 
 /// Builds an SPA_PARAM_EnumFormat pod for interleaved F32 audio, any rate.
-fn build_enum_format_pod() -> Result<Vec<u8>, String> {
+fn build_enum_format_pod() -> anyhow::Result<Vec<u8>> {
     use pipewire::spa::{
         param::{
             audio::AudioFormat,
@@ -240,6 +240,6 @@ fn build_enum_format_pod() -> Result<Vec<u8>, String> {
     });
 
     let (cursor, _) = PodSerializer::serialize(std::io::Cursor::new(Vec::new()), &obj)
-        .map_err(|e| format!("PodSerializer::serialize: {e}"))?;
+        .map_err(|e| anyhow::anyhow!("PodSerializer::serialize: {e}"))?;
     Ok(cursor.into_inner())
 }

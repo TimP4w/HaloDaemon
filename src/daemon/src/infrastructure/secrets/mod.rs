@@ -20,15 +20,16 @@ pub use file_store::FileKeyStore;
 use std::sync::Arc;
 
 use anyhow::Result;
+use halod_shared::ids::PluginId;
 
 /// Per-plugin secret storage. Keys are namespaced by `(plugin_id, field_key)` so
 /// one plugin's secret can never collide with, or be read as, another's.
 pub trait SecretStore: Send + Sync {
-    fn set(&self, plugin_id: &str, key: &str, plaintext: &str) -> Result<()>;
+    fn set(&self, plugin_id: &PluginId, key: &str, plaintext: &str) -> Result<()>;
     /// `Ok(None)` when nothing is stored for this key (not an error).
-    fn get(&self, plugin_id: &str, key: &str) -> Result<Option<String>>;
+    fn get(&self, plugin_id: &PluginId, key: &str) -> Result<Option<String>>;
     /// Deleting an absent entry is not an error.
-    fn delete(&self, plugin_id: &str, key: &str) -> Result<()>;
+    fn delete(&self, plugin_id: &PluginId, key: &str) -> Result<()>;
 }
 
 /// Pick the OS keyring if reachable, else the encrypted-file fallback. Probes
@@ -38,13 +39,11 @@ pub trait SecretStore: Send + Sync {
 pub fn open_secret_store() -> Arc<dyn SecretStore> {
     match keyring_store::KeyringStore::probe() {
         Ok(store) => {
-            log::info!("[secrets] using the OS keyring for secure plugin config");
+            log::info!("using the OS keyring for secure plugin config");
             Arc::new(store)
         }
         Err(e) => {
-            log::info!(
-                "[secrets] OS keyring unavailable ({e:#}); falling back to the encrypted file store"
-            );
+            log::info!("OS keyring unavailable ({e:#}); falling back to the encrypted file store");
             Arc::new(file_store::FileKeyStore::new())
         }
     }

@@ -2,7 +2,7 @@
 //! Typed LPCIO plugin backend.
 
 use super::super::manifest::{DeviceSpec, PluginManifest};
-use super::super::transport::{PluginIo, PluginTransportDescriptor};
+use super::super::transport::{accept_spec, Discovery, PluginIo, PluginTransportDescriptor};
 use crate::domain::registry::observers::discovery::DiscoveryHandle;
 use anyhow::{bail, Result};
 use halod_shared::types::{Permission, WriteRateLimit};
@@ -48,10 +48,12 @@ fn open(
         bail!("lpcio is only available on Windows");
     }
 }
-pub(super) const DESCRIPTOR: PluginTransportDescriptor = PluginTransportDescriptor {
+pub(super) const DESCRIPTOR: PluginTransportDescriptor = PluginTransportDescriptor::Discovered {
     kind: "lpcio",
-    matches: Some(matches),
     open,
-    id_suffix: Some(suffix),
-    validate: None,
+    discovery: Discovery {
+        matches,
+        id_suffix: suffix,
+        validate: accept_spec,
+    },
 };

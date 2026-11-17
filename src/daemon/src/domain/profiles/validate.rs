@@ -77,7 +77,8 @@ mod tests {
     fn rejects_too_many_device_states() {
         let mut p = Profile::default();
         for i in 0..MAX_DEVICE_STATES + 1 {
-            p.device_states.insert(format!("d{i}"), json!({}));
+            p.device_states
+                .insert(format!("d{i}").parse().unwrap(), json!({}));
         }
         assert!(validate_profile("p", &p).is_err());
     }
@@ -89,14 +90,14 @@ mod tests {
             deep = json!([deep]);
         }
         let mut p = Profile::default();
-        p.device_states.insert("d".into(), deep);
+        p.device_states.insert("d".parse().unwrap(), deep);
         assert!(validate_profile("p", &p).is_err());
     }
 
     #[test]
     fn rejects_non_object_device_state() {
         let mut p = Profile::default();
-        p.device_states.insert("d".into(), json!(true));
+        p.device_states.insert("d".parse().unwrap(), json!(true));
         assert!(validate_profile("p", &p).is_err());
     }
 
@@ -108,10 +109,11 @@ mod tests {
             state.insert(format!("c{i}"), json!(null));
         }
         p.device_states
-            .insert("d".into(), serde_json::Value::Object(state));
+            .insert("d".parse().unwrap(), serde_json::Value::Object(state));
         assert!(validate_profile("p", &p).is_err());
 
-        p.device_states.insert("d".into(), json!({"": null}));
+        p.device_states
+            .insert("d".parse().unwrap(), json!({"": null}));
         assert!(validate_profile("p", &p).is_err());
     }
 
@@ -122,7 +124,7 @@ mod tests {
         assert!(validate_profile("\0", &p).is_err());
 
         let mut p = Profile::default();
-        p.device_states.insert("\0".into(), json!({}));
+        p.device_states.insert(Default::default(), json!({}));
         assert!(validate_profile("p", &p).is_err());
     }
 
@@ -130,7 +132,7 @@ mod tests {
     fn accepts_a_normal_profile() {
         let mut p = Profile::default();
         p.device_states
-            .insert("d".into(), json!({"rgb": {"mode": "static"}}));
+            .insert("d".parse().unwrap(), json!({"rgb": {"mode": "static"}}));
         assert!(validate_profile("p", &p).is_ok());
     }
 }

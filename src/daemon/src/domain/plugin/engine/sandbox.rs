@@ -6,14 +6,15 @@
 
 use std::cell::Cell;
 use std::rc::Rc;
-use std::time::{Duration, Instant};
+use std::time::Duration;
+use tokio::time::Instant;
 
 use mlua::debug::DebugEvent;
 use mlua::{HookTriggers, Lua, LuaOptions, StdLib, Table, VmState};
 
-use halod_shared::types::Permission;
-
 use super::bytebuf;
+use crate::domain::plugin::ResolvedConfig;
+use crate::domain::plugin::ResolvedConfigValue;
 
 /// Globals removed before a plugin script runs.
 const REMOVED: &[&str] = &[
@@ -29,13 +30,8 @@ const REMOVED: &[&str] = &[
     "print",
 ];
 
-/// Strip every escape hatch, then re-inject `halod`/`log`, then selectively
-/// re-enable permission-gated globals the plugin was actually granted.
-/// `granted` is the effective declared ∩ user-accepted set guaranteed by
-/// `Registry::granted_for`; this function only ever adds capability, never checks
-/// consent itself. `config` is this plugin's own resolved config values (see
-/// `plugins::resolved_config_for`) — never another plugin's, since the caller
-/// builds one `config` map per VM.
+/// Strip every escape hatch, then re-inject `halod`, `log` and the clock.
+/// `config` is this plugin's own resolved config, never another plugin's.
 /// A plugin's optional `log` level.
 fn plugin_log_level(name: Option<&str>) -> log::Level {
     match name {
@@ -46,11 +42,7 @@ fn plugin_log_level(name: Option<&str>) -> log::Level {
     }
 }
 
-pub fn apply(
-    lua: &Lua,
-    granted: &[Permission],
-    config: &crate::domain::plugin::ResolvedConfig,
-) -> mlua::Result<()> {
+pub fn apply(lua: &Lua, config: &ResolvedConfig) -> mlua::Result<()> {
     let globals = lua.globals();
     strip_escape_hatches(lua)?;
     let logger = lua.create_function(
@@ -66,10 +58,7 @@ pub fn apply(
     register_sleep(lua)?;
     super::image_api::register(lua)?;
     inject_config(lua, config)?;
-
-    if granted.contains(&Permission::Os) {
-        reinject_clock(lua)?;
-    }
+    reinject_clock(lua)?;
     Ok(())
 }
 
@@ -133,7 +122,7 @@ pub(super) fn strip_escape_hatches(lua: &Lua) -> mlua::Result<()> {
 }
 
 /// Build a fresh sandboxed plugin VM: strip escape hatches (and, for a full
-/// runtime, re-inject the `halod` surface for `granted`/`config`), cap the Lua
+/// runtime, re-inject the `halod` surface for `config`), cap the Lua
 /// allocator at `memory_limit`, and install the `instruction_budget` hook.
 /// Returns the VM and the budget counter (reset per call to make the budget
 /// per-callback). Every plugin VM — device worker, effect worker, `pre_scan`,
@@ -141,15 +130,14 @@ pub(super) fn strip_escape_hatches(lua: &Lua) -> mlua::Result<()> {
 /// earlier drift left the effect VM with no memory cap; another the manifest
 /// parser hand-rolling the trio outside this chokepoint).
 pub(super) fn bootstrap_vm(
-    granted: &[Permission],
-    config: &crate::domain::plugin::ResolvedConfig,
+    config: &ResolvedConfig,
     memory_limit: usize,
     instruction_budget: u64,
 ) -> mlua::Result<(Lua, Rc<Cell<u64>>)> {
     let libs = StdLib::STRING | StdLib::TABLE | StdLib::MATH | StdLib::COROUTINE | StdLib::UTF8;
     let lua = Lua::new_with(libs, LuaOptions::default())?;
     lua.set_app_data(CallDeadline(Rc::new(Cell::new(None))));
-    apply(&lua, granted, config)?;
+    apply(&lua, config)?;
     lua.set_memory_limit(memory_limit)?;
     let budget = install_instruction_budget_hook(&lua, instruction_budget);
     Ok((lua, budget))
@@ -238,10 +226,10 @@ fn register_sleep(lua: &Lua) -> mlua::Result<()> {
     // A duration-only clock is safe to expose to every package: unlike wall
     // time it conveys no host date/time information and is useful for polling
     // coalescing without requesting the `os` permission.
-    let origin = std::sync::OnceLock::<std::time::Instant>::new();
+    let origin = std::sync::OnceLock::<tokio::time::Instant>::new();
     let monotonic_ms = lua.create_function(move |_, ()| {
         Ok(origin
-            .get_or_init(std::time::Instant::now)
+            .get_or_init(tokio::time::Instant::now)
             .elapsed()
             .as_millis() as u64)
     })?;
@@ -256,30 +244,21 @@ fn inject_platform(lua: &Lua) -> mlua::Result<()> {
 /// Populate `halod.config` with this plugin's resolved values. Read-only in
 /// spirit (nothing enforces it in Lua, but plugins have no reason to mutate
 /// it and no callback ever reads it back from the host).
-fn inject_config(lua: &Lua, config: &crate::domain::plugin::ResolvedConfig) -> mlua::Result<()> {
+fn inject_config(lua: &Lua, config: &ResolvedConfig) -> mlua::Result<()> {
     let halod: Table = lua.globals().get("halod")?;
     let table = lua.create_table()?;
     for (key, value) in config {
         match value {
-            crate::domain::plugin::ResolvedConfigValue::Boolean(value) => {
-                table.set(key.as_str(), *value)?
-            }
-            crate::domain::plugin::ResolvedConfigValue::Number(value) => {
-                table.set(key.as_str(), *value)?
-            }
-            crate::domain::plugin::ResolvedConfigValue::Integer(value) => {
-                table.set(key.as_str(), *value)?
-            }
-            crate::domain::plugin::ResolvedConfigValue::String(value) => {
-                table.set(key.as_str(), value.as_str())?
-            }
+            ResolvedConfigValue::Boolean(value) => table.set(key.as_str(), *value)?,
+            ResolvedConfigValue::Number(value) => table.set(key.as_str(), *value)?,
+            ResolvedConfigValue::Integer(value) => table.set(key.as_str(), *value)?,
+            ResolvedConfigValue::String(value) => table.set(key.as_str(), value.as_str())?,
         }
     }
     halod.set("config", table)
 }
 
-/// `Permission::Os` only ever re-enables the read-only wall clock — never
-/// filesystem/process access, which `os` also carries and stays stripped.
+/// Only the read-only wall clock; `os` filesystem and process access stays stripped.
 fn reinject_clock(lua: &Lua) -> mlua::Result<()> {
     let os: Table = lua.create_table()?;
     let time = lua.create_function(|_, ()| {
@@ -307,8 +286,8 @@ mod tests {
     #[test]
     fn removes_every_escape_hatch_and_keeps_string_lib() {
         let lua = Lua::new();
-        apply(&lua, &[], &HashMap::new()).unwrap();
-        for name in REMOVED {
+        apply(&lua, &HashMap::new()).unwrap();
+        for name in REMOVED.iter().filter(|name| **name != "os") {
             let v: mlua::Value = lua.load(format!("return {name}")).eval().unwrap();
             assert!(v.is_nil(), "escape hatch '{name}' was not stripped");
         }
@@ -319,7 +298,7 @@ mod tests {
 
     #[test]
     fn bootstrap_never_loads_dangerous_stdlibs_internally() {
-        let (lua, _) = bootstrap_vm(&[], &HashMap::new(), 1024 * 1024, 1_000_000).unwrap();
+        let (lua, _) = bootstrap_vm(&HashMap::new(), 1024 * 1024, 1_000_000).unwrap();
         let loaded: Table = lua.named_registry_value("_LOADED").unwrap();
 
         for name in ["os", "io", "package", "debug"] {
@@ -334,7 +313,7 @@ mod tests {
 
     #[test]
     fn log_accepts_an_optional_level_and_never_fails_the_call() {
-        let (lua, _) = bootstrap_vm(&[], &HashMap::new(), 1024 * 1024, 1_000_000).unwrap();
+        let (lua, _) = bootstrap_vm(&HashMap::new(), 1024 * 1024, 1_000_000).unwrap();
         for call in [
             r#"log("m")"#,
             r#"log("m", "trace")"#,
@@ -352,7 +331,7 @@ mod tests {
 
     #[test]
     fn print_is_not_available_to_plugins() {
-        let (lua, _) = bootstrap_vm(&[], &HashMap::new(), 1024 * 1024, 1_000_000).unwrap();
+        let (lua, _) = bootstrap_vm(&HashMap::new(), 1024 * 1024, 1_000_000).unwrap();
         let print: mlua::Value = lua.globals().get("print").unwrap();
         assert!(print.is_nil());
     }
@@ -360,19 +339,18 @@ mod tests {
     #[test]
     fn log_is_available() {
         let lua = Lua::new();
-        apply(&lua, &[], &HashMap::new()).unwrap();
+        apply(&lua, &HashMap::new()).unwrap();
         lua.load(r#"log("hello from a test plugin")"#)
             .exec()
             .unwrap();
     }
 
     #[test]
-    fn granted_os_permission_reinjects_only_the_clock() {
+    fn the_clock_is_available_but_the_rest_of_os_is_not() {
         let lua = Lua::new();
-        apply(&lua, &[Permission::Os], &HashMap::new()).unwrap();
+        apply(&lua, &HashMap::new()).unwrap();
         let now: u64 = lua.load("return os.time()").eval().unwrap();
         assert!(now > 0);
-        // Filesystem/process access must stay stripped even with Os granted.
         assert!(lua
             .load("return os.remove")
             .eval::<mlua::Value>()
@@ -387,7 +365,7 @@ mod tests {
             "host".to_string(),
             crate::domain::plugin::ResolvedConfigValue::String("127.0.0.1".to_string()),
         )]);
-        apply(&lua, &[], &config).unwrap();
+        apply(&lua, &config).unwrap();
         let host: String = lua.load("return halod.config.host").eval().unwrap();
         assert_eq!(host, "127.0.0.1");
         assert!(lua
@@ -402,7 +380,6 @@ mod tests {
         let lua_a = Lua::new();
         apply(
             &lua_a,
-            &[],
             &HashMap::from([(
                 "secret".to_string(),
                 crate::domain::plugin::ResolvedConfigValue::String("plugin-a-value".to_string()),
@@ -412,7 +389,6 @@ mod tests {
         let lua_b = Lua::new();
         apply(
             &lua_b,
-            &[],
             &HashMap::from([(
                 "secret".to_string(),
                 crate::domain::plugin::ResolvedConfigValue::String("plugin-b-value".to_string()),
@@ -447,7 +423,7 @@ mod tests {
                 crate::domain::plugin::ResolvedConfigValue::String("quiet".to_string()),
             ),
         ]);
-        apply(&lua, &[], &config).unwrap();
+        apply(&lua, &config).unwrap();
 
         lua.load(
             "assert(type(halod.config.enabled) == 'boolean')\n\
@@ -462,7 +438,7 @@ mod tests {
     #[test]
     fn empty_config_map_still_exposes_an_empty_table() {
         let lua = Lua::new();
-        apply(&lua, &[], &HashMap::new()).unwrap();
+        apply(&lua, &HashMap::new()).unwrap();
         lua.load("assert(type(halod.config) == 'table')")
             .exec()
             .unwrap();
@@ -471,7 +447,7 @@ mod tests {
     #[test]
     fn package_modules_are_cached_and_cannot_escape_the_index() {
         let lua = Lua::new();
-        apply(&lua, &[], &HashMap::new()).unwrap();
+        apply(&lua, &HashMap::new()).unwrap();
         let sources = std::collections::BTreeMap::from([(
             "lib.counter".to_owned(),
             "local n = 0; return function() n = n + 1; return n end".to_owned(),
@@ -496,20 +472,18 @@ mod tests {
     }
 
     #[test]
-    fn monotonic_clock_is_available_without_os_permission() {
+    fn monotonic_clock_never_goes_backwards() {
         let lua = Lua::new();
-        apply(&lua, &[], &HashMap::new()).unwrap();
+        apply(&lua, &HashMap::new()).unwrap();
         let first: u64 = lua.load("return halod.monotonic_ms()").eval().unwrap();
         let second: u64 = lua.load("return halod.monotonic_ms()").eval().unwrap();
         assert!(second >= first);
-        let os: mlua::Value = lua.load("return os").eval().unwrap();
-        assert!(os.is_nil());
     }
 
     #[test]
     fn platform_is_available_without_os_permission() {
         let lua = Lua::new();
-        apply(&lua, &[], &HashMap::new()).unwrap();
+        apply(&lua, &HashMap::new()).unwrap();
         let platform: String = lua.load("return halod.platform").eval().unwrap();
         assert_eq!(platform, std::env::consts::OS);
     }
@@ -518,7 +492,7 @@ mod tests {
     fn sleep_refuses_once_the_callback_deadline_passes() {
         let lua = Lua::new();
         lua.set_app_data(CallDeadline(Rc::new(Cell::new(None))));
-        apply(&lua, &[], &HashMap::new()).unwrap();
+        apply(&lua, &HashMap::new()).unwrap();
         // Deadline already in the past → sleep must error.
         set_call_deadline(&lua, Duration::from_millis(0));
         std::thread::sleep(Duration::from_millis(1));
@@ -530,7 +504,7 @@ mod tests {
     fn sleep_within_deadline_is_allowed() {
         let lua = Lua::new();
         lua.set_app_data(CallDeadline(Rc::new(Cell::new(None))));
-        apply(&lua, &[], &HashMap::new()).unwrap();
+        apply(&lua, &HashMap::new()).unwrap();
         set_call_deadline(&lua, Duration::from_secs(5));
         lua.load("halod.sleep_ms(1)").exec().unwrap();
     }
@@ -561,8 +535,7 @@ mod tests {
     ) -> Option<bool> {
         let (tx, rx) = std::sync::mpsc::channel();
         std::thread::spawn(move || {
-            let (lua, _budget) =
-                bootstrap_vm(&[], &HashMap::new(), 8 * 1024 * 1024, 5_000_000).unwrap();
+            let (lua, _budget) = bootstrap_vm(&HashMap::new(), 8 * 1024 * 1024, 5_000_000).unwrap();
             if let Some(d) = deadline {
                 set_call_deadline(&lua, d);
             }

@@ -2,6 +2,7 @@
 use crate::domain::events::ChangeSink as _;
 
 use crate::application::state::AppState;
+use crate::domain::events::Change;
 use anyhow::Result;
 use halod_shared::types::AppRule;
 use std::sync::Arc;
@@ -41,8 +42,7 @@ pub async fn add(
     app.config.write().await.app_rules.push(rule);
     app.request_config_save();
     notify_watcher(&app).await;
-    app.record_change(crate::domain::events::Change::AppRules)
-        .await;
+    app.record_change(Change::AppRules).await;
     Ok(())
 }
 
@@ -63,8 +63,13 @@ pub async fn update(
     }
     app.request_config_save();
     notify_watcher(&app).await;
-    app.record_change(crate::domain::events::Change::AppRules)
-        .await;
+    app.record_change(Change::AppRules).await;
+    Ok(())
+}
+
+pub async fn list_running_apps(client: crate::application::ipc::ClientHandle) -> Result<()> {
+    let apps = crate::domain::profiles::observers::running_apps::scan().await?;
+    client.send(&halod_shared::messages::DaemonMessage::RunningAppsList { apps });
     Ok(())
 }
 
@@ -78,8 +83,7 @@ pub async fn remove(index: usize, app: Arc<AppState>) -> Result<()> {
     }
     app.request_config_save();
     notify_watcher(&app).await;
-    app.record_change(crate::domain::events::Change::AppRules)
-        .await;
+    app.record_change(Change::AppRules).await;
     Ok(())
 }
 

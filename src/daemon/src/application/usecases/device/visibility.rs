@@ -6,12 +6,16 @@ use anyhow::{anyhow, Result};
 use std::sync::Arc;
 
 use crate::application::state::AppState;
+use crate::application::usecases::plugin::plugins;
+use crate::application::usecases::registry::registration;
+use crate::domain::events::Change;
 use crate::domain::profiles::device_state::persist_device_state;
 use crate::domain::registry::model::ensure_record;
+use halod_shared::ids::DeviceId;
 use halod_shared::types::{ChannelKind, VisibilityState};
 
 pub async fn set_device_visibility(
-    device_id: String,
+    device_id: DeviceId,
     new_state: VisibilityState,
     app: Arc<AppState>,
 ) -> Result<()> {
@@ -36,11 +40,11 @@ pub async fn set_device_visibility(
 
         // Clear slots before state change (gates check active_state == Visible).
         if new_state != VisibilityState::Visible {
-            crate::application::usecases::registry::registration::clear_engine_slots(device);
+            registration::clear_engine_slots(device);
         }
 
         if new_state == VisibilityState::Disabled {
-            crate::application::usecases::registry::registration::close_device(&app, device).await;
+            registration::close_device(&app, device).await;
         }
 
         if new_state != VisibilityState::Disabled {
@@ -67,28 +71,23 @@ pub async fn set_device_visibility(
         new_state == VisibilityState::Visible && prev_state == Some(VisibilityState::Disabled);
     if enabling_from_disabled {
         if let Some(plugin_id) = owning_plugin_id {
-            crate::application::usecases::plugin::plugins::reconcile_plugins(
-                &app,
-                std::slice::from_ref(&plugin_id),
-            )
-            .await;
+            plugins::reconcile_plugins(&app, std::slice::from_ref(&plugin_id)).await;
             return Ok(());
         }
         app.device_registry
             .write()
             .await
             .retain(|d| d.id() != device_id);
-        crate::application::usecases::plugin::plugins::reconcile_full(&app).await;
+        plugins::reconcile_full(&app).await;
         return Ok(());
     }
 
-    app.record_change(crate::domain::events::Change::Device(device_id))
-        .await;
+    app.record_change(Change::Device(device_id)).await;
     Ok(())
 }
 
 pub async fn set_channel_visibility(
-    device_id: String,
+    device_id: DeviceId,
     kind: ChannelKind,
     channel_id: String,
     state: VisibilityState,
@@ -141,8 +140,7 @@ pub async fn set_channel_visibility(
         app.request_config_save();
     }
 
-    app.record_change(crate::domain::events::Change::Device(device_id))
-        .await;
+    app.record_change(Change::Device(device_id)).await;
     Ok(())
 }
 
@@ -158,9 +156,13 @@ mod tests {
         let device = Arc::new(MockDevice::new("dev1").with_rgb().with_fan());
         let app = app_with(vec![device.clone()]);
 
-        set_device_visibility("dev1".into(), VisibilityState::Hidden, app.clone())
-            .await
-            .unwrap();
+        set_device_visibility(
+            "dev1".parse().unwrap(),
+            VisibilityState::Hidden,
+            app.clone(),
+        )
+        .await
+        .unwrap();
 
         let cfg = app.config.read().await;
         let record = cfg.known_devices.get("dev1").unwrap();
@@ -182,9 +184,13 @@ mod tests {
         }
         let app = app_with(vec![device.clone()]);
 
-        set_device_visibility("dev1".into(), VisibilityState::Hidden, app.clone())
-            .await
-            .unwrap();
+        set_device_visibility(
+            "dev1".parse().unwrap(),
+            VisibilityState::Hidden,
+            app.clone(),
+        )
+        .await
+        .unwrap();
 
         assert!(device.fan.as_ref().unwrap().curve("default").is_none());
     }
@@ -208,7 +214,7 @@ mod tests {
             &(device.clone() as Arc<dyn crate::domain::device::Device>),
         );
         app.config.write().await.known_devices.insert(
-            "dev1".into(),
+            "dev1".parse().unwrap(),
             crate::domain::registry::model::DeviceRecord {
                 name: String::new(),
                 vendor: String::new(),
@@ -219,9 +225,13 @@ mod tests {
 
         assert!(device.fan.as_ref().unwrap().curve("default").is_none());
 
-        set_device_visibility("dev1".into(), VisibilityState::Hidden, app.clone())
-            .await
-            .unwrap();
+        set_device_visibility(
+            "dev1".parse().unwrap(),
+            VisibilityState::Hidden,
+            app.clone(),
+        )
+        .await
+        .unwrap();
         let cfg = app.config.read().await;
         assert_eq!(
             cfg.known_devices.get("dev1").unwrap().active_state,
@@ -233,9 +243,13 @@ mod tests {
     async fn set_device_visibility_for_unknown_device_still_writes_config() {
         let app = app_with(vec![]);
 
-        set_device_visibility("ghost".into(), VisibilityState::Hidden, app.clone())
-            .await
-            .unwrap();
+        set_device_visibility(
+            "ghost".parse().unwrap(),
+            VisibilityState::Hidden,
+            app.clone(),
+        )
+        .await
+        .unwrap();
 
         let cfg = app.config.read().await;
         let record = cfg.known_devices.get("ghost").unwrap();

@@ -8,6 +8,7 @@ use crate::config::{Config, PlacedZone};
 use crate::domain::cooling::model::FanCurveRecord;
 use crate::domain::device::Device;
 use crate::domain::registry::identity::{detect_conflicts, ConflictEntry};
+use halod_shared::ids::DeviceId;
 use halod_shared::types::{
     ChannelKind, DeviceCapability, EffectParamValue, VisibilityState, WireDevice,
 };
@@ -18,10 +19,10 @@ use halod_shared::types::{
 #[derive(Default)]
 pub struct DevicesSnapshot {
     pub devices: Vec<WireDevice>,
-    pub fan_curves: Vec<(String, String, FanCurveRecord)>,
+    pub fan_curves: Vec<(DeviceId, String, FanCurveRecord)>,
     pub placed_zones: Vec<PlacedZone>,
-    pub lcd_templates: HashMap<String, String>,
-    pub lcd_template_params: HashMap<String, HashMap<String, EffectParamValue>>,
+    pub lcd_templates: HashMap<DeviceId, String>,
+    pub lcd_template_params: HashMap<DeviceId, HashMap<String, EffectParamValue>>,
 }
 
 impl AppState {
@@ -32,7 +33,7 @@ impl AppState {
     pub async fn snapshot_selected_devices(
         &self,
         cfg: &Config,
-        selected_ids: Option<&std::collections::HashSet<String>>,
+        selected_ids: Option<&std::collections::HashSet<DeviceId>>,
     ) -> DevicesSnapshot {
         let all_devices: Vec<Arc<dyn Device>> = self.device_registry.read().await.clone();
         let device_list: Vec<Arc<dyn Device>> = all_devices
@@ -72,20 +73,20 @@ impl AppState {
             })
             .collect();
 
-        let lcd_templates: HashMap<String, String> = device_list
+        let lcd_templates: HashMap<DeviceId, String> = device_list
             .iter()
             .filter_map(|d| {
                 let lcd = d.as_lcd()?;
-                Some((d.id().to_owned(), lcd.lcd_template_id()?))
+                Some((d.id().clone(), lcd.lcd_template_id()?))
             })
             .collect();
 
-        let lcd_template_params: HashMap<String, HashMap<String, EffectParamValue>> = device_list
+        let lcd_template_params: HashMap<DeviceId, HashMap<String, EffectParamValue>> = device_list
             .iter()
             .filter_map(|d| {
                 let lcd = d.as_lcd()?;
                 lcd.lcd_template_id()?;
-                Some((d.id().to_owned(), lcd.lcd_template_params()))
+                Some((d.id().clone(), lcd.lcd_template_params()))
             })
             .collect();
 
@@ -196,7 +197,7 @@ impl AppState {
                     .map(|record| record.active_state.clone())
                     .unwrap_or_else(|| device.active_state());
                 ConflictEntry {
-                    id: device.id().to_owned(),
+                    id: device.id().clone(),
                     identity: device.identity(),
                     origin: device.conflict_origin(),
                     connected: device.is_live(),
@@ -212,7 +213,7 @@ impl AppState {
             .map(|(entry, conflict)| (entry.id.clone(), conflict))
             .collect();
         for wire in &mut devices {
-            wire.conflict = conflicts_by_id.get(&wire.id).cloned().flatten();
+            wire.conflict = conflicts_by_id.get(wire.id.as_str()).cloned().flatten();
         }
 
         DevicesSnapshot {
@@ -249,7 +250,10 @@ mod tests {
         let app = Arc::new(AppState::new(Config::default()));
         for (id, origin) in [
             ("builtin", DeviceOrigin::Builtin),
-            ("openrgb", DeviceOrigin::Integration("openrgb".into())),
+            (
+                "openrgb",
+                DeviceOrigin::Integration("openrgb".parse().unwrap()),
+            ),
         ] {
             let identity = DeviceIdentity {
                 scope: Some(crate::domain::registry::identity::IdentityScope::Local),
@@ -304,7 +308,7 @@ mod tests {
         let dev: Arc<dyn Device> = Arc::new(MockDevice::new("fan").with_fan_rpm(900));
         let app = app_with(vec![dev]);
         app.data_bus.replace_host_sensors(vec![(
-            "fan".into(),
+            "fan".parse().unwrap(),
             Sensor {
                 id: "cooling_fan_default_rpm".into(),
                 name: "Fan RPM".into(),
@@ -354,7 +358,11 @@ mod tests {
         let dev: Arc<dyn Device> = Arc::new(MockDevice::new("fan").with_fan_rpm(900));
         let app = app_with(vec![dev]);
         crate::application::usecases::device::telemetry::observe(&app).await;
-        assert!(app.cooling.record_applied_duty("fan", "default", 100).await);
+        assert!(
+            app.cooling
+                .record_applied_duty(&"fan".parse().unwrap(), "default", 100)
+                .await
+        );
 
         let snapshot = app.snapshot_devices(&app.config.read().await.clone()).await;
         let duty =
@@ -373,7 +381,7 @@ mod tests {
         use crate::domain::registry::model::DeviceRecord;
         let mut cfg = Config::default();
         cfg.known_devices.insert(
-            "test_device".to_string(),
+            "test_device".parse().unwrap(),
             DeviceRecord {
                 name: String::new(),
                 vendor: String::new(),
@@ -398,7 +406,7 @@ mod tests {
         use crate::domain::registry::model::DeviceRecord;
         let mut cfg = Config::default();
         cfg.known_devices.insert(
-            "test_device".to_string(),
+            "test_device".parse().unwrap(),
             DeviceRecord {
                 name: "My Fan".into(),
                 vendor: "Acme".into(),
@@ -442,7 +450,7 @@ mod tests {
         use crate::domain::registry::model::DeviceRecord;
         let mut cfg = Config::default();
         cfg.known_devices.insert(
-            "chain_dev".to_string(),
+            "chain_dev".parse().unwrap(),
             DeviceRecord {
                 name: "ARGB Strip".into(),
                 vendor: "Generic".into(),
@@ -509,7 +517,7 @@ mod tests {
 
         let mut cfg = Config::default();
         cfg.known_devices.insert(
-            "combo".to_string(),
+            "combo".parse().unwrap(),
             DeviceRecord {
                 name: "Renamed".into(),
                 vendor: "Acme".into(),

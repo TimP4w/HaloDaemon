@@ -3,7 +3,7 @@
 //! multi-select process-picker modal.
 
 use crate::ui::components as widgets;
-use std::collections::{HashMap, HashSet};
+use std::collections::HashSet;
 
 use crate::domain::topic_store::TopicStore;
 use egui::{Align2, Color32, Id, Order, Pos2, Rect, Sense, Stroke, Vec2};
@@ -11,6 +11,9 @@ use halod_shared::capability;
 use halod_shared::types::{Notification, RunningApp, DEFAULT_PROFILE_NAME};
 
 use crate::domain::state::Page;
+use crate::domain::tour;
+use crate::domain::tour::AnchorId;
+use crate::runtime::app_icons::{get_icon, IconCache};
 use crate::runtime::ipc::CommandTx;
 use crate::ui::components::ButtonKind;
 use crate::ui::theme::{self, a};
@@ -26,6 +29,7 @@ pub struct ProfileUi {
     pub pick_filter: String,
     pub pick_selected: HashSet<String>,
     pub settings_name_buf: String,
+    pub renaming: bool,
     /// Profile a delete is pending confirmation for; drives the confirm dialog.
     pub confirm_delete: Option<String>,
     /// Last profile the settings page was seeded for (detect profile changes).
@@ -114,233 +118,6 @@ fn override_diff_lines(default: &serde_json::Value, value: &serde_json::Value) -
         .collect()
 }
 
-/// State of a background icon load. `Failed` is terminal so a missing icon is
-/// not re-resolved every frame.
-pub enum IconState {
-    Loading,
-    Ready(egui::TextureHandle),
-    Failed,
-}
-
-pub type IconCache = std::sync::Arc<std::sync::Mutex<HashMap<String, IconState>>>;
-
-// ── Icon loading ─────────────────────────────────────────────────────────────
-
-/// Resolve an icon identifier (theme name or absolute path) to an image file.
-/// Returns `None` if the icon cannot be found.
-fn resolve_icon_path(name: &str) -> Option<std::path::PathBuf> {
-    let p = std::path::Path::new(name);
-    if p.is_absolute() {
-        return p.exists().then(|| p.to_owned());
-    }
-    #[cfg(unix)]
-    return find_xdg_icon(name);
-    #[cfg(not(unix))]
-    None
-}
-
-/// Parse the pixel size from a hicolor theme directory name
-/// ("48x48" -> 48, "scalable" -> 0).
-#[cfg(unix)]
-fn parse_icon_dir_size(dir_name: &str) -> u32 {
-    dir_name
-        .split('x')
-        .next()
-        .and_then(|s| s.parse().ok())
-        .unwrap_or(0)
-}
-
-/// Accumulates the best icon candidate across the filesystem walk, applying the
-/// raster > svg > pixmap precedence (larger raster wins).
-#[cfg(unix)]
-#[derive(Default)]
-struct IconRanker {
-    best_raster: Option<(u32, std::path::PathBuf)>,
-    svg: Option<std::path::PathBuf>,
-    pixmap: Option<std::path::PathBuf>,
-}
-
-#[cfg(unix)]
-impl IconRanker {
-    /// Offer a raster candidate of the given pixel size; keeps it if it is the
-    /// largest seen so far.
-    fn offer_raster(&mut self, size: u32, path: std::path::PathBuf) {
-        if self.best_raster.as_ref().is_none_or(|(s, _)| size > *s) {
-            self.best_raster = Some((size, path));
-        }
-    }
-
-    /// Offer an SVG candidate; the first one seen is kept.
-    fn offer_svg(&mut self, path: std::path::PathBuf) {
-        if self.svg.is_none() {
-            self.svg = Some(path);
-        }
-    }
-
-    /// Offer a pixmaps-dir candidate; the first one seen is kept.
-    fn offer_pixmap(&mut self, path: std::path::PathBuf) {
-        if self.pixmap.is_none() {
-            self.pixmap = Some(path);
-        }
-    }
-
-    /// Resolve to the winning path: largest raster, else svg, else pixmap.
-    fn winner(self) -> Option<std::path::PathBuf> {
-        self.best_raster
-            .map(|(_, p)| p)
-            .or(self.svg)
-            .or(self.pixmap)
-    }
-}
-
-/// Data directories to search for icons, user-level first. `XDG_DATA_HOME` is
-/// separate from `XDG_DATA_DIRS` and is where Steam writes per-game icons.
-#[cfg(unix)]
-fn icon_data_dirs() -> Vec<String> {
-    icon_data_dirs_from(
-        std::env::var("XDG_DATA_HOME").ok().as_deref(),
-        std::env::var("HOME").ok().as_deref(),
-        std::env::var("XDG_DATA_DIRS").ok().as_deref(),
-    )
-}
-
-#[cfg(unix)]
-fn icon_data_dirs_from(
-    data_home: Option<&str>,
-    home: Option<&str>,
-    data_dirs: Option<&str>,
-) -> Vec<String> {
-    let mut dirs = Vec::new();
-    match data_home.filter(|d| !d.is_empty()) {
-        Some(d) => dirs.push(d.to_string()),
-        None => {
-            if let Some(home) = home.filter(|h| !h.is_empty()) {
-                dirs.push(format!("{home}/.local/share"));
-            }
-        }
-    }
-    dirs.extend(
-        data_dirs
-            .filter(|d| !d.is_empty())
-            .unwrap_or("/usr/local/share:/usr/share")
-            .split(':')
-            .filter(|d| !d.is_empty())
-            .map(String::from),
-    );
-    dirs
-}
-
-/// Walk the icon data directories for `name`, returning the best match.
-/// Prefers the largest raster (PNG/JPEG) so it stays crisp; falls back to a
-/// scalable SVG (rasterized at load time) and finally the pixmaps directory.
-#[cfg(unix)]
-fn find_xdg_icon(name: &str) -> Option<std::path::PathBuf> {
-    let mut ranker = IconRanker::default();
-
-    for base in icon_data_dirs() {
-        let hicolor = std::path::PathBuf::from(&base).join("icons/hicolor");
-        if let Ok(entries) = std::fs::read_dir(&hicolor) {
-            for entry in entries.flatten() {
-                let apps_dir = entry.path().join("apps");
-                for ext in ["png", "jpg", "jpeg"] {
-                    let candidate = apps_dir.join(format!("{name}.{ext}"));
-                    if candidate.exists() {
-                        let size = parse_icon_dir_size(&entry.file_name().to_string_lossy());
-                        ranker.offer_raster(size, candidate);
-                    }
-                }
-                let candidate = apps_dir.join(format!("{name}.svg"));
-                if candidate.exists() {
-                    ranker.offer_svg(candidate);
-                }
-            }
-        }
-        for ext in ["png", "jpg", "jpeg", "svg"] {
-            let p = std::path::PathBuf::from(&base)
-                .join("pixmaps")
-                .join(format!("{name}.{ext}"));
-            if p.exists() {
-                ranker.offer_pixmap(p);
-                break;
-            }
-        }
-    }
-    ranker.winner()
-}
-
-/// Rasterize an SVG file to RGBA at roughly `target` pixels on the long edge.
-fn rasterize_svg(path: &std::path::Path, target: u32) -> Option<egui::ColorImage> {
-    let data = std::fs::read(path).ok()?;
-    crate::svg::color_image(&data, target)
-}
-
-/// Texture size icons are normalized to. Larger than the on-screen render size
-/// (16–32px) so the final linear downscale stays crisp on HiDPI.
-const ICON_PX: u32 = 64;
-
-/// Load an icon into an egui texture. Handles both raster and SVG sources.
-/// Raster sources are downscaled with a high-quality filter so a large source
-/// (e.g. a 1024² PNG) doesn't alias when drawn at 16–32px.
-fn load_icon_texture(ctx: &egui::Context, name: &str) -> Option<egui::TextureHandle> {
-    let path = resolve_icon_path(name)?;
-    let color_image = if path
-        .extension()
-        .is_some_and(|e| e.eq_ignore_ascii_case("svg"))
-    {
-        rasterize_svg(&path, ICON_PX)?
-    } else {
-        let mut img = image::open(&path).ok()?;
-        if img.width().max(img.height()) > ICON_PX {
-            img = img.resize(ICON_PX, ICON_PX, image::imageops::FilterType::Lanczos3);
-        }
-        let rgba = img.into_rgba8();
-        let size = [rgba.width() as usize, rgba.height() as usize];
-        egui::ColorImage::from_rgba_unmultiplied(size, &rgba.into_raw())
-    };
-    Some(ctx.load_texture(name, color_image, egui::TextureOptions::LINEAR))
-}
-
-/// Get a ready icon texture, kicking off a background load on first request.
-/// Returns `None` while loading, on failure, or for an unknown icon — the call
-/// never blocks the UI thread on filesystem or decode work.
-pub fn get_icon(
-    cache: &IconCache,
-    ctx: &egui::Context,
-    icon_name: &str,
-) -> Option<egui::TextureHandle> {
-    if icon_name.is_empty() {
-        return None;
-    }
-    let mut map = cache
-        .lock()
-        .unwrap_or_else(std::sync::PoisonError::into_inner);
-    if let Some(state) = map.get(icon_name) {
-        return match state {
-            IconState::Ready(tex) => Some(tex.clone()),
-            IconState::Loading | IconState::Failed => None,
-        };
-    }
-    map.insert(icon_name.to_string(), IconState::Loading);
-    drop(map);
-    spawn_icon_load(cache.clone(), ctx.clone(), icon_name.to_string());
-    None
-}
-
-/// Resolve and decode an icon off the UI thread, then store the result and
-/// request a repaint so the loaded texture appears on the next frame.
-fn spawn_icon_load(cache: IconCache, ctx: egui::Context, name: String) {
-    std::thread::spawn(move || {
-        let state = match load_icon_texture(&ctx, &name) {
-            Some(tex) => IconState::Ready(tex),
-            None => IconState::Failed,
-        };
-        if let Ok(mut map) = cache.lock() {
-            map.insert(name, state);
-        }
-        ctx.request_repaint();
-    });
-}
-
 /// Draw a process icon at `rect`. Falls back to a letter chip if no icon is available.
 fn draw_process_icon(
     ui: &egui::Ui,
@@ -362,7 +139,7 @@ fn draw_process_icon(
             .next()
             .unwrap_or('?');
         ui.painter()
-            .rect_filled(rect, rect.height() * 0.25, theme::hex(0x1c2535));
+            .rect_filled(rect, rect.height() * 0.25, theme::TRACK);
         ui.painter().text(
             rect.center(),
             Align2::CENTER_CENTER,
@@ -393,20 +170,27 @@ pub fn title_button(
         &state.profiles.active
     };
 
-    // Measure the name to size the pill.
-    let name_width = p
-        .layout_no_wrap(profile_name.to_string(), theme::subhead(), Color32::WHITE)
+    let caption = t!("profile.title_caption");
+    let caption_width = p
+        .layout_no_wrap(caption.to_string(), theme::body_md(), Color32::WHITE)
         .size()
         .x;
-    // padding(12) + name(nw) + gap(8) + chevron(8) + padding(12)
-    let pill_w = 12.0 + name_width + 8.0 + 8.0 + 12.0;
-    let pill_h = 28.0;
+    let name_width = p
+        .layout_no_wrap(
+            profile_name.to_string(),
+            theme::semibold(13.0),
+            Color32::WHITE,
+        )
+        .size()
+        .x;
+    let pill_w = 12.0 + caption_width + 10.0 + name_width + 10.0 + 12.0 + 12.0;
+    let pill_h = 32.0;
     let pill_rect = Rect::from_min_size(
         Pos2::new(right_x - pill_w, cy - pill_h / 2.0),
         Vec2::new(pill_w, pill_h),
     );
 
-    let resp = ui.interact(pill_rect, Id::new("profile_btn"), Sense::click());
+    let resp = ui.interact(pill_rect, Id::unique("profile_btn"), Sense::click());
     let hovered = resp.hovered();
     if hovered {
         ui.ctx().set_cursor_icon(egui::CursorIcon::PointingHand);
@@ -414,13 +198,13 @@ pub fn title_button(
     let bg = if hovered || st.dropdown_open {
         theme::ROW_ACTIVE
     } else {
-        theme::INNER_BG
+        theme::RAISED_BG
     };
-    p.rect_filled(pill_rect, 9.0, bg);
+    p.rect_filled(pill_rect, theme::RADIUS_SM, bg);
     p.rect_stroke(
         pill_rect,
-        9.0,
-        Stroke::new(1.0, theme::BORDER),
+        theme::RADIUS_SM,
+        Stroke::new(1.0, theme::BORDER_INNER),
         egui::StrokeKind::Middle,
     );
 
@@ -428,24 +212,34 @@ pub fn title_button(
     p.text(
         Pos2::new(x, cy),
         Align2::LEFT_CENTER,
+        caption,
+        theme::body_md(),
+        theme::TEXT_DIM,
+    );
+    x += caption_width + 10.0;
+    p.text(
+        Pos2::new(x, cy),
+        Align2::LEFT_CENTER,
         profile_name,
-        theme::subhead(),
+        theme::semibold(13.0),
         theme::TEXT,
     );
-    x += name_width + 8.0;
+    x += name_width + 10.0;
     if switching {
-        let spin_rect = Rect::from_center_size(Pos2::new(x + 4.0, cy), Vec2::splat(10.0));
-        egui::Spinner::new()
-            .size(10.0)
-            .color(theme::TEXT_FAINT)
-            .paint_at(ui, spin_rect);
-    } else {
-        p.text(
-            Pos2::new(x + 4.0, cy),
-            Align2::CENTER_CENTER,
-            if st.dropdown_open { "▴" } else { "▾" },
-            theme::body(16.0),
+        crate::ui::components::paint_spinner(
+            p,
+            Pos2::new(x + 6.0, cy),
+            10.0,
+            ui.input(|i| i.time) as f32,
             theme::TEXT_FAINT,
+        );
+        ui.ctx().request_repaint();
+    } else {
+        crate::ui::components::paint_chevron(
+            p,
+            Pos2::new(x + 6.0, cy),
+            st.dropdown_open,
+            theme::TEXT_DIM,
         );
     }
 
@@ -496,10 +290,10 @@ pub fn title_dropdown(
     // Anchored below the button, right edges aligned. `open_bool` +
     // `CloseOnClickOutside` lets egui own the dismissal — no manual hit-testing.
     egui::Popup::new(
-        Id::new("profile_dropdown"),
+        Id::unique("profile_dropdown"),
         ctx.clone(),
         btn_rect,
-        egui::LayerId::new(Order::Foreground, Id::new("profile_dropdown")),
+        egui::LayerId::new(Order::Foreground, Id::unique("profile_dropdown")),
     )
     .align(egui::RectAlign::BOTTOM_END)
     .gap(6.0)
@@ -534,11 +328,14 @@ pub fn title_dropdown(
             let dot_x = row_rect.left() + 14.0;
             let dot_y = row_rect.center().y;
             if is_switch_target {
-                let spin_rect = Rect::from_center_size(Pos2::new(dot_x, dot_y), Vec2::splat(10.0));
-                egui::Spinner::new()
-                    .size(10.0)
-                    .color(theme::CYAN)
-                    .paint_at(ui, spin_rect);
+                crate::ui::components::paint_spinner(
+                    ui.painter(),
+                    Pos2::new(dot_x, dot_y),
+                    10.0,
+                    ui.input(|i| i.time) as f32,
+                    theme::CYAN,
+                );
+                ui.ctx().request_repaint();
             } else if is_active {
                 theme::glow(ui.painter(), Pos2::new(dot_x, dot_y), 5.0, theme::CYAN, 0.5);
                 ui.painter()
@@ -580,56 +377,36 @@ pub fn title_dropdown(
 
             // Gear → navigate to profile settings page
             let gear_rect = Rect::from_center_size(Pos2::new(gear_x, icon_y), Vec2::splat(20.0));
-            let gear_resp =
-                ui.interact(gear_rect, Id::new(("pdrop_gear", profile)), Sense::click());
-            let gear_col = if gear_resp.hovered() {
-                theme::TEXT
-            } else {
-                theme::TEXT_FAINT
+            let gear = |p: &egui::Painter, r: Rect, c: Color32| {
+                p.text(r.center(), Align2::CENTER_CENTER, "⚙", theme::body(16.0), c);
             };
-            if gear_resp.hovered() {
-                ui.ctx().set_cursor_icon(egui::CursorIcon::PointingHand);
-            }
-            ui.painter().text(
-                gear_rect.center(),
-                Align2::CENTER_CENTER,
-                "⚙",
-                theme::body(16.0),
-                gear_col,
-            );
-            if gear_resp.clicked() {
+            if widgets::glyph_button_at(ui, gear_rect, Id::unique(("pdrop_gear", profile)), gear)
+                .clicked()
+            {
                 navigate_settings = Some(profile.clone());
             }
 
-            // Delete × (non-default profiles only)
-            if !is_default {
-                let del_rect = Rect::from_center_size(Pos2::new(del_x, icon_y), Vec2::splat(20.0));
-                let del_resp =
-                    ui.interact(del_rect, Id::new(("pdrop_del", profile)), Sense::click());
-                let del_col = if del_resp.hovered() {
-                    theme::OFFLINE
-                } else {
-                    theme::TEXT_FAINT
-                };
-                if del_resp.hovered() {
-                    ui.ctx().set_cursor_icon(egui::CursorIcon::PointingHand);
-                }
-                ui.painter().text(
-                    del_rect.center(),
-                    Align2::CENTER_CENTER,
-                    "×",
-                    theme::title(),
-                    del_col,
-                );
-                if del_resp.clicked() {
-                    remove = Some(profile.clone());
-                }
+            let del_rect = Rect::from_center_size(Pos2::new(del_x, icon_y), Vec2::splat(20.0));
+            if !is_default
+                && widgets::glyph_button_at(
+                    ui,
+                    del_rect,
+                    Id::unique(("pdrop_del", profile)),
+                    widgets::paint_close_glyph,
+                )
+                .clicked()
+            {
+                remove = Some(profile.clone());
             }
 
             // Click row body (left of icons) → switch to profile
             let body_rect =
                 Rect::from_min_max(row_rect.min, Pos2::new(del_x - 6.0, row_rect.max.y));
-            let body_resp = ui.interact(body_rect, Id::new(("pdrop_row", profile)), Sense::click());
+            let body_resp = ui.interact(
+                body_rect,
+                Id::unique(("pdrop_row", profile)),
+                Sense::click(),
+            );
             if body_resp.clicked() && !is_active && !is_switching {
                 switch_to = Some(profile.clone());
             }
@@ -651,7 +428,7 @@ pub fn title_dropdown(
             if widgets::button(
                 ui,
                 &t!("profile.new_profile_btn"),
-                widgets::ButtonKind::Ghost,
+                widgets::ButtonKind::Secondary,
                 Vec2::new(add_w, 34.0),
             )
             .clicked()
@@ -662,7 +439,7 @@ pub fn title_dropdown(
             if widgets::button(
                 ui,
                 &t!("profile.profile_settings_btn"),
-                widgets::ButtonKind::Ghost,
+                widgets::ButtonKind::Secondary,
                 Vec2::new(add_w, 34.0),
             )
             .clicked()
@@ -773,7 +550,7 @@ pub fn add_modal(ctx: &egui::Context, state: &TopicStore, cmd: &CommandTx, st: &
             if widgets::button(
                 ui,
                 &t!("profile.cancel"),
-                ButtonKind::Ghost,
+                ButtonKind::Secondary,
                 egui::vec2(80.0, 34.0),
             )
             .clicked()
@@ -848,151 +625,242 @@ pub fn show(
         || (state.profiles.active.is_empty() && profile == DEFAULT_PROFILE_NAME);
     let is_default = profile == DEFAULT_PROFILE_NAME;
 
-    egui::ScrollArea::vertical()
-        .auto_shrink([false, false])
-        .show(ui, |ui| {
-            ui.add_space(26.0);
-            ui.horizontal(|ui| {
-                ui.add_space(36.0);
-                ui.vertical(|ui| {
-                    ui.set_max_width(760.0);
-
-                    // Back button
-                    let back_resp = ui.add(
-                        egui::Label::new(
-                            egui::RichText::new(t!("profile.back"))
-                                .font(theme::body_md())
-                                .color(theme::TEXT_FAINT),
-                        )
-                        .sense(Sense::click()),
-                    );
-                    if back_resp.hovered() {
-                        ui.ctx().set_cursor_icon(egui::CursorIcon::PointingHand);
-                    }
-                    if back_resp.clicked() {
-                        *page = Page::Home;
+    widgets::page_frame(ui, |ui| {
+        widgets::split_columns(ui, 260.0, 24.0, |nav, ui| {
+            profile_nav(nav, state, st, profile, page);
+            egui::ScrollArea::vertical()
+                .auto_shrink([false, false])
+                .show(ui, |ui| {
+                    if profile_header(ui, state, cmd, st, profile, page, is_active) {
+                        return;
                     }
                     ui.add_space(theme::SPACE_8);
-
-                    // Profile name heading (editable for non-default)
-                    let heading = ui.horizontal(|ui| {
-                        if is_default {
-                            ui.label(
-                                egui::RichText::new(profile)
-                                    .font(theme::bold(22.0))
-                                    .color(theme::TEXT),
-                            );
-                        } else {
-                            let te = egui::TextEdit::singleline(&mut st.settings_name_buf)
-                                .font(theme::bold(22.0))
-                                .desired_width(400.0)
-                                .frame(egui::Frame::NONE)
-                                .text_color(theme::TEXT);
-                            let te_resp = ui.add(te);
-                            if te_resp.lost_focus() {
-                                let new_name = st.settings_name_buf.trim().to_string();
-                                if name_available(state, &new_name) && new_name != profile {
-                                    crate::runtime::ipc::send(
-                                        cmd,
-                                        halod_shared::commands::DaemonCommand::RenameProfile {
-                                            old_name: profile.to_string(),
-                                            new_name: new_name.clone(),
-                                        },
-                                    );
-                                    // Optimistic nav; main.rs redirects to Home if the name
-                                    // disappears.
-                                    *page = Page::Profile(new_name);
-                                    return;
-                                }
-                                st.settings_name_buf = profile.to_string();
-                            }
-                        }
-
-                        ui.add_space(theme::SPACE_6);
-                        if is_active {
-                            // Active badge
-                            let badge_rect =
-                                Rect::from_min_size(ui.cursor().min, Vec2::new(60.0, 22.0));
-                            ui.allocate_rect(badge_rect, Sense::hover());
-                            ui.painter()
-                                .rect_filled(badge_rect, 6.0, a(theme::CYAN, 0.15));
-                            ui.painter().rect_stroke(
-                                badge_rect,
-                                6.0,
-                                Stroke::new(1.0, a(theme::CYAN, 0.35)),
-                                egui::StrokeKind::Middle,
-                            );
-                            ui.painter().text(
-                                badge_rect.center(),
-                                Align2::CENTER_CENTER,
-                                t!("profile.active"),
-                                theme::semibold(11.0),
-                                theme::CYAN,
-                            );
-                        } else if st.switching_to.as_deref() == Some(profile) {
-                            widgets::button_loading(
-                                ui,
-                                &t!("profile.set_active"),
-                                ButtonKind::Ghost,
-                                egui::vec2(90.0, 28.0),
-                            );
-                        } else if st.switching_to.is_none() {
-                            if widgets::button(
-                                ui,
-                                &t!("profile.set_active"),
-                                ButtonKind::Ghost,
-                                egui::vec2(90.0, 28.0),
-                            )
-                            .clicked()
-                            {
-                                st.switching_to = Some(profile.to_string());
-                                crate::runtime::ipc::send(
-                                    cmd,
-                                    halod_shared::commands::DaemonCommand::SwitchProfile {
-                                        name: profile.to_string(),
-                                    },
-                                );
-                            }
-                        } else {
-                            widgets::button_disabled(
-                                ui,
-                                &t!("profile.set_active"),
-                                ButtonKind::Ghost,
-                                egui::vec2(90.0, 28.0),
-                            );
-                        }
-                    });
-                    crate::domain::tour::anchor(
-                        ui.ctx(),
-                        crate::domain::tour::AnchorId::ProfileHeader,
-                        heading.response.rect,
-                    );
-
-                    ui.add_space(theme::SPACE_3);
-                    ui.label(
-                        egui::RichText::new(if is_default {
-                            t!("profile.default_desc")
-                        } else {
-                            t!("profile.profile_desc")
-                        })
-                        .font(theme::body_md())
-                        .color(theme::TEXT_FAINT),
-                    );
-                    ui.add_space(theme::SPACE_10);
-
-                    // ── AUTO-ACTIVATE section ────────────────────────────────
                     auto_activate_card(ui, state, cmd, st, profile);
-                    ui.add_space(20.0);
-
-                    // ── OVERRIDES section ────────────────────────────────────
+                    ui.add_space(theme::SPACE_8);
                     overrides_section(ui, state, cmd, profile, is_default);
                 });
-                ui.add_space(36.0);
-            });
         });
+    });
 
     // Process picker modal (rendered on top, outside scroll area)
     process_picker(ui.ctx(), state, cmd, st, profile, running_apps);
+}
+
+enum HeaderAction {
+    Delete,
+    Rename,
+    Activate,
+}
+
+/// Name, active tag and description with the profile's actions. Returns
+/// `true` when a rename navigated away this frame.
+fn profile_header(
+    ui: &mut egui::Ui,
+    state: &TopicStore,
+    cmd: &CommandTx,
+    st: &mut ProfileUi,
+    profile: &str,
+    page: &mut Page,
+    is_active: bool,
+) -> bool {
+    let is_default = profile == DEFAULT_PROFILE_NAME;
+    let switching = st.switching_to.is_some();
+    let switching_here = st.switching_to.as_deref() == Some(profile);
+    let mut renamed = false;
+    let heading = egui::Sides::new().height(52.0).show(
+        ui,
+        |ui| {
+            ui.vertical(|ui| {
+                ui.horizontal(|ui| {
+                    if st.renaming {
+                        let te = ui.add(
+                            egui::TextEdit::singleline(&mut st.settings_name_buf)
+                                .font(theme::semibold(22.0))
+                                .desired_width(320.0),
+                        );
+                        if !te.has_focus() && !te.lost_focus() {
+                            te.request_focus();
+                        }
+                        if te.lost_focus() {
+                            st.renaming = false;
+                            let new_name = st.settings_name_buf.trim().to_string();
+                            let commit = !ui.input(|i| i.key_pressed(egui::Key::Escape));
+                            if commit && name_available(state, &new_name) && new_name != profile {
+                                crate::runtime::ipc::send(
+                                    cmd,
+                                    halod_shared::commands::DaemonCommand::RenameProfile {
+                                        old_name: profile.to_string(),
+                                        new_name: new_name.clone(),
+                                    },
+                                );
+                                *page = Page::Profile(new_name);
+                                renamed = true;
+                            } else {
+                                st.settings_name_buf = profile.to_string();
+                            }
+                        }
+                    } else {
+                        ui.label(
+                            egui::RichText::new(profile)
+                                .font(theme::semibold(22.0))
+                                .color(theme::TEXT),
+                        );
+                    }
+                    if is_active {
+                        ui.add_space(theme::SPACE_1);
+                        widgets::tag(ui, &t!("profile.active"), widgets::TagTone::Accent);
+                    }
+                });
+                ui.add_space(theme::SPACE_1);
+                ui.label(
+                    egui::RichText::new(if is_default {
+                        t!("profile.default_desc")
+                    } else {
+                        t!("profile.profile_desc")
+                    })
+                    .font(theme::body_lg())
+                    .color(theme::TEXT_DIM),
+                );
+            })
+            .response
+            .rect
+        },
+        |ui| {
+            ui.spacing_mut().item_spacing.x = theme::SPACE_6;
+            let size = egui::vec2(0.0, 36.0);
+            let mut action = None;
+            if !is_default {
+                if widgets::button(ui, &t!("profile.delete_profile"), ButtonKind::Danger, size)
+                    .clicked()
+                {
+                    action = Some(HeaderAction::Delete);
+                }
+                if widgets::button(ui, &t!("profile.rename"), ButtonKind::Secondary, size).clicked()
+                {
+                    action = Some(HeaderAction::Rename);
+                }
+            }
+            if is_active {
+                return action;
+            }
+            if switching_here {
+                widgets::button_loading(ui, &t!("profile.set_active"), ButtonKind::Primary, size);
+            } else if widgets::button_enabled(
+                ui,
+                &t!("profile.set_active"),
+                ButtonKind::Primary,
+                size,
+                !switching,
+            ) {
+                action = Some(HeaderAction::Activate);
+            }
+            action
+        },
+    );
+    match heading.1 {
+        Some(HeaderAction::Delete) => st.confirm_delete = Some(profile.to_string()),
+        Some(HeaderAction::Rename) => {
+            st.settings_name_buf = profile.to_string();
+            st.renaming = true;
+        }
+        Some(HeaderAction::Activate) => {
+            st.switching_to = Some(profile.to_string());
+            crate::runtime::ipc::send(
+                cmd,
+                halod_shared::commands::DaemonCommand::SwitchProfile {
+                    name: profile.to_string(),
+                },
+            );
+        }
+        None => {}
+    }
+    tour::anchor(ui.ctx(), AnchorId::ProfileHeader, heading.0);
+    renamed
+}
+
+fn profile_nav(
+    ui: &mut egui::Ui,
+    state: &TopicStore,
+    st: &mut ProfileUi,
+    current: &str,
+    page: &mut Page,
+) {
+    ui.label(
+        egui::RichText::new(t!("profile.profiles_title"))
+            .font(theme::display())
+            .color(theme::TEXT),
+    );
+    ui.add_space(theme::SPACE_5);
+    ui.spacing_mut().item_spacing.y = theme::SPACE_2;
+    for name in &state.profiles.available {
+        let note = if state.profiles.active == *name {
+            t!("profile.active")
+        } else if name == DEFAULT_PROFILE_NAME {
+            t!("profile.fallback")
+        } else {
+            Default::default()
+        };
+        let (rect, resp) = widgets::hover_row(ui, 38.0, name == current);
+        ui.painter().text(
+            Pos2::new(rect.left() + 12.0, rect.center().y),
+            Align2::LEFT_CENTER,
+            name,
+            theme::body_lg(),
+            if name == current {
+                theme::NAV_TEXT_ACTIVE
+            } else {
+                theme::TEXT_SOFT
+            },
+        );
+        ui.painter().text(
+            Pos2::new(rect.right() - 12.0, rect.center().y),
+            Align2::RIGHT_CENTER,
+            note,
+            theme::body_sm(),
+            theme::TEXT_MUT,
+        );
+        if resp.clicked() {
+            *page = Page::Profile(name.clone());
+        }
+    }
+    ui.add_space(theme::SPACE_4);
+    if widgets::button(
+        ui,
+        &t!("profile.new_profile"),
+        ButtonKind::Secondary,
+        Vec2::new(ui.available_width(), 36.0),
+    )
+    .clicked()
+    {
+        st.add_modal_open = true;
+    }
+}
+
+/// A profile page section: the shared card with its title and optional lede.
+fn section<R>(
+    ui: &mut egui::Ui,
+    title: &str,
+    lede: Option<&str>,
+    body: impl FnOnce(&mut egui::Ui) -> R,
+) -> R {
+    widgets::card_with_margin(ui, egui::Margin::symmetric(20, 18), |ui| {
+        ui.set_width(ui.available_width());
+        ui.label(
+            egui::RichText::new(title)
+                .font(theme::heading())
+                .color(theme::TEXT),
+        );
+        if let Some(lede) = lede {
+            ui.add_space(theme::SPACE_1);
+            ui.label(
+                egui::RichText::new(lede)
+                    .font(theme::body_md())
+                    .color(theme::TEXT_DIM),
+            );
+        }
+        ui.add_space(theme::SPACE_7);
+        body(ui)
+    })
 }
 
 fn names_after_removing(names: &[String], proc_name: &str) -> Vec<String> {
@@ -1056,47 +924,36 @@ fn auto_activate_card(
         ..
     } = st;
 
-    widgets::card_titled(
+    section(
         ui,
         &t!("profile.auto_activate_title"),
-        |_| {},
+        Some(&t!("profile.auto_activate_desc")),
         |ui| {
-            ui.label(
-                egui::RichText::new(t!("profile.auto_activate_desc"))
-                    .font(theme::body_md())
-                    .color(theme::TEXT_FAINT),
-            );
-            ui.add_space(theme::SPACE_5);
-
-            if !chips.is_empty() {
-                ui.horizontal_wrapped(|ui| {
-                    ui.spacing_mut().item_spacing = Vec2::new(6.0, 6.0);
-                    for (rule_idx, proc, icon_name) in &chips {
-                        let chip_resp = process_chip(ui, proc, icon_name, icon_cache);
-                        if chip_resp.clicked() {
-                            remove_process = Some((*rule_idx, proc.clone()));
-                        }
+            ui.horizontal_wrapped(|ui| {
+                ui.spacing_mut().item_spacing = Vec2::splat(theme::SPACE_6);
+                for (rule_idx, proc, icon_name) in &chips {
+                    let icon = match get_icon(icon_cache, ui.ctx(), icon_name) {
+                        Some(tex) => widgets::AppIcon::Texture(tex.id()),
+                        None => widgets::AppIcon::Letter(
+                            proc.chars()
+                                .next()
+                                .unwrap_or('?')
+                                .to_uppercase()
+                                .next()
+                                .unwrap_or('?'),
+                            theme::widget_hue(proc.bytes().fold(0u8, |h, b| h.wrapping_add(b))),
+                        ),
+                    };
+                    if widgets::app_tile(ui, proc, icon) {
+                        remove_process = Some((*rule_idx, proc.clone()));
                     }
-                });
-                ui.add_space(theme::SPACE_4);
-            }
-
-            let add_btn_rect = Rect::from_min_size(ui.cursor().min, Vec2::new(150.0, 32.0));
-            crate::domain::tour::anchor(
-                ui.ctx(),
-                crate::domain::tour::AnchorId::ProfileAddProcess,
-                add_btn_rect,
-            );
-            if widgets::button(
-                ui,
-                &t!("profile.add_processes"),
-                ButtonKind::Ghost,
-                egui::vec2(150.0, 32.0),
-            )
-            .clicked()
-            {
-                open_picker = true;
-            }
+                }
+                let add = widgets::add_app_tile(ui, &t!("profile.add_processes"));
+                tour::anchor(ui.ctx(), AnchorId::ProfileAddProcess, add.rect);
+                if add.clicked() {
+                    open_picker = true;
+                }
+            });
         },
     );
 
@@ -1139,70 +996,6 @@ fn auto_activate_card(
     }
 }
 
-/// A small removable process chip with icon. Returns `Response` — `.clicked()` means the × was hit.
-fn process_chip(
-    ui: &mut egui::Ui,
-    proc_name: &str,
-    icon_name: &str,
-    cache: &IconCache,
-) -> egui::Response {
-    let font = theme::body_sm();
-    let text_galley =
-        ui.painter()
-            .layout_no_wrap(proc_name.to_string(), font.clone(), Color32::WHITE);
-    let text_w = text_galley.size().x;
-    let icon_size = 16.0;
-    // chip: 7px + icon(16) + 5px + text + 6px + ×(10) + 7px
-    let chip_w = 7.0 + icon_size + 5.0 + text_w + 6.0 + 10.0 + 7.0;
-    let chip_h = 26.0;
-    let (rect, resp) = ui.allocate_exact_size(Vec2::new(chip_w, chip_h), Sense::click());
-    let hovered = resp.hovered();
-
-    let bg = if hovered {
-        a(Color32::WHITE, 0.08)
-    } else {
-        a(Color32::WHITE, 0.05)
-    };
-    ui.painter().rect_filled(rect, theme::RADIUS_SM, bg);
-    ui.painter().rect_stroke(
-        rect,
-        theme::RADIUS_SM,
-        Stroke::new(1.0, theme::BORDER_SOFT),
-        egui::StrokeKind::Middle,
-    );
-
-    let icon_rect = Rect::from_min_size(
-        Pos2::new(rect.left() + 7.0, rect.center().y - icon_size / 2.0),
-        Vec2::splat(icon_size),
-    );
-    draw_process_icon(ui, icon_rect, icon_name, proc_name, cache);
-
-    ui.painter().text(
-        Pos2::new(icon_rect.right() + 5.0, rect.center().y),
-        Align2::LEFT_CENTER,
-        proc_name,
-        font,
-        theme::TEXT_DIM,
-    );
-
-    let x_col = if hovered {
-        theme::OFFLINE
-    } else {
-        theme::TEXT_FAINT
-    };
-    ui.painter().text(
-        Pos2::new(rect.right() - 10.0, rect.center().y),
-        Align2::CENTER_CENTER,
-        "×",
-        theme::heading(),
-        x_col,
-    );
-    if hovered {
-        ui.ctx().set_cursor_icon(egui::CursorIcon::PointingHand);
-    }
-    resp
-}
-
 fn overrides_section(
     ui: &mut egui::Ui,
     state: &TopicStore,
@@ -1210,124 +1003,100 @@ fn overrides_section(
     profile: &str,
     is_default: bool,
 ) {
+    use halod_shared::commands::OverrideTarget;
     if is_default {
         return;
     }
+    let empty = halod_shared::types::ProfileOverrides::default();
+    let overrides = state.profiles.overrides.get(profile).unwrap_or(&empty);
+    let mut rows: Vec<(String, String, OverrideTarget)> = Vec::new();
+    for (device_id, keys) in &overrides.device_capabilities {
+        let device_name = state
+            .devices
+            .iter()
+            .find(|d| d.id == device_id)
+            .map_or(device_id.as_str(), |d| d.name.as_str());
+        for (key, diff) in keys {
+            let what = std::iter::once(capability_label(key).into_owned())
+                .chain(override_diff_lines(&diff.default, &diff.value))
+                .collect::<Vec<_>>()
+                .join(" · ");
+            rows.push((
+                device_name.to_string(),
+                what,
+                OverrideTarget::DeviceCapability {
+                    device_id: device_id.clone(),
+                    state_key: key.clone(),
+                },
+            ));
+        }
+    }
+    if overrides.canvas {
+        rows.push((
+            t!("profile.canvas_effects").into_owned(),
+            String::new(),
+            OverrideTarget::Canvas,
+        ));
+    }
 
-    widgets::card_titled(
-        ui,
-        &t!("profile.overrides_title"),
-        |_| {},
-        |ui| {
-            crate::domain::tour::anchor(
-                ui.ctx(),
-                crate::domain::tour::AnchorId::ProfileOverrides,
-                ui.max_rect(),
+    let mut remove_target = None;
+    section(ui, &t!("profile.overrides_title"), None, |ui| {
+        tour::anchor(ui.ctx(), AnchorId::ProfileOverrides, ui.max_rect());
+        if rows.is_empty() {
+            ui.label(
+                egui::RichText::new(t!("profile.overrides_empty"))
+                    .font(theme::body_md())
+                    .color(theme::TEXT_DIM),
             );
-            let empty = halod_shared::types::ProfileOverrides::default();
-            let overrides = state.profiles.overrides.get(profile).unwrap_or(&empty);
-            if overrides.device_capabilities.is_empty() && !overrides.canvas {
-                ui.label(
-                    egui::RichText::new(t!("profile.overrides_empty"))
-                        .font(theme::body_md())
-                        .color(theme::TEXT_FAINT),
-                );
-                return;
-            }
-
-            let mut remove_target: Option<halod_shared::commands::OverrideTarget> = None;
-
-            // Canvas override
-            if overrides.canvas {
-                ui.add_space(theme::SPACE_2);
-                egui::Sides::new().show(
-                    ui,
-                    |ui| {
+            return;
+        }
+        ui.spacing_mut().item_spacing.y = 0.0;
+        for (title, what, target) in rows {
+            widgets::divider(ui);
+            ui.add_space(theme::SPACE_6);
+            egui::Sides::new().height(36.0).show(
+                ui,
+                |ui| {
+                    ui.vertical(|ui| {
                         ui.label(
-                            egui::RichText::new(t!("profile.canvas_effects"))
-                                .font(theme::heading())
+                            egui::RichText::new(title)
+                                .font(theme::medium(14.0))
                                 .color(theme::TEXT),
                         );
-                    },
-                    |ui| {
-                        if widgets::button(
-                            ui,
-                            &t!("profile.revert"),
-                            ButtonKind::Ghost,
-                            egui::vec2(70.0, 26.0),
-                        )
-                        .clicked()
-                        {
-                            remove_target = Some(halod_shared::commands::OverrideTarget::Canvas);
-                        }
-                    },
-                );
-                ui.add_space(theme::SPACE_2);
-            }
-
-            // Per-device capability overrides
-            for (device_id, keys) in &overrides.device_capabilities {
-                let device_name = state
-                    .devices
-                    .iter()
-                    .find(|d| &d.id == device_id)
-                    .map(|d| d.name.as_str())
-                    .unwrap_or(device_id.as_str());
-
-                ui.add_space(theme::SPACE_2);
-                widgets::caps_label(ui, device_name);
-                ui.add_space(theme::SPACE_2);
-
-                for (key, diff) in keys {
-                    let label = capability_label(key);
-                    ui.horizontal(|ui| {
-                        ui.label(
-                            egui::RichText::new(label.as_ref())
-                                .font(theme::body_lg())
-                                .color(theme::TEXT_DIM),
-                        );
-                        ui.with_layout(egui::Layout::right_to_left(egui::Align::Center), |ui| {
-                            if widgets::button(
-                                ui,
-                                &t!("profile.revert"),
-                                ButtonKind::Ghost,
-                                egui::vec2(70.0, 26.0),
-                            )
-                            .clicked()
-                            {
-                                remove_target = Some(
-                                    halod_shared::commands::OverrideTarget::DeviceCapability {
-                                        device_id: device_id.clone(),
-                                        state_key: key.clone(),
-                                    },
-                                );
-                            }
-                        });
-                    });
-                    for line in override_diff_lines(&diff.default, &diff.value) {
-                        ui.horizontal(|ui| {
-                            ui.add_space(theme::SPACE_4);
+                        if !what.is_empty() {
                             ui.label(
-                                egui::RichText::new(line)
-                                    .font(theme::body_md())
-                                    .color(theme::TEXT_FAINT),
+                                egui::RichText::new(what)
+                                    .font(theme::body_sm())
+                                    .color(theme::TEXT_DIM),
                             );
-                        });
+                        }
+                    });
+                },
+                |ui| {
+                    if widgets::button(
+                        ui,
+                        &t!("profile.revert"),
+                        ButtonKind::Secondary,
+                        egui::vec2(0.0, 30.0),
+                    )
+                    .clicked()
+                    {
+                        remove_target = Some(target);
                     }
-                }
-            }
-
-            if let Some(target) = remove_target {
-                crate::runtime::ipc::send(
-                    cmd,
-                    halod_shared::commands::DaemonCommand::RemoveProfileOverride {
-                        profile: profile.to_string(),
-                        target,
-                    },
-                );
-            }
-        },
-    );
+                },
+            );
+            ui.add_space(theme::SPACE_6);
+        }
+    });
+    if let Some(target) = remove_target {
+        crate::runtime::ipc::send(
+            cmd,
+            halod_shared::commands::DaemonCommand::RemoveProfileOverride {
+                profile: profile.to_string(),
+                target,
+            },
+        );
+    }
 }
 
 // ── Process picker modal ──────────────────────────────────────────────────────
@@ -1442,7 +1211,7 @@ pub fn process_picker(
                                 Align2::CENTER_CENTER,
                                 "✔",
                                 theme::bold(9.0),
-                                theme::hex(0x0a0d13),
+                                theme::ON_ACCENT,
                             );
                         } else {
                             ui.painter().circle_stroke(
@@ -1517,7 +1286,7 @@ pub fn process_picker(
                 if widgets::button(
                     ui,
                     &t!("profile.cancel"),
-                    ButtonKind::Ghost,
+                    ButtonKind::Secondary,
                     egui::vec2(80.0, 34.0),
                 )
                 .clicked()
@@ -1626,23 +1395,6 @@ mod tests {
         assert!(override_diff_lines(&value.clone(), &value).is_empty());
     }
 
-    #[cfg(unix)]
-    #[test]
-    fn icon_data_dirs_searches_data_home_before_system_dirs() {
-        assert_eq!(
-            icon_data_dirs_from(None, Some("/home/u"), Some("/usr/share")),
-            vec!["/home/u/.local/share".to_string(), "/usr/share".to_string()]
-        );
-        assert_eq!(
-            icon_data_dirs_from(Some("/xdg/data"), Some("/home/u"), Some("/usr/share")),
-            vec!["/xdg/data".to_string(), "/usr/share".to_string()]
-        );
-        assert_eq!(
-            icon_data_dirs_from(None, None, Some("")),
-            vec!["/usr/local/share".to_string(), "/usr/share".to_string()]
-        );
-    }
-
     fn state_with_profiles(profiles: &[&str], active: &str, rules: Vec<AppRule>) -> TopicStore {
         TopicStore {
             profiles: halod_shared::types::ProfileState {
@@ -1696,38 +1448,6 @@ mod tests {
     }
 
     #[test]
-    fn get_icon_never_blocks_and_reflects_cache_state() {
-        let ctx = egui::Context::default();
-        let cache: IconCache = Default::default();
-
-        // Empty name resolves to nothing and registers no load.
-        assert!(get_icon(&cache, &ctx, "").is_none());
-        assert!(cache.lock().unwrap().is_empty());
-
-        // Pending and failed entries yield None without spawning a load.
-        cache.lock().unwrap().insert("a".into(), IconState::Loading);
-        cache.lock().unwrap().insert("b".into(), IconState::Failed);
-        assert!(get_icon(&cache, &ctx, "a").is_none());
-        assert!(get_icon(&cache, &ctx, "b").is_none());
-
-        // A ready entry yields its texture.
-        let tex = ctx.load_texture("t", egui::ColorImage::example(), Default::default());
-        cache
-            .lock()
-            .unwrap()
-            .insert("c".into(), IconState::Ready(tex.clone()));
-        assert_eq!(get_icon(&cache, &ctx, "c").map(|t| t.id()), Some(tex.id()));
-    }
-
-    #[test]
-    fn get_icon_first_request_registers_a_background_load() {
-        let ctx = egui::Context::default();
-        let cache: IconCache = Default::default();
-        assert!(get_icon(&cache, &ctx, "halod-no-such-icon-zzz").is_none());
-        assert!(cache.lock().unwrap().contains_key("halod-no-such-icon-zzz"));
-    }
-
-    #[test]
     fn seed_resets_on_profile_change() {
         let mut st = ProfileUi::default();
         seed_if_profile_changed(&mut st, "Gaming");
@@ -1755,50 +1475,5 @@ mod tests {
     fn picker_merge_does_not_duplicate_existing_process() {
         let merged = merge_process_names(&["game.exe".to_string()], &["game.exe".to_string()]);
         assert_eq!(merged, vec!["game.exe"]);
-    }
-
-    #[cfg(unix)]
-    #[test]
-    fn parse_icon_dir_size_extracts_dimension() {
-        assert_eq!(parse_icon_dir_size("48x48"), 48);
-        assert_eq!(parse_icon_dir_size("256x256"), 256);
-        assert_eq!(parse_icon_dir_size("scalable"), 0);
-        assert_eq!(parse_icon_dir_size(""), 0);
-    }
-
-    #[cfg(unix)]
-    #[test]
-    fn icon_ranker_precedence() {
-        use std::path::PathBuf;
-
-        // Raster always wins over svg and pixmap.
-        let mut r = IconRanker::default();
-        r.offer_svg(PathBuf::from("a.svg"));
-        r.offer_pixmap(PathBuf::from("a.png"));
-        r.offer_raster(48, PathBuf::from("48.png"));
-        assert_eq!(r.winner(), Some(PathBuf::from("48.png")));
-
-        // Largest raster wins regardless of offer order.
-        let mut r = IconRanker::default();
-        r.offer_raster(48, PathBuf::from("48.png"));
-        r.offer_raster(256, PathBuf::from("256.png"));
-        r.offer_raster(32, PathBuf::from("32.png"));
-        assert_eq!(r.winner(), Some(PathBuf::from("256.png")));
-
-        // Svg wins over pixmap when no raster present; first svg kept.
-        let mut r = IconRanker::default();
-        r.offer_svg(PathBuf::from("first.svg"));
-        r.offer_svg(PathBuf::from("second.svg"));
-        r.offer_pixmap(PathBuf::from("p.png"));
-        assert_eq!(r.winner(), Some(PathBuf::from("first.svg")));
-
-        // Pixmap is the last resort; first pixmap kept.
-        let mut r = IconRanker::default();
-        r.offer_pixmap(PathBuf::from("first.png"));
-        r.offer_pixmap(PathBuf::from("second.png"));
-        assert_eq!(r.winner(), Some(PathBuf::from("first.png")));
-
-        // Nothing offered yields None.
-        assert_eq!(IconRanker::default().winner(), None);
     }
 }

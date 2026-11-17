@@ -1,11 +1,8 @@
 // SPDX-License-Identifier: GPL-3.0-or-later
-//! Shared progress affordances — the ring spinner, the gradient loading bar,
-//! and the success badge. Every "something is happening / it's done" surface in
-//! the app routes through these so they read as one family: the Drift lavender→
-//! magenta gradient ([`theme::PROGRESS_A`]→[`theme::PROGRESS_B`]) over a common
-//! [`theme::TRACK`].
+//! Shared progress affordances — the ring spinner, the loading bar and the
+//! success badge: one accent over a common [`theme::TRACK`].
 
-use egui::{Pos2, Rect, Sense, Shape, Stroke, Vec2};
+use egui::{Color32, Pos2, Rect, Sense, Shape, Stroke, Vec2};
 
 use crate::ui::icons;
 use crate::ui::theme;
@@ -15,26 +12,27 @@ use crate::ui::theme;
 pub fn spinner(ui: &mut egui::Ui, size: f32) -> egui::Response {
     let (rect, resp) = ui.allocate_exact_size(Vec2::splat(size), Sense::hover());
     let time = ui.input(|i| i.time) as f32;
-    paint_spinner(ui.painter(), rect.center(), size, time);
+    paint_spinner(ui.painter(), rect.center(), size, time, theme::CYAN);
     ui.ctx().request_repaint();
     resp
 }
 
-/// Paint a spinner of diameter `size` centered at `center` for clock `time`.
-pub fn paint_spinner(painter: &egui::Painter, center: Pos2, size: f32, time: f32) {
+/// Paint a spinner of diameter `size` centered at `center` for clock `time`:
+/// a faint track in `color` with a bright arc of the same color sweeping it.
+pub fn paint_spinner(painter: &egui::Painter, center: Pos2, size: f32, time: f32, color: Color32) {
     let stroke_w = (size / 11.0).clamp(2.0, 4.0);
     let radius = size / 2.0 - stroke_w / 2.0;
-    painter.circle_stroke(center, radius, Stroke::new(stroke_w, theme::TRACK));
+    painter.circle_stroke(center, radius, Stroke::new(stroke_w, theme::a(color, 0.25)));
     let start = time * 3.2;
     let sweep = std::f32::consts::PI * 0.62;
     let steps = 24;
     let pts: Vec<Pos2> = (0..=steps)
         .map(|i| center + Vec2::angled(start + sweep * i as f32 / steps as f32) * radius)
         .collect();
-    painter.add(Shape::line(pts, Stroke::new(stroke_w, theme::PROGRESS_A)));
+    painter.add(Shape::line(pts, Stroke::new(stroke_w, color)));
 }
 
-/// A gradient loading bar filling `width`. `fraction: Some(f)` draws a
+/// A loading bar filling `width`. `fraction: Some(f)` draws a
 /// determinate fill (`f` clamped to `0..=1`); `None` animates an indeterminate
 /// segment sweeping left→right and drives its own repaint.
 pub fn progress_bar(
@@ -47,17 +45,14 @@ pub fn progress_bar(
     let p = ui.painter();
     let r = rect.height() / 2.0;
     p.rect_filled(rect, r, theme::TRACK);
-    // The gradient maps across the full inner width and is revealed through a
-    // clip, so at any fraction the visible hues are the left slice of the same
-    // spectrum rather than a squished full sweep.
-    let inner = rect.shrink(1.0);
+    let inner = rect;
     match fraction {
         Some(f) => {
             let f = f.clamp(0.0, 1.0);
             if f > 0.0 {
                 let clip =
                     Rect::from_min_size(inner.min, Vec2::new(inner.width() * f, inner.height()));
-                gradient_fill(p, inner, clip);
+                p.rect_filled(clip, r, theme::CYAN);
             }
         }
         None => {
@@ -68,20 +63,12 @@ pub fn progress_bar(
                     Pos2::new(inner.left() + inner.width() * x0, inner.top()),
                     Pos2::new(inner.left() + inner.width() * x1, inner.bottom()),
                 );
-                gradient_fill(p, inner, clip);
+                p.rect_filled(clip, r, theme::CYAN);
             }
             ui.ctx().request_repaint();
         }
     }
     resp
-}
-
-fn gradient_fill(painter: &egui::Painter, full: Rect, clip: Rect) {
-    theme::h_gradient(
-        &painter.with_clip_rect(clip),
-        full,
-        &[theme::PROGRESS_A, theme::PROGRESS_B],
-    );
 }
 
 /// Visible sub-segment `(x0, x1)` in `0..=1` of an indeterminate bar at loop

@@ -5,7 +5,10 @@ use anyhow::{Context, Result};
 use std::sync::Arc;
 
 use crate::application::state::AppState;
+use crate::application::usecases::registry::registration;
+use crate::domain::events::Change;
 use crate::domain::registry::require_device_owned_id;
+use halod_shared::ids::DeviceId;
 
 /// Reconcile the explicitly-owned children of a dynamic controller. Plugin
 /// children use stable hardware ids (for example a receiver serial), so a
@@ -32,7 +35,7 @@ pub(crate) async fn reconcile_owned_children(
     let mut registered = std::collections::HashSet::new();
     for child in added {
         let child_id = child.id().to_owned();
-        if crate::application::usecases::registry::registration::register_device(app, child).await {
+        if registration::register_device(app, child).await {
             registered.insert(child_id);
         }
     }
@@ -51,10 +54,7 @@ pub(crate) async fn reconcile_owned_children(
             removed
         };
         for child in removed {
-            log::info!(
-                "[receiver] Removed {} after receiver slot changed",
-                child.id()
-            );
+            log::info!("Removed {} after receiver slot changed", child.id());
             super::registration::close_device(app, &child).await;
         }
     }
@@ -109,38 +109,36 @@ pub(crate) async fn revive_owned_children(
         match super::registration::init_device(app, &child).await {
             Ok(true) => {
                 super::registration::restore_saved_state(app, &child).await;
-                log::info!("[receiver] Reinitialized {} after it came back", child.id());
+                log::info!("Reinitialized {} after it came back", child.id());
                 revived = true;
             }
-            _ => log::debug!("[receiver] {} is still unreachable", child.id()),
+            _ => log::debug!("{} is still unreachable", child.id()),
         }
     }
     revived
 }
 
-pub async fn start_pairing(id: String, timeout_secs: u8, app: Arc<AppState>) -> Result<()> {
+pub async fn start_pairing(id: DeviceId, timeout_secs: u8, app: Arc<AppState>) -> Result<()> {
     let device = require_device_owned_id(&id, &app).await?;
     let cap = device
         .as_pairing()
         .context("device does not support pairing")?;
     cap.start_pairing(timeout_secs).await?;
-    app.record_change(crate::domain::events::Change::Device(id))
-        .await;
+    app.record_change(Change::Device(id)).await;
     Ok(())
 }
 
-pub async fn stop_pairing(id: String, app: Arc<AppState>) -> Result<()> {
+pub async fn stop_pairing(id: DeviceId, app: Arc<AppState>) -> Result<()> {
     let device = require_device_owned_id(&id, &app).await?;
     let cap = device
         .as_pairing()
         .context("device does not support pairing")?;
     cap.stop_pairing().await?;
-    app.record_change(crate::domain::events::Change::Device(id))
-        .await;
+    app.record_change(Change::Device(id)).await;
     Ok(())
 }
 
-pub async fn unpair(id: String, slot: u8, app: Arc<AppState>) -> Result<()> {
+pub async fn unpair(id: DeviceId, slot: u8, app: Arc<AppState>) -> Result<()> {
     let device = require_device_owned_id(&id, &app).await?;
     let cap = device
         .as_pairing()
@@ -152,15 +150,14 @@ pub async fn unpair(id: String, slot: u8, app: Arc<AppState>) -> Result<()> {
             .await
             .retain(|d| d.id() != removed_id);
         super::registration::close_device(&app, &removed).await;
-        log::info!("[receiver] Removed {removed_id} after unpair");
+        log::info!("Removed {removed_id} after unpair");
     } else {
         // Lua/plugin controllers cannot return a concrete child `Arc` through
         // the pairing ABI. Diff their owned children after the hardware write
         // instead, which removes the slot that the plugin just cleared.
         reconcile_owned_children(&device, &app).await;
     }
-    app.record_change(crate::domain::events::Change::PluginTopology)
-        .await;
+    app.record_change(Change::PluginTopology).await;
     Ok(())
 }
 
@@ -179,7 +176,7 @@ mod tests {
     #[tokio::test]
     async fn start_pairing_forwards_timeout() {
         let (mock, app) = receiver();
-        start_pairing("mock_receiver".into(), 30, app)
+        start_pairing("mock_receiver".parse().unwrap(), 30, app)
             .await
             .unwrap();
         assert_eq!(mock.calls(), ["start_pairing 30"]);
@@ -188,14 +185,18 @@ mod tests {
     #[tokio::test]
     async fn stop_pairing_closes_lock() {
         let (mock, app) = receiver();
-        stop_pairing("mock_receiver".into(), app).await.unwrap();
+        stop_pairing("mock_receiver".parse().unwrap(), app)
+            .await
+            .unwrap();
         assert_eq!(mock.calls(), ["stop_pairing"]);
     }
 
     #[tokio::test]
     async fn unpair_forwards_slot() {
         let (mock, app) = receiver();
-        unpair("mock_receiver".into(), 3, app).await.unwrap();
+        unpair("mock_receiver".parse().unwrap(), 3, app)
+            .await
+            .unwrap();
         assert_eq!(mock.calls(), ["unpair 3"]);
     }
 
@@ -210,16 +211,19 @@ mod tests {
             for id in ["child-asleep", "child-awake"] {
                 cfg.active_profile_data_mut()
                     .device_states
-                    .insert(id.into(), serde_json::json!({ "x": 1 }));
+                    .insert(id.parse().unwrap(), serde_json::json!({ "x": 1 }));
             }
         }
         app.device_registry
             .children
             .lock()
             .await
-            .entry("mock_controller".into())
+            .entry("mock_controller".parse().unwrap())
             .or_default()
-            .extend(["child-asleep".to_string(), "child-awake".to_string()]);
+            .extend([
+                "child-asleep".parse().unwrap(),
+                "child-awake".parse().unwrap(),
+            ]);
 
         assert!(revive_owned_children(&root, &app).await);
         assert!(
@@ -246,6 +250,8 @@ mod tests {
     #[tokio::test]
     async fn start_pairing_unknown_device_errors() {
         let app = app_with(vec![]);
-        assert!(start_pairing("nope".into(), 30, app).await.is_err());
+        assert!(start_pairing("nope".parse().unwrap(), 30, app)
+            .await
+            .is_err());
     }
 }

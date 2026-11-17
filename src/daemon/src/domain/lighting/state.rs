@@ -9,6 +9,7 @@ use halod_shared::types::{
 
 use crate::config::{Config, PlacedZone};
 use crate::domain::lighting::engine::RgbEngine;
+use crate::domain::plugin::Registry;
 
 fn sanitize_zone(mut p: PlacedZone) -> PlacedZone {
     p.sanitize();
@@ -69,7 +70,7 @@ impl LightingState {
 
     pub async fn snapshot(
         &self,
-        registry: &crate::domain::plugin::Registry,
+        registry: &Registry,
         cfg: &Config,
         placed_zones: Vec<PlacedZone>,
     ) -> WireLightingState {
@@ -101,7 +102,7 @@ mod override_map_tests {
     #[test]
     fn placed_zone_sanitize_preserves_finite_fields() {
         let p = PlacedZone {
-            device_id: "dev1".into(),
+            device_id: "dev1".parse().unwrap(),
             channel_id: "zoneA".into(),
             x: 0.1,
             y: 0.2,
@@ -125,7 +126,7 @@ mod override_map_tests {
     #[test]
     fn placed_zone_nan_inf_replaced_with_fallbacks() {
         let p = PlacedZone {
-            device_id: "dev1".into(),
+            device_id: "dev1".parse().unwrap(),
             channel_id: "zoneA".into(),
             x: f32::NAN,
             y: f32::INFINITY,
@@ -157,7 +158,7 @@ mod snapshot_tests {
         let state = LightingState::default();
         let cfg = Config::default();
         let channels = vec![PlacedZone {
-            device_id: "rgb_dev".to_string(),
+            device_id: "rgb_dev".parse().unwrap(),
             channel_id: "zone_1".to_string(),
             x: 10.0,
             y: 20.0,

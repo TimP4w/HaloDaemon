@@ -4,21 +4,21 @@
 
 use crate::ui::components as widgets;
 use egui::{Align2, Pos2, Rect, Sense, Vec2};
-use halod_shared::commands::DaemonCommand;
+use halod_shared::commands::{DaemonCommand, DeviceOp};
 use halod_shared::types::{
     ChannelKind, CoolingChannel, DeviceCapability, FanCurveStatus, Sensor, VisibilityState,
 };
 
 use super::{editing, DeviceUi, TabCtx};
+use crate::domain::tour;
+use crate::domain::tour::AnchorId;
+use crate::runtime::ipc;
 use crate::ui::screens::cooling::preset_display_name;
 use crate::ui::theme;
+use halod_shared::ids::DeviceId;
 
 pub fn show(ui: &mut egui::Ui, ctx: &TabCtx, st: &mut DeviceUi) {
-    crate::domain::tour::anchor(
-        ui.ctx(),
-        crate::domain::tour::AnchorId::TabCooling,
-        ui.max_rect(),
-    );
+    tour::anchor(ui.ctx(), AnchorId::TabCooling, ui.max_rect());
     let all_channels = visible_cooling_channels(ctx.dev, true);
     let has_hidden = all_channels.len() > cooling_channels(ctx.dev).len();
     let channels = visible_cooling_channels(ctx.dev, st.cooling.show_hidden);
@@ -100,7 +100,7 @@ pub fn show(ui: &mut egui::Ui, ctx: &TabCtx, st: &mut DeviceUi) {
                                 (t!("cooling.disable_channel"), VisibilityState::Disabled)
                             };
                             if widgets::context_menu_item(ui, &label, theme::TEXT).clicked() {
-                                crate::runtime::ipc::send(
+                                ipc::send(
                                     ctx.cmd,
                                     DaemonCommand::SetChannelVisibility {
                                         device_id: ctx.dev.id.clone(),
@@ -123,7 +123,7 @@ pub fn show(ui: &mut egui::Ui, ctx: &TabCtx, st: &mut DeviceUi) {
                 if widgets::button(
                     ui,
                     &label,
-                    widgets::ButtonKind::Ghost,
+                    widgets::ButtonKind::Secondary,
                     egui::vec2(150.0, 28.0),
                 )
                 .clicked()
@@ -174,48 +174,30 @@ fn top_row(
     ui.columns(2, |cols| {
         // Curve sensor selector + live temp.
         widgets::card(&mut cols[0], |ui| {
-            widgets::caps_label(ui, &t!("cooling.curve_sensor_caps"));
+            widgets::section_label(ui, &t!("cooling.curve_sensor"));
             ui.add_space(theme::SPACE_4);
-            let current = st
-                .cooling
-                .curve_sensor
-                .as_ref()
-                .and_then(|sid| sensors.iter().find(|(_, s)| &s.id == sid))
-                .map(|(d, s)| format!("{d} · {} ({:.0}°C)", s.name, s.value))
-                .unwrap_or_else(|| t!("cooling.no_sensor").to_string());
             let mut pick: Option<Option<String>> = None;
             let sensor_combo_rect =
                 Rect::from_min_size(ui.cursor().min, Vec2::new(ui.available_width(), 28.0));
-            crate::domain::tour::anchor(
-                ui.ctx(),
-                crate::domain::tour::AnchorId::CoolingSensor,
-                sensor_combo_rect,
-            );
-            egui::ComboBox::from_id_salt("curve_sensor")
-                .selected_text(current)
-                .width(ui.available_width())
-                .show_ui(ui, |ui| {
-                    if ui
-                        .selectable_label(
-                            st.cooling.curve_sensor.is_none(),
-                            t!("cooling.no_sensor"),
-                        )
-                        .clicked()
-                    {
-                        pick = Some(None);
-                    }
-                    for (d, s) in sensors {
-                        let on = st.cooling.curve_sensor.as_deref() == Some(s.id.as_str());
-                        let label = format!("{d} · {} ({:.0}°C)", s.name, s.value);
-                        if ui.selectable_label(on, label).clicked() {
-                            pick = Some(Some(s.id.clone()));
-                        }
-                    }
-                });
+            tour::anchor(ui.ctx(), AnchorId::CoolingSensor, sensor_combo_rect);
+            let options: Vec<(String, String)> = sensors
+                .iter()
+                .map(|(d, s)| (s.id.clone(), format!("{d} · {} ({:.0}°C)", s.name, s.value)))
+                .collect();
+            let current_id = st.cooling.curve_sensor.clone().unwrap_or_default();
+            if let Some(id) = widgets::combo_picker_full(
+                ui,
+                "curve_sensor",
+                &options,
+                &current_id,
+                Some(&t!("cooling.no_sensor")),
+            ) {
+                pick = Some((!id.is_empty()).then_some(id));
+            }
             if let Some(sel) = pick {
                 st.cooling.curve_sensor = sel;
                 st.last_edit = ctx.time;
-                crate::runtime::ipc::send(
+                ipc::send(
                     ctx.cmd,
                     curve_points_command(
                         ctx.dev.id.clone(),
@@ -230,15 +212,16 @@ fn top_row(
                 .map(|t| format!("{t:.0}"))
                 .unwrap_or_else(|| "-".into());
             ui.horizontal(|ui| {
+                ui.spacing_mut().item_spacing.x = 6.0;
                 ui.label(
                     egui::RichText::new(t)
-                        .font(theme::mono_bold(22.0))
-                        .color(theme::STAT_CYAN),
+                        .font(theme::semibold(40.0))
+                        .color(theme::TEXT),
                 );
                 ui.label(
                     egui::RichText::new(t!("cooling.celsius_now"))
-                        .font(theme::body_sm())
-                        .color(theme::TEXT_FAINT),
+                        .font(theme::body_lg())
+                        .color(theme::TEXT_MUT),
                 );
             });
         });
@@ -267,7 +250,7 @@ fn curve_card(
     ui: &mut egui::Ui,
     ctx: &TabCtx,
     st: &mut DeviceUi,
-    fan_id: &str,
+    fan_id: &DeviceId,
     channel_id: &str,
     status: Option<FanCurveStatus>,
     sensor_temp: Option<f32>,
@@ -289,37 +272,21 @@ fn curve_card(
                 if !presets.is_empty() {
                     let active =
                         crate::ui::screens::cooling::matching_preset(&presets, &st.cooling.curve);
-                    let selected_text = active
-                        .map(preset_display_name)
-                        .unwrap_or_else(|| t!("cooling.preset").to_string());
-                    let mut pick: Option<&halod_shared::types::WirePresetCurve> = None;
-                    let combo = egui::ComboBox::from_id_salt("curve_preset")
-                        .selected_text(selected_text)
-                        .width(130.0)
-                        .show_ui(ui, |ui| {
-                            ui.set_max_width(180.0);
-                            for p in &presets {
-                                let selected = active.is_some_and(|a| a.id == p.id);
-                                if ui
-                                    .selectable_label(selected, preset_display_name(p))
-                                    .clicked()
-                                {
-                                    pick = Some(p);
-                                }
-                            }
-                        });
-                    crate::domain::tour::anchor(
-                        ui.ctx(),
-                        crate::domain::tour::AnchorId::CoolingPreset,
-                        combo.response.rect,
-                    );
+                    let names: Vec<String> = presets.iter().map(preset_display_name).collect();
+                    let labels: Vec<&str> = names.iter().map(String::as_str).collect();
+                    let mut idx = active
+                        .and_then(|a| presets.iter().position(|p| p.id == a.id))
+                        .unwrap_or(usize::MAX);
+                    let seg = ui.scope(|ui| widgets::segmented(ui, &labels, &mut idx, false));
+                    let pick = seg.inner.then(|| presets.get(idx)).flatten();
+                    tour::anchor(ui.ctx(), AnchorId::CoolingPreset, seg.response.rect);
                     if let Some(p) = pick {
                         st.cooling.curve = p.points.clone();
                         st.last_edit = ctx.time;
                         st.queue(
                             "curve",
                             curve_preset_command(
-                                fan_id.to_string(),
+                                fan_id.clone(),
                                 channel_id.to_string(),
                                 p.id.clone(),
                                 st.cooling.curve_sensor.clone(),
@@ -355,11 +322,7 @@ fn curve_card(
             Pos2::new(outer.left() + 40.0, outer.top() + 8.0),
             Pos2::new(outer.right() - 6.0, outer.bottom() - 22.0),
         );
-        crate::domain::tour::anchor(
-            ui.ctx(),
-            crate::domain::tour::AnchorId::CoolingCurveEditor,
-            plot,
-        );
+        tour::anchor(ui.ctx(), AnchorId::CoolingCurveEditor, plot);
         // Y axis (duty %) and X axis (°C) labels.
         for i in 0..=4 {
             let frac = i as f32 / 4.0;
@@ -368,16 +331,16 @@ fn curve_card(
                 Pos2::new(plot.left() - 8.0, y),
                 Align2::RIGHT_CENTER,
                 format!("{}", (frac * 100.0) as i32),
-                theme::value_xs(),
-                theme::TEXT_FAINT2,
+                theme::caption(),
+                theme::TEXT_FAINT,
             );
             let x = plot.left() + frac * plot.width();
             ui.painter().text(
                 Pos2::new(x, plot.bottom() + 12.0),
                 Align2::CENTER_CENTER,
                 format!("{}", 20 + (frac * 80.0) as i32),
-                theme::value_xs(),
-                theme::TEXT_FAINT2,
+                theme::caption(),
+                theme::TEXT_FAINT,
             );
         }
         let op = sensor_temp.map(|t| [t, halod_shared::curve::duty_at(&st.cooling.curve, t)]);
@@ -389,9 +352,10 @@ fn curve_card(
             0.0..=100.0,
             theme::CYAN,
             op,
+            |[t, d]| format!("{t:.0} °C · {d:.0}%"),
         ) {
             let cmd = curve_points_command(
-                fan_id.to_string(),
+                fan_id.clone(),
                 channel_id.to_string(),
                 st.cooling.curve.clone(),
                 st.cooling.curve_sensor.clone(),
@@ -402,30 +366,34 @@ fn curve_card(
 }
 
 fn curve_points_command(
-    device_id: String,
+    device_id: DeviceId,
     channel_id: String,
     points: Vec<[f32; 2]>,
     sensor_id: Option<String>,
 ) -> DaemonCommand {
-    DaemonCommand::SetCoolingCurvePoints {
-        device_id,
-        channel_id,
-        points,
-        sensor_id,
+    DaemonCommand::Device {
+        device_id: device_id.clone(),
+        op: DeviceOp::SetCoolingCurvePoints {
+            channel_id,
+            points,
+            sensor_id,
+        },
     }
 }
 
 fn curve_preset_command(
-    device_id: String,
+    device_id: DeviceId,
     channel_id: String,
     preset: String,
     sensor_id: Option<String>,
 ) -> DaemonCommand {
-    DaemonCommand::SetCoolingCurvePreset {
-        device_id,
-        channel_id,
-        preset,
-        sensor_id,
+    DaemonCommand::Device {
+        device_id: device_id.clone(),
+        op: DeviceOp::SetCoolingCurvePreset {
+            channel_id,
+            preset,
+            sensor_id,
+        },
     }
 }
 

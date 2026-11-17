@@ -144,7 +144,7 @@ pub struct WidgetSprite {
 
 #[derive(Debug, Clone, PartialEq, Serialize, Deserialize)]
 pub struct LcdEditorRender {
-    pub device_id: String,
+    pub device_id: crate::ids::DeviceId,
     pub canvas_w: u32,
     pub canvas_h: u32,
     pub sprites: Vec<WidgetSprite>,

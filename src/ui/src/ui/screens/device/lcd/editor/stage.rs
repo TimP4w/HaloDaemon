@@ -3,6 +3,7 @@
 //! live render — see the module doc), widget hit-testing/drag/resize/rotate,
 //! and the rotation-aware painter used to composite widget sprites.
 
+use super::layers::LayerAction;
 use std::collections::HashMap;
 
 use egui::{Color32, Rect, Sense, Stroke, Vec2};
@@ -15,10 +16,13 @@ use super::sprites::{
     content_bounds, ensure_sprite_textures, request_editor_render, resize_preview_rect,
 };
 use super::{send_def, DeviceUi, ResizePreview, TabCtx};
+use crate::domain::tour;
+use crate::domain::tour::AnchorId;
 use crate::ui::components as widgets;
 use crate::ui::screens::device::lcd::gif::decode_next_thumb;
 use crate::ui::screens::device::lcd::preview::{cover_uv, paint_image_circle, panel_size};
 use crate::ui::theme;
+use halod_shared::ids::DeviceId;
 
 /// Screen distance from a selected widget's top edge to its rotation handle.
 #[cfg(test)]
@@ -40,8 +44,14 @@ fn index_widget_ids(ids: impl IntoIterator<Item = String>) -> HashMap<String, us
         .collect()
 }
 
-pub(super) fn stage(ui: &mut egui::Ui, ctx: &TabCtx, st: &mut DeviceUi, id: &str, lcd: &LcdStatus) {
-    let avail = (ui.available_width() - 4.0).clamp(220.0, 520.0);
+pub(super) fn stage(
+    ui: &mut egui::Ui,
+    ctx: &TabCtx,
+    st: &mut DeviceUi,
+    id: &DeviceId,
+    lcd: &LcdStatus,
+) {
+    let avail = (ui.available_width() - 12.0).clamp(220.0, 380.0);
     let size_vec = panel_size(avail, lcd.descriptor.width, lcd.descriptor.height);
     // Background senses clicks before per-widget interacts below, so a widget
     // (registered later, "on top") consumes clicks over it — giving
@@ -50,11 +60,7 @@ pub(super) fn stage(ui: &mut egui::Ui, ctx: &TabCtx, st: &mut DeviceUi, id: &str
         .vertical_centered(|ui| ui.allocate_exact_size(size_vec, Sense::click_and_drag()))
         .inner;
     st.lcd.editor.stage_rect = Some(rect);
-    crate::domain::tour::anchor(
-        ui.ctx(),
-        crate::domain::tour::AnchorId::LcdEditorStage,
-        rect,
-    );
+    tour::anchor(ui.ctx(), AnchorId::LcdEditorStage, rect);
     let center = rect.center();
     let radius = rect.width().min(rect.height()) / 2.0;
 
@@ -103,13 +109,13 @@ pub(super) fn stage(ui: &mut egui::Ui, ctx: &TabCtx, st: &mut DeviceUi, id: &str
     match lcd.descriptor.shape {
         ScreenShape::Circle => {
             ui.painter()
-                .circle_stroke(center, radius, Stroke::new(6.0, theme::BODY));
+                .circle_stroke(center, radius + 3.0, Stroke::new(6.0, theme::BORDER));
         }
         ScreenShape::Square => {
             ui.painter().rect_stroke(
                 rect,
                 theme::RADIUS_XL,
-                Stroke::new(6.0, theme::BODY),
+                Stroke::new(6.0, theme::BORDER),
                 egui::StrokeKind::Outside,
             );
         }
@@ -167,6 +173,7 @@ pub(super) fn stage(ui: &mut egui::Ui, ctx: &TabCtx, st: &mut DeviceUi, id: &str
     let mut resized = false;
     let mut rotated = false;
     let mut deleted = false;
+    let mut layer_choice: Option<(String, LayerAction)> = None;
     let mut edited = false;
     let mut widget_clicked = false;
     let mut widget_double_clicked = false;
@@ -228,9 +235,10 @@ pub(super) fn stage(ui: &mut egui::Ui, ctx: &TabCtx, st: &mut DeviceUi, id: &str
 
         let resp = ui.interact(
             hit,
-            ui.id().with(("lcd_editor_widget", wid.as_str())),
+            ui.scope_id().with(("lcd_editor_widget", wid.as_str())),
             Sense::click_and_drag(),
         );
+        layer_menu(&resp, wid, &mut layer_choice);
         if resp.dragged() && !editing && !is_primary {
             let delta = resp.drag_delta();
             // Dragging a widget that's part of a multi-selection moves the whole
@@ -286,8 +294,7 @@ pub(super) fn stage(ui: &mut egui::Ui, ctx: &TabCtx, st: &mut DeviceUi, id: &str
             let text_edit = egui::TextEdit::singleline(&mut buf)
                 .font(font_id)
                 .text_color(color)
-                .horizontal_align(egui::Align::Center)
-                .vertical_align(egui::Align::Center)
+                .align(egui::Align2::CENTER_CENTER)
                 .clip_text(false)
                 .frame(egui::Frame::NONE);
             // A child `Ui` rather than `ui.put`, which would advance the parent
@@ -338,18 +345,13 @@ pub(super) fn stage(ui: &mut egui::Ui, ctx: &TabCtx, st: &mut DeviceUi, id: &str
             } else {
                 Stroke::new(1.0, theme::a(theme::TEXT_MUT, 0.6))
             };
-            let fill = if selected {
-                theme::a(theme::CYAN, 0.10)
-            } else {
-                Color32::TRANSPARENT
-            };
             if rotation_active(deg) {
-                p.add(egui::Shape::convex_polygon(corners.to_vec(), fill, stroke));
+                p.add(egui::Shape::convex_polygon(
+                    corners.to_vec(),
+                    Color32::TRANSPARENT,
+                    stroke,
+                ));
             } else {
-                // Unrotated: keep the rounded-rect look of the original outline.
-                if selected {
-                    p.rect_filled(content, theme::RADIUS_XS, fill);
-                }
                 p.rect_stroke(content, theme::RADIUS_XS, stroke, egui::StrokeKind::Outside);
             }
         }
@@ -384,13 +386,13 @@ pub(super) fn stage(ui: &mut egui::Ui, ctx: &TabCtx, st: &mut DeviceUi, id: &str
         if is_primary {
             // Resize handle at the (rotated) bottom-right corner.
             let handle_c = corners[2];
-            let handle_rect = Rect::from_center_size(handle_c, Vec2::splat(14.0));
+            let handle_rect = Rect::from_center_size(handle_c, Vec2::splat(12.0));
             let hresp = ui.interact(
                 handle_rect,
-                ui.id().with(("lcd_editor_resize", wid.as_str())),
+                ui.scope_id().with(("lcd_editor_resize", wid.as_str())),
                 Sense::drag(),
             );
-            ui.painter().rect_filled(handle_rect, 3.0, theme::CYAN);
+            ui.painter().rect_filled(handle_rect, 2.0, theme::CYAN);
             if hresp.drag_started() {
                 // Capture the true (daemon-sprite) start box before this frame's
                 // drag; later frames scale it by the live scale ratio.
@@ -469,7 +471,7 @@ pub(super) fn stage(ui: &mut egui::Ui, ctx: &TabCtx, st: &mut DeviceUi, id: &str
             let rot_rect = Rect::from_center_size(rot_c, Vec2::splat(16.0));
             let rresp = ui.interact(
                 rot_rect,
-                ui.id().with(("lcd_editor_rotate", wid.as_str())),
+                ui.scope_id().with(("lcd_editor_rotate", wid.as_str())),
                 Sense::drag(),
             );
             {
@@ -478,7 +480,8 @@ pub(super) fn stage(ui: &mut egui::Ui, ctx: &TabCtx, st: &mut DeviceUi, id: &str
                     [top_mid, rot_c],
                     Stroke::new(1.0, theme::a(theme::TEXT_MUT, 0.8)),
                 );
-                p.circle_filled(rot_c, 6.0, theme::CYAN);
+                p.circle_filled(rot_c, 5.5, theme::TEXT);
+                p.circle_stroke(rot_c, 5.5, Stroke::new(2.0, theme::CYAN));
             }
             if rresp.dragged() {
                 if let Some(cur) = rresp.interact_pointer_pos() {
@@ -501,7 +504,7 @@ pub(super) fn stage(ui: &mut egui::Ui, ctx: &TabCtx, st: &mut DeviceUi, id: &str
             let badge_rect = Rect::from_center_size(badge_c, Vec2::splat(18.0));
             let badge = ui.interact(
                 badge_rect,
-                ui.id().with(("lcd_editor_del", wid.as_str())),
+                ui.scope_id().with(("lcd_editor_del", wid.as_str())),
                 Sense::click(),
             );
             let p = ui.painter();
@@ -539,10 +542,11 @@ pub(super) fn stage(ui: &mut egui::Ui, ctx: &TabCtx, st: &mut DeviceUi, id: &str
                 let drag_hit = selected_hit.shrink(inset);
                 let selected_resp = ui.interact(
                     drag_hit,
-                    ui.id()
+                    ui.scope_id()
                         .with(("lcd_editor_selected_overlay", selected_id.as_str())),
                     Sense::click_and_drag(),
                 );
+                layer_menu(&selected_resp, &selected_id, &mut layer_choice);
                 if selected_resp.dragged() {
                     let delta = selected_resp.drag_delta();
                     if let Some(widget) = st
@@ -669,76 +673,59 @@ pub(super) fn stage(ui: &mut egui::Ui, ctx: &TabCtx, st: &mut DeviceUi, id: &str
             st.lcd.editor.clear_selection();
         }
         if ui.input(|i| i.key_pressed(egui::Key::Delete)) && !st.lcd.editor.selected.is_empty() {
-            let sel = &st.lcd.editor.selected;
-            st.lcd.editor.def.widgets.retain(|w| !sel.contains(&w.id));
+            let selected: Vec<String> = st.lcd.editor.selected.iter().cloned().collect();
+            for id in selected {
+                deleted |= st.lcd.editor.apply_layer(&id, LayerAction::Delete);
+            }
             st.lcd.editor.clear_selection();
-            deleted = true;
         }
-        // Single-selection axis centering, Figma-style.
+        // Single-selection axis centering, Figma-style: Alt+H snaps to the
+        // horizontal center, Alt+V to the vertical center.
         let sel = st.lcd.editor.primary().cloned();
-        // Center the selected widget on one axis, Figma-style: Alt+H snaps to
-        // the horizontal center, Alt+V to the vertical center.
         let (center_h, center_v) = ui.input(|i| {
             (
                 i.modifiers.alt && i.key_pressed(egui::Key::H),
                 i.modifiers.alt && i.key_pressed(egui::Key::V),
             )
         });
-        if center_h || center_v {
-            if let Some(ref sid) = sel {
-                if let Some(w) = st.lcd.editor.def.widgets.iter_mut().find(|w| &w.id == sid) {
-                    if center_h {
-                        w.x = 0.5;
-                    }
-                    if center_v {
-                        w.y = 0.5;
-                    }
-                    moved = true;
-                }
+        if let Some(sid) = sel {
+            if center_h {
+                moved |= st
+                    .lcd
+                    .editor
+                    .apply_layer(&sid, LayerAction::CenterHorizontally);
+            }
+            if center_v {
+                moved |= st
+                    .lcd
+                    .editor
+                    .apply_layer(&sid, LayerAction::CenterVertically);
             }
         }
     }
 
+    if let Some((layer, action)) = layer_choice {
+        if st.lcd.editor.apply_layer(&layer, action) {
+            send_def(ctx, st, id, true);
+        }
+    }
     if deleted {
         send_def(ctx, st, id, true);
     } else if moved || resized || rotated || edited {
         send_def(ctx, st, id, false);
     }
+}
 
-    ui.add_space(theme::SPACE_3);
-    ui.horizontal(|ui| {
-        ui.label(
-            egui::RichText::new(t!("lcd.widget_count", n = st.lcd.editor.def.widgets.len()))
-                .font(theme::mono(10.5))
-                .color(theme::TEXT_FAINT),
-        );
-        if !st.lcd.editor.def.widgets.is_empty()
-            && widgets::button(
-                ui,
-                &t!("lcd.clear_all"),
-                widgets::ButtonKind::Ghost,
-                egui::vec2(80.0, 24.0),
-            )
-            .clicked()
-        {
-            st.lcd.editor.def.widgets.clear();
-            st.lcd.editor.clear_selection();
-            send_def(ctx, st, id, true);
+fn layer_menu(resp: &egui::Response, layer: &str, choice: &mut Option<(String, LayerAction)>) {
+    resp.context_menu(|ui| {
+        ui.set_width(186.0);
+        for action in LayerAction::MENU {
+            if widgets::context_menu_item(ui, &action.label(), theme::TEXT).clicked() {
+                *choice = Some((layer.to_owned(), action));
+                ui.close();
+            }
         }
     });
-    if st.lcd.editor.def.widgets.is_empty() {
-        ui.label(
-            egui::RichText::new(t!("lcd.empty_screen_hint"))
-                .font(theme::caption())
-                .color(theme::TEXT_FAINT),
-        );
-    } else {
-        ui.label(
-            egui::RichText::new(t!("lcd.editor_shortcuts_hint"))
-                .font(theme::body(9.5))
-                .color(theme::TEXT_FAINT2),
-        );
-    }
 }
 
 fn cycle_widget_at(

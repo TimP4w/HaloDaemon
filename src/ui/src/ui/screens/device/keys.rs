@@ -1,28 +1,28 @@
 // SPDX-License-Identifier: GPL-3.0-or-later
-//! Keys/Buttons tab — per-button action remapping.
-//!
-//! Layout: left card (button selector list) + right column (assign action card
-//! + parameters card). Matches the Prism Control design: the left card lets
-//! the user pick which button to configure; the right panel assigns the action
-//! category and then edits the category-specific parameters.
+//! Keys/Buttons tab — per-button action remapping: a button list on the left
+//! and one editor card for the selected button and layer on the right.
 
 use crate::ui::components as widgets;
-use egui::{Align2, Color32, Pos2, Rect, Sense, Stroke, Vec2};
-use halod_shared::commands::DaemonCommand;
+use egui::{Align2, Pos2, Rect, Sense, Stroke, Vec2};
+use halod_shared::commands::{DaemonCommand, DeviceOp};
+use halod_shared::keycodes;
 use halod_shared::types::{
     ButtonAction, ButtonMapping, CycleDir, DeviceCapability, DeviceType, KeyRemapStatus,
-    MediaAction, MouseBtn, ScrollAxis,
+    MediaAction, ModKey, MouseBtn, ScrollAxis,
 };
 
 use super::{macro_editor, DeviceUi, TabCtx};
+use crate::domain::tour;
+use crate::domain::tour::AnchorId;
+use crate::runtime::ipc;
 use crate::ui::theme::{self, a};
+use halod_shared::ids::DeviceId;
+
+const LIST_W: f32 = 398.0;
+const ROW_H: f32 = 58.0;
 
 pub fn show(ui: &mut egui::Ui, ctx: &TabCtx, st: &mut DeviceUi) {
-    crate::domain::tour::anchor(
-        ui.ctx(),
-        crate::domain::tour::AnchorId::TabKeys,
-        ui.max_rect(),
-    );
+    tour::anchor(ui.ctx(), AnchorId::TabKeys, ui.max_rect());
     let Some(remap) = ctx.dev.capabilities.iter().find_map(|c| match c {
         DeviceCapability::KeyRemap(r) => Some(r.clone()),
         _ => None,
@@ -31,7 +31,6 @@ pub fn show(ui: &mut egui::Ui, ctx: &TabCtx, st: &mut DeviceUi) {
     };
     let id = ctx.dev.id.clone();
 
-    // Default to first button
     if st.keys.keys_sel_cid.is_none() && !remap.buttons.is_empty() {
         st.keys.keys_sel_cid = Some(remap.buttons[0].cid);
     }
@@ -47,11 +46,10 @@ pub fn show(ui: &mut egui::Ui, ctx: &TabCtx, st: &mut DeviceUi) {
         sync_mapping_editor(&mut st.keys, cid, base, shifted);
     }
 
-    // The list below stays the primary control; the picture is a shortcut.
     if let Some(status) = ctx.dev.keyboard_layout() {
         if !status.keys.is_empty() {
             keyboard_overview(ui, st, status);
-            ui.add_space(theme::SPACE_7);
+            ui.add_space(theme::SPACE_8);
         }
     }
 
@@ -60,13 +58,11 @@ pub fn show(ui: &mut egui::Ui, ctx: &TabCtx, st: &mut DeviceUi) {
     } else {
         t!("device.keys_tab_keys")
     };
-    // ~58/42 split (matching the design), not the even split `ui.columns` gives.
-    let gap = ui.spacing().item_spacing.x;
-    let left_w = (ui.available_width() - gap) * 1.4 / 2.4;
+    let gap = theme::SPACE_8;
+    let left_w = LIST_W.min((ui.available_width() - gap) * 0.4);
     widgets::split_columns(ui, left_w, gap, |left, right| {
-        button_selector_card(left, ctx, st, &remap, &id, &tab_label);
-        action_card(right, ctx, st, &remap, &id);
-        params_card(right, ctx, st, &id);
+        button_list_card(left, ctx, st, &remap, &id, &tab_label);
+        editor_card(right, ctx, st, &remap, &id);
     });
 }
 
@@ -106,17 +102,14 @@ fn sync_mapping_editor(
 
 // ── Keyboard overview (clickable key picture) ────────────────────────────────
 
-/// Reduce a click on key `idx` to a new selected cid. A mapped key (one with a
-/// KeyRemap cid) selects it; an unmapped key is a no-op (keeps `current`).
-fn key_click_selection(
+fn selectable_cid_at(
     keys: &[halod_shared::keyboard::VisualKey],
-    idx: usize,
-    current: Option<u16>,
+    rects: &[Rect],
+    pos: egui::Pos2,
+    unit: f32,
 ) -> Option<u16> {
-    match keys.get(idx).and_then(|k| k.remap_cid) {
-        Some(cid) => Some(cid),
-        None => current,
-    }
+    let idx = super::keyboard_visual::hit_key(keys, rects, pos, unit)?;
+    keys[idx].remap_cid
 }
 
 /// The index of the key currently highlighted for `cid`, if any.
@@ -134,115 +127,94 @@ fn keyboard_overview(
     status: &halod_shared::keyboard::KeyboardLayoutStatus,
 ) {
     use super::keyboard_visual as kbv;
-    use std::collections::HashSet;
 
     let (resp, inner) = kbv::panel(ui, 240.0, Sense::click());
     let keys = &status.keys;
     let rects = kbv::key_rects(keys, inner, 3.0);
     let unit = kbv::unit_for(keys, inner);
 
-    if resp.clicked() {
-        if let Some(pos) = resp.interact_pointer_pos() {
-            if let Some(i) = kbv::hit_key(keys, &rects, pos, unit) {
-                st.keys.keys_sel_cid = key_click_selection(keys, i, st.keys.keys_sel_cid);
-            }
-        }
-    }
-    if resp.hovered() {
+    let hovered = resp
+        .hover_pos()
+        .and_then(|pos| selectable_cid_at(keys, &rects, pos, unit));
+    if hovered.is_some() {
         ui.ctx().set_cursor_icon(egui::CursorIcon::PointingHand);
+        if resp.clicked() {
+            st.keys.keys_sel_cid = hovered;
+        }
     }
 
     let selected = selected_key_index(keys, st.keys.keys_sel_cid);
-    let remappable: HashSet<u32> = keys
+    let cid_by_led: std::collections::HashMap<u32, u16> = keys
         .iter()
-        .filter(|k| k.remap_cid.is_some())
-        .map(|k| k.led_id)
+        .filter_map(|k| Some((k.led_id, k.remap_cid?)))
         .collect();
-    let (mapped, unmapped) = (theme::hex(0x28324a), theme::hex(0x141a24));
+    let selected_cid = st.keys.keys_sel_cid;
     kbv::draw_keyboard(
         ui,
         keys,
         &rects,
-        &|id| {
-            if remappable.contains(&id) {
-                mapped
-            } else {
-                unmapped
-            }
-        },
+        &|id| key_fill(cid_by_led.get(&id).copied(), selected_cid, hovered),
         selected,
         status.language,
         unit,
     );
 }
 
-// ── Left card: button selector ───────────────────────────────────────────────
+fn key_fill(cid: Option<u16>, selected: Option<u16>, hovered: Option<u16>) -> egui::Color32 {
+    match cid {
+        Some(cid) if Some(cid) == selected => theme::CYAN,
+        Some(cid) if Some(cid) == hovered => a(theme::CYAN, 0.55),
+        Some(_) => theme::ACCENT_BORDER,
+        None => theme::INNER_BG,
+    }
+}
 
-fn button_selector_card(
+// ── Left card: button list ───────────────────────────────────────────────────
+
+fn button_list_card(
     ui: &mut egui::Ui,
     ctx: &TabCtx,
     st: &mut DeviceUi,
     remap: &KeyRemapStatus,
-    id: &str,
+    id: &DeviceId,
     tab_label: &str,
 ) {
-    widgets::card_frameless(ui, |ui| {
-        let hdr_h = 50.0;
-        let (hdr, _) =
-            ui.allocate_exact_size(Vec2::new(ui.available_width(), hdr_h), Sense::hover());
-        let p = ui.painter();
-        p.text(
-            Pos2::new(hdr.left() + 18.0, hdr.center().y - 8.0),
-            Align2::LEFT_CENTER,
-            tab_label,
-            theme::heading(),
-            theme::TEXT,
-        );
-        p.text(
-            Pos2::new(hdr.left() + 18.0, hdr.center().y + 8.0),
-            Align2::LEFT_CENTER,
-            t!("device.keys_select_button_hint"),
-            theme::body_sm(),
-            theme::TEXT_FAINT,
-        );
-
-        // "Reset all" ghost button — right-aligned in header
-        let btn_sz = Vec2::new(82.0, 28.0);
-        let btn_rect = Rect::from_min_size(
-            Pos2::new(
-                hdr.right() - btn_sz.x - 18.0,
-                hdr.center().y - btn_sz.y / 2.0,
-            ),
-            btn_sz,
-        );
-        let reset = ui
-            .scope_builder(egui::UiBuilder::new().max_rect(btn_rect), |ui| {
-                widgets::button(
+    widgets::card_with_margin(ui, egui::Margin::same(8), |ui| {
+        ui.set_width(ui.available_width());
+        ui.spacing_mut().item_spacing.y = 0.0;
+        egui::Frame::NONE
+            .inner_margin(egui::Margin::symmetric(12, 10))
+            .show(ui, |ui| {
+                egui::Sides::new().height(30.0).show(
                     ui,
-                    &t!("device.keys_reset_all"),
-                    widgets::ButtonKind::Ghost,
-                    btn_sz,
-                )
-            })
-            .inner;
-        if reset.clicked() {
-            crate::runtime::ipc::send(
-                ctx.cmd,
-                halod_shared::commands::DaemonCommand::ResetAllButtonMappings {
-                    id: id.to_string(),
-                },
-            );
-        }
+                    |ui| {
+                        ui.label(
+                            egui::RichText::new(tab_label)
+                                .font(theme::heading())
+                                .color(theme::TEXT),
+                        );
+                    },
+                    |ui| {
+                        if widgets::button(
+                            ui,
+                            &t!("device.keys_reset_all"),
+                            widgets::ButtonKind::Secondary,
+                            Vec2::new(0.0, 30.0),
+                        )
+                        .clicked()
+                        {
+                            ipc::send(
+                                ctx.cmd,
+                                DaemonCommand::Device {
+                                    device_id: id.clone(),
+                                    op: DeviceOp::ResetAllButtonMappings,
+                                },
+                            );
+                        }
+                    },
+                );
+            });
 
-        // Header hairline
-        let p = ui.painter();
-        p.line_segment(
-            [hdr.left_bottom(), hdr.right_bottom()],
-            Stroke::new(1.0, theme::BORDER_SOFT),
-        );
-
-        // ── Button rows ───────────────────────────────────────────────
-        let last_cid = remap.buttons.last().map(|b| b.cid);
         for btn in &remap.buttons {
             let action = remap
                 .mappings
@@ -251,134 +223,52 @@ fn button_selector_card(
                 .map(|m| m.base.clone())
                 .unwrap_or_default();
             let ActionDisplay {
-                tag,
-                label,
-                color: type_color,
-                ..
+                tag, label, tone, ..
             } = action_display(&action);
             let selected = st.keys.keys_sel_cid == Some(btn.cid);
 
-            let (rect, resp) =
-                ui.allocate_exact_size(Vec2::new(ui.available_width(), 48.0), Sense::click());
+            let (rect, resp) = widgets::hover_row(ui, ROW_H, selected);
             let p = ui.painter();
-
-            // Row background + left accent bar
-            if selected {
-                p.rect_filled(rect, 0.0, theme::ROW_ACTIVE);
-                p.rect_filled(
-                    Rect::from_min_size(rect.min, Vec2::new(2.0, rect.height())),
-                    0.0,
-                    type_color,
-                );
-            } else if resp.hovered() {
-                p.rect_filled(rect, 0.0, a(Color32::WHITE, 0.025));
-            }
-
-            // Key label chip — width grows to fit longer labels
-            let label_g = p.layout_no_wrap(
-                btn.label.clone(),
-                theme::semibold(11.0),
-                if selected {
-                    Color32::WHITE
-                } else {
-                    theme::TEXT_BRIGHT
-                },
+            let tag_rect =
+                widgets::paint_tag(p, rect.right_center() - Vec2::new(12.0, 0.0), &tag, tone);
+            let text = p.with_clip_rect(Rect::from_min_max(
+                rect.min,
+                Pos2::new(tag_rect.left() - 12.0, rect.max.y),
+            ));
+            text.text(
+                Pos2::new(rect.left() + 12.0, rect.center().y - 8.0),
+                Align2::LEFT_CENTER,
+                &btn.label,
+                theme::medium(14.0),
+                theme::TEXT,
             );
-            let chip_w = chip_width(label_g.size().x);
-            let chip = Rect::from_min_size(
-                Pos2::new(rect.left() + 18.0, rect.center().y - 15.0),
-                Vec2::new(chip_w, 30.0),
-            );
-            p.rect_filled(chip, theme::RADIUS_SM, theme::INNER_BG);
-            p.rect_stroke(
-                chip,
-                theme::RADIUS_SM,
-                Stroke::new(1.0, if selected { type_color } else { theme::BORDER }),
-                egui::StrokeKind::Middle,
-            );
-            p.galley(
-                Pos2::new(
-                    chip.center().x - label_g.size().x / 2.0,
-                    chip.center().y - label_g.size().y / 2.0,
-                ),
-                label_g,
-                Color32::WHITE,
-            );
-
-            // Action name
-            p.text(
-                Pos2::new(chip.right() + 12.0, rect.center().y),
+            text.text(
+                Pos2::new(rect.left() + 12.0, rect.center().y + 9.0),
                 Align2::LEFT_CENTER,
                 label,
-                theme::body_md(),
-                if selected {
-                    theme::TEXT
-                } else {
-                    theme::TEXT_DIM
-                },
+                theme::body_sm(),
+                theme::TEXT_DIM,
             );
 
-            // Tag chip (right edge)
-            let tag_g = p.layout_no_wrap(tag.to_string(), theme::caption(), type_color);
-            let tag_w = tag_g.size().x + 18.0;
-            let tag_rect = Rect::from_min_size(
-                Pos2::new(rect.right() - tag_w - 18.0, rect.center().y - 11.0),
-                Vec2::new(tag_w, 22.0),
-            );
-            p.rect_stroke(
-                tag_rect,
-                theme::RADIUS_SM,
-                Stroke::new(1.0, theme::BORDER),
-                egui::StrokeKind::Middle,
-            );
-            p.galley(
-                Pos2::new(
-                    tag_rect.center().x - tag_g.size().x / 2.0,
-                    tag_rect.center().y - tag_g.size().y / 2.0,
-                ),
-                tag_g,
-                type_color,
-            );
-
-            // Hairline separator (skip on last row)
-            if Some(btn.cid) != last_cid {
-                p.line_segment(
-                    [rect.left_bottom(), rect.right_bottom()],
-                    Stroke::new(1.0, theme::BORDER_SOFT),
-                );
-            }
-
-            if resp.hovered() {
-                ui.ctx().set_cursor_icon(egui::CursorIcon::PointingHand);
-            }
             if resp.clicked() {
                 st.keys.keys_sel_cid = Some(btn.cid);
-                // Don't update last_edit: allow the re-seed logic to immediately
-                // pick up the new button's daemon action on the next frame.
             }
         }
     });
 }
 
-// ── Which layer a section edits ──────────────────────────────────────────────
+// ── Which layer the editor edits ─────────────────────────────────────────────
 
 /// A button mapping has two independent slots: the plain press (`Base`) and
-/// what it does while the layer-shift key is held (`Shifted`). Both are edited
-/// side by side so the user can see the whole mapping at once.
-#[derive(Clone, Copy, PartialEq, Eq)]
+/// what it does while the layer-shift key is held (`Shifted`).
+#[derive(Clone, Copy, PartialEq, Eq, Default, Debug)]
 pub(super) enum Layer {
+    #[default]
     Base,
     Shifted,
 }
 
 impl Layer {
-    fn title(self) -> std::borrow::Cow<'static, str> {
-        match self {
-            Layer::Base => t!("device.keys_layer_normal"),
-            Layer::Shifted => t!("device.keys_layer_shift"),
-        }
-    }
-
     pub(super) fn from_shifted(shifted: bool) -> Self {
         if shifted {
             Layer::Shifted
@@ -430,200 +320,211 @@ impl Layer {
     }
 }
 
-// ── Right card 1: Assign action ──────────────────────────────────────────────
+// ── Right card: editor for the selected button ───────────────────────────────
 
-fn action_card(
+fn editor_card(
     ui: &mut egui::Ui,
     ctx: &TabCtx,
     st: &mut DeviceUi,
     remap: &KeyRemapStatus,
-    id: &str,
+    id: &DeviceId,
 ) {
-    let sel_cid = st.keys.keys_sel_cid;
-    let sel_label = sel_cid
-        .and_then(|cid| remap.buttons.iter().find(|b| b.cid == cid))
-        .map(|b| b.label.as_str())
-        .unwrap_or("-");
-
     widgets::card(ui, |ui| {
-        // ── Card header ───────────────────────────────────────────────────
-        egui::Sides::new().show(
-            ui,
-            |ui| {
-                ui.label(
-                    egui::RichText::new(t!("device.keys_assign_action"))
-                        .font(theme::heading())
-                        .color(theme::TEXT),
-                );
-            },
-            |ui| {
-                // Selected button chip
-                let g = ui.painter().layout_no_wrap(
-                    sel_label.to_string(),
-                    theme::semibold(11.0),
-                    Color32::WHITE,
-                );
-                let (chip, _) =
-                    ui.allocate_exact_size(Vec2::new(g.size().x + 18.0, 26.0), Sense::hover());
-                ui.painter()
-                    .rect_filled(chip, theme::RADIUS_SM, theme::INNER_BG);
-                ui.painter().rect_stroke(
-                    chip,
-                    theme::RADIUS_SM,
-                    Stroke::new(1.0, theme::hex(0x2a3446)),
-                    egui::StrokeKind::Middle,
-                );
-                ui.painter().galley(
-                    Pos2::new(
-                        chip.center().x - g.size().x / 2.0,
-                        chip.center().y - g.size().y / 2.0,
-                    ),
-                    g,
-                    Color32::WHITE,
-                );
-                ui.add_space(theme::SPACE_3);
-                ui.label(
-                    egui::RichText::new(t!("device.keys_editing"))
-                        .font(theme::micro())
-                        .color(theme::TEXT_FAINT2),
-                );
-            },
-        );
-        ui.add_space(theme::SPACE_3);
-        ui.label(
-            egui::RichText::new(t!("device.keys_assign_hint", button = sel_label))
-                .font(theme::body_sm())
-                .color(theme::TEXT_MUT),
-        );
-        ui.add_space(theme::SPACE_7);
-
-        action_section(ui, ctx, st, id, Layer::Base);
-        ui.add_space(theme::SPACE_8);
-        action_section(ui, ctx, st, id, Layer::Shifted);
-    });
-}
-
-/// One layer's category-chip row within the "Assign action" card.
-fn action_section(ui: &mut egui::Ui, ctx: &TabCtx, st: &mut DeviceUi, id: &str, layer: Layer) {
-    let Some(cid) = st.keys.keys_sel_cid else {
-        return;
-    };
-    let current_action = layer.get(st).unwrap_or_default();
-
-    widgets::caps_label(ui, &layer.title());
-    ui.add_space(theme::SPACE_4);
-    let cat_rect = Rect::from_min_size(ui.cursor().min, Vec2::new(ui.available_width(), 30.0));
-    match layer {
-        Layer::Base => {
-            crate::domain::tour::anchor(
-                ui.ctx(),
-                crate::domain::tour::AnchorId::KeysActionCategory,
-                cat_rect,
-            );
-        }
-        Layer::Shifted => {
-            crate::domain::tour::anchor(
-                ui.ctx(),
-                crate::domain::tour::AnchorId::KeysLayerShift,
-                cat_rect,
-            );
-        }
-    }
-    widgets::pill_strip(ui, |ui| {
-        for proto in action_categories() {
-            if !layer.allows(proto) {
-                continue;
-            }
-            let active = same_category(&current_action, proto);
-            let ActionDisplay {
-                type_name, color, ..
-            } = action_display(proto);
-            let (clicked, chip_rect) = action_chip(ui, &type_name, active, color);
-            if layer == Layer::Base && matches!(proto, ButtonAction::Macro { .. }) {
-                anchor_macro_tour(ui.ctx(), chip_rect);
-            }
-            if clicked {
-                let new_action = adapt_to_category(proto.clone(), &current_action);
-                let (base, shifted) = layer.pair(st, new_action.clone());
-                layer.set(st, new_action);
-                st.last_edit = ctx.time;
-                if mapping_is_complete(&base, &shifted) {
-                    crate::runtime::ipc::send(
-                        ctx.cmd,
-                        DaemonCommand::SetButtonMapping {
-                            id: id.to_string(),
-                            mapping: ButtonMapping { cid, base, shifted },
-                        },
-                    );
-                }
-            }
-        }
-    });
-}
-
-// ── Right card 2: Parameters ─────────────────────────────────────────────────
-
-fn params_card(ui: &mut egui::Ui, ctx: &TabCtx, st: &mut DeviceUi, id: &str) {
-    widgets::card(ui, |ui| {
-        if st.keys.keys_sel_cid.is_none() {
+        ui.set_width(ui.available_width());
+        let Some(cid) = st.keys.keys_sel_cid else {
             ui.label(
                 egui::RichText::new(t!("device.keys_select_button_prompt"))
                     .font(theme::body_md())
                     .color(theme::TEXT_FAINT),
             );
             return;
+        };
+        let name = remap
+            .buttons
+            .iter()
+            .find(|b| b.cid == cid)
+            .map(|b| b.label.as_str())
+            .unwrap_or("-");
+
+        egui::Sides::new().show(
+            ui,
+            |ui| {
+                ui.vertical(|ui| {
+                    ui.spacing_mut().item_spacing.y = theme::SPACE_2;
+                    ui.label(
+                        egui::RichText::new(name)
+                            .font(theme::semibold(18.0))
+                            .color(theme::TEXT),
+                    );
+                    ui.label(
+                        egui::RichText::new(t!("device.keys_editor_hint"))
+                            .font(theme::body_md())
+                            .color(theme::TEXT_DIM),
+                    );
+                });
+            },
+            |ui| {
+                let labels = [
+                    t!("device.keys_layer_normal"),
+                    t!("device.keys_layer_shift"),
+                ];
+                let labels: Vec<&str> = labels.iter().map(|l| l.as_ref()).collect();
+                let mut idx = st.keys.layer as usize;
+                let rect = ui
+                    .scope(|ui| widgets::segmented(ui, &labels, &mut idx, false))
+                    .response
+                    .rect;
+                tour::anchor(ui.ctx(), AnchorId::KeysLayerShift, rect);
+                st.keys.layer = Layer::from_shifted(idx == 1);
+            },
+        );
+        let layer = st.keys.layer;
+        let action = layer.get(st).unwrap_or_default();
+
+        ui.add_space(theme::SPACE_9);
+        widgets::section_label(ui, &t!("device.keys_action"));
+        ui.add_space(theme::SPACE_4);
+        action_grid(ui, ctx, st, id, cid, layer, &action);
+
+        if has_params(&action) {
+            ui.add_space(theme::SPACE_9);
+            params_editor(ui, ctx, st, id, action, layer);
         }
 
-        params_section(ui, ctx, st, id, Layer::Base);
         ui.add_space(theme::SPACE_9);
-        params_section(ui, ctx, st, id, Layer::Shifted);
+        let (rule, _) =
+            ui.allocate_exact_size(Vec2::new(ui.available_width(), 1.0), Sense::hover());
+        ui.painter().line_segment(
+            [rule.left_center(), rule.right_center()],
+            Stroke::new(1.0, theme::BORDER_SOFT),
+        );
+        ui.add_space(theme::SPACE_4);
+        ui.allocate_ui_with_layout(
+            Vec2::new(ui.available_width(), 36.0),
+            egui::Layout::right_to_left(egui::Align::Center),
+            |ui| {
+                if widgets::button(
+                    ui,
+                    &t!("device.keys_restore_default"),
+                    widgets::ButtonKind::Secondary,
+                    Vec2::new(0.0, 36.0),
+                )
+                .clicked()
+                {
+                    st.keys.keys_action = Some(ButtonAction::Native);
+                    st.keys.keys_shifted_action = Some(ButtonAction::Native);
+                    st.keys.chord_capture = None;
+                    st.last_edit = ctx.time;
+                    ipc::send(
+                        ctx.cmd,
+                        DaemonCommand::Device {
+                            device_id: id.clone(),
+                            op: DeviceOp::ResetButtonMapping { cid },
+                        },
+                    );
+                }
+            },
+        );
     });
 }
 
-/// One layer's header + parameter editor within the "Parameters" card.
-fn params_section(ui: &mut egui::Ui, ctx: &TabCtx, st: &mut DeviceUi, id: &str, layer: Layer) {
-    let action = layer.get(st).unwrap_or_default();
-    let ActionDisplay {
-        type_name,
-        color: type_color,
-        ..
-    } = action_display(&action);
+/// Whether an action has a sub-option section below the action grid.
+fn has_params(action: &ButtonAction) -> bool {
+    !matches!(
+        action,
+        ButtonAction::Native | ButtonAction::Disable | ButtonAction::LayerShift
+    )
+}
 
-    ui.horizontal(|ui| {
-        let (dot, _) = ui.allocate_exact_size(Vec2::splat(14.0), Sense::hover());
-        ui.painter().circle_filled(dot.center(), 3.5, type_color);
-        ui.label(
-            egui::RichText::new(layer.title())
-                .font(theme::heading())
-                .color(theme::TEXT),
-        );
-        ui.add_space(theme::SPACE_1);
-        ui.label(
-            egui::RichText::new(format!("· {type_name}"))
-                .font(theme::body_sm())
-                .color(theme::TEXT_FAINT),
-        );
-    });
-    ui.add_space(theme::SPACE_7);
-
-    let no_params = match &action {
-        ButtonAction::Native => Some(t!("device.keys_no_params_native")),
-        ButtonAction::Disable => Some(t!("device.keys_no_params_disable")),
-        ButtonAction::LayerShift => Some(t!("device.keys_no_params_layer_shift")),
-        ButtonAction::KeyChord { .. } => Some(t!("device.keys_no_params")),
-        _ => None,
-    };
-
-    if let Some(msg) = no_params {
-        ui.label(
-            egui::RichText::new(msg)
-                .font(theme::body_md())
-                .color(theme::TEXT_MUT),
-        );
-        return;
+fn action_grid(
+    ui: &mut egui::Ui,
+    ctx: &TabCtx,
+    st: &mut DeviceUi,
+    id: &DeviceId,
+    cid: u16,
+    layer: Layer,
+    current_action: &ButtonAction,
+) {
+    let protos: Vec<&ButtonAction> = action_categories()
+        .iter()
+        .filter(|p| layer.allows(p))
+        .collect();
+    let names: Vec<_> = protos.iter().map(|p| action_display(p).type_name).collect();
+    let labels: Vec<&str> = names.iter().map(|n| n.as_ref()).collect();
+    let selected = protos.iter().position(|p| same_category(current_action, p));
+    let tiles = widgets::option_grid(ui, &labels, selected, 4);
+    if let Some(grid) = tiles.iter().map(|t| t.rect).reduce(|a, b| a.union(b)) {
+        tour::anchor(ui.ctx(), AnchorId::KeysActionCategory, grid);
     }
+    for (proto, tile) in protos.into_iter().zip(&tiles) {
+        if matches!(proto, ButtonAction::Macro { .. }) {
+            anchor_macro_tour(ui.ctx(), tile.rect);
+        }
+        if tile.clicked() {
+            let new_action = adapt_to_category(proto.clone(), current_action);
+            let (base, shifted) = layer.pair(st, new_action.clone());
+            layer.set(st, new_action);
+            st.last_edit = ctx.time;
+            if mapping_is_complete(&base, &shifted) {
+                ipc::send(
+                    ctx.cmd,
+                    DaemonCommand::Device {
+                        device_id: id.clone(),
+                        op: DeviceOp::SetButtonMapping {
+                            mapping: ButtonMapping { cid, base, shifted },
+                        },
+                    },
+                );
+            }
+        }
+    }
+}
 
-    params_editor(ui, ctx, st, id, action, layer);
+/// A captured key-chord press: the key's native code plus held modifiers.
+/// Modifier keys alone are not a chord, so they are skipped.
+fn chord_from_event(ev: &egui::Event) -> Option<(u32, Vec<ModKey>)> {
+    let ctrl = |name: &str| keycodes::native_code(name).map(|k| (k, vec![ModKey::Ctrl]));
+    match ev {
+        egui::Event::Key {
+            key,
+            physical_key,
+            pressed: true,
+            repeat: false,
+            modifiers,
+        } => {
+            let code = macro_editor::key_code(*key, *physical_key)?;
+            let name = keycodes::label(code);
+            if ["Shift", "Control", "Alt", "Super"]
+                .iter()
+                .any(|m| name.starts_with(m))
+            {
+                return None;
+            }
+            let mods = [
+                (modifiers.ctrl, ModKey::Ctrl),
+                (modifiers.shift, ModKey::Shift),
+                (modifiers.alt, ModKey::Alt),
+                (modifiers.mac_cmd, ModKey::Super),
+            ]
+            .into_iter()
+            .filter_map(|(on, m)| on.then_some(m))
+            .collect();
+            Some((code, mods))
+        }
+        egui::Event::Copy => ctrl("C"),
+        egui::Event::Cut => ctrl("X"),
+        egui::Event::Paste(_) => ctrl("V"),
+        _ => None,
+    }
+}
+
+fn chord_label(key: u32, modifiers: &[ModKey]) -> String {
+    modifiers
+        .iter()
+        .map(|m| format!("{m:?}"))
+        .chain(std::iter::once(keycodes::label(key)))
+        .collect::<Vec<_>>()
+        .join(" + ")
 }
 
 fn direction_pills(
@@ -635,29 +536,25 @@ fn direction_pills(
     make_cmd: &impl Fn(ButtonAction) -> DaemonCommand,
     make_action: impl Fn(CycleDir) -> ButtonAction,
 ) {
-    widgets::caps_label(ui, &t!("device.keys_direction"));
+    widgets::section_label(ui, &t!("device.keys_direction"));
     ui.add_space(theme::SPACE_4);
-    widgets::pill_strip(ui, |ui| {
-        for (label, dir) in [
-            (t!("device.keys_dir_up"), CycleDir::Up),
-            (t!("device.keys_dir_down"), CycleDir::Down),
-        ] {
-            let active = current == dir;
-            if widgets::pill(ui, &label, active) && !active {
-                let a = make_action(dir);
-                layer.set(st, a.clone());
-                st.last_edit = ctx.time;
-                crate::runtime::ipc::send(ctx.cmd, make_cmd(a));
-            }
-        }
-    });
+    let dirs = [
+        (t!("device.keys_dir_up"), CycleDir::Up),
+        (t!("device.keys_dir_down"), CycleDir::Down),
+    ];
+    if let Some(dir) = widgets::option_grid_value(ui, &dirs, &current, 2) {
+        let a = make_action(dir);
+        layer.set(st, a.clone());
+        st.last_edit = ctx.time;
+        ipc::send(ctx.cmd, make_cmd(a));
+    }
 }
 
 fn params_editor(
     ui: &mut egui::Ui,
     ctx: &TabCtx,
     st: &mut DeviceUi,
-    id: &str,
+    id: &DeviceId,
     action: ButtonAction,
     layer: Layer,
 ) {
@@ -673,9 +570,11 @@ fn params_editor(
             Layer::Base => (act, other.clone()),
             Layer::Shifted => (other.clone(), act),
         };
-        DaemonCommand::SetButtonMapping {
-            id: id.to_string(),
-            mapping: ButtonMapping { cid, base, shifted },
+        DaemonCommand::Device {
+            device_id: id.clone(),
+            op: DeviceOp::SetButtonMapping {
+                mapping: ButtonMapping { cid, base, shifted },
+            },
         }
     };
     let tag = layer.tag();
@@ -685,16 +584,24 @@ fn params_editor(
         layer.set(st, a.clone());
         st.last_edit = ctx.time;
         let cmd = make_cmd(a);
-        if let DaemonCommand::SetButtonMapping { mapping, .. } = &cmd {
+        if let DaemonCommand::Device {
+            op: DeviceOp::SetButtonMapping { mapping, .. },
+            ..
+        } = &cmd
+        {
             if mapping_is_complete(&mapping.base, &mapping.shifted) {
-                crate::runtime::ipc::send(ctx.cmd, cmd);
+                ipc::send(ctx.cmd, cmd);
             }
         }
     };
     let queue = |st: &mut DeviceUi, field: &str, a: ButtonAction| {
         layer.set(st, a.clone());
         let cmd = make_cmd(a);
-        if let DaemonCommand::SetButtonMapping { mapping, .. } = &cmd {
+        if let DaemonCommand::Device {
+            op: DeviceOp::SetButtonMapping { mapping, .. },
+            ..
+        } = &cmd
+        {
             if mapping_is_complete(&mapping.base, &mapping.shifted) {
                 st.queue(&format!("btn:{field}:{cid}:{tag}"), cmd, ctx.time);
             }
@@ -703,22 +610,18 @@ fn params_editor(
 
     match action {
         ButtonAction::MouseButton { btn } => {
-            widgets::caps_label(ui, &t!("device.keys_mouse_button"));
+            widgets::section_label(ui, &t!("device.keys_mouse_button"));
             ui.add_space(theme::SPACE_4);
-            widgets::pill_strip(ui, |ui| {
-                for (label, mbtn) in [
-                    (t!("device.keys_mouse_left"), MouseBtn::Left),
-                    (t!("device.keys_mouse_right"), MouseBtn::Right),
-                    (t!("device.keys_mouse_middle"), MouseBtn::Middle),
-                    (t!("device.keys_mouse_back"), MouseBtn::Back),
-                    (t!("device.keys_mouse_forward"), MouseBtn::Forward),
-                ] {
-                    let active = btn == mbtn;
-                    if widgets::pill(ui, &label, active) && !active {
-                        apply(st, ButtonAction::MouseButton { btn: mbtn });
-                    }
-                }
-            });
+            let options = [
+                (t!("device.keys_mouse_left"), MouseBtn::Left),
+                (t!("device.keys_mouse_right"), MouseBtn::Right),
+                (t!("device.keys_mouse_middle"), MouseBtn::Middle),
+                (t!("device.keys_mouse_back"), MouseBtn::Back),
+                (t!("device.keys_mouse_forward"), MouseBtn::Forward),
+            ];
+            if let Some(btn) = widgets::option_grid_value(ui, &options, &btn, 3) {
+                apply(st, ButtonAction::MouseButton { btn });
+            }
         }
         ButtonAction::DpiCycle { direction } => {
             direction_pills(ui, ctx, st, layer, direction, &make_cmd, |dir| {
@@ -731,7 +634,7 @@ fn params_editor(
             });
         }
         ButtonAction::MomentaryDpi { dpi } => {
-            widgets::caps_label(ui, &t!("device.keys_dpi_value"));
+            widgets::section_label(ui, &t!("device.keys_dpi_value"));
             ui.add_space(theme::SPACE_4);
             let mut dpi_f = dpi as f32;
             let mut new_dpi: Option<u16> = None;
@@ -762,56 +665,40 @@ fn params_editor(
                 queue(st, "dpi", ButtonAction::MomentaryDpi { dpi: new_dpi });
             }
             ui.add_space(theme::SPACE_6);
-            widgets::caps_label(ui, &t!("device.keys_presets"));
+            widgets::section_label(ui, &t!("device.keys_presets"));
             ui.add_space(theme::SPACE_4);
-            widgets::pill_strip(ui, |ui| {
-                for preset in [400u16, 800, 1600, 3200, 6400] {
-                    let active = dpi == preset;
-                    if widgets::pill(ui, &preset.to_string(), active) && !active {
-                        apply(st, ButtonAction::MomentaryDpi { dpi: preset });
-                    }
-                }
-            });
+            let presets = [400u16, 800, 1600, 3200, 6400].map(|v| (v.to_string(), v));
+            if let Some(dpi) = widgets::option_grid_value(ui, &presets, &dpi, 5) {
+                apply(st, ButtonAction::MomentaryDpi { dpi });
+            }
         }
         ButtonAction::MediaKey { key } => {
-            widgets::caps_label(ui, &t!("device.keys_media_key"));
+            widgets::section_label(ui, &t!("device.keys_media_key"));
             ui.add_space(theme::SPACE_4);
-            widgets::pill_strip(ui, |ui| {
-                for (label, mkey) in [
-                    (t!("device.keys_media_play"), MediaAction::Play),
-                    (t!("device.keys_media_next"), MediaAction::Next),
-                    (t!("device.keys_media_prev"), MediaAction::Prev),
-                    (t!("device.keys_media_mute"), MediaAction::Mute),
-                ] {
-                    let active = key == mkey;
-                    if widgets::pill(ui, &label, active) && !active {
-                        apply(st, ButtonAction::MediaKey { key: mkey });
-                    }
-                }
-            });
+            let options = [
+                (t!("device.keys_media_play"), MediaAction::Play),
+                (t!("device.keys_media_next"), MediaAction::Next),
+                (t!("device.keys_media_prev"), MediaAction::Prev),
+                (t!("device.keys_media_mute"), MediaAction::Mute),
+                (t!("device.keys_media_volume_up"), MediaAction::VolumeUp),
+                (t!("device.keys_media_volume_down"), MediaAction::VolumeDown),
+            ];
+            if let Some(key) = widgets::option_grid_value(ui, &options, &key, 3) {
+                apply(st, ButtonAction::MediaKey { key });
+            }
         }
         ButtonAction::Scroll { axis, clicks } => {
-            widgets::caps_label(ui, &t!("device.keys_axis"));
+            widgets::section_label(ui, &t!("device.keys_axis"));
             ui.add_space(theme::SPACE_4);
-            widgets::pill_strip(ui, |ui| {
-                for (label, saxis) in [
-                    (t!("device.keys_axis_vertical"), ScrollAxis::Vertical),
-                    (t!("device.keys_axis_horizontal"), ScrollAxis::Horizontal),
-                ] {
-                    let active = axis == saxis;
-                    if widgets::pill(ui, &label, active) && !active {
-                        apply(
-                            st,
-                            ButtonAction::Scroll {
-                                axis: saxis,
-                                clicks,
-                            },
-                        );
-                    }
-                }
-            });
+            let options = [
+                (t!("device.keys_axis_vertical"), ScrollAxis::Vertical),
+                (t!("device.keys_axis_horizontal"), ScrollAxis::Horizontal),
+            ];
+            if let Some(axis) = widgets::option_grid_value(ui, &options, &axis, 2) {
+                apply(st, ButtonAction::Scroll { axis, clicks });
+            }
             ui.add_space(theme::SPACE_6);
-            widgets::caps_label(ui, &t!("device.keys_clicks_per_event"));
+            widgets::section_label(ui, &t!("device.keys_clicks_per_event"));
             ui.add_space(theme::SPACE_4);
             let mut v = clicks;
             if ui
@@ -822,7 +709,7 @@ fn params_editor(
             }
         }
         ButtonAction::OpenApp { ref path } => {
-            widgets::caps_label(ui, &t!("device.keys_application"));
+            widgets::section_label(ui, &t!("device.keys_application"));
             ui.add_space(theme::SPACE_4);
             let mut buf = path.clone();
             let shifted = matches!(layer, Layer::Shifted);
@@ -847,7 +734,7 @@ fn params_editor(
             ui.horizontal(|ui| {
                 let resp = action_text_field(
                     ui,
-                    ui.available_width() - 92.0,
+                    ui.available_width() - 96.0,
                     &mut buf,
                     &t!("device.keys_app_hint"),
                     ("openapp", cid, tag),
@@ -855,7 +742,14 @@ fn params_editor(
                 if resp.changed() {
                     queue(st, "app", ButtonAction::OpenApp { path: buf.clone() });
                 }
-                if widgets::pill(ui, &t!("device.keys_browse"), false) {
+                if widgets::button(
+                    ui,
+                    &t!("device.keys_browse"),
+                    widgets::ButtonKind::Secondary,
+                    Vec2::new(88.0, 34.0),
+                )
+                .clicked()
+                {
                     let (tx, rx) = std::sync::mpsc::channel();
                     let egui_ctx = ui.ctx().clone();
                     std::thread::spawn(move || {
@@ -867,7 +761,7 @@ fn params_editor(
             });
         }
         ButtonAction::Command { ref cmd, ref args } => {
-            widgets::caps_label(ui, &t!("device.keys_command"));
+            widgets::section_label(ui, &t!("device.keys_command"));
             ui.add_space(theme::SPACE_4);
             let mut buf = cmd.clone();
             let resp = action_text_field(
@@ -891,20 +785,36 @@ fn params_editor(
         ButtonAction::Macro { steps } => {
             let macro_rect =
                 Rect::from_min_size(ui.cursor().min, Vec2::new(ui.available_width(), 28.0));
-            crate::domain::tour::anchor(
-                ui.ctx(),
-                crate::domain::tour::AnchorId::KeysMacro,
-                macro_rect,
-            );
+            tour::anchor(ui.ctx(), AnchorId::KeysMacro, macro_rect);
             macro_editor::show(ui, ctx, st, id, cid, layer, steps);
         }
-        _ => {
-            ui.label(
-                egui::RichText::new(t!("device.keys_no_params"))
-                    .font(theme::body_md())
-                    .color(theme::TEXT_MUT),
-            );
+        ButtonAction::KeyChord { key, modifiers } => {
+            widgets::section_label(ui, &t!("device.keys_type_key_chord"));
+            ui.add_space(theme::SPACE_4);
+            let armed = st.keys.chord_capture == Some((cid, layer));
+            let label = if armed {
+                t!("device.keys_chord_press").to_string()
+            } else if key == 0 {
+                t!("device.keys_chord_record").to_string()
+            } else {
+                chord_label(key, &modifiers)
+            };
+            let tile = widgets::option_grid(ui, &[&label], armed.then_some(0), 1);
+            if tile[0].clicked() {
+                st.keys.chord_capture = (!armed).then_some((cid, layer));
+            }
+            if armed {
+                st.last_edit = ctx.time;
+                ui.memory_mut(|m| m.request_focus(egui::Id::unique(("chord", cid, tag))));
+                if let Some((key, modifiers)) =
+                    ui.input(|i| i.events.iter().find_map(chord_from_event))
+                {
+                    st.keys.chord_capture = None;
+                    apply(st, ButtonAction::KeyChord { key, modifiers });
+                }
+            }
         }
+        _ => {}
     }
 }
 
@@ -922,59 +832,15 @@ fn action_text_field(
         egui::TextEdit::singleline(buf)
             .hint_text(hint.to_string())
             .margin(egui::vec2(10.0, 8.0))
-            .id(egui::Id::new(id)),
+            .id(egui::Id::unique(id)),
     )
-}
-
-// ── Action chip widget (colored active state) ────────────────────────────────
-
-fn action_chip(ui: &mut egui::Ui, label: &str, active: bool, color: Color32) -> (bool, Rect) {
-    let galley = ui.painter().layout_no_wrap(
-        label.to_string(),
-        theme::body_sm(),
-        if active {
-            Color32::WHITE
-        } else {
-            theme::TEXT_DIM
-        },
-    );
-    let (rect, resp) =
-        ui.allocate_exact_size(Vec2::new(galley.size().x + 24.0, 31.0), Sense::click());
-    let p = ui.painter();
-    if active {
-        p.rect_filled(rect, 8.0, a(color, 0.16));
-        p.rect_stroke(rect, 8.0, Stroke::new(1.0, color), egui::StrokeKind::Middle);
-    } else {
-        p.rect_stroke(
-            rect,
-            8.0,
-            Stroke::new(1.0, theme::hex(0x222b3a)),
-            egui::StrokeKind::Middle,
-        );
-    }
-    p.galley(
-        Pos2::new(
-            rect.center().x - galley.size().x / 2.0,
-            rect.center().y - galley.size().y / 2.0,
-        ),
-        galley,
-        if active {
-            Color32::WHITE
-        } else {
-            theme::TEXT_DIM
-        },
-    );
-    if resp.hovered() {
-        ui.ctx().set_cursor_icon(egui::CursorIcon::PointingHand);
-    }
-    (resp.clicked(), rect)
 }
 
 /// Keep the macro tour step reachable before Macro is selected. Once it is
 /// selected, the later parameters-card anchor replaces this fallback with the
 /// full macro editor rect in the same frame.
 fn anchor_macro_tour(ctx: &egui::Context, rect: Rect) {
-    crate::domain::tour::anchor(ctx, crate::domain::tour::AnchorId::KeysMacro, rect);
+    tour::anchor(ctx, AnchorId::KeysMacro, rect);
 }
 
 // ── Data helpers ─────────────────────────────────────────────────────────────
@@ -997,21 +863,25 @@ fn action_categories() -> &'static [ButtonAction] {
         ButtonAction::MouseButton {
             btn: MouseBtn::Left,
         },
-        ButtonAction::DpiCycle {
-            direction: CycleDir::Up,
-        },
-        ButtonAction::MomentaryDpi { dpi: 800 },
-        ButtonAction::ProfileCycle {
-            direction: CycleDir::Up,
-        },
-        ButtonAction::MediaKey {
-            key: MediaAction::Play,
-        },
-        ButtonAction::LayerShift,
         ButtonAction::Scroll {
             axis: ScrollAxis::Vertical,
             clicks: 1,
         },
+        ButtonAction::KeyChord {
+            key: 0,
+            modifiers: Vec::new(),
+        },
+        ButtonAction::MediaKey {
+            key: MediaAction::Play,
+        },
+        ButtonAction::DpiCycle {
+            direction: CycleDir::Up,
+        },
+        ButtonAction::ProfileCycle {
+            direction: CycleDir::Up,
+        },
+        ButtonAction::MomentaryDpi { dpi: 800 },
+        ButtonAction::LayerShift,
         ButtonAction::Macro { steps: Vec::new() },
         ButtonAction::OpenApp {
             path: String::new(),
@@ -1047,6 +917,12 @@ fn adapt_to_category(proto: ButtonAction, current: &ButtonAction) -> ButtonActio
                 direction: direction.clone(),
             }
         }
+        (ButtonAction::KeyChord { .. }, ButtonAction::KeyChord { key, modifiers }) => {
+            ButtonAction::KeyChord {
+                key: *key,
+                modifiers: modifiers.clone(),
+            }
+        }
         (ButtonAction::MediaKey { .. }, ButtonAction::MediaKey { key }) => {
             ButtonAction::MediaKey { key: key.clone() }
         }
@@ -1079,6 +955,7 @@ pub(super) fn mapping_is_complete(base: &ButtonAction, shifted: &ButtonAction) -
     fn complete(action: &ButtonAction) -> bool {
         match action {
             ButtonAction::Macro { steps } => !steps.is_empty(),
+            ButtonAction::KeyChord { key, .. } => *key != 0,
             ButtonAction::OpenApp { path } => !path.is_empty(),
             ButtonAction::Command { cmd, .. } => !cmd.is_empty(),
             _ => true,
@@ -1087,88 +964,82 @@ pub(super) fn mapping_is_complete(base: &ButtonAction, shifted: &ButtonAction) -
     complete(base) && complete(shifted)
 }
 
-/// Width of the key-label chip: grows to fit the label with side padding,
-/// but never below the base width so short labels keep a uniform pill.
-fn chip_width(label_w: f32) -> f32 {
-    (label_w + 20.0).max(62.0)
-}
-
-/// Everything the UI shows for one action: the left-card row's short tag +
-/// accent color, the Parameters card header's type name, and the row's full
+/// Everything the UI shows for one action: the left-card row's tag and tone, the Parameters card header's type name, and the row's full
 /// label (type name plus any sub-value, e.g. "DPI cycle: Up").
 struct ActionDisplay {
     tag: std::borrow::Cow<'static, str>,
     type_name: std::borrow::Cow<'static, str>,
     label: String,
-    color: Color32,
+    tone: widgets::TagTone,
 }
 
 fn action_display(a: &ButtonAction) -> ActionDisplay {
-    let (tag, type_name, color) = match a {
+    use widgets::TagTone as T;
+    let (tag, type_name, tone) = match a {
         ButtonAction::Native => (
             t!("device.keys_tag_default"),
             t!("device.keys_type_default"),
-            theme::TEXT_FAINT,
+            T::Neutral,
         ),
         ButtonAction::Disable => (
             t!("device.keys_tag_disabled"),
             t!("device.keys_type_disabled"),
-            theme::STAT_AMBER,
+            T::Danger,
         ),
         ButtonAction::MouseButton { .. } => (
             t!("device.keys_tag_mouse_btn"),
             t!("device.keys_type_mouse_button"),
-            theme::CYAN,
+            T::Accent,
         ),
         ButtonAction::Scroll { .. } => (
             t!("device.keys_tag_scroll"),
             t!("device.keys_type_scroll"),
-            theme::hex(0x38bdf8),
+            T::Accent,
         ),
         ButtonAction::KeyChord { .. } => (
             t!("device.keys_tag_key_chord"),
             t!("device.keys_type_key_chord"),
-            theme::STAT_PURPLE,
+            T::Accent,
         ),
         ButtonAction::MediaKey { .. } => (
             t!("device.keys_tag_media"),
             t!("device.keys_type_media_key"),
-            theme::STAT_AMBER,
+            T::Accent,
         ),
         ButtonAction::DpiCycle { .. } => (
             t!("device.keys_tag_dpi_cycle"),
             t!("device.keys_type_dpi_cycle"),
-            theme::hex(0xf472b6),
+            T::Warn,
         ),
         ButtonAction::ProfileCycle { .. } => (
             t!("device.keys_tag_profile"),
             t!("device.keys_type_profile_cycle"),
-            theme::STAT_GREEN,
+            T::Ok,
         ),
         ButtonAction::MomentaryDpi { .. } => (
             t!("device.keys_tag_dpi_snap"),
             t!("device.keys_type_momentary_dpi"),
-            theme::hex(0xf472b6),
+            T::Warn,
         ),
         ButtonAction::LayerShift => (
             t!("device.keys_tag_layer"),
             t!("device.keys_type_layer_shift"),
-            theme::STAT_PURPLE,
+            T::Ok,
         ),
         ButtonAction::Macro { .. } => (
             t!("device.keys_tag_macro"),
             t!("device.keys_type_macro"),
-            theme::STAT_GREEN,
+            T::Ok,
         ),
         ButtonAction::OpenApp { .. } => (
             t!("device.keys_tag_launch"),
             t!("device.keys_type_open_app"),
-            theme::STAT_GREEN,
+            T::Ok,
         ),
         ButtonAction::Command { .. } => (
             t!("device.keys_tag_command"),
             t!("device.keys_type_command"),
-            theme::STAT_AMBER,
+            T::Warn,
         ),
     };
 
@@ -1203,7 +1074,7 @@ fn action_display(a: &ButtonAction) -> ActionDisplay {
         tag,
         type_name,
         label,
-        color,
+        tone,
     }
 }
 
@@ -1234,16 +1105,33 @@ mod tests {
     }
 
     #[test]
-    fn key_click_selects_mapped_key_and_ignores_unmapped() {
-        let keys = vec![vkey(0, Some(0x50)), vkey(1, None), vkey(2, Some(0x51))];
-        // Clicking a mapped key selects its cid.
-        assert_eq!(key_click_selection(&keys, 0, None), Some(0x50));
-        assert_eq!(key_click_selection(&keys, 2, Some(0x50)), Some(0x51));
-        // Clicking an unmapped key keeps the current selection (no-op).
-        assert_eq!(key_click_selection(&keys, 1, Some(0x50)), Some(0x50));
-        assert_eq!(key_click_selection(&keys, 1, None), None);
-        // Out-of-range index is a no-op.
-        assert_eq!(key_click_selection(&keys, 9, Some(0x50)), Some(0x50));
+    fn selectable_hovered_and_selected_keys_each_get_their_own_fill() {
+        let plain = key_fill(None, Some(1), Some(1));
+        let selectable = key_fill(Some(2), Some(1), None);
+        let hovered = key_fill(Some(2), Some(1), Some(2));
+        let selected = key_fill(Some(1), Some(1), Some(1));
+        let fills = [plain, selectable, hovered, selected];
+        for (i, a) in fills.iter().enumerate() {
+            for b in &fills[i + 1..] {
+                assert_ne!(a, b);
+            }
+        }
+    }
+
+    #[test]
+    fn only_keys_tied_to_a_remap_button_are_selectable() {
+        let mut keys = vec![vkey(0, Some(0x50)), vkey(1, None)];
+        keys[1].cell.col = 1.0;
+        let avail = Rect::from_min_size(egui::Pos2::ZERO, egui::vec2(200.0, 100.0));
+        let rects = super::super::keyboard_visual::key_rects(&keys, avail, 3.0);
+        let unit = super::super::keyboard_visual::unit_for(&keys, avail);
+        let at = |i: usize| selectable_cid_at(&keys, &rects, rects[i].center(), unit);
+        assert_eq!(at(0), Some(0x50));
+        assert_eq!(at(1), None);
+        assert_eq!(
+            selectable_cid_at(&keys, &rects, egui::Pos2::new(-5.0, -5.0), unit),
+            None
+        );
     }
 
     #[test]
@@ -1254,16 +1142,6 @@ mod tests {
         // No selection, or a cid not on the grid, highlights nothing.
         assert_eq!(selected_key_index(&keys, None), None);
         assert_eq!(selected_key_index(&keys, Some(0x99)), None);
-    }
-
-    #[test]
-    fn chip_width_clamps_and_grows() {
-        // Short labels keep the uniform base width.
-        assert_eq!(chip_width(10.0), 62.0);
-        assert_eq!(chip_width(42.0), 62.0);
-        // Long labels grow to fit with side padding, so text never overflows.
-        assert_eq!(chip_width(90.0), 110.0);
-        assert!(chip_width(200.0) > chip_width(90.0));
     }
 
     #[test]
@@ -1510,5 +1388,62 @@ mod tests {
         assert!(!Layer::Shifted.allows(&ButtonAction::LayerShift));
         assert!(Layer::Base.allows(&ButtonAction::LayerShift));
         assert!(Layer::Shifted.allows(&ButtonAction::Native));
+    }
+
+    fn key_press(key: egui::Key, modifiers: egui::Modifiers) -> egui::Event {
+        egui::Event::Key {
+            key,
+            physical_key: None,
+            pressed: true,
+            repeat: false,
+            modifiers,
+        }
+    }
+
+    #[test]
+    fn chord_capture_takes_key_with_held_modifiers() {
+        let a = keycodes::native_code("A").unwrap();
+        let ev = key_press(egui::Key::A, egui::Modifiers::CTRL | egui::Modifiers::SHIFT);
+        assert_eq!(
+            chord_from_event(&ev),
+            Some((a, vec![ModKey::Ctrl, ModKey::Shift]))
+        );
+    }
+
+    #[test]
+    fn chord_capture_ignores_lone_modifiers_and_releases() {
+        let ev = key_press(egui::Key::ControlLeft, egui::Modifiers::CTRL);
+        assert_eq!(chord_from_event(&ev), None);
+        let release = egui::Event::Key {
+            key: egui::Key::A,
+            physical_key: None,
+            pressed: false,
+            repeat: false,
+            modifiers: egui::Modifiers::NONE,
+        };
+        assert_eq!(chord_from_event(&release), None);
+    }
+
+    #[test]
+    fn chord_capture_recovers_clipboard_shortcuts() {
+        let c = keycodes::native_code("C").unwrap();
+        assert_eq!(
+            chord_from_event(&egui::Event::Copy),
+            Some((c, vec![ModKey::Ctrl]))
+        );
+    }
+
+    #[test]
+    fn unrecorded_key_chord_is_a_draft() {
+        let empty = ButtonAction::KeyChord {
+            key: 0,
+            modifiers: vec![],
+        };
+        assert!(!mapping_is_complete(&empty, &ButtonAction::Native));
+        let recorded = ButtonAction::KeyChord {
+            key: keycodes::native_code("A").unwrap(),
+            modifiers: vec![ModKey::Ctrl],
+        };
+        assert!(mapping_is_complete(&recorded, &ButtonAction::Native));
     }
 }

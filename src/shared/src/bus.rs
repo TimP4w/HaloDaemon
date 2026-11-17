@@ -87,6 +87,13 @@ pub struct BusEvent {
     pub payload: BusEventPayload,
 }
 
+/// The first frame every client sends.
+#[derive(Debug, Clone, Serialize, Deserialize)]
+#[serde(tag = "type", rename_all = "snake_case")]
+pub enum ClientHello {
+    BusSubscribe(BusSubscribe),
+}
+
 #[derive(Debug, Clone, Serialize, Deserialize)]
 pub struct BusSubscribe {
     #[serde(default)]

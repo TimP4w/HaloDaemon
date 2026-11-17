@@ -17,8 +17,9 @@
 
 use std::io::Read;
 use std::process::{Command, Stdio};
-use std::sync::Arc;
-use std::time::{Duration, Instant};
+use std::sync::{Arc, OnceLock};
+use std::time::Duration;
+use tokio::time::Instant;
 
 use anyhow::Result;
 use halod_shared::types::{Permission, WriteRateStatus};
@@ -131,9 +132,9 @@ const MAX_COMMAND_OUTPUT_BYTES: usize = 256 * 1024;
 #[derive(Clone)]
 pub struct CommandExecutor {
     allowed: Arc<[String]>,
-    unrecoverable: Arc<std::sync::Mutex<Option<String>>>,
+    unrecoverable: Arc<OnceLock<String>>,
     #[cfg(feature = "plugin-test")]
-    scripted: Option<Arc<std::sync::Mutex<std::collections::VecDeque<CommandRunResult>>>>,
+    scripted: Option<Arc<parking_lot::Mutex<std::collections::VecDeque<CommandRunResult>>>>,
 }
 
 /// The bounded outcome of one allowlisted command invocation. Failures before
@@ -155,7 +156,7 @@ impl CommandExecutor {
         allowed.dedup();
         Self {
             allowed: allowed.into(),
-            unrecoverable: Arc::new(std::sync::Mutex::new(None)),
+            unrecoverable: Arc::default(),
             #[cfg(feature = "plugin-test")]
             scripted: None,
         }
@@ -167,22 +168,19 @@ impl CommandExecutor {
         results: impl IntoIterator<Item = CommandRunResult>,
     ) -> Self {
         let mut executor = Self::new(commands);
-        executor.scripted = Some(Arc::new(std::sync::Mutex::new(
+        executor.scripted = Some(Arc::new(parking_lot::Mutex::new(
             results.into_iter().collect(),
         )));
         executor
     }
 
     fn reject<T>(&self, detail: String) -> Result<T> {
-        self.unrecoverable
-            .lock()
-            .unwrap()
-            .get_or_insert(detail.clone());
+        let _ = self.unrecoverable.set(detail.clone());
         anyhow::bail!(detail)
     }
 
     fn unrecoverable_error(&self) -> Option<String> {
-        self.unrecoverable.lock().unwrap().clone()
+        self.unrecoverable.get().cloned()
     }
 
     pub fn run(&self, executable: &str, args: &[String]) -> Result<CommandRunResult> {
@@ -207,7 +205,6 @@ impl CommandExecutor {
         if let Some(results) = &self.scripted {
             return results
                 .lock()
-                .unwrap()
                 .pop_front()
                 .ok_or_else(|| anyhow::anyhow!("no more scripted command results queued"));
         }
@@ -225,10 +222,7 @@ impl CommandExecutor {
         // potentially different PATH lookup between readiness and execution.
         let resolved = super::command_resolve::resolve(executable).ok_or_else(|| {
             let detail = format!("command '{executable}' is not executable on PATH");
-            self.unrecoverable
-                .lock()
-                .unwrap()
-                .get_or_insert(detail.clone());
+            let _ = self.unrecoverable.set(detail.clone());
             anyhow::anyhow!(detail)
         })?;
         let mut child = Command::new(&resolved)
@@ -243,10 +237,7 @@ impl CommandExecutor {
                     error.kind(),
                     std::io::ErrorKind::NotFound | std::io::ErrorKind::PermissionDenied
                 ) {
-                    self.unrecoverable
-                        .lock()
-                        .unwrap()
-                        .get_or_insert(detail.clone());
+                    let _ = self.unrecoverable.set(detail.clone());
                 }
                 anyhow::anyhow!(detail)
             })?;
@@ -327,7 +318,7 @@ pub fn command_result_table(
 #[derive(Clone)]
 pub struct AddrScope {
     allowed: Arc<[u8]>,
-    unrecoverable: Arc<std::sync::Mutex<Option<String>>>,
+    unrecoverable: Arc<OnceLock<String>>,
 }
 
 impl AddrScope {
@@ -337,7 +328,7 @@ impl AddrScope {
         v.dedup();
         Self {
             allowed: v.into(),
-            unrecoverable: Arc::new(std::sync::Mutex::new(None)),
+            unrecoverable: Arc::default(),
         }
     }
 
@@ -356,16 +347,13 @@ impl AddrScope {
             let detail = format!(
                 "plugin SMBus access to address 0x{addr:02x} is outside its declared scope"
             );
-            self.unrecoverable
-                .lock()
-                .unwrap()
-                .get_or_insert(detail.clone());
+            let _ = self.unrecoverable.set(detail.clone());
             anyhow::bail!(detail)
         }
     }
 
     fn unrecoverable_error(&self) -> Option<String> {
-        self.unrecoverable.lock().unwrap().clone()
+        self.unrecoverable.get().cloned()
     }
 }
 
@@ -418,40 +406,63 @@ type PluginOpenFn = fn(
     Option<halod_shared::types::WriteRateLimit>,
 ) -> Result<PluginIo>;
 
-pub struct PluginTransportDescriptor {
-    /// The `match.transport` discriminator (e.g. "hid", "smbus").
-    pub kind: &'static str,
-    /// Does this spec (of this kind) accept the discovered handle? `None` for a
-    /// backend that is config-instantiated rather than discovery-matched (the
-    /// `tcp` integration transport), which is reached via `open` directly and
-    /// never through handle matching.
-    pub matches: Option<fn(&DeviceSpec, &DiscoveryHandle<'_>) -> bool>,
-    /// Open the live transport for a matched handle, returning any [`PluginIo`]
-    /// shape (stream, datagram, or request/response). `config` is the plugin's
-    /// resolved non-secure config values (see `plugins::config_for`) — HID/
-    /// SMBus ignore it; the `tcp` backend reads its host/port keys from it,
-    /// since a config-instantiated integration has no real discovery handle.
-    /// `granted` is the plugin's granted permissions — a backend that reaches
-    /// off the matched device (the `tcp` backend) gates on `Permission::Network`.
-    pub open: PluginOpenFn,
-    /// Stable per-device id suffix from the matched handle. `None` for a
-    /// config-instantiated backend, whose id is built from its config, not a handle.
-    pub id_suffix: Option<fn(&DiscoveryHandle<'_>) -> String>,
-    /// Reject a manifest whose match spec omits a field this kind requires. `None`
-    /// for a config-instantiated backend (an integration declares no device specs).
-    pub validate: Option<fn(&DeviceSpec) -> Result<()>>,
+pub enum PluginTransportDescriptor {
+    Discovered {
+        kind: &'static str,
+        open: PluginOpenFn,
+        discovery: Discovery,
+    },
+    Configured {
+        kind: &'static str,
+        open: PluginOpenFn,
+    },
+}
+
+impl PluginTransportDescriptor {
+    pub fn kind(&self) -> &'static str {
+        match self {
+            Self::Discovered { kind, .. } | Self::Configured { kind, .. } => kind,
+        }
+    }
+
+    pub fn open(&self) -> PluginOpenFn {
+        match self {
+            Self::Discovered { open, .. } | Self::Configured { open, .. } => *open,
+        }
+    }
+
+    pub fn discovery(&self) -> Option<&Discovery> {
+        match self {
+            Self::Discovered { discovery, .. } => Some(discovery),
+            Self::Configured { .. } => None,
+        }
+    }
+}
+
+pub struct Discovery {
+    pub matches: fn(&DeviceSpec, &DiscoveryHandle<'_>) -> bool,
+    /// Stable per-device id suffix from the matched handle.
+    pub id_suffix: fn(&DiscoveryHandle<'_>) -> String,
+    /// Reject a match spec that omits a field this kind requires.
+    pub validate: fn(&DeviceSpec) -> Result<()>,
+}
+
+pub fn accept_spec(_: &DeviceSpec) -> Result<()> {
+    Ok(())
 }
 
 /// Resolve a `match.transport` kind to its registered backend.
 pub fn descriptor_for(kind: &str) -> Option<&'static PluginTransportDescriptor> {
-    super::backends::DESCRIPTORS.iter().find(|d| d.kind == kind)
+    super::backends::DESCRIPTORS
+        .iter()
+        .find(|d| d.kind() == kind)
 }
 
 /// Every registered backend kind, for error messages.
 pub fn known_kinds() -> Vec<&'static str> {
     super::backends::DESCRIPTORS
         .iter()
-        .map(|d| d.kind)
+        .map(PluginTransportDescriptor::kind)
         .collect()
 }
 
@@ -464,9 +475,36 @@ mod tests {
         let kinds = super::known_kinds();
         for kind in &kinds {
             assert_eq!(kinds.iter().filter(|k| *k == kind).count(), 1, "{kind}");
-            assert_eq!(super::descriptor_for(kind).unwrap().kind, *kind);
+            assert_eq!(super::descriptor_for(kind).unwrap().kind(), *kind);
         }
         assert!(super::descriptor_for("nope").is_none());
+    }
+
+    #[test]
+    fn each_descriptor_variant_is_named_where_its_manifest_declares_it() {
+        use crate::domain::plugin::manifest::{RawDeviceSpec, TransportsConfig};
+        for descriptor in crate::domain::plugin::engine::backends::DESCRIPTORS {
+            let kind = descriptor.kind();
+            let as_device_match = serde_yaml::from_str::<RawDeviceSpec>(&format!(
+                "vendor: V\nmodel: M\nmatch: {{ {kind}: {{}} }}\n"
+            ));
+            let unknown = |result: Result<(), serde_yaml::Error>| {
+                result.is_err_and(|error| error.to_string().contains("unknown field"))
+            };
+            let named_by_device = !unknown(as_device_match.map(drop));
+            let named_by_transports = !unknown(
+                serde_yaml::from_str::<TransportsConfig>(&format!("{kind}: {{}}\n")).map(drop),
+            );
+            match descriptor {
+                super::PluginTransportDescriptor::Discovered { .. } => {
+                    assert!(named_by_device, "{kind}");
+                }
+                super::PluginTransportDescriptor::Configured { .. } => {
+                    assert!(!named_by_device, "{kind}");
+                    assert!(named_by_transports, "{kind}");
+                }
+            }
+        }
     }
 
     #[test]

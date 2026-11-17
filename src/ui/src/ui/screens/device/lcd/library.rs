@@ -2,6 +2,7 @@
 //! Media card: the Images/GIFs library grid, Video source picker, and the
 //! background upload/native-file-picker plumbing they share.
 
+use halod_shared::commands::DeviceOp;
 use std::path::PathBuf;
 use std::sync::mpsc::TryRecvError;
 
@@ -10,8 +11,11 @@ use halod_shared::types::{LcdStatus, LcdUploadProgress, LcdUploadStage};
 
 use super::gif::decode_next_thumb;
 use super::{DeviceUi, LcdMediaTab, PickerTarget, TabCtx};
+use crate::runtime::ipc;
 use crate::ui::components as widgets;
+use crate::ui::screens::device;
 use crate::ui::theme;
+use halod_shared::ids::DeviceId;
 
 /// Maximum library tiles shown (not counting the "None" slot).
 const MAX_TILES: usize = 11;
@@ -22,7 +26,7 @@ pub(super) fn media_content(
     ui: &mut egui::Ui,
     ctx: &TabCtx,
     st: &mut DeviceUi,
-    id: &str,
+    id: &DeviceId,
     lcd: &LcdStatus,
 ) {
     widgets::card_titled(
@@ -58,7 +62,7 @@ pub(super) fn video_section(ui: &mut egui::Ui, ctx: &TabCtx, st: &mut DeviceUi, 
     if widgets::button(
         ui,
         &t!("lcd.choose_video"),
-        widgets::ButtonKind::Ghost,
+        widgets::ButtonKind::Secondary,
         egui::vec2(140.0, 30.0),
     )
     .clicked()
@@ -93,9 +97,9 @@ fn cleared_upload_base(
     base: Option<usize>,
     lib_len: usize,
     terminal: Option<&LcdUploadProgress>,
-    device_id: &str,
+    device_id: &DeviceId,
 ) -> Option<usize> {
-    if crate::ui::screens::device::is_terminal_upload_for(terminal, device_id) {
+    if device::is_terminal_upload_for(terminal, device_id) {
         return None;
     }
     base.filter(|&b| lib_len <= b)
@@ -107,7 +111,7 @@ pub(super) fn image_section(
     ui: &mut egui::Ui,
     ctx: &TabCtx,
     st: &mut DeviceUi,
-    id: &str,
+    id: &DeviceId,
     lcd: &LcdStatus,
 ) {
     let active_template_id = ctx.state.lcd.engine.device_templates.get(id).cloned();
@@ -150,13 +154,13 @@ pub(super) fn image_section(
         widgets::button_loading(
             ui,
             &upload_label(ctx.lcd_upload.as_ref(), id),
-            widgets::ButtonKind::Ghost,
+            widgets::ButtonKind::Secondary,
             egui::vec2(180.0, 30.0),
         );
     } else if widgets::button(
         ui,
         &t!("lcd.upload_image_gif"),
-        widgets::ButtonKind::Ghost,
+        widgets::ButtonKind::Secondary,
         egui::vec2(180.0, 30.0),
     )
     .clicked()
@@ -179,9 +183,21 @@ pub(super) fn image_section(
 /// built on this.
 pub(super) fn image_picker(
     ui: &mut egui::Ui,
+    scope: &str,
     ctx: &TabCtx,
     st: &mut DeviceUi,
-    id: &str,
+    id: &DeviceId,
+    current: &str,
+) -> Option<String> {
+    ui.push_id(scope, |ui| image_picker_body(ui, ctx, st, id, current))
+        .inner
+}
+
+fn image_picker_body(
+    ui: &mut egui::Ui,
+    ctx: &TabCtx,
+    st: &mut DeviceUi,
+    id: &DeviceId,
     current: &str,
 ) -> Option<String> {
     st.lcd.upload_base = cleared_upload_base(
@@ -221,13 +237,13 @@ pub(super) fn image_picker(
         widgets::button_loading(
             ui,
             &upload_label(ctx.lcd_upload.as_ref(), id),
-            widgets::ButtonKind::Ghost,
+            widgets::ButtonKind::Secondary,
             egui::vec2(180.0, 30.0),
         );
     } else if widgets::button(
         ui,
         &t!("lcd.upload_image_gif"),
-        widgets::ButtonKind::Ghost,
+        widgets::ButtonKind::Secondary,
         egui::vec2(180.0, 30.0),
     )
     .clicked()
@@ -256,7 +272,7 @@ pub(super) fn delete_image_modal(ui: &mut egui::Ui, ctx: &TabCtx, st: &mut Devic
         &t!("lcd.delete"),
         &mut st.lcd.confirm_delete_image,
     ) {
-        crate::runtime::ipc::send(
+        ipc::send(
             ctx.cmd,
             halod_shared::commands::DaemonCommand::DeleteLcdImage {
                 filename: filename.clone(),
@@ -266,7 +282,7 @@ pub(super) fn delete_image_modal(ui: &mut egui::Ui, ctx: &TabCtx, st: &mut Devic
         st.lcd.requested.remove(&filename);
         // The daemon doesn't push the library after a delete; re-list so
         // the removed tile disappears.
-        crate::runtime::ipc::send(
+        ipc::send(
             ctx.cmd,
             halod_shared::commands::DaemonCommand::ListLcdImages,
         );
@@ -278,22 +294,26 @@ pub(super) fn delete_image_modal(ui: &mut egui::Ui, ctx: &TabCtx, st: &mut Devic
 pub(super) fn select_none(
     ctx: &TabCtx,
     st: &mut DeviceUi,
-    id: &str,
+    id: &DeviceId,
     active_template_id: Option<&str>,
 ) {
     st.lcd.preview_pending = None;
     if active_template_id.is_some() {
-        crate::runtime::ipc::send(
+        ipc::send(
             ctx.cmd,
-            halod_shared::commands::DaemonCommand::LcdEngineDeactivate {
-                device_id: id.to_string(),
+            halod_shared::commands::DaemonCommand::Device {
+                device_id: id.clone(),
+                op: DeviceOp::LcdEngineDeactivate,
             },
         );
         st.lcd.template_params.clear();
     }
-    crate::runtime::ipc::send(
+    ipc::send(
         ctx.cmd,
-        halod_shared::commands::DaemonCommand::SetScreenDefault { id: id.to_string() },
+        halod_shared::commands::DaemonCommand::Device {
+            device_id: id.clone(),
+            op: DeviceOp::SetScreenDefault,
+        },
     );
 }
 
@@ -302,38 +322,41 @@ pub(super) fn select_none(
 pub(super) fn select_image(
     ctx: &TabCtx,
     st: &mut DeviceUi,
-    id: &str,
+    id: &DeviceId,
     filename: &str,
     active_template_id: Option<&str>,
 ) {
     // Reject anything the daemon would reject anyway (path traversal, bad
     // extension) before it ever leaves the GUI — the daemon re-checks on receipt.
     if let Err(e) = halod_shared::types::validate_image_filename(filename) {
-        log::warn!("[LCD] refusing to apply invalid image filename {filename:?}: {e}");
+        log::warn!("refusing to apply invalid image filename {filename:?}: {e}");
         return;
     }
     if active_template_id.is_some() {
-        crate::runtime::ipc::send(
+        ipc::send(
             ctx.cmd,
-            halod_shared::commands::DaemonCommand::LcdEngineDeactivate {
-                device_id: id.to_string(),
+            halod_shared::commands::DaemonCommand::Device {
+                device_id: id.clone(),
+                op: DeviceOp::LcdEngineDeactivate,
             },
         );
         st.lcd.template_params.clear();
     }
     st.lcd.preview_pending = Some(filename.to_string());
-    crate::runtime::ipc::send(
+    ipc::send(
         ctx.cmd,
-        halod_shared::commands::DaemonCommand::SetScreenImageFromLibrary {
-            id: id.to_string(),
-            filename: filename.to_string(),
+        halod_shared::commands::DaemonCommand::Device {
+            device_id: id.clone(),
+            op: DeviceOp::SetScreenImageFromLibrary {
+                filename: filename.to_string(),
+            },
         },
     );
 }
 
 /// Label for the in-flight upload spinner. Falls back to a generic
 /// "Uploading" until the daemon reports which stage it is in.
-fn upload_label(progress: Option<&LcdUploadProgress>, device_id: &str) -> String {
+fn upload_label(progress: Option<&LcdUploadProgress>, device_id: &DeviceId) -> String {
     match progress {
         Some(p) if p.device_id == device_id => match (p.stage, p.percent) {
             (LcdUploadStage::Processing, Some(pct)) => {
@@ -379,7 +402,7 @@ fn spawn_picker(
 
 /// Apply a finished file pick: upload the image or switch the video source.
 /// A cancelled dialog (or a dead picker thread) just clears the slot.
-pub(super) fn poll_picker(ui: &egui::Ui, ctx: &TabCtx, st: &mut DeviceUi, id: &str) {
+pub(super) fn poll_picker(ui: &egui::Ui, ctx: &TabCtx, st: &mut DeviceUi, id: &DeviceId) {
     let Some((target, rx)) = st.lcd.picker.take() else {
         return;
     };
@@ -387,11 +410,13 @@ pub(super) fn poll_picker(ui: &egui::Ui, ctx: &TabCtx, st: &mut DeviceUi, id: &s
         Err(TryRecvError::Empty) => st.lcd.picker = Some((target, rx)),
         Ok(Some(path)) => match target {
             PickerTarget::Image => start_upload(ui, ctx, st, id, path),
-            PickerTarget::Video => crate::runtime::ipc::send(
+            PickerTarget::Video => ipc::send(
                 ctx.cmd,
-                halod_shared::commands::DaemonCommand::SetScreenVideo {
-                    id: id.to_string(),
-                    path: path.to_string_lossy().into_owned(),
+                halod_shared::commands::DaemonCommand::Device {
+                    device_id: id.clone(),
+                    op: DeviceOp::SetScreenVideo {
+                        path: path.to_string_lossy().into_owned(),
+                    },
                 },
             ),
         },
@@ -401,7 +426,7 @@ pub(super) fn poll_picker(ui: &egui::Ui, ctx: &TabCtx, st: &mut DeviceUi, id: &s
 
 /// Read + base64-encode the picked file off the UI thread (a multi-MB GIF would
 /// otherwise freeze the page for the whole encode) and send it to the daemon.
-fn start_upload(ui: &egui::Ui, ctx: &TabCtx, st: &mut DeviceUi, id: &str, path: PathBuf) {
+fn start_upload(ui: &egui::Ui, ctx: &TabCtx, st: &mut DeviceUi, id: &DeviceId, path: PathBuf) {
     // Feedback only: the daemon re-enforces the same ceiling on receipt.
     match std::fs::metadata(&path) {
         Ok(m) => {
@@ -420,17 +445,17 @@ fn start_upload(ui: &egui::Ui, ctx: &TabCtx, st: &mut DeviceUi, id: &str, path: 
     st.lcd.upload_base = Some(ctx.lcd_images.len());
     let cmd = ctx.cmd.clone();
     let egui_ctx = ui.ctx().clone();
-    let device_id = id.to_string();
+    let device_id = id.clone();
     std::thread::spawn(move || {
         match std::fs::read(&path) {
             Ok(bytes) => {
                 use base64::Engine as _;
                 let b64 = base64::engine::general_purpose::STANDARD.encode(&bytes);
-                crate::runtime::ipc::send(
+                ipc::send(
                     &cmd,
-                    halod_shared::commands::DaemonCommand::SetScreenImage {
-                        id: device_id,
-                        data_b64: b64,
+                    halod_shared::commands::DaemonCommand::Device {
+                        device_id: device_id.clone(),
+                        op: DeviceOp::SetScreenImage { data_b64: b64 },
                     },
                 );
             }
@@ -496,7 +521,11 @@ pub(super) fn draw_thumb_tile(
     let badge_r = 8.0;
     let badge_c = rect.right_top() + egui::vec2(-badge_r - 2.0, badge_r + 2.0);
     let badge_rect = Rect::from_center_size(badge_c, Vec2::splat(badge_r * 2.0));
-    let badge = ui.interact(badge_rect, ui.id().with(("del", id_salt)), Sense::click());
+    let badge = ui.interact(
+        badge_rect,
+        ui.scope_id().with(("del", id_salt)),
+        Sense::click(),
+    );
     let show_badge = resp.hovered() || badge.hovered();
 
     let p = ui.painter();
@@ -552,7 +581,7 @@ mod tests {
 
     fn terminal(stage: LcdUploadStage, device_id: &str) -> LcdUploadProgress {
         LcdUploadProgress {
-            device_id: device_id.into(),
+            device_id: device_id.parse().unwrap(),
             stage,
             percent: None,
         }
@@ -561,58 +590,91 @@ mod tests {
     #[test]
     fn upload_spinner_clears_only_once_the_library_grows() {
         // No spinner armed → stays cleared regardless of library size.
-        assert_eq!(cleared_upload_base(None, 5, None, "lcd"), None);
+        assert_eq!(
+            cleared_upload_base(None, 5, None, &"lcd".parse().unwrap()),
+            None
+        );
         // Armed at 3: still uploading while the library hasn't grown past 3.
-        assert_eq!(cleared_upload_base(Some(3), 3, None, "lcd"), Some(3));
-        assert_eq!(cleared_upload_base(Some(3), 2, None, "lcd"), Some(3));
+        assert_eq!(
+            cleared_upload_base(Some(3), 3, None, &"lcd".parse().unwrap()),
+            Some(3)
+        );
+        assert_eq!(
+            cleared_upload_base(Some(3), 2, None, &"lcd".parse().unwrap()),
+            Some(3)
+        );
         // The refreshed library grew past the captured size → spinner clears.
-        assert_eq!(cleared_upload_base(Some(3), 4, None, "lcd"), None);
+        assert_eq!(
+            cleared_upload_base(Some(3), 4, None, &"lcd".parse().unwrap()),
+            None
+        );
     }
 
     #[test]
     fn upload_spinner_clears_on_terminal_signal() {
         // A fresh Done for this device clears even without library growth.
         let done = terminal(LcdUploadStage::Done, "lcd");
-        assert_eq!(cleared_upload_base(Some(3), 3, Some(&done), "lcd"), None);
+        assert_eq!(
+            cleared_upload_base(Some(3), 3, Some(&done), &"lcd".parse().unwrap()),
+            None
+        );
         // A Failed likewise clears (the reported bug: a failed device write).
         let failed = terminal(LcdUploadStage::Failed, "lcd");
-        assert_eq!(cleared_upload_base(Some(3), 3, Some(&failed), "lcd"), None);
+        assert_eq!(
+            cleared_upload_base(Some(3), 3, Some(&failed), &"lcd".parse().unwrap()),
+            None
+        );
         // A terminal for a different device is ignored.
         let other = terminal(LcdUploadStage::Failed, "other");
         assert_eq!(
-            cleared_upload_base(Some(3), 3, Some(&other), "lcd"),
+            cleared_upload_base(Some(3), 3, Some(&other), &"lcd".parse().unwrap()),
             Some(3)
         );
         // Staleness: a retained terminal is delivered as a `None` one-shot on
         // non-arrival frames, so a freshly-armed spinner is not cleared.
-        assert_eq!(cleared_upload_base(Some(3), 3, None, "lcd"), Some(3));
+        assert_eq!(
+            cleared_upload_base(Some(3), 3, None, &"lcd".parse().unwrap()),
+            Some(3)
+        );
     }
 
     #[test]
     fn upload_label_reflects_daemon_progress_for_the_open_device() {
         let p = |stage, percent| {
             Some(LcdUploadProgress {
-                device_id: "lcd".into(),
+                device_id: "lcd".parse().unwrap(),
                 stage,
                 percent,
             })
         };
-        assert_eq!(upload_label(None, "lcd"), "Uploading…");
+        assert_eq!(upload_label(None, &"lcd".parse().unwrap()), "Uploading…");
         assert_eq!(
-            upload_label(p(LcdUploadStage::Processing, Some(42)).as_ref(), "lcd"),
+            upload_label(
+                p(LcdUploadStage::Processing, Some(42)).as_ref(),
+                &"lcd".parse().unwrap()
+            ),
             "Processing… 42%"
         );
         assert_eq!(
-            upload_label(p(LcdUploadStage::Processing, None).as_ref(), "lcd"),
+            upload_label(
+                p(LcdUploadStage::Processing, None).as_ref(),
+                &"lcd".parse().unwrap()
+            ),
             "Processing…"
         );
         assert_eq!(
-            upload_label(p(LcdUploadStage::Applying, None).as_ref(), "lcd"),
+            upload_label(
+                p(LcdUploadStage::Applying, None).as_ref(),
+                &"lcd".parse().unwrap()
+            ),
             "Writing to device…"
         );
         // Progress for a different device must not leak into this spinner.
         assert_eq!(
-            upload_label(p(LcdUploadStage::Applying, None).as_ref(), "other"),
+            upload_label(
+                p(LcdUploadStage::Applying, None).as_ref(),
+                &"other".parse().unwrap()
+            ),
             "Uploading…"
         );
     }

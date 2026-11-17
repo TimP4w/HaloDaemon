@@ -5,8 +5,11 @@ use anyhow::{bail, Result};
 use halod_shared::types::{Permission, WriteRateLimit};
 use std::sync::Arc;
 
-use crate::domain::plugin::engine::transport::{PluginIo, PluginTransportDescriptor};
+use crate::domain::plugin::engine::transport::{
+    accept_spec, Discovery, PluginIo, PluginTransportDescriptor,
+};
 use crate::domain::plugin::manifest::{DeviceSpec, PluginManifest};
+use crate::domain::plugin::ResolvedConfig;
 use crate::domain::registry::observers::discovery::DiscoveryHandle;
 use crate::infrastructure::drivers::transports::usb::{UsbDevices, UsbSelector};
 
@@ -57,7 +60,7 @@ pub(crate) fn open_usb(
 fn open(
     manifest: &PluginManifest,
     handle: &DiscoveryHandle<'_>,
-    _config: &crate::domain::plugin::ResolvedConfig,
+    _config: &ResolvedConfig,
     granted: &[Permission],
     limit: Option<WriteRateLimit>,
 ) -> Result<PluginIo> {
@@ -119,10 +122,12 @@ fn id_suffix(handle: &DiscoveryHandle<'_>) -> String {
     }
 }
 
-pub(super) const DESCRIPTOR: PluginTransportDescriptor = PluginTransportDescriptor {
+pub(super) const DESCRIPTOR: PluginTransportDescriptor = PluginTransportDescriptor::Discovered {
     kind: "usb",
-    matches: Some(matches),
     open,
-    id_suffix: Some(id_suffix),
-    validate: None,
+    discovery: Discovery {
+        matches,
+        id_suffix,
+        validate: accept_spec,
+    },
 };

@@ -2,13 +2,12 @@
 #![cfg(target_os = "linux")]
 //! Linux host-metrics backend, reading the numbers from `/proc`.
 
-use async_trait::async_trait;
-use std::sync::Mutex;
-
 use super::{
     cpu_load_pct, parse_cpu_mhz, parse_meminfo, parse_proc_stat, parse_uptime, HostMetrics,
     HostMetricsBackend,
 };
+use async_trait::async_trait;
+use parking_lot::Mutex;
 
 #[derive(Default)]
 pub struct LinuxMetrics {
@@ -32,7 +31,7 @@ impl HostMetricsBackend for LinuxMetrics {
         .unwrap_or_default();
 
         let cpu_load_pct = parse_proc_stat(&stat).and_then(|cur| {
-            let mut prev = self.prev_cpu.lock().unwrap();
+            let mut prev = self.prev_cpu.lock();
             let load = prev.and_then(|p| cpu_load_pct(p, cur));
             *prev = Some(cur);
             load

@@ -1,14 +1,43 @@
 // SPDX-License-Identifier: GPL-3.0-or-later
-use halod_shared::commands::DaemonCommand;
-use serde::{Deserialize, Serialize};
-use serde_json::{json, Value};
+use halod_shared::commands::{DaemonCommand, DeviceOp, IntegrationOp, Request};
+use halod_shared::messages::{DaemonMessage, IpcError};
+use serde::Deserialize;
+use serde_json::Value;
 use std::sync::Arc;
 use std::time::Duration;
 use tokio::sync::broadcast::error::RecvError;
 
 use super::{ClientHandle, LeaseState};
-use crate::application::state::AppState;
-use crate::domain::profiles;
+use crate::application::notifications;
+use crate::application::state::{AppState, CommandTarget};
+use crate::application::usecases::cooling::failsafe;
+use crate::application::usecases::cooling::fan_curve;
+use crate::application::usecases::cooling::tuning;
+use crate::application::usecases::device::capability;
+use crate::application::usecases::device::capability::CapabilityParam;
+use crate::application::usecases::device::keyboard_layout;
+use crate::application::usecases::device::rename;
+use crate::application::usecases::device::visibility;
+use crate::application::usecases::input::key_remap;
+use crate::application::usecases::input::onboard_profiles;
+use crate::application::usecases::lcd::controls;
+use crate::application::usecases::lcd::editor;
+use crate::application::usecases::lcd::templates;
+use crate::application::usecases::lighting::canvas;
+use crate::application::usecases::lighting::custom_effects;
+use crate::application::usecases::lighting::rgb;
+use crate::application::usecases::plugin::integrations;
+use crate::application::usecases::plugin::plugins;
+use crate::application::usecases::plugin::repos;
+use crate::application::usecases::profiles::app_rules;
+use crate::application::usecases::profiles::lifecycle;
+use crate::application::usecases::profiles::profile_override;
+use crate::application::usecases::registry::chain;
+use crate::application::usecases::registry::debug;
+use crate::application::usecases::registry::receiver;
+use crate::application::usecases::registry::settings;
+use crate::domain::plugin::SurfacedPluginError;
+use halod_shared::ids::DeviceId;
 
 const LCD_PREVIEW_LEASE: Duration =
     Duration::from_secs(halod_shared::types::LCD_PREVIEW_LEASE_SECS);
@@ -18,7 +47,7 @@ const IPC_MAX_NODES: usize = 200_000;
 
 /// Reject a command whose JSON nests too deep or holds too many collection nodes,
 /// so a small frame can't expand into excessive nested work.
-fn check_ipc_bounds(v: &Value) -> Result<(), String> {
+fn check_ipc_bounds(v: &Value) -> anyhow::Result<()> {
     crate::util::json::check_bounds(v, IPC_MAX_DEPTH, IPC_MAX_NODES)
 }
 
@@ -38,7 +67,7 @@ async fn lcd_preview_forward_loop(app: Arc<AppState>, client: ClientHandle) {
             }
         }
         // Engine may not be set yet at startup — same readiness dance as
-        // engine_subscribe_loop, plus the closed() escape.
+        // canvas_forward_loop, plus the closed() escape.
         let mut ready = app.engines_ready.subscribe();
         let mut rx = loop {
             if let Some(e) = app.lcd.engine() {
@@ -69,25 +98,14 @@ async fn lcd_preview_forward_loop(app: Arc<AppState>, client: ClientHandle) {
     }
 }
 
-async fn engine_subscribe_loop<T, F>(
-    app: Arc<AppState>,
-    client: ClientHandle,
-    get_receiver: F,
-    frame_type: &'static str,
-) where
-    T: Serialize + Send + Sync + 'static,
-    F: Fn(&AppState) -> Option<tokio::sync::broadcast::Receiver<Arc<T>>>,
-{
-    // The domain engine is set once during startup, possibly after this client
-    // subscribes. Wake on the readiness signal rather than polling; re-check
-    // each round so a flip that races the subscribe is never missed.
+async fn canvas_forward_loop(app: Arc<AppState>, client: ClientHandle) {
     let mut ready = app.engines_ready.subscribe();
     let mut rx = loop {
-        if let Some(rx) = get_receiver(&app) {
-            break rx;
+        if let Some(engine) = app.lighting.engine() {
+            break engine.subscribe();
         }
         if ready.changed().await.is_err() {
-            return; // daemon shutting down
+            return;
         }
     };
     loop {
@@ -96,42 +114,39 @@ async fn engine_subscribe_loop<T, F>(
                 if client.tx.is_closed() {
                     break;
                 }
-                client.send_json(&json!({"type": frame_type, "data": *frame}));
+                client.send(&DaemonMessage::CanvasFrame { data: frame });
             }
-            Err(RecvError::Lagged(n)) => log::debug!("{frame_type} subscriber lagged {n} frame(s)"),
+            Err(RecvError::Lagged(n)) => log::debug!("canvas_frame subscriber lagged {n} frame(s)"),
             Err(RecvError::Closed) => break,
         }
     }
 }
 
 pub async fn handle_message(msg: Value, client: ClientHandle, app: Arc<AppState>) {
-    let Some(cmd) = msg["type"].as_str() else {
-        log::warn!("IPC: frame missing string 'type' field");
-        client
-            .send_json(&json!({"type": "error", "message": "missing or non-string 'type' field"}));
-        return;
-    };
-
-    if cmd == "ping" {
-        client.send_json(&json!({"type": "pong"}));
-        return;
-    }
-
-    let req_id = msg["request_id"].as_str();
+    let cmd = msg["type"].as_str().unwrap_or("<untyped>").to_string();
+    let req_id = msg["request_id"].as_str().map(str::to_string);
 
     if let Err(e) = check_ipc_bounds(&msg) {
-        reply_error(&client, cmd, req_id, anyhow::anyhow!("frame rejected: {e}"));
+        reply_error(
+            &client,
+            &cmd,
+            &anyhow::anyhow!("frame rejected: {e}"),
+            req_id,
+        );
         return;
     }
 
-    let typed = match DaemonCommand::deserialize(&msg) {
-        Ok(typed) => typed,
+    let Request {
+        request_id,
+        command,
+    } = match Request::deserialize(&msg) {
+        Ok(request) => request,
         Err(e) => {
             reply_error(
                 &client,
-                cmd,
+                &cmd,
+                &anyhow::anyhow!("failed to parse: {e}"),
                 req_id,
-                anyhow::anyhow!("failed to parse: {e}"),
             );
             return;
         }
@@ -142,170 +157,88 @@ pub async fn handle_message(msg: Value, client: ClientHandle, app: Arc<AppState>
     // other devices run concurrently. This keeps one slow / timing-out device
     // (e.g. an unreachable wireless controller) from stalling every other
     // command. Global commands run inline in read order.
-    match command_target(&typed) {
-        Some(id) => {
-            let writes_device = command_writes_device(&typed);
-            let id = id.to_string();
-            let cmd = cmd.to_string();
-            let req_id = req_id.map(str::to_string);
+    match command_target(&command) {
+        Some(target) => {
+            let writes_device = command_writes_device(&command);
             tokio::spawn(async move {
-                let lock = app.device_lock(&id).await;
+                let lock = app.device_lock(target.clone()).await;
                 let _guard = lock.lock().await;
-                if let Err(e) = dispatch(typed, client.clone(), Arc::clone(&app)).await {
-                    let plugin_handled = e
-                        .downcast_ref::<crate::domain::plugin::SurfacedPluginError>()
-                        .is_some();
-                    if writes_device && !plugin_handled {
-                        let device = {
-                            let devices = app.device_registry.read().await;
-                            devices
-                                .iter()
-                                .find(|device| device.id() == id)
-                                .map(|device| device.name().to_string())
-                                .unwrap_or_else(|| id.clone())
-                        };
-                        crate::application::notifications::send(
+                if let Err(e) = dispatch(command, client.clone(), Arc::clone(&app)).await {
+                    log::warn!("command '{cmd}' failed: {e:#}");
+                    let mut error = ipc_error(&e, request_id);
+                    if let (true, false, CommandTarget::Device(device_id)) =
+                        (writes_device, error.handled, &target)
+                    {
+                        let device = app.device_registry.find(device_id).await.map_or_else(
+                            || device_id.to_string(),
+                            |device| device.name().to_string(),
+                        );
+                        notifications::send(
                             &app,
                             halod_shared::types::NotificationCode::DeviceWriteFailed {
+                                device_id: device_id.clone(),
                                 device,
                                 detail: format!("{e:#}"),
                             },
                         )
                         .await;
                     }
-                    reply_error_with_handled(&client, &cmd, req_id.as_deref(), e, writes_device);
+                    error.handled |= writes_device;
+                    client.send(&DaemonMessage::Error(error));
                 }
             });
         }
         None => {
-            if let Err(e) = dispatch(typed, client.clone(), app).await {
-                reply_error(&client, cmd, req_id, e);
+            if let Err(e) = dispatch(command, client.clone(), app).await {
+                reply_error(&client, &cmd, &e, request_id);
             }
         }
     }
 }
 
-/// Send an `error` reply frame for a failed command, echoing `request_id` when
-/// the client supplied one so it can correlate the failure.
-fn reply_error(client: &ClientHandle, cmd: &str, req_id: Option<&str>, e: anyhow::Error) {
-    reply_error_with_handled(client, cmd, req_id, e, false);
+fn catalog_error_code(
+    error: &halod_plugin_signing::CatalogError,
+) -> halod_shared::types::CatalogErrorCode {
+    use halod_plugin_signing::CatalogError as E;
+    use halod_shared::types::CatalogErrorCode as C;
+    match error {
+        E::Malformed(_) => C::Malformed,
+        E::Unsigned => C::Unsigned,
+        E::UntrustedKey(_) => C::UntrustedKey,
+        E::SignatureMismatch => C::SignatureMismatch,
+        E::Stale { .. } => C::Stale,
+        E::HashMismatch { .. } => C::HashMismatch,
+        E::ApiIncompatible { .. } => C::ApiIncompatible,
+    }
 }
 
-fn reply_error_with_handled(
-    client: &ClientHandle,
-    cmd: &str,
-    req_id: Option<&str>,
-    e: anyhow::Error,
-    handled: bool,
-) {
+fn ipc_error(e: &anyhow::Error, request_id: Option<String>) -> IpcError {
+    IpcError {
+        message: format!("{e:#}"),
+        code: e
+            .downcast_ref::<halod_plugin_signing::CatalogError>()
+            .map(catalog_error_code),
+        handled: e.downcast_ref::<SurfacedPluginError>().is_some(),
+        request_id,
+    }
+}
+
+fn reply_error(client: &ClientHandle, cmd: &str, e: &anyhow::Error, request_id: Option<String>) {
     log::warn!("command '{cmd}' failed: {e:#}");
-    let mut reply = json!({"type": "error", "message": e.to_string()});
-    if e.is::<halod_plugin_signing::RepositorySignatureMismatch>() {
-        reply["code"] = halod_shared::types::ERROR_REPOSITORY_SIGNATURE_VERIFICATION_FAILED.into();
-    }
-    if handled
-        || e.downcast_ref::<crate::domain::plugin::SurfacedPluginError>()
-            .is_some()
-    {
-        reply["handled"] = true.into();
-    }
-    if let Some(req_id) = req_id {
-        reply["request_id"] = req_id.into();
-    }
-    client.send_json(&reply);
+    client.send(&DaemonMessage::Error(ipc_error(e, request_id)));
 }
 
-/// Whether failure means a requested hardware write did not reach the device.
-/// Device-scoped configuration-only commands deliberately stay on the generic
-/// error path.
 fn command_writes_device(cmd: &DaemonCommand) -> bool {
-    use DaemonCommand::*;
-    matches!(
-        cmd,
-        SetChoice { .. }
-            | SetRange { .. }
-            | SetBoolean { .. }
-            | TriggerAction { .. }
-            | ResetAllButtonMappings { .. }
-            | ResetButtonMapping { .. }
-            | SetEqPreset { .. }
-            | SetEqBands { .. }
-            | SetDpiSteps { .. }
-            | LightingApply { .. }
-            | LightingDetectSegments { .. }
-            | SetButtonMapping { .. }
-            | SetSoftwareDpiSteps { .. }
-            | OnboardProfileSwitch { .. }
-            | OnboardProfileRestore { .. }
-            | OnboardProfileSetEnabled { .. }
-            | SetScreenImage { .. }
-            | SetScreenImageFromLibrary { .. }
-            | SetScreenRotation { .. }
-            | SetScreenBrightness { .. }
-            | SetScreenDefault { .. }
-            | SetScreenRawStreaming { .. }
-            | SetScreenVideo { .. }
-            | ReceiverStartPairing { .. }
-            | ReceiverStopPairing { .. }
-            | ReceiverUnpair { .. }
-            | SetKeyboardLayout { .. }
-    )
+    matches!(cmd, DaemonCommand::Device { op, .. } if op.writes_device())
 }
 
-/// The device id a command targets, or `None` for global commands (profiles,
-/// settings, canvas-wide effects, …). Determines the [`AppState::device_lock`]
-/// used to serialize per-device work; see [`handle_message`].
-fn command_target(cmd: &DaemonCommand) -> Option<&str> {
-    use DaemonCommand::*;
+/// Serializes device-scoped work under [`AppState::device_lock`].
+fn command_target(cmd: &DaemonCommand) -> Option<CommandTarget> {
     match cmd {
-        SetChoice { id, .. }
-        | SetRange { id, .. }
-        | SetBoolean { id, .. }
-        | TriggerAction { id, .. }
-        | ResetAllButtonMappings { id, .. }
-        | ResetButtonMapping { id, .. }
-        | SetEqPreset { id, .. }
-        | SetEqBands { id, .. }
-        | SetDpiSteps { id, .. }
-        | LightingApply { id, .. }
-        | LightingSetChannelTransform { id, .. }
-        | LightingAddSegment { id, .. }
-        | LightingRemoveSegment { id, .. }
-        | LightingReorderSegment { id, .. }
-        | LightingDetectSegments { id, .. }
-        | SetButtonMapping { id, .. }
-        | SetSoftwareDpiSteps { id, .. }
-        | OnboardProfileSwitch { id, .. }
-        | OnboardProfileRestore { id, .. }
-        | OnboardProfileSetEnabled { id, .. }
-        | SetScreenImage { id, .. }
-        | SetScreenImageFromLibrary { id, .. }
-        | SetScreenRotation { id, .. }
-        | SetScreenBrightness { id, .. }
-        | SetScreenDefault { id, .. }
-        | SetScreenRawStreaming { id, .. }
-        | SetScreenVideo { id, .. }
-        | ReceiverStartPairing { id, .. }
-        | ReceiverStopPairing { id, .. }
-        | ReceiverUnpair { id, .. }
-        | SetKeyboardLayout { id, .. }
-        | BeginIntegrationSetup { id }
-        | ResetIntegrationSetup { id }
-        | SelectIntegrationSetupMode { id, .. }
-        | SubmitIntegrationSetup { id, .. }
-        | RetryIntegrationPairing { id }
-        | CancelIntegrationSetup { id } => Some(id),
-        SetCoolingCurvePoints { device_id, .. }
-        | SetCoolingCurvePreset { device_id, .. }
-        | RemoveCoolingCurve { device_id, .. } => Some(device_id),
-        SetDeviceVisibility { device_id, .. }
-        | SetDeviceName { device_id, .. }
-        | CanvasPlaceZone { device_id, .. }
-        | CanvasRemoveZone { device_id, .. }
-        | CanvasMoveZone { device_id, .. }
-        | LcdEngineSetTemplate { device_id, .. }
-        | LcdEngineDeactivate { device_id, .. }
-        | RenderLcdEditor { device_id, .. } => Some(device_id),
+        DaemonCommand::Device { device_id, .. } => Some(CommandTarget::Device(device_id.clone())),
+        DaemonCommand::Integration { plugin_id, .. } => {
+            Some(CommandTarget::Plugin(plugin_id.clone()))
+        }
         _ => None,
     }
 }
@@ -317,206 +250,74 @@ async fn dispatch(
     app: Arc<AppState>,
 ) -> anyhow::Result<()> {
     match cmd {
-        DaemonCommand::SetRange { id, key, value } => {
-            crate::application::usecases::device::capability::set_capability_param(
-                id,
-                crate::application::usecases::device::capability::CapabilityParam::Range {
-                    key,
-                    value,
-                },
-                app,
-            )
-            .await
+        DaemonCommand::Device { device_id, op } => {
+            dispatch_device(device_id, op, client, app).await
         }
-        DaemonCommand::SetChoice { id, key, selected } => {
-            crate::application::usecases::device::capability::set_capability_param(
-                id,
-                crate::application::usecases::device::capability::CapabilityParam::Choice {
-                    key,
-                    selected,
-                },
-                app,
-            )
-            .await
-        }
-        DaemonCommand::SetBoolean { id, key, value } => {
-            crate::application::usecases::device::capability::set_capability_param(
-                id,
-                crate::application::usecases::device::capability::CapabilityParam::Boolean {
-                    key,
-                    value,
-                },
-                app,
-            )
-            .await
-        }
-        DaemonCommand::TriggerAction { id, key } => {
-            crate::application::usecases::device::capability::set_capability_param(
-                id,
-                crate::application::usecases::device::capability::CapabilityParam::Action { key },
-                app,
-            )
-            .await
-        }
-        DaemonCommand::AddProfile { name } => {
-            crate::application::usecases::profiles::lifecycle::add_profile(name, app).await
-        }
+        DaemonCommand::Integration { plugin_id, op } => match op {
+            IntegrationOp::SetEnabled { enabled } => {
+                integrations::set_integration_enabled(plugin_id, enabled, app).await
+            }
+            IntegrationOp::SetConfig { values } => {
+                integrations::set_integration_config(plugin_id, values, app).await
+            }
+            IntegrationOp::BeginSetup => integrations::begin_setup(plugin_id, app).await,
+            IntegrationOp::CancelSetup => integrations::cancel_setup(plugin_id, app).await,
+            IntegrationOp::ResetSetup => integrations::reset_setup(plugin_id, app).await,
+            IntegrationOp::RetryPairing => integrations::retry_pairing(plugin_id, app).await,
+            IntegrationOp::SelectSetupMode { mode } => {
+                integrations::select_setup_mode(plugin_id, mode, app).await
+            }
+            IntegrationOp::SubmitSetup {
+                candidate_id,
+                values,
+            } => integrations::submit_setup(plugin_id, candidate_id, values, app).await,
+        },
+        DaemonCommand::AddProfile { name } => lifecycle::add_profile(name, app).await,
         DaemonCommand::RenameProfile { old_name, new_name } => {
-            crate::application::usecases::profiles::lifecycle::rename_profile(
-                old_name, new_name, app,
-            )
-            .await
+            lifecycle::rename_profile(old_name, new_name, app).await
         }
-        DaemonCommand::RemoveProfile { name } => {
-            crate::application::usecases::profiles::lifecycle::remove_profile(name, app).await
-        }
-        DaemonCommand::SwitchProfile { name } => {
-            crate::application::usecases::profiles::lifecycle::switch_profile(name, app).await
-        }
+        DaemonCommand::RemoveProfile { name } => lifecycle::remove_profile(name, app).await,
+        DaemonCommand::SwitchProfile { name } => lifecycle::switch_profile(name, app).await,
         DaemonCommand::RemoveProfileOverride { profile, target } => {
-            crate::application::usecases::profiles::profile_override::remove_profile_override(
-                profile, target, app,
-            )
-            .await
+            profile_override::remove_profile_override(profile, target, app).await
         }
         DaemonCommand::SetLightingTargets {
             device_ids,
             channels,
-        } => {
-            crate::application::usecases::profiles::lifecycle::set_lighting_targets(
-                device_ids, channels, app,
-            )
-            .await
-        }
+        } => lifecycle::set_lighting_targets(device_ids, channels, app).await,
         DaemonCommand::AddAppRule {
             process_names,
             profile,
             enabled,
-        } => {
-            crate::application::usecases::profiles::app_rules::add(
-                process_names,
-                profile,
-                enabled,
-                app,
-            )
-            .await
-        }
+        } => app_rules::add(process_names, profile, enabled, app).await,
         DaemonCommand::UpdateAppRule {
             index,
             process_names,
             profile,
             enabled,
-        } => {
-            crate::application::usecases::profiles::app_rules::update(
-                index,
-                process_names,
-                profile,
-                enabled,
-                app,
-            )
-            .await
-        }
-        DaemonCommand::RemoveAppRule { index } => {
-            crate::application::usecases::profiles::app_rules::remove(index, app).await
-        }
-        DaemonCommand::Rediscover => {
-            crate::application::usecases::registry::settings::rediscover(app).await
-        }
-        DaemonCommand::GetUdevRulesStatus => {
-            crate::application::usecases::plugin::plugins::get_udev_rules_status(client, app).await
-        }
+        } => app_rules::update(index, process_names, profile, enabled, app).await,
+        DaemonCommand::RemoveAppRule { index } => app_rules::remove(index, app).await,
+        DaemonCommand::Rediscover => settings::rediscover(app).await,
+        DaemonCommand::GetUdevRulesStatus => plugins::get_udev_rules_status(client, app).await,
         DaemonCommand::SetPluginEnabled { id, enabled } => {
-            crate::application::usecases::plugin::plugins::set_enabled(id, enabled, app).await
+            plugins::set_enabled(id, enabled, app).await
         }
-        DaemonCommand::ImportPluginRepository { source_path } => {
-            crate::application::usecases::plugin::repos::import_local_repo(source_path, app).await
-        }
-        DaemonCommand::ConfirmPluginEnable { id, authority } => {
-            crate::application::usecases::plugin::plugins::confirm_enable(id, authority, app).await
-        }
-        DaemonCommand::ConfirmPluginEnableBatch { plugins } => {
-            crate::application::usecases::plugin::plugins::confirm_enable_batch(plugins, app).await
-        }
-        DaemonCommand::SetPluginConfig { id, values } => {
-            crate::application::usecases::plugin::plugins::set_config(id, values, app).await
-        }
-        DaemonCommand::AddPluginRepo { url } => {
-            crate::application::usecases::plugin::repos::add_repo(url, app).await
-        }
-        DaemonCommand::RemovePluginRepo { slug } => {
-            crate::application::usecases::plugin::repos::remove_repo(slug, app).await
-        }
-        DaemonCommand::ListPluginReleases { url } => {
-            crate::application::usecases::plugin::repos::list_releases(url, client).await
-        }
-        DaemonCommand::CheckPluginRepoUpdates => {
-            crate::application::usecases::plugin::repos::check_repo_updates(app, client).await
-        }
-        DaemonCommand::UpdatePluginRepo { slug } => {
-            crate::application::usecases::plugin::repos::update_repo(slug, app).await
-        }
-        DaemonCommand::InstallPluginRelease { slug, tag } => {
-            crate::application::usecases::plugin::repos::install_release(slug, tag, true, app).await
-        }
-        DaemonCommand::FollowLatestPluginRelease { slug } => {
-            crate::application::usecases::plugin::repos::follow_latest_release(slug, app).await
-        }
-        DaemonCommand::UpdateAllPlugins => {
-            crate::application::usecases::plugin::repos::update_all_plugins(app).await
-        }
-        DaemonCommand::SetIntegrationEnabled { id, enabled } => {
-            crate::application::usecases::plugin::integrations::set_integration_enabled(
-                id, enabled, app,
-            )
-            .await
-        }
-        DaemonCommand::SetIntegrationConfig { id, values } => {
-            crate::application::usecases::plugin::integrations::set_integration_config(
-                id, values, app,
-            )
-            .await
-        }
-        DaemonCommand::BeginIntegrationSetup { id } => {
-            crate::application::usecases::plugin::integrations::begin_setup(id, app).await
-        }
-        DaemonCommand::ResetIntegrationSetup { id } => {
-            crate::application::usecases::plugin::integrations::reset_setup(id, app).await
-        }
-        DaemonCommand::SelectIntegrationSetupMode { id, mode } => {
-            crate::application::usecases::plugin::integrations::select_setup_mode(id, mode, app)
-                .await
-        }
-        DaemonCommand::SubmitIntegrationSetup {
+        DaemonCommand::SetPluginConfig { id, values } => plugins::set_config(id, values, app).await,
+        DaemonCommand::AddPluginRepo { source } => repos::add_repo(source, app).await,
+        DaemonCommand::RemovePluginRepo { slug } => repos::remove_repo(slug, app).await,
+        DaemonCommand::RefreshPluginRepos => repos::refresh_repos(app).await,
+        DaemonCommand::InstallPlugin {
+            repo,
             id,
-            candidate_id,
-            values,
-        } => {
-            crate::application::usecases::plugin::integrations::submit_setup(
-                id,
-                candidate_id,
-                values,
-                app,
-            )
-            .await
-        }
-        DaemonCommand::RetryIntegrationPairing { id } => {
-            crate::application::usecases::plugin::integrations::retry_pairing(id, app).await
-        }
-        DaemonCommand::CancelIntegrationSetup { id } => {
-            crate::application::usecases::plugin::integrations::cancel_setup(id, app).await
-        }
-        DaemonCommand::SetLogLevel { level } => {
-            crate::application::usecases::registry::settings::set_log_level(level, app).await
-        }
-        DaemonCommand::SetLanguage { lang } => {
-            crate::application::usecases::registry::settings::set_language(lang, app).await
-        }
-        DaemonCommand::SetHomeWidgets { widgets } => {
-            crate::application::usecases::registry::settings::set_home_widgets(widgets, app).await
-        }
+            permissions_confirmed,
+        } => repos::install_plugin(repo, id, permissions_confirmed, app).await,
+        DaemonCommand::UninstallPlugin { id } => repos::uninstall_plugin(id, app).await,
+        DaemonCommand::UpdateAllPlugins => repos::update_all_plugins(app).await,
+        DaemonCommand::SetLogLevel { level } => settings::set_log_level(level, app).await,
+        DaemonCommand::SetLanguage { lang } => settings::set_language(lang, app).await,
+        DaemonCommand::SetHomeWidgets { widgets } => settings::set_home_widgets(widgets, app).await,
         DaemonCommand::SetCoolingWidgets { widgets } => {
-            crate::application::usecases::registry::settings::set_cooling_widgets(widgets, app)
-                .await
+            settings::set_cooling_widgets(widgets, app).await
         }
         DaemonCommand::SetUiConfig {
             close_to_tray,
@@ -524,7 +325,7 @@ async fn dispatch(
             hide_window_controls,
             low_battery_notifications,
         } => {
-            crate::application::usecases::registry::settings::set_ui_config(
+            settings::set_ui_config(
                 close_to_tray,
                 suppress_dependency_warning,
                 hide_window_controls,
@@ -533,60 +334,27 @@ async fn dispatch(
             )
             .await
         }
-        DaemonCommand::SetPluginDownloadConsent { allowed } => {
-            crate::application::usecases::registry::settings::set_plugin_download_consent(
-                allowed, app,
-            )
-            .await
-        }
-        DaemonCommand::MarkTourSeen { tour } => {
-            crate::application::usecases::registry::settings::mark_tour_seen(tour, app).await
-        }
-        DaemonCommand::ResetToursSeen => {
-            crate::application::usecases::registry::settings::reset_tours_seen(app).await
-        }
+        DaemonCommand::MarkTourSeen { tour } => settings::mark_tour_seen(tour, app).await,
+        DaemonCommand::ResetToursSeen => settings::reset_tours_seen(app).await,
         DaemonCommand::SetFanFailsafeDuty { duty } => {
-            crate::application::usecases::cooling::failsafe::set_fan_failsafe_duty(duty, app).await
+            failsafe::set_fan_failsafe_duty(duty, app).await
         }
-        DaemonCommand::ResetAllButtonMappings { id } => {
-            crate::application::usecases::input::key_remap::reset_all_button_mappings(id, app).await
-        }
-        DaemonCommand::ResetButtonMapping { id, cid } => {
-            crate::application::usecases::input::key_remap::reset_button_mapping(id, cid, app).await
-        }
-        DaemonCommand::SetEqPreset { id, preset_index } => {
-            crate::application::usecases::device::capability::set_capability_param(
-                id,
-                crate::application::usecases::device::capability::CapabilityParam::EqPreset {
-                    preset_index,
+        DaemonCommand::SetCoolingTuning {
+            ramp_up_pct_per_s,
+            ramp_down_pct_per_s,
+            hysteresis_c,
+            smoothing_secs,
+            sensor_stale_secs,
+        } => {
+            tuning::set_cooling_tuning(
+                tuning::CoolingTuning {
+                    ramp_up_pct_per_s,
+                    ramp_down_pct_per_s,
+                    hysteresis_c,
+                    smoothing_secs,
+                    sensor_stale_secs,
                 },
                 app,
-            )
-            .await
-        }
-        DaemonCommand::SetEqBands { id, values } => {
-            crate::application::usecases::device::capability::set_capability_param(
-                id,
-                crate::application::usecases::device::capability::CapabilityParam::EqBands {
-                    values,
-                },
-                app,
-            )
-            .await
-        }
-        DaemonCommand::SetDpiSteps { id, steps } => {
-            crate::application::usecases::device::capability::set_capability_param(
-                id,
-                crate::application::usecases::device::capability::CapabilityParam::DpiSteps {
-                    steps,
-                },
-                app,
-            )
-            .await
-        }
-        DaemonCommand::SetDeviceVisibility { device_id, state } => {
-            crate::application::usecases::device::visibility::set_device_visibility(
-                device_id, state, app,
             )
             .await
         }
@@ -595,281 +363,275 @@ async fn dispatch(
             kind,
             channel_id,
             state,
-        } => {
-            crate::application::usecases::device::visibility::set_channel_visibility(
-                device_id, kind, channel_id, state, app,
-            )
-            .await
-        }
-        DaemonCommand::SetKeyboardLayout { id, selection } => {
-            crate::application::usecases::device::keyboard_layout::set_keyboard_layout(
-                id, selection, app,
-            )
-            .await
-        }
-        DaemonCommand::SetDeviceName { device_id, name } => {
-            crate::application::usecases::device::rename::set_device_name(device_id, name, app)
-                .await
-        }
+        } => visibility::set_channel_visibility(device_id, kind, channel_id, state, app).await,
 
-        DaemonCommand::SetCoolingCurvePoints {
-            device_id,
-            channel_id,
-            points,
-            sensor_id,
-        } => {
-            crate::application::usecases::cooling::fan_curve::set_cooling_curve_points(
-                device_id, channel_id, points, sensor_id, app,
-            )
-            .await
-        }
-        DaemonCommand::SetCoolingCurvePreset {
-            device_id,
-            channel_id,
-            preset,
-            sensor_id,
-        } => {
-            crate::application::usecases::cooling::fan_curve::set_cooling_curve_preset(
-                device_id, channel_id, preset, sensor_id, app,
-            )
-            .await
-        }
-        DaemonCommand::RemoveCoolingCurve {
-            device_id,
-            channel_id,
-        } => {
-            crate::application::usecases::cooling::fan_curve::remove_cooling_curve(
-                device_id, channel_id, app,
-            )
-            .await
-        }
+        DaemonCommand::PlayMacro { steps } => key_remap::play_macro(steps, app).await,
 
-        DaemonCommand::LightingApply { id, state } => {
-            crate::application::usecases::lighting::rgb::lighting_apply(id, state, app).await
-        }
-        DaemonCommand::LightingSetChannelTransform {
-            id,
-            channel_id,
-            transform,
-        } => {
-            crate::application::usecases::lighting::rgb::set_channel_transform(
-                id, channel_id, transform, app,
-            )
-            .await
-        }
-        DaemonCommand::LightingAddSegment {
-            id,
-            channel_id,
-            name,
-            led_count,
-            topology,
-        } => {
-            crate::application::usecases::registry::chain::lighting_add_segment(
-                id, channel_id, name, led_count, topology, app,
-            )
-            .await
-        }
-        DaemonCommand::LightingRemoveSegment {
-            id,
-            channel_id,
-            device_id,
-        } => {
-            crate::application::usecases::registry::chain::lighting_remove_segment(
-                id, channel_id, device_id, app,
-            )
-            .await
-        }
-        DaemonCommand::LightingReorderSegment {
-            id,
-            channel_id,
-            device_id,
-            new_index,
-        } => {
-            crate::application::usecases::registry::chain::lighting_reorder_segment(
-                id, channel_id, device_id, new_index, app,
-            )
-            .await
-        }
-        DaemonCommand::LightingDetectSegments { id, channel_id } => {
-            crate::application::usecases::registry::chain::lighting_detect_segments(
-                id, channel_id, app,
-            )
-            .await
-        }
-
-        DaemonCommand::SetButtonMapping { id, mapping } => {
-            crate::application::usecases::input::key_remap::set_button_mapping(id, mapping, app)
-                .await
-        }
-        DaemonCommand::SetSoftwareDpiSteps { id, steps } => {
-            crate::application::usecases::input::key_remap::set_software_dpi_steps(id, steps, app)
-                .await
-        }
-        DaemonCommand::PlayMacro { steps } => {
-            crate::application::usecases::input::key_remap::play_macro(steps, app).await
-        }
-
-        DaemonCommand::OnboardProfileSwitch { id, slot } => {
-            crate::application::usecases::input::onboard_profiles::switch_onboard_profile(
-                id, slot, app,
-            )
-            .await
-        }
-        DaemonCommand::OnboardProfileRestore { id, slot } => {
-            crate::application::usecases::input::onboard_profiles::restore_onboard_profile(
-                id, slot, app,
-            )
-            .await
-        }
-        DaemonCommand::OnboardProfileSetEnabled { id, slot, enabled } => {
-            crate::application::usecases::input::onboard_profiles::set_onboard_profile_enabled(
-                id, slot, enabled, app,
-            )
-            .await
-        }
-
-        DaemonCommand::SetScreenImage { id, data_b64 } => {
-            crate::application::usecases::lcd::controls::set_screen_image(id, data_b64, app, client)
-                .await
-        }
-        DaemonCommand::SetScreenImageFromLibrary { id, filename } => {
-            crate::application::usecases::lcd::controls::set_screen_image_from_library(
-                id, filename, app, client,
-            )
-            .await
-        }
-        DaemonCommand::SetScreenRotation { id, rotation } => {
-            crate::application::usecases::lcd::controls::set_screen_rotation(id, rotation, app)
-                .await
-        }
-        DaemonCommand::SetScreenBrightness { id, brightness } => {
-            crate::application::usecases::lcd::controls::set_screen_brightness(id, brightness, app)
-                .await
-        }
-        DaemonCommand::SetScreenDefault { id } => {
-            crate::application::usecases::lcd::controls::set_screen_default(id, app).await
-        }
-        DaemonCommand::SetScreenRawStreaming { id, enabled } => {
-            crate::application::usecases::lcd::controls::set_screen_raw_streaming(id, enabled, app)
-                .await
-        }
-        DaemonCommand::SetScreenVideo { id, path } => {
-            crate::application::usecases::lcd::controls::set_screen_video(id, path, app).await
-        }
-        DaemonCommand::ListLcdImages => {
-            crate::application::usecases::lcd::controls::list_lcd_images(client).await
-        }
+        DaemonCommand::ListLcdImages => controls::list_lcd_images(client).await,
         DaemonCommand::DeleteLcdImage { filename } => {
-            crate::application::usecases::lcd::controls::delete_lcd_image(filename, app).await
+            controls::delete_lcd_image(filename, app).await
         }
         DaemonCommand::GetPluginAsset { plugin_id, name } => {
-            crate::application::usecases::plugin::plugins::get_asset(plugin_id, name, client, app)
-                .await
+            plugins::get_asset(plugin_id, name, client, app).await
         }
         DaemonCommand::GetLcdWidgetIcon { catalog_id } => {
-            crate::application::usecases::plugin::plugins::get_lcd_widget_icon(
-                catalog_id, client, app,
-            )
-            .await
+            plugins::get_lcd_widget_icon(catalog_id, client, app).await
         }
         DaemonCommand::GetLcdPluginPreset { catalog_id } => {
-            crate::application::usecases::plugin::plugins::get_lcd_preset(catalog_id, client, app)
-                .await
+            plugins::get_lcd_preset(catalog_id, client, app).await
         }
-        DaemonCommand::ListSerialPorts => {
-            crate::application::usecases::plugin::plugins::list_serial_ports(client).await
-        }
+        DaemonCommand::ListSerialPorts => plugins::list_serial_ports(client).await,
 
         DaemonCommand::CanvasUpsertEffect { instance_id, def } => {
-            crate::application::usecases::lighting::canvas::upsert_effect(instance_id, def, app)
-                .await
+            canvas::upsert_effect(instance_id, def, app).await
         }
         DaemonCommand::CanvasRemoveEffect { instance_id } => {
-            crate::application::usecases::lighting::canvas::remove_effect(instance_id, app).await
+            canvas::remove_effect(instance_id, app).await
         }
         DaemonCommand::CanvasSetDefaultEffect { instance_id } => {
-            crate::application::usecases::lighting::canvas::set_default_effect(instance_id, app)
-                .await
-        }
-        DaemonCommand::CanvasPlaceZone {
-            device_id,
-            channel_id,
-            x,
-            y,
-            w,
-            h,
-            rotation,
-            effect,
-            sampling_mode,
-        } => {
-            crate::application::usecases::lighting::canvas::place_zone(
-                device_id,
-                channel_id,
-                x,
-                y,
-                w,
-                h,
-                rotation,
-                effect,
-                sampling_mode,
-                app,
-            )
-            .await
-        }
-        DaemonCommand::CanvasRemoveZone {
-            device_id,
-            channel_id,
-        } => {
-            crate::application::usecases::lighting::canvas::remove_zone(device_id, channel_id, app)
-                .await
-        }
-        DaemonCommand::CanvasMoveZone {
-            device_id,
-            channel_id,
-            x,
-            y,
-            w,
-            h,
-            rotation,
-            effect,
-            sampling_mode,
-        } => {
-            crate::application::usecases::lighting::canvas::move_zone(
-                device_id,
-                channel_id,
-                x,
-                y,
-                w,
-                h,
-                rotation,
-                effect,
-                sampling_mode,
-                app,
-            )
-            .await
+            canvas::set_default_effect(instance_id, app).await
         }
         DaemonCommand::CanvasSetSampleRadius { radius } => {
-            crate::application::usecases::lighting::canvas::set_sample_radius(radius, app).await
+            canvas::set_sample_radius(radius, app).await
         }
-        DaemonCommand::CanvasStop => {
-            crate::application::usecases::lighting::canvas::stop(app).await
-        }
+        DaemonCommand::CanvasStop => canvas::stop(app).await,
         DaemonCommand::CanvasSubscribe => {
             if client.try_subscribe_canvas() {
-                let c2 = client.clone();
-                let task = tokio::spawn(engine_subscribe_loop(
-                    app,
-                    c2,
-                    |a| a.lighting.engine().map(|e| e.subscribe()),
-                    "canvas_frame",
-                ));
+                let task = tokio::spawn(canvas_forward_loop(app, client.clone()));
                 client.track_subscription(task);
             }
             Ok(())
         }
 
-        DaemonCommand::LcdEngineSetTemplate {
-            device_id,
+        DaemonCommand::LcdEngineSubscribe => {
+            client.touch_lcd_preview();
+            if client.try_subscribe_lcd() {
+                let task = tokio::spawn(lcd_preview_forward_loop(app, client.clone()));
+                client.track_subscription(task);
+            }
+            Ok(())
+        }
+        DaemonCommand::SaveLcdTemplate { name, def } => {
+            templates::save_template(name, def, app).await
+        }
+        DaemonCommand::LoadLcdTemplate { name } => templates::load_template(name, client).await,
+        DaemonCommand::DeleteLcdTemplate { name } => templates::delete_template(name, app).await,
+
+        DaemonCommand::SaveCustomEffect { name, params } => {
+            custom_effects::save_custom_effect(name, params, app).await
+        }
+        DaemonCommand::DeleteCustomEffect { name } => {
+            custom_effects::delete_custom_effect(name, app).await
+        }
+
+        DaemonCommand::ListRunningApps => app_rules::list_running_apps(client).await,
+        DaemonCommand::GetDebugInfo => debug::get_debug_info(client, app).await,
+        DaemonCommand::SetEngineConfig {
+            engine,
+            enabled,
+            tick_ms,
+            fps,
+            failsafe_duty,
+        } => settings::set_engine_config(engine, enabled, tick_ms, fps, failsafe_duty, app).await,
+        DaemonCommand::Ping => {
+            client.send(&DaemonMessage::Pong);
+            Ok(())
+        }
+        DaemonCommand::Shutdown => {
+            log::info!("Shutdown requested by a client");
+            request_shutdown(&app);
+            Ok(())
+        }
+    }
+}
+
+async fn dispatch_device(
+    device_id: DeviceId,
+    op: DeviceOp,
+    client: ClientHandle,
+    app: Arc<AppState>,
+) -> anyhow::Result<()> {
+    match op {
+        DeviceOp::SetRange { key, value } => {
+            capability::set_capability_param(device_id, CapabilityParam::Range { key, value }, app)
+                .await
+        }
+        DeviceOp::SetChoice { key, selected } => {
+            capability::set_capability_param(
+                device_id,
+                CapabilityParam::Choice { key, selected },
+                app,
+            )
+            .await
+        }
+        DeviceOp::SetBoolean { key, value } => {
+            capability::set_capability_param(
+                device_id,
+                CapabilityParam::Boolean { key, value },
+                app,
+            )
+            .await
+        }
+        DeviceOp::TriggerAction { key } => {
+            capability::set_capability_param(device_id, CapabilityParam::Action { key }, app).await
+        }
+        DeviceOp::ResetAllButtonMappings => {
+            key_remap::reset_all_button_mappings(device_id, app).await
+        }
+        DeviceOp::ResetButtonMapping { cid } => {
+            key_remap::reset_button_mapping(device_id, cid, app).await
+        }
+        DeviceOp::SetEqPreset { preset_index } => {
+            capability::set_capability_param(
+                device_id,
+                CapabilityParam::EqPreset { preset_index },
+                app,
+            )
+            .await
+        }
+        DeviceOp::SetEqBands { values } => {
+            capability::set_capability_param(device_id, CapabilityParam::EqBands { values }, app)
+                .await
+        }
+        DeviceOp::SetDpiSteps { steps } => {
+            capability::set_capability_param(device_id, CapabilityParam::DpiSteps { steps }, app)
+                .await
+        }
+        DeviceOp::SetDeviceVisibility { state } => {
+            visibility::set_device_visibility(device_id, state, app).await
+        }
+        DeviceOp::SetKeyboardLayout { selection } => {
+            keyboard_layout::set_keyboard_layout(device_id, selection, app).await
+        }
+        DeviceOp::SetDeviceName { name } => rename::set_device_name(device_id, name, app).await,
+        DeviceOp::SetCoolingCurvePoints {
+            channel_id,
+            points,
+            sensor_id,
+        } => {
+            fan_curve::set_cooling_curve_points(device_id, channel_id, points, sensor_id, app).await
+        }
+        DeviceOp::SetCoolingCurvePreset {
+            channel_id,
+            preset,
+            sensor_id,
+        } => {
+            fan_curve::set_cooling_curve_preset(device_id, channel_id, preset, sensor_id, app).await
+        }
+        DeviceOp::RemoveCoolingCurve { channel_id } => {
+            fan_curve::remove_cooling_curve(device_id, channel_id, app).await
+        }
+        DeviceOp::LightingApply { state } => rgb::lighting_apply(device_id, state, app).await,
+        DeviceOp::LightingSetChannelTransform {
+            channel_id,
+            transform,
+        } => rgb::set_channel_transform(device_id, channel_id, transform, app).await,
+        DeviceOp::LightingAddSegment {
+            channel_id,
+            name,
+            led_count,
+            topology,
+        } => {
+            chain::lighting_add_segment(device_id, channel_id, name, led_count, topology, app).await
+        }
+        DeviceOp::LightingRemoveSegment {
+            channel_id,
+            segment_id,
+        } => chain::lighting_remove_segment(device_id, channel_id, segment_id, app).await,
+        DeviceOp::LightingReorderSegment {
+            channel_id,
+            segment_id,
+            new_index,
+        } => {
+            chain::lighting_reorder_segment(device_id, channel_id, segment_id, new_index, app).await
+        }
+        DeviceOp::LightingDetectSegments { channel_id } => {
+            chain::lighting_detect_segments(device_id, channel_id, app).await
+        }
+        DeviceOp::SetButtonMapping { mapping } => {
+            key_remap::set_button_mapping(device_id, mapping, app).await
+        }
+        DeviceOp::SetSoftwareDpiSteps { steps } => {
+            key_remap::set_software_dpi_steps(device_id, steps, app).await
+        }
+        DeviceOp::OnboardProfileSwitch { slot } => {
+            onboard_profiles::switch_onboard_profile(device_id, slot, app).await
+        }
+        DeviceOp::OnboardProfileRestore { slot } => {
+            onboard_profiles::restore_onboard_profile(device_id, slot, app).await
+        }
+        DeviceOp::OnboardProfileSetEnabled { slot, enabled } => {
+            onboard_profiles::set_onboard_profile_enabled(device_id, slot, enabled, app).await
+        }
+        DeviceOp::SetScreenImage { data_b64 } => {
+            controls::set_screen_image(device_id, data_b64, app, client).await
+        }
+        DeviceOp::SetScreenImageFromLibrary { filename } => {
+            controls::set_screen_image_from_library(device_id, filename, app, client).await
+        }
+        DeviceOp::SetScreenRotation { rotation } => {
+            controls::set_screen_rotation(device_id, rotation, app).await
+        }
+        DeviceOp::SetScreenBrightness { brightness } => {
+            controls::set_screen_brightness(device_id, brightness, app).await
+        }
+        DeviceOp::SetScreenDefault => controls::set_screen_default(device_id, app).await,
+        DeviceOp::SetScreenRawStreaming { enabled } => {
+            controls::set_screen_raw_streaming(device_id, enabled, app).await
+        }
+        DeviceOp::SetScreenVideo { path } => controls::set_screen_video(device_id, path, app).await,
+        DeviceOp::CanvasPlaceZone {
+            channel_id,
+            x,
+            y,
+            w,
+            h,
+            rotation,
+            effect,
+            sampling_mode,
+        } => {
+            canvas::place_zone(
+                device_id,
+                channel_id,
+                x,
+                y,
+                w,
+                h,
+                rotation,
+                effect,
+                sampling_mode,
+                app,
+            )
+            .await
+        }
+        DeviceOp::CanvasRemoveZone { channel_id } => {
+            canvas::remove_zone(device_id, channel_id, app).await
+        }
+        DeviceOp::CanvasMoveZone {
+            channel_id,
+            x,
+            y,
+            w,
+            h,
+            rotation,
+            effect,
+            sampling_mode,
+        } => {
+            canvas::move_zone(
+                device_id,
+                channel_id,
+                x,
+                y,
+                w,
+                h,
+                rotation,
+                effect,
+                sampling_mode,
+                app,
+            )
+            .await
+        }
+        DeviceOp::LcdEngineSetTemplate {
             template_id,
             params,
         } => {
@@ -881,84 +643,17 @@ async fn dispatch(
             )
             .await
         }
-        DaemonCommand::LcdEngineDeactivate { device_id } => {
+        DeviceOp::LcdEngineDeactivate => {
             crate::application::usecases::lcd::engine::deactivate(device_id, app).await
         }
-        DaemonCommand::LcdEngineSubscribe => {
-            client.touch_lcd_preview();
-            if client.try_subscribe_lcd() {
-                let task = tokio::spawn(lcd_preview_forward_loop(app, client.clone()));
-                client.track_subscription(task);
-            }
-            Ok(())
+        DeviceOp::RenderLcdEditor { def, known } => {
+            editor::render(device_id, def, known, app, client).await
         }
-        DaemonCommand::SaveLcdTemplate { name, def } => {
-            crate::application::usecases::lcd::templates::save_template(name, def, app).await
+        DeviceOp::ReceiverStartPairing { timeout_secs } => {
+            receiver::start_pairing(device_id, timeout_secs, app).await
         }
-        DaemonCommand::LoadLcdTemplate { name } => {
-            crate::application::usecases::lcd::templates::load_template(name, client).await
-        }
-        DaemonCommand::DeleteLcdTemplate { name } => {
-            crate::application::usecases::lcd::templates::delete_template(name, app).await
-        }
-        DaemonCommand::RenderLcdEditor {
-            device_id,
-            def,
-            known,
-        } => {
-            crate::application::usecases::lcd::editor::render(device_id, def, known, app, client)
-                .await
-        }
-
-        DaemonCommand::SaveCustomEffect { name, params } => {
-            crate::application::usecases::lighting::custom_effects::save_custom_effect(
-                name, params, app,
-            )
-            .await
-        }
-        DaemonCommand::DeleteCustomEffect { name } => {
-            crate::application::usecases::lighting::custom_effects::delete_custom_effect(name, app)
-                .await
-        }
-
-        DaemonCommand::ReceiverStartPairing { id, timeout_secs } => {
-            crate::application::usecases::registry::receiver::start_pairing(id, timeout_secs, app)
-                .await
-        }
-        DaemonCommand::ReceiverStopPairing { id } => {
-            crate::application::usecases::registry::receiver::stop_pairing(id, app).await
-        }
-        DaemonCommand::ReceiverUnpair { id, slot } => {
-            crate::application::usecases::registry::receiver::unpair(id, slot, app).await
-        }
-
-        DaemonCommand::ListRunningApps => profiles::observers::running_apps::list(client).await,
-        DaemonCommand::GetDebugInfo => {
-            crate::application::usecases::registry::debug::get_debug_info(client, app).await
-        }
-        DaemonCommand::SetEngineConfig {
-            engine,
-            enabled,
-            tick_ms,
-            fps,
-            failsafe_duty,
-        } => {
-            crate::application::usecases::registry::settings::set_engine_config(
-                engine,
-                enabled,
-                tick_ms,
-                fps,
-                failsafe_duty,
-                app,
-            )
-            .await
-        }
-        DaemonCommand::Ping => Ok(()),
-        DaemonCommand::Shutdown => {
-            log::info!("Shutdown requested by a client");
-            request_shutdown(&app);
-            Ok(())
-        }
+        DeviceOp::ReceiverStopPairing => receiver::stop_pairing(device_id, app).await,
+        DeviceOp::ReceiverUnpair { slot } => receiver::unpair(device_id, slot, app).await,
     }
 }
 
@@ -986,6 +681,7 @@ mod tests {
     use super::ClientHandle;
     use super::*;
     use crate::config::Config;
+    use serde_json::json;
     use std::time::Duration;
     use tokio::sync::mpsc;
 
@@ -1044,19 +740,23 @@ mod tests {
         reply_error(
             &client,
             "add_plugin_repo",
+            &halod_plugin_signing::CatalogError::SignatureMismatch.into(),
             None,
-            halod_plugin_signing::RepositorySignatureMismatch.into(),
         );
 
         let frame = rx.recv().await.unwrap();
         let reply: Value = serde_json::from_slice(&frame[5..]).unwrap();
+        assert_eq!(reply["code"], "signature_mismatch");
+    }
+
+    #[test]
+    fn error_messages_keep_every_context_layer() {
+        let error = anyhow::anyhow!("permission denied")
+            .context("opening /plugins")
+            .context("installing demo");
         assert_eq!(
-            reply["code"],
-            halod_shared::types::ERROR_REPOSITORY_SIGNATURE_VERIFICATION_FAILED
-        );
-        assert_eq!(
-            reply["message"],
-            "release signature does not match release.yaml"
+            ipc_error(&error, None).message,
+            "installing demo: opening /plugins: permission denied"
         );
     }
 
@@ -1073,9 +773,12 @@ mod tests {
 
         handle_message(
             json!({
-                "type": "lighting_apply",
-                "id": "missing-device",
-                "state": {"mode": "static", "color": {"r": 1, "g": 2, "b": 3}},
+                "type": "device",
+                "device_id": "missing-device",
+                "op": {
+                    "type": "lighting_apply",
+                    "state": {"mode": "static", "color": {"r": 1, "g": 2, "b": 3}}
+                },
                 "request_id": "write-1"
             }),
             client,
@@ -1096,7 +799,7 @@ mod tests {
         let halod_shared::bus::BusEventPayload::Notification(notification) = &notification.payload;
         assert!(matches!(
             &notification.code,
-            halod_shared::types::NotificationCode::DeviceWriteFailed { device, detail }
+            halod_shared::types::NotificationCode::DeviceWriteFailed { device, detail, .. }
                 if device == "missing-device" && detail.contains("missing-device")
         ));
     }
@@ -1104,56 +807,67 @@ mod tests {
     #[test]
     fn only_hardware_commands_are_classified_as_device_writes() {
         use halod_shared::types::{LightingState, RgbColor};
-        assert!(command_writes_device(&DaemonCommand::LightingApply {
-            id: "kbd".into(),
-            state: LightingState::Static {
-                color: RgbColor { r: 1, g: 2, b: 3 },
-            },
+        assert!(command_writes_device(&DaemonCommand::Device {
+            device_id: "kbd".parse().unwrap(),
+            op: DeviceOp::LightingApply {
+                state: LightingState::Static {
+                    color: RgbColor { r: 1, g: 2, b: 3 },
+                }
+            }
         }));
-        assert!(!command_writes_device(&DaemonCommand::SetDeviceName {
-            device_id: "kbd".into(),
-            name: "Desk keyboard".into(),
+        assert!(!command_writes_device(&DaemonCommand::Device {
+            device_id: "kbd".parse().unwrap(),
+            op: DeviceOp::SetDeviceName {
+                name: "Desk keyboard".into()
+            }
         }));
     }
 
     #[test]
     fn command_target_routes_device_commands_and_leaves_globals_unlocked() {
         use halod_shared::types::{LightingState, RgbColor};
-        // Device-scoped commands map to their device id (by whichever field
-        // names it) so same-device work serializes on one lock.
         assert_eq!(
-            command_target(&DaemonCommand::LightingApply {
-                id: "kbd".into(),
-                state: LightingState::Static {
-                    color: RgbColor { r: 0, g: 0, b: 0 }
-                },
+            command_target(&DaemonCommand::Device {
+                device_id: "kbd".parse().unwrap(),
+                op: DeviceOp::LightingApply {
+                    state: LightingState::Static {
+                        color: RgbColor { r: 0, g: 0, b: 0 }
+                    }
+                }
             }),
-            Some("kbd")
+            Some(CommandTarget::Device("kbd".parse().unwrap()))
         );
         assert_eq!(
-            command_target(&DaemonCommand::RemoveCoolingCurve {
-                device_id: "fan0".into(),
-                channel_id: "fan".into(),
+            command_target(&DaemonCommand::Device {
+                device_id: "fan0".parse().unwrap(),
+                op: DeviceOp::RemoveCoolingCurve {
+                    channel_id: "fan".into()
+                }
             }),
-            Some("fan0")
+            Some(CommandTarget::Device("fan0".parse().unwrap()))
         );
         assert_eq!(
-            command_target(&DaemonCommand::CanvasMoveZone {
-                device_id: "ram".into(),
-                channel_id: "leds".into(),
-                x: 0.0,
-                y: 0.0,
-                w: None,
-                h: None,
-                rotation: None,
-                effect: None,
-                sampling_mode: None,
+            command_target(&DaemonCommand::Device {
+                device_id: "ram".parse().unwrap(),
+                op: DeviceOp::CanvasMoveZone {
+                    channel_id: "leds".into(),
+                    x: 0.0,
+                    y: 0.0,
+                    w: None,
+                    h: None,
+                    rotation: None,
+                    effect: None,
+                    sampling_mode: None
+                }
             }),
-            Some("ram")
+            Some(CommandTarget::Device("ram".parse().unwrap()))
         );
         assert_eq!(
-            command_target(&DaemonCommand::RetryIntegrationPairing { id: "hue".into() }),
-            Some("hue")
+            command_target(&DaemonCommand::Integration {
+                plugin_id: "hue".parse().unwrap(),
+                op: IntegrationOp::RetryPairing
+            }),
+            Some(CommandTarget::Plugin("hue".parse().unwrap()))
         );
         // Global commands run inline (no device lock) so a stuck device can't
         // stall them.
@@ -1304,8 +1018,8 @@ mod tests {
             tokio::task::yield_now().await;
         }
 
-        let frame =
-            crate::domain::lcd::engine::encode_wire_frame("lcd0", 1, "").expect("wire encode");
+        let frame = crate::domain::lcd::engine::encode_wire_frame(&"lcd0".parse().unwrap(), 1, "")
+            .expect("wire encode");
         let _ = engine.frame_sender().send(frame);
 
         tokio::time::timeout(Duration::from_secs(2), preview_rx.changed())

@@ -1,10 +1,9 @@
 settings:
-  log_level: Log Level
+  log_level: Log level
   language: Language
 
 notify:
   error_title: Error
-  unknown_error: Unknown error
   low_battery:
     title: "%{device} battery is low"
     message: "%{battery} is at %{level}%"
@@ -14,15 +13,9 @@ notify:
   key_remap_unavailable:
     title: Key remapping unavailable
     message: "Could not initialize the action system: %{detail}"
-  device_reconnect_failed:
-    title: Device did not reconnect
-    message: "%{device} was not ready after 6 reconnection attempts."
   profile_switched:
     title: Profile switched
     message: "Now using '%{profile}'"
-  chain_link_restore_failed:
-    title: "Could not restore chain link \"%{name}\""
-    message: "%{detail}. The link was removed from the saved layout."
   device_init_failed:
     title: "Failed to initialize %{device}"
     message: "%{detail}"
@@ -33,8 +26,6 @@ notify:
     title: "Fan stalled: %{fan}"
     message: "Fan is not spinning (0 RPM) while the curve duty is applied. Check fan connections or replace the fan."
   plugin_content_changed:
-    title: Plugin changed on disk
-    message: "%{plugin}'s files changed on disk, so it was disabled for safety. Open the Plugins screen to review and re-enable it."
   plugin_runtime_error:
     title: "An error occurred in plugin %{plugin}"
     message: "Open Details for the full error."
@@ -45,46 +36,58 @@ notify:
   plugin_recommended:
     title: Recommended plugin available
     message: "%{plugin} is recommended for this system. Open Plugins to enable it."
-  repository_integrity:
-    title: Repository integrity error
-    message: "Something is not right. Package %{package} from repository %{repository} failed validation and was not loaded."
+  plugin_update_needs_permissions:
+    title: "%{plugin} was updated and needs more permissions"
+    message: It stays off until you turn it on again in Plugins, where you can review its permissions.
 
 tray:
   open: Open HaloDaemon
   quit: Quit
-  tooltip: HaloDaemon
   profile: Profile
 
 onboarding:
+  feature_profiles_body: Switch every setting at once when a game or app comes into focus.
+  feature_profiles: Profiles
+  feature_cooling_body: Fan and pump curves driven by any temperature sensor.
+  feature_cooling: Cooling
+  feature_lighting_body: One canvas for every RGB device, with effects that span them all.
+  feature_lighting: Lighting
+  done_note: Plugins stay up to date automatically. You can change everything later in Plugins and Settings.
+  done_sensors: sensors available
+  done_plugins: plugins enabled
+  done_devices: devices found
+  done_sub: HaloDaemon is running and your devices are ready.
+  skip: Skip for now
+  recommended: Recommended
+  language_sub: You can change this at any time in Settings
+  check_optional: "%{impact} · optional"
+  check_missing: Missing
+  check_ready: Ready
+  health_ok_optional: "Your system is ready. %{n} optional items are missing; they only turn off related features."
+  step_welcome: Welcome
+  step_system: System check
+  step_prefs: Preferences
+  step_plugins: Plugins
+  step_done: Done
   welcome_title: Welcome to HaloDaemon
-  welcome_body: "Control your lights, fans, pumps, and sensors from one place. We'll get everything ready in about a minute."
-  health_title: System health
-  health_sub: HaloDaemon checks the system access needed for your hardware. Missing optional items only disable related features.
+  welcome_body: Control your lights, fans, pumps and sensors from one place. Setup takes about a minute.
+  health_title: System check
+  health_sub: HaloDaemon checks the system access your hardware needs. Missing optional items only turn off the related feature.
   health_checking: Checking your system…
   health_ok: Your system is ready.
   prefs_title: A few preferences
   prefs_sub: You can change these at any time in Settings.
-  tray_title: Close to tray
-  tray_desc: Hide the window instead of quitting when the close button is pressed.
-  plugins_title: Official plugins & updates
-  plugins_desc: Allow HaloDaemon to download official plugins from GitHub and check for updates on startup.
-  scanning: Finding compatible plugins…
   plugins_page_title: Choose your plugins
-  plugins_page_sub: Recommended plugins are already selected. Review the system access each one requests before enabling it.
+  plugins_page_sub: We picked the plugins that match the hardware we found. Check the system access each one asks for before you enable it.
   plugins_loading: Official plugins are still downloading. You can enable them later from the Plugins tab.
   plugins_error: We couldn't download the official plugins. Check your internet connection, then try again.
   plugins_retry: Retry
-  plugins_retrying: Retrying the official plugin download…
-  permissions_none: No additional system access required.
   done_title: You're all set
-  done_summary_plugins: "Your plugins are ready and will stay up to date.\nYou can manage them from the Plugins tab."
-  done_summary_basic: "HaloDaemon is ready.\nYou can enable plugins later from the Plugins tab."
   back: Back
   please_wait: Scanning…
   p_get_started: Get started
   p_scan: Find plugins
-  p_finish_setup: Finish setup
-  p_grant_enable: Grant & enable
+  p_install: "Install %{n}"
   p_finish: Finish
   p_enter: Open HaloDaemon
   p_continue: Continue

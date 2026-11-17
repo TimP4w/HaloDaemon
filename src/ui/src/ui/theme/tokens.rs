@@ -3,14 +3,13 @@
 
 use egui::{Color32, Margin, Rect, Stroke, Vec2};
 
-use super::{BORDER, CARD_BG, INNER_BG};
+use super::{BORDER, INNER_BG};
 
 pub const RADIUS_XS: f32 = 4.0;
 pub const RADIUS_SM: f32 = 7.0;
 pub const RADIUS_MD: f32 = 10.0;
 pub const RADIUS_LG: f32 = 12.0;
 pub const RADIUS_XL: f32 = 14.0;
-pub const RADIUS_2XL: f32 = 18.0;
 
 pub const SPACE_1: f32 = 2.0;
 pub const SPACE_2: f32 = 4.0;
@@ -22,11 +21,10 @@ pub const SPACE_7: f32 = 14.0;
 pub const SPACE_8: f32 = 16.0;
 pub const SPACE_9: f32 = 18.0;
 pub const SPACE_10: f32 = 24.0;
-pub const SPACE_12: f32 = 40.0;
 pub const SPACE_16: f32 = 60.0;
 
 pub const PAD_CARD: Margin = Margin::same(20);
-pub const PAD_MODAL: Margin = Margin::same(18);
+pub const PAD_MODAL: Margin = Margin::same(22);
 pub const PAD_BANNER: Margin = Margin::symmetric(14, 11);
 pub const PAD_WELL: Margin = Margin::same(12);
 pub const PAD_FIELD: Vec2 = Vec2::new(12.0, 9.0);
@@ -45,10 +43,6 @@ pub fn paint_well(p: &egui::Painter, rect: Rect, radius: f32) {
     paint_surface(p, rect, radius, INNER_BG, BORDER);
 }
 
-pub fn paint_card_rect(p: &egui::Painter, rect: Rect, radius: f32) {
-    paint_surface(p, rect, radius, CARD_BG, BORDER);
-}
-
 #[cfg(test)]
 mod tests {
     use super::*;
@@ -61,7 +55,7 @@ mod tests {
             ..Default::default()
         };
         for r in [0.0, 4.0, 7.0, 10.0, 14.0, 32.0] {
-            let _ = ctx.clone().run_ui(input.clone(), |ui| {
+            let _ = crate::ui::run_headless(&ctx, input.clone(), |ui| {
                 let before = ui.painter().add(egui::Shape::Noop);
                 paint_surface(
                     ui.painter(),

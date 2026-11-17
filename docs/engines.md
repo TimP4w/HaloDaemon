@@ -6,9 +6,7 @@ Engines are background loops that drive device state over time. Each engine owns
 
 ## Shared run loop
 
-Most tick-based engines (canvas, fan curve, LCD) share one driver, `engine_run_loop`. It owns the master on/off switch, the tick interval, and reacting to live config edits; engines pass in only a `tick_fn`. Config (enabled flag + tick interval) reaches a running engine through a `watch` channel, so a GUI edit takes effect without a restart.
-
-`engine_run_loop_idle` is the same driver with one extra capability: an **idle gate**. While enabled but with nothing to do, the engine parks on a wake signal instead of ticking (zero renders, zero device I/O) and resumes the instant work appears. It takes two extra callbacks: `has_work()` (is there anything to do right now?) and `wait_for_work()` (a future that resolves when work might appear, typically a `tokio::sync::Notify`). Plain `engine_run_loop` is a thin wrapper that hardwires `has_work = true`, so its idle branch is dead and non-idling engines behave exactly as before, at no cost.
+The canvas and LCD engines share one driver, `engine_run_loop_idle` in `application/run_loop.rs`. It owns the master on/off switch, the tick interval, reacting to live config edits, and an **idle gate**: while enabled but with nothing to do, the engine parks on a wake signal instead of ticking (zero renders, zero device I/O) and resumes the instant work appears. An engine implements the `IdleEngine` trait: `tick`, `has_work` (is there anything to do right now?), `wait_for_work` (a future that resolves when work might appear, typically a `tokio::sync::Notify`) and `on_disabled`. Config (enabled flag + tick interval) reaches a running engine through an `EngineConfigReceiver`, a typed subscription to the engine's retained bus record, so a GUI edit takes effect without a restart. The fan-curve engine runs its own interval loop on the same receiver.
 
 Three resting states, with every edge looping back to "read latest config" at the top:
 
@@ -31,7 +29,7 @@ Three resting states, with every edge looping back to "read latest config" at th
                                         └────► back to top
 ```
 
-Only the **LCD** engine uses the idle gate today: `has_work` = "any device has an active template?" and `wait_for_work` = a `Notify` pinged by `set_template_active()`. The `Notify` stores one permit, so a template set in the brief window before the engine parks still wakes it on the next `notified()`: no missed activations. Fan curve and canvas always have work while enabled, so they tick continuously.
+The **LCD** engine's `has_work` is "any device has an active template?" and its `wait_for_work` is a `Notify` pinged by `set_template_active()`. The **canvas** engine keeps ticking for 20 s after its last frame that had something to drive (a placed zone, a direct-effect device or a preview subscriber), then parks; it wakes when a subscriber or a canvas edit pings its `Notify`, and probes once a second while parked so a device that appears without a ping is picked up. The `Notify` stores one permit, so a wake in the brief window before an engine parks still takes effect on the next `notified()`: no missed activations.
 
 `tick_ms` is a *target* cadence, not a guarantee of physical write throughput: the daemon's per-device write-rate limiter (see [architecture.md](architecture.md#transport-moving-bytes)) is the actual enforced ceiling underneath it *if* a device has declared one. No device does today, so pushing canvas FPS to 240 reaches the transport at 240fps unthrottled: the limiter exists so a future device (or a misbehaving non-GUI caller) can be capped without touching the engine loop.
 
@@ -109,11 +107,32 @@ The fan curve engine implements closed-loop temperature-based PWM control.
 
 ### How it works
 
-On each tick (default 2 s), the engine reads the configured temperature source, linearly interpolates the (temperature, duty %) curve defined by the user, and writes the new duty to the fan controller.
+On each tick (default 2 s), the engine reads the configured temperature source, runs it through the pipeline below, and writes the resulting duty to the fan controller.
 
-Downward hysteresis (3 °C) is applied to the temperature reading: rising temperatures ramp the fan up immediately, but a falling temperature only ramps it back down once it drops more than 3 °C below the level it ramped up at. This stops the duty oscillating around a curve knee when a sensor dithers by a degree or two. A 1-percentage-point deadband on the computed duty additionally skips writes for sub-1% changes, sparing fan bearings constant micro-adjustments.
+1. **Stuck sensor check.** When enabled, a reading that has not changed for the configured window marks the curve `SensorMalfunction` and applies the failsafe duty until the value moves again.
+2. **Smoothing.** When enabled, the temperature is the mean of the readings within the configured window, so short spikes are damped before the curve sees them.
+3. **Hysteresis.** Rising temperatures pass through immediately. A falling temperature is held until it drops more than the configured band below the last value, which stops the duty oscillating around a curve knee when a sensor dithers.
+4. **Curve.** The (temperature, duty %) points are linearly interpolated and clamped at both ends.
+5. **Ramp.** The duty moves toward the curve value no faster than the configured spin-up or spin-down rate, measured against the time since the previous tick. A limited ramp always moves at least 1 point per tick. The ramp starts from the engine's last accepted write, or from the device-reported duty when there is none.
+6. **Deadband.** A write is skipped while the device-reported duty is within 1 percentage point of the curve value, sparing fan bearings constant micro-adjustments.
 
-**Failsafe:** if the configured temperature sensor is absent (unassigned, or its device disconnected), the engine writes the configured failsafe duty (75% by default) to avoid thermal runaway.
+Constant curves skip steps 1 to 4 and still ramp.
+
+**Failsafe:** if no sensor is assigned, the assigned sensor has been missing for more than 10 s, or it is stuck, the engine writes the configured failsafe duty (75% by default) to avoid thermal runaway.
+
+### Settings
+
+All settings are global, live under `cooling` in `config.yaml`, and appear in Settings → Engines. A value of 0 disables the stage.
+
+| Key | Default | Effect |
+|-----|---------|--------|
+| `fan_curve_tick_ms` | 2000 | Tick interval, 500 to 60000 ms |
+| `fan_failsafe_duty` | 75 | Duty applied when the sensor is missing or stuck |
+| `fan_ramp_up_pct_per_s` | 0 | Max duty rise in percentage points per second; 0 is instant |
+| `fan_ramp_down_pct_per_s` | 5 | Max duty fall in percentage points per second; 0 is instant |
+| `fan_hysteresis_c` | 3 | Falling-temperature band in °C |
+| `fan_smoothing_secs` | 0 | Averaging window in seconds |
+| `fan_sensor_stale_secs` | 0 | Stuck-sensor window in seconds |
 
 ### Preset curves
 

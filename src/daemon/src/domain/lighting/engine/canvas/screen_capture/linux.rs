@@ -1,9 +1,11 @@
 // SPDX-License-Identifier: GPL-3.0-or-later
+use crate::constants::SCREEN_CAPTURE_CLIENT;
+use parking_lot::Mutex;
 use std::{
     os::fd::{FromRawFd, IntoRawFd, OwnedFd},
     sync::{
         atomic::{AtomicBool, AtomicU32, Ordering},
-        Arc, Mutex,
+        Arc,
     },
 };
 
@@ -30,10 +32,13 @@ impl MmapCache {
     /// Ensure the mapping covers `fd` (with size `len` at offset 0). Reuses
     /// an existing mapping when the fd matches, otherwise unmaps the old and
     /// maps the new. Returns a pointer to the mapped memory.
-    fn ensure(&mut self, fd: i32, len: usize) -> Result<*mut libc::c_void, String> {
+    fn ensure(&mut self, fd: i32, len: usize) -> anyhow::Result<*mut libc::c_void> {
         let mut stat = std::mem::MaybeUninit::<libc::stat>::uninit();
         if unsafe { libc::fstat(fd, stat.as_mut_ptr()) } != 0 {
-            return Err(format!("fstat failed: {}", std::io::Error::last_os_error()));
+            return Err(anyhow::anyhow!(
+                "fstat failed: {}",
+                std::io::Error::last_os_error()
+            ));
         }
         let stat = unsafe { stat.assume_init() };
         let identity = (stat.st_dev, stat.st_ino);
@@ -54,7 +59,10 @@ impl MmapCache {
             )
         };
         if ptr == libc::MAP_FAILED {
-            return Err(format!("mmap failed: {}", std::io::Error::last_os_error()));
+            return Err(anyhow::anyhow!(
+                "mmap failed: {}",
+                std::io::Error::last_os_error()
+            ));
         }
         self.ptr = ptr;
         self.len = len;
@@ -107,7 +115,7 @@ fn dmabuf_sync(fd: i32, flags: u64) {
 /// Builds an SPA_PARAM_EnumFormat pod for video/raw BGRA without DRM modifiers.
 /// Omitting the modifier tells the compositor to use MemFd (shared memory)
 /// rather than DMA-BUF, so MAP_BUFFERS can map the data directly.
-fn build_enum_format_pod() -> Result<Vec<u8>, String> {
+fn build_enum_format_pod() -> anyhow::Result<Vec<u8>> {
     use pipewire::spa::{
         param::{
             format::{FormatProperties, MediaSubtype, MediaType},
@@ -170,13 +178,12 @@ fn build_enum_format_pod() -> Result<Vec<u8>, String> {
     });
 
     let (cursor, _) = PodSerializer::serialize(std::io::Cursor::new(Vec::new()), &obj)
-        .map_err(|e| format!("PodSerializer::serialize: {e}"))?;
+        .map_err(|e| anyhow::anyhow!("PodSerializer::serialize: {e}"))?;
     Ok(cursor.into_inner())
 }
 
 pub fn list_monitors() -> Vec<MonitorInfo> {
     vec![MonitorInfo {
-        index: 0,
         label: "Default (select in portal dialog)".to_string(),
     }]
 }
@@ -185,11 +192,11 @@ pub fn start(
     _monitor_index: usize,
     frame_slot: Arc<Mutex<Option<RawFrame>>>,
     stop: Arc<AtomicBool>,
-) -> Result<(), String> {
+) -> anyhow::Result<()> {
     let rt = tokio::runtime::Handle::try_current()
-        .map_err(|e| format!("no tokio runtime available: {e}"))?;
+        .map_err(|e| anyhow::anyhow!("no tokio runtime available: {e}"))?;
 
-    let (pw_tx, pw_rx) = std::sync::mpsc::sync_channel::<Result<(i32, u32, u32, u32), String>>(1);
+    let (pw_tx, pw_rx) = std::sync::mpsc::sync_channel::<anyhow::Result<(i32, u32, u32, u32)>>(1);
 
     // The portal task owns the screencast session for its whole lifetime and
     // closes it when `stop` is set — dropping the Session does NOT close it, so
@@ -232,11 +239,11 @@ type Portal = (
 /// tears down the screencast on the compositor and clears the sharing indicator.
 async fn run_portal(
     stop: Arc<AtomicBool>,
-    pw_tx: std::sync::mpsc::SyncSender<Result<(i32, u32, u32, u32), String>>,
+    pw_tx: std::sync::mpsc::SyncSender<anyhow::Result<(i32, u32, u32, u32)>>,
 ) {
     let negotiated = tokio::time::timeout(std::time::Duration::from_secs(60), acquire_portal())
         .await
-        .map_err(|_| "portal dialog timed out after 60 s".to_string())
+        .map_err(|_| anyhow::anyhow!("portal dialog timed out after 60 s"))
         .and_then(|r| r);
 
     let (proxy, session, fd, node_id, width, height) = match negotiated {
@@ -264,7 +271,7 @@ async fn run_portal(
     log::info!("Screen capture portal session closed");
 }
 
-async fn acquire_portal() -> Result<Portal, String> {
+async fn acquire_portal() -> anyhow::Result<Portal> {
     use ashpd::desktop::screencast::{
         CursorMode, OpenPipeWireRemoteOptions, Screencast, SelectSourcesOptions, SourceType,
         StartCastOptions,
@@ -273,11 +280,11 @@ async fn acquire_portal() -> Result<Portal, String> {
 
     let proxy = Screencast::new()
         .await
-        .map_err(|e| format!("Screencast::new: {e}"))?;
+        .map_err(|e| anyhow::anyhow!("Screencast::new: {e}"))?;
     let session = proxy
         .create_session(CreateSessionOptions::default())
         .await
-        .map_err(|e| format!("create_session: {e}"))?;
+        .map_err(|e| anyhow::anyhow!("create_session: {e}"))?;
 
     proxy
         .select_sources(
@@ -289,19 +296,19 @@ async fn acquire_portal() -> Result<Portal, String> {
                 .set_persist_mode(PersistMode::DoNot),
         )
         .await
-        .map_err(|e| format!("select_sources: {e}"))?;
+        .map_err(|e| anyhow::anyhow!("select_sources: {e}"))?;
 
     let response = proxy
         .start(&session, None, StartCastOptions::default())
         .await
-        .map_err(|e| format!("portal start: {e}"))?
+        .map_err(|e| anyhow::anyhow!("portal start: {e}"))?
         .response()
-        .map_err(|e| format!("portal response: {e}"))?;
+        .map_err(|e| anyhow::anyhow!("portal response: {e}"))?;
 
     let stream = response
         .streams()
         .first()
-        .ok_or("portal returned no streams")?;
+        .ok_or_else(|| anyhow::anyhow!("portal returned no streams"))?;
     let node_id = stream.pipe_wire_node_id();
 
     // Some compositors return (0, 0) when size isn't known ahead of negotiation;
@@ -318,7 +325,7 @@ async fn acquire_portal() -> Result<Portal, String> {
     let fd: OwnedFd = proxy
         .open_pipe_wire_remote(&session, OpenPipeWireRemoteOptions::default())
         .await
-        .map_err(|e| format!("open_pipe_wire_remote: {e}"))?;
+        .map_err(|e| anyhow::anyhow!("open_pipe_wire_remote: {e}"))?;
 
     Ok((proxy, session, fd.into_raw_fd(), node_id, width, height))
 }
@@ -376,7 +383,7 @@ fn run_pipewire(
 
     let stream = pipewire::stream::StreamBox::new(
         &core,
-        crate::constants::SCREEN_CAPTURE_CLIENT,
+        SCREEN_CAPTURE_CLIENT,
         pipewire::properties::properties! {
             *pipewire::keys::MEDIA_TYPE     => "Video",
             *pipewire::keys::MEDIA_CATEGORY => "Capture",
@@ -407,7 +414,7 @@ fn run_pipewire(
     let frame_w = Arc::new(AtomicU32::new(width));
     let frame_h = Arc::new(AtomicU32::new(height));
     let (frame_w_pc, frame_h_pc) = (Arc::clone(&frame_w), Arc::clone(&frame_h));
-    let mut last_copied_frame = None::<std::time::Instant>;
+    let mut last_copied_frame = None::<tokio::time::Instant>;
 
     let _listener = match stream
         .add_local_listener_with_user_data(())
@@ -450,7 +457,7 @@ fn run_pipewire(
             let Some(mut buf) = std::iter::from_fn(|| s.dequeue_buffer()).last() else {
                 return;
             };
-            let now = std::time::Instant::now();
+            let now = tokio::time::Instant::now();
             if last_copied_frame
                 .is_some_and(|last| now.duration_since(last) < std::time::Duration::from_millis(33))
             {
@@ -501,7 +508,7 @@ fn run_pipewire(
                     log::warn!("PipeWire: DmaBuf frame has no fd, skipping");
                     return;
                 }
-                let mut cache = mmap_cache.lock().unwrap();
+                let mut cache = mmap_cache.lock();
                 let ptr = match cache.ensure(fd, expected) {
                     Ok(p) => p,
                     Err(e) => {
@@ -538,7 +545,7 @@ fn run_pipewire(
                 "PipeWire: stored frame {width}x{height} stride={stride} ({} bytes)",
                 raw.len()
             );
-            *frame_slot_c.lock().unwrap_or_else(|e| e.into_inner()) = Some(RawFrame {
+            *frame_slot_c.lock() = Some(RawFrame {
                 width,
                 height,
                 stride,
@@ -593,7 +600,7 @@ fn run_pipewire(
             // main thread clears ml_ptr to None before `ml` drops, and we hold
             // the lock here while dereferencing the pointer, so the two
             // operations cannot interleave.
-            let guard = ml_ptr_watcher.lock().unwrap_or_else(|e| e.into_inner());
+            let guard = ml_ptr_watcher.lock();
             if let Some(MainLoopPtr(ptr)) = *guard {
                 unsafe {
                     pipewire::sys::pw_main_loop_quit(ptr);
@@ -607,7 +614,7 @@ fn run_pipewire(
 
     // Clear the pointer under the lock before `ml` drops so the watcher
     // thread cannot call pw_main_loop_quit on freed memory.
-    *ml_ptr.lock().unwrap_or_else(|e| e.into_inner()) = None;
+    *ml_ptr.lock() = None;
 
     log::info!("Screen capture PipeWire thread exiting");
 }
@@ -621,7 +628,6 @@ mod tests {
     fn list_monitors_returns_exactly_one_entry() {
         let monitors = list_monitors();
         assert_eq!(monitors.len(), 1);
-        assert_eq!(monitors[0].index, 0);
         assert!(!monitors[0].label.is_empty());
     }
 

@@ -1,6 +1,7 @@
 // SPDX-License-Identifier: GPL-3.0-or-later
 //! Effect-instance command builders and per-effect param editing widgets.
 
+use halod_shared::commands::DeviceOp;
 use std::collections::HashMap;
 
 use halod_shared::{
@@ -14,6 +15,7 @@ use halod_shared::{
 use crate::runtime::ipc::CommandTx;
 use crate::ui::components as widgets;
 use crate::ui::theme;
+use halod_shared::ids::DeviceId;
 
 use super::CanvasUi;
 
@@ -60,27 +62,29 @@ pub(super) fn build_instance_params(
 pub(super) fn unroll_cmd(cmd: &CommandTx, zone: &PlacedZone, currently_unrolled: bool) {
     crate::runtime::ipc::send(
         cmd,
-        DaemonCommand::CanvasMoveZone {
+        DaemonCommand::Device {
             device_id: zone.device_id.clone(),
-            channel_id: zone.channel_id.clone(),
-            x: zone.x as f64,
-            y: zone.y as f64,
-            w: None,
-            h: None,
-            rotation: None,
-            effect: None,
-            sampling_mode: Some(if currently_unrolled {
-                SamplingMode::Spatial
-            } else {
-                SamplingMode::Unrolled
-            }),
+            op: DeviceOp::CanvasMoveZone {
+                channel_id: zone.channel_id.clone(),
+                x: zone.x as f64,
+                y: zone.y as f64,
+                w: None,
+                h: None,
+                rotation: None,
+                effect: None,
+                sampling_mode: Some(if currently_unrolled {
+                    SamplingMode::Spatial
+                } else {
+                    SamplingMode::Unrolled
+                }),
+            },
         },
     );
 }
 
 /// Toggle a zone's membership in an instance (`None` = follow the canvas default).
 pub(super) fn assign_zone_cmd(
-    device_id: &str,
+    device_id: &DeviceId,
     channel_id: &str,
     assign: Option<&str>,
     on: bool,
@@ -88,47 +92,55 @@ pub(super) fn assign_zone_cmd(
 ) -> DaemonCommand {
     let effect = assign.map(str::to_string);
     if on {
-        DaemonCommand::CanvasRemoveZone {
-            device_id: device_id.to_string(),
-            channel_id: channel_id.to_string(),
+        DaemonCommand::Device {
+            device_id: device_id.clone(),
+            op: DeviceOp::CanvasRemoveZone {
+                channel_id: channel_id.to_string(),
+            },
         }
     } else if let Some(p) = placed {
         // MoveZone treats `effect: None` as "leave unchanged"; clearing needs PlaceZone.
         match effect {
-            Some(_) => DaemonCommand::CanvasMoveZone {
-                device_id: device_id.to_string(),
-                channel_id: channel_id.to_string(),
-                x: p.x as f64,
-                y: p.y as f64,
-                w: Some(p.w as f64),
-                h: Some(p.h as f64),
-                rotation: Some(p.rotation as f64),
-                effect,
-                sampling_mode: None,
+            Some(_) => DaemonCommand::Device {
+                device_id: device_id.clone(),
+                op: DeviceOp::CanvasMoveZone {
+                    channel_id: channel_id.to_string(),
+                    x: p.x as f64,
+                    y: p.y as f64,
+                    w: Some(p.w as f64),
+                    h: Some(p.h as f64),
+                    rotation: Some(p.rotation as f64),
+                    effect,
+                    sampling_mode: None,
+                },
             },
-            None => DaemonCommand::CanvasPlaceZone {
-                device_id: device_id.to_string(),
-                channel_id: channel_id.to_string(),
-                x: Some(p.x as f64),
-                y: Some(p.y as f64),
-                w: Some(p.w as f64),
-                h: Some(p.h as f64),
-                rotation: Some(p.rotation as f64),
-                effect: None,
-                sampling_mode: None,
+            None => DaemonCommand::Device {
+                device_id: device_id.clone(),
+                op: DeviceOp::CanvasPlaceZone {
+                    channel_id: channel_id.to_string(),
+                    x: Some(p.x as f64),
+                    y: Some(p.y as f64),
+                    w: Some(p.w as f64),
+                    h: Some(p.h as f64),
+                    rotation: Some(p.rotation as f64),
+                    effect: None,
+                    sampling_mode: None,
+                },
             },
         }
     } else {
-        DaemonCommand::CanvasPlaceZone {
-            device_id: device_id.to_string(),
-            channel_id: channel_id.to_string(),
-            x: None,
-            y: None,
-            w: None,
-            h: None,
-            rotation: None,
-            effect,
-            sampling_mode: None,
+        DaemonCommand::Device {
+            device_id: device_id.clone(),
+            op: DeviceOp::CanvasPlaceZone {
+                channel_id: channel_id.to_string(),
+                x: None,
+                y: None,
+                w: None,
+                h: None,
+                rotation: None,
+                effect,
+                sampling_mode: None,
+            },
         }
     }
 }
@@ -179,7 +191,7 @@ pub(super) fn instance_params(
                     _ => *min as f32,
                 };
                 ui.add_space(theme::SPACE_3);
-                let readout = format!("{val:.0}%");
+                let readout = widgets::range_readout(val, *step);
                 if widgets::slider_row(
                     ui,
                     &effect_param_label(param),
@@ -213,21 +225,6 @@ pub(super) fn instance_params(
                     }
                 });
             }
-            ParamKind::Color => {
-                let color = match &current {
-                    EffectParamValue::Color(c) => *c,
-                    _ => RgbColor {
-                        r: 90,
-                        g: 209,
-                        b: 232,
-                    },
-                };
-                ui.add_space(theme::SPACE_3);
-                if let Some(new_color) = widgets::color_picker(ui, color) {
-                    edits.insert(param.id.clone(), EffectParamValue::Color(new_color));
-                    changed = true;
-                }
-            }
             ParamKind::Boolean => {
                 let on = matches!(&current, EffectParamValue::Bool(true));
                 ui.add_space(theme::SPACE_2);
@@ -241,25 +238,70 @@ pub(super) fn instance_params(
                         );
                     },
                     |ui| {
-                        if super::rack::toggle_switch(
-                            ui,
-                            on,
-                            egui::Id::new(("inst_bool", instance_id, &param.id)),
-                        ) {
+                        if widgets::toggle(ui, on) != on {
                             edits.insert(param.id.clone(), EffectParamValue::Bool(!on));
                             changed = true;
                         }
                     },
                 );
             }
-            ParamKind::Text
+            ParamKind::Color
+            | ParamKind::Text
             | ParamKind::Sensor
             | ParamKind::Image
             | ParamKind::Number { .. }
             | ParamKind::Steps => {}
         }
     }
+    changed |= color_slots(ui, edits, &mut canvas_ui.color_slot, def, eff);
     changed
+}
+
+/// The effect's colour params as slot buttons sharing one picker, which edits
+/// the active slot.
+fn color_slots(
+    ui: &mut egui::Ui,
+    edits: &mut HashMap<String, EffectParamValue>,
+    slot: &mut usize,
+    def: &EffectDef,
+    eff: &halod_shared::types::Animation,
+) -> bool {
+    let colors: Vec<(&EffectParamDescriptor, RgbColor)> = eff
+        .params
+        .iter()
+        .filter(|p| matches!(p.kind, ParamKind::Color))
+        .map(|p| {
+            let c = match edits.get(&p.id).or_else(|| def.params.get(&p.id)) {
+                Some(EffectParamValue::Color(c)) => *c,
+                _ => match p.default {
+                    EffectParamValue::Color(c) => c,
+                    _ => RgbColor::default(),
+                },
+            };
+            (p, c)
+        })
+        .collect();
+    let labelled: Vec<(&str, RgbColor)> = colors
+        .iter()
+        .map(|(p, c)| {
+            (
+                if p.label.is_empty() {
+                    p.id.as_str()
+                } else {
+                    p.label.as_str()
+                },
+                *c,
+            )
+        })
+        .collect();
+    ui.add_space(theme::SPACE_3);
+    match widgets::color_slots(ui, &t!("canvas.colors"), &labelled, slot) {
+        Some((i, new)) => {
+            edits.insert(colors[i].0.id.clone(), EffectParamValue::Color(new));
+            true
+        }
+        None => false,
+    }
 }
 
 #[cfg(test)]

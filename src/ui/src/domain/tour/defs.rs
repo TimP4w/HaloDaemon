@@ -35,11 +35,6 @@ fn build_tour(key: TourKey) -> Tour {
                 t!("tour.page_home.manage_device.body"),
             ),
             step(
-                AnchorId::HomeShowHidden,
-                t!("tour.page_home.hidden_devices.title"),
-                t!("tour.page_home.hidden_devices.body"),
-            ),
-            step(
                 AnchorId::HomeSidebarHome,
                 t!("tour.page_home.sidebar_home.title"),
                 t!("tour.page_home.sidebar_home.body"),
@@ -53,11 +48,6 @@ fn build_tour(key: TourKey) -> Tour {
                 AnchorId::HomeSidebarCooling,
                 t!("tour.page_home.sidebar_cooling.title"),
                 t!("tour.page_home.sidebar_cooling.body"),
-            ),
-            step(
-                AnchorId::HomeSidebarIntegrations,
-                t!("tour.page_home.sidebar_integrations.title"),
-                t!("tour.page_home.sidebar_integrations.body"),
             ),
             step(
                 AnchorId::HomeSidebarPlugins,
@@ -341,18 +331,6 @@ fn build_tour(key: TourKey) -> Tour {
                 t!("tour.page_plugins.permissions.body"),
             ),
         ]),
-        TourKey::PageIntegrations => make_tour(vec![
-            step(
-                AnchorId::IntegrationsOverview,
-                t!("tour.page_integrations.overview.title"),
-                t!("tour.page_integrations.overview.body"),
-            ),
-            step(
-                AnchorId::IntegrationsToggle,
-                t!("tour.page_integrations.toggle.title"),
-                t!("tour.page_integrations.toggle.body"),
-            ),
-        ]),
     }
 }
 
@@ -380,7 +358,6 @@ pub const ALL_TOUR_KEYS: &[TourKey] = &[
     TourKey::LcdEditor,
     TourKey::EffectDesigner,
     TourKey::PagePlugins,
-    TourKey::PageIntegrations,
 ];
 
 /// Localized tours, interned per `(locale, tour)` so the `&'static Tour` shape

@@ -2,11 +2,15 @@
 #![cfg(test)]
 //! Shared mock device + builders for unit tests. Test-only.
 
+use std::path::{Path, PathBuf};
+
 use crate::application::state::AppState;
+use crate::config::Config;
 use crate::domain::cooling::model::FanCurveRecord;
 use crate::domain::device::chain::{
     ChannelDescriptor, LightingDivisionAdapter, LightingDivisionHost,
 };
+use crate::domain::device::OnboardProfilesCapability;
 use crate::domain::device::{
     ActionCapability, BooleanCapability, CapabilityRef, ChoiceCapability, ChoiceStateCache,
     Controller, CoolingCapability, CoolingStateSlot, Device, DpiCapability, EqualizerCapability,
@@ -15,17 +19,20 @@ use crate::domain::device::{
     SensorCapability, VisibilitySlot,
 };
 use crate::domain::lcd::engine::{video::VideoEngine, LcdEngine};
+use crate::domain::plugin;
 use crate::domain::registry::identity::{DeviceIdentity, DeviceOrigin};
 use anyhow::Result;
 use async_trait::async_trait;
+use halod_shared::ids::{DeviceId, PluginId};
 use halod_shared::types::{
     Boolean, ButtonDescriptor, ButtonMapping, ConnectionType, CoolingChannel, CoolingChannelKind,
     DpiMode, DpiStatus, EqBand, Equalizer, KeyRemapStatus, LcdDescriptor, LightingDescriptor,
     LightingState, ScreenShape, Sensor, SensorType, SensorUnit, WriteRateStatus,
 };
+use parking_lot::Mutex;
 use std::sync::{
     atomic::{AtomicBool, AtomicUsize, Ordering},
-    Arc, Mutex,
+    Arc,
 };
 
 /// Process-wide mutex for tests that mutate `HALOD_CONFIG_DIR`.
@@ -34,7 +41,7 @@ use std::sync::{
 pub static HALOD_CONFIG_DIR_LOCK: Mutex<()> = Mutex::new(());
 
 pub fn app_with(devices: Vec<Arc<dyn Device>>) -> Arc<AppState> {
-    let app = Arc::new(AppState::new(crate::config::Config::default()));
+    let app = Arc::new(AppState::new(Config::default()));
     *app.device_registry.try_write().unwrap() = devices;
     app
 }
@@ -48,16 +55,16 @@ pub fn install_lcd_engine(app: &Arc<AppState>) -> Arc<LcdEngine> {
     engine
 }
 
-type ScriptedResync = Result<(Vec<Arc<dyn Device>>, Vec<String>)>;
+type ScriptedResync = Result<(Vec<Arc<dyn Device>>, Vec<DeviceId>)>;
 
 struct MockChainAdapter {
-    parent_id: String,
+    parent_id: DeviceId,
     channels: Vec<ChannelDescriptor>,
 }
 
 #[async_trait]
 impl LightingDivisionAdapter for MockChainAdapter {
-    fn parent_id(&self) -> String {
+    fn parent_id(&self) -> DeviceId {
         self.parent_id.clone()
     }
     fn channels(&self) -> Vec<ChannelDescriptor> {
@@ -77,13 +84,11 @@ where
     F: FnOnce(Arc<crate::application::state::AppState>) -> Fut,
     Fut: std::future::Future<Output = ()>,
 {
-    let _guard = HALOD_CONFIG_DIR_LOCK
-        .lock()
-        .unwrap_or_else(|e| e.into_inner());
+    let _guard = HALOD_CONFIG_DIR_LOCK.lock();
     let tmp = tempfile::tempdir().unwrap();
     unsafe { std::env::set_var("HALOD_CONFIG_DIR", tmp.path()) };
     f(Arc::new(crate::application::state::AppState::new(
-        crate::config::Config::default(),
+        Config::default(),
     )))
     .await;
     unsafe { std::env::remove_var("HALOD_CONFIG_DIR") };
@@ -94,20 +99,33 @@ where
 /// shared lock and restores it on drop, so a `request_config_save()` inside the
 /// test never touches the real `~/.config/halod`. Bind it for the whole test.
 pub struct TmpConfigDir {
-    _dir: tempfile::TempDir,
-    _guard: std::sync::MutexGuard<'static, ()>,
+    dir: tempfile::TempDir,
+    _guard: parking_lot::MutexGuard<'static, ()>,
+}
+
+impl TmpConfigDir {
+    pub fn path(&self) -> &Path {
+        self.dir.path()
+    }
+}
+
+pub fn write_plugin_package(root: &Path, id: &str, version: &str, api: &str) -> PathBuf {
+    let package = root.join(id);
+    std::fs::create_dir_all(&package).unwrap();
+    std::fs::write(
+        package.join("plugin.yaml"),
+        format!("id: {id}\nversion: {version}\napi: \"{api}\"\ntype: integration\ntransports:\n  command:\n    commands: [nvidia-smi]\n"),
+    )
+    .unwrap();
+    std::fs::write(package.join("main.lua"), "return {}\n").unwrap();
+    package
 }
 
 pub fn tmp_config_dir() -> TmpConfigDir {
-    let guard = HALOD_CONFIG_DIR_LOCK
-        .lock()
-        .unwrap_or_else(|e| e.into_inner());
+    let guard = HALOD_CONFIG_DIR_LOCK.lock();
     let dir = tempfile::tempdir().unwrap();
     unsafe { std::env::set_var("HALOD_CONFIG_DIR", dir.path()) };
-    TmpConfigDir {
-        _dir: dir,
-        _guard: guard,
-    }
+    TmpConfigDir { dir, _guard: guard }
 }
 
 impl Drop for TmpConfigDir {
@@ -126,7 +144,7 @@ pub enum InitBehavior {
 }
 
 pub struct MockDevice {
-    pub id: String,
+    pub id: DeviceId,
     pub name: String,
     pub vendor: String,
     pub model: String,
@@ -147,10 +165,10 @@ pub struct MockDevice {
     pub live: Arc<AtomicBool>,
     /// Owning plugin id when this device stands in for an integration root
     /// (see `Device::integration_id`). `None` for a normal device.
-    pub integration_id: Option<String>,
+    pub integration_id: Option<PluginId>,
     /// Owning plugin id for scoped teardown (see `Device::owning_plugin_id`).
     /// `None` for a normal built-in host device.
-    pub owning_plugin_id: Option<String>,
+    pub owning_plugin_id: Option<PluginId>,
     pub identity: Option<(DeviceIdentity, DeviceOrigin)>,
     /// Remaining capability writes to refuse; see `refusing_writes`.
     pub refusals: Arc<AtomicUsize>,
@@ -212,7 +230,7 @@ impl MockDevice {
     /// string defaults fill the rest.
     pub fn new(id: &str) -> Self {
         Self {
-            id: id.to_string(),
+            id: id.parse().unwrap(),
             name: "mock".to_string(),
             vendor: "mock".to_string(),
             model: "mock".to_string(),
@@ -268,7 +286,7 @@ impl MockDevice {
     }
 
     pub fn with_fan_duty(self, duty: u8) -> Self {
-        *self.fan_duty.lock().unwrap() = duty;
+        *self.fan_duty.lock() = duty;
         self.with_fan()
     }
 
@@ -285,7 +303,7 @@ impl MockDevice {
     }
 
     pub fn fan_duty(&self) -> u8 {
-        *self.fan_duty.lock().unwrap()
+        *self.fan_duty.lock()
     }
 
     pub fn with_temp(self, sensor_id: &str, value: f64) -> Self {
@@ -299,11 +317,11 @@ impl MockDevice {
     }
 
     pub fn calls(&self) -> Vec<String> {
-        self.calls.lock().unwrap().clone()
+        self.calls.lock().clone()
     }
 
     fn record_call(&self, call: String) {
-        self.calls.lock().unwrap().push(call);
+        self.calls.lock().push(call);
     }
 
     pub fn with_pairing(mut self) -> Self {
@@ -317,7 +335,7 @@ impl MockDevice {
     }
 
     pub fn script_resync(&self, result: ScriptedResync) {
-        *self.resync.lock().unwrap() = Some(result);
+        *self.resync.lock() = Some(result);
     }
 
     pub fn with_chain(mut self, channels: Vec<ChannelDescriptor>) -> Self {
@@ -384,14 +402,14 @@ impl MockDevice {
     /// Stand in for an integration root owned by plugin `id` (see
     /// `Device::integration_id`).
     pub fn with_integration_id(mut self, id: &str) -> Self {
-        self.integration_id = Some(id.to_string());
+        self.integration_id = Some(id.parse().unwrap());
         self
     }
 
     /// Stand in for a device owned by plugin `id` for scoped teardown
     /// (see `Device::owning_plugin_id`).
     pub fn with_owning_plugin_id(mut self, id: &str) -> Self {
-        self.owning_plugin_id = Some(id.to_string());
+        self.owning_plugin_id = Some(id.parse().unwrap());
         self
     }
 
@@ -401,7 +419,6 @@ impl MockDevice {
     }
 
     /// Start the device offline (`is_live() == false`), for engine liveness-gating tests.
-    #[allow(dead_code)] // shared test builder option; only some feature/target suites use it
     pub fn offline(self) -> Self {
         self.live.store(false, Ordering::SeqCst);
         self
@@ -522,7 +539,7 @@ impl MockDevice {
 
 #[async_trait]
 impl Device for MockDevice {
-    fn id(&self) -> &str {
+    fn id(&self) -> &DeviceId {
         &self.id
     }
     fn name(&self) -> &str {
@@ -547,11 +564,11 @@ impl Device for MockDevice {
         self.closed.store(true, Ordering::SeqCst);
     }
 
-    fn integration_id(&self) -> Option<String> {
+    fn integration_id(&self) -> Option<PluginId> {
         self.integration_id.clone()
     }
 
-    fn owning_plugin_id(&self) -> Option<String> {
+    fn owning_plugin_id(&self) -> Option<PluginId> {
         self.owning_plugin_id.clone()
     }
 
@@ -708,7 +725,7 @@ impl CoolingCapability for MockDevice {
             .ok_or_else(|| anyhow::anyhow!("unknown cooling channel '{channel_id}'"))
     }
     async fn set_cooling_duty(&self, _channel_id: &str, duty: u8) -> Result<()> {
-        *self.fan_duty.lock().unwrap() = duty;
+        *self.fan_duty.lock() = duty;
         Ok(())
     }
     fn cooling_state(&self) -> &CoolingStateSlot {
@@ -744,7 +761,7 @@ impl LightingCapability for MockDevice {
     }
     async fn apply(&self, state: LightingState) -> Result<()> {
         self.rgb_apply_count.fetch_add(1, Ordering::SeqCst);
-        self.write_order.lock().unwrap().push("lighting");
+        self.write_order.lock().push("lighting");
         self.lighting_state().set_state(Some(state));
         Ok(())
     }
@@ -812,23 +829,19 @@ impl ChoiceCapability for MockDevice {
             anyhow::bail!("device did not answer");
         }
         self.choice_cache().record(key, selected);
-        self.write_order.lock().unwrap().push("choice");
-        self.restore_scoped
-            .lock()
-            .unwrap()
-            .push(crate::domain::plugin::restore_in_flight());
+        self.write_order.lock().push("choice");
+        self.restore_scoped.lock().push(plugin::restore_in_flight());
         *self
             .choice_last_set
             .as_ref()
             .expect("MockDevice: choice_last_set not present — call .with_choice()")
-            .lock()
-            .unwrap() = Some((key.to_string(), selected));
+            .lock() = Some((key.to_string(), selected));
         Ok(())
     }
 }
 
 #[async_trait]
-impl crate::domain::device::OnboardProfilesCapability for MockDevice {
+impl OnboardProfilesCapability for MockDevice {
     async fn switch_profile(&self, slot: u16) -> Result<()> {
         self.record_call(format!("switch {slot}"));
         Ok(())
@@ -866,13 +879,12 @@ impl crate::domain::device::OnboardProfilesCapability for MockDevice {
         "onboard"
     }
     async fn restore_state(&self, v: &serde_json::Value) -> bool {
-        self.write_order.lock().unwrap().push("onboard");
+        self.write_order.lock().push("onboard");
         *self
             .onboard_active_slot
             .as_ref()
             .expect("MockDevice: onboard slot not present — call .with_onboard()")
-            .lock()
-            .unwrap() = v
+            .lock() = v
             .get("active_slot")
             .and_then(|s| s.as_u64())
             .and_then(|s| u16::try_from(s).ok());
@@ -900,9 +912,9 @@ impl PairingCapability for MockDevice {
 impl Controller for MockDevice {
     async fn resync_children(
         &self,
-        _existing: &std::collections::HashSet<String>,
-    ) -> Result<(Vec<Arc<dyn Device>>, Vec<String>)> {
-        match self.resync.lock().unwrap().take() {
+        _existing: &std::collections::HashSet<DeviceId>,
+    ) -> Result<(Vec<Arc<dyn Device>>, Vec<DeviceId>)> {
+        match self.resync.lock().take() {
             Some(Ok(v)) => Ok(v),
             Some(Err(e)) => {
                 self.live.store(false, Ordering::SeqCst);
@@ -926,8 +938,7 @@ impl RangeCapability for MockDevice {
             .range_last_set
             .as_ref()
             .expect("MockDevice: range_last_set not present — call .with_range()")
-            .lock()
-            .unwrap() = Some((key.to_string(), value));
+            .lock() = Some((key.to_string(), value));
         Ok(())
     }
 }
@@ -942,8 +953,7 @@ impl BooleanCapability for MockDevice {
             .bool_last_set
             .as_ref()
             .expect("MockDevice: bool_last_set not present — call .with_booleans()")
-            .lock()
-            .unwrap() = Some((key.to_string(), value));
+            .lock() = Some((key.to_string(), value));
         Ok(())
     }
 }
@@ -955,8 +965,7 @@ impl ActionCapability for MockDevice {
             .action_last_key
             .as_ref()
             .expect("MockDevice: action_last_key not present — call .with_action()")
-            .lock()
-            .unwrap() = Some(key.to_string());
+            .lock() = Some(key.to_string());
         Ok(())
     }
 }
@@ -967,7 +976,7 @@ impl DpiCapability for MockDevice {
         let current_dpi = self
             .dpi_direct_last
             .as_ref()
-            .and_then(|m| *m.lock().unwrap())
+            .and_then(|m| *m.lock())
             .or(self.dpi_initial)
             .unwrap_or(0);
         DpiStatus {
@@ -983,8 +992,7 @@ impl DpiCapability for MockDevice {
             .dpi_last_steps
             .as_ref()
             .expect("MockDevice: dpi_last_steps not present — call .with_dpi()")
-            .lock()
-            .unwrap() = Some(steps);
+            .lock() = Some(steps);
         Ok(())
     }
     async fn set_dpi_index(&self, _index: usize) -> Result<()> {
@@ -992,7 +1000,7 @@ impl DpiCapability for MockDevice {
     }
     async fn set_dpi_direct(&self, dpi: u16) -> Result<()> {
         if let Some(m) = &self.dpi_direct_last {
-            *m.lock().unwrap() = Some(dpi);
+            *m.lock() = Some(dpi);
         }
         Ok(())
     }
@@ -1018,8 +1026,7 @@ impl KeyRemapCapability for MockDevice {
             .key_remap_last_mapping
             .as_ref()
             .expect("MockDevice: key_remap_last_mapping not present — call .with_key_remap()")
-            .lock()
-            .unwrap() = Some(mapping);
+            .lock() = Some(mapping);
         Ok(())
     }
     async fn reset_button_mapping(&self, _cid: u16) -> Result<()> {
@@ -1038,7 +1045,6 @@ impl SensorCapability for MockDevice {
             .as_ref()
             .expect("MockDevice: sensors not present — call .with_sensor()")
             .lock()
-            .unwrap()
             .clone())
     }
 }
@@ -1051,7 +1057,6 @@ impl EqualizerCapability for MockDevice {
             .as_ref()
             .expect("MockDevice: eq_state not present — call .with_equalizer()")
             .lock()
-            .unwrap()
             .clone())
     }
 
@@ -1060,14 +1065,12 @@ impl EqualizerCapability for MockDevice {
             .as_ref()
             .expect("MockDevice: eq_state not present")
             .lock()
-            .unwrap()
             .selected_preset = preset_index;
         *self
             .eq_last_preset
             .as_ref()
             .expect("MockDevice: eq_last_preset not present")
-            .lock()
-            .unwrap() = Some(preset_index);
+            .lock() = Some(preset_index);
         Ok(())
     }
 
@@ -1076,8 +1079,7 @@ impl EqualizerCapability for MockDevice {
             .eq_state
             .as_ref()
             .expect("MockDevice: eq_state not present")
-            .lock()
-            .unwrap();
+            .lock();
         for (band, &v) in eq.bands.iter_mut().zip(values) {
             band.value = v;
         }
@@ -1086,8 +1088,7 @@ impl EqualizerCapability for MockDevice {
             .eq_last_bands
             .as_ref()
             .expect("MockDevice: eq_last_bands not present")
-            .lock()
-            .unwrap() = Some(values.to_vec());
+            .lock() = Some(values.to_vec());
         Ok(())
     }
 
@@ -1097,7 +1098,6 @@ impl EqualizerCapability for MockDevice {
                 .as_ref()
                 .expect("MockDevice: eq_state not present")
                 .lock()
-                .unwrap()
                 .clone(),
         )
     }
@@ -1142,10 +1142,10 @@ mod capability_tests {
         });
         EqCap::restore_state(&dev2, &saved).await;
 
-        let last_preset = dev2.eq_last_preset.as_ref().unwrap().lock().unwrap();
+        let last_preset = dev2.eq_last_preset.as_ref().unwrap().lock();
         assert_eq!(*last_preset, Some(1));
 
-        let last_bands = dev2.eq_last_bands.as_ref().unwrap().lock().unwrap();
+        let last_bands = dev2.eq_last_bands.as_ref().unwrap().lock();
         assert!(last_bands.is_some());
         assert_eq!(last_bands.as_ref().unwrap().len(), 10);
     }
@@ -1168,10 +1168,10 @@ mod capability_tests {
         EqCap::restore_state(&dev, &bad_state).await;
 
         // The preset was set but bands were skipped (len != 10)
-        let last_preset = dev.eq_last_preset.as_ref().unwrap().lock().unwrap();
+        let last_preset = dev.eq_last_preset.as_ref().unwrap().lock();
         assert_eq!(*last_preset, Some(1));
         // Bands should not have been called
-        let last_bands = dev.eq_last_bands.as_ref().unwrap().lock().unwrap();
+        let last_bands = dev.eq_last_bands.as_ref().unwrap().lock();
         assert!(last_bands.is_none());
     }
 

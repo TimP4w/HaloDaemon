@@ -10,13 +10,14 @@ use super::device::unit;
 pub struct SensorView {
     pub id: String,
     pub label: String,
+    pub device: String,
     pub value: f64,
     pub unit: &'static str,
 }
 
 /// One device's sensors. Sensors without their own name (e.g. an hwmon channel
 /// with a blank `_label`) fall back to the device name.
-fn views(d: &WireDevice) -> impl Iterator<Item = SensorView> + '_ {
+pub fn views(d: &WireDevice) -> impl Iterator<Item = SensorView> + '_ {
     d.capabilities
         .iter()
         .filter_map(|cap| match cap {
@@ -31,6 +32,7 @@ fn views(d: &WireDevice) -> impl Iterator<Item = SensorView> + '_ {
             } else {
                 s.name.clone()
             },
+            device: d.name.clone(),
             value: s.value,
             unit: unit(&s.unit),
         })
@@ -39,16 +41,6 @@ fn views(d: &WireDevice) -> impl Iterator<Item = SensorView> + '_ {
 /// Sensors across all devices, in device order.
 pub fn sensors(state: &TopicStore) -> Vec<SensorView> {
     state.devices.iter().flat_map(views).collect()
-}
-
-/// One device's sensors, in report order.
-pub fn device_sensors(state: &TopicStore, device_id: &str) -> Vec<SensorView> {
-    state
-        .devices
-        .iter()
-        .filter(|d| d.id == device_id)
-        .flat_map(views)
-        .collect()
 }
 
 #[cfg(test)]
@@ -108,36 +100,6 @@ mod tests {
         };
         let s = sensors(&state);
         assert_eq!(s[0].label, "My Device");
-    }
-
-    #[test]
-    fn device_sensors_selects_only_the_named_device() {
-        let mut a = dev(
-            DeviceType::Sensor,
-            vec![DeviceCapability::Sensors(vec![sensor(
-                "a1",
-                SensorType::Load,
-            )])],
-        );
-        a.id = "a".into();
-        let mut b = dev(
-            DeviceType::Gpu,
-            vec![DeviceCapability::Sensors(vec![
-                sensor("b1", SensorType::Temperature),
-                sensor("b2", SensorType::FanSpeed),
-            ])],
-        );
-        b.id = "b".into();
-        let state = TopicStore {
-            devices: vec![a, b],
-            ..Default::default()
-        };
-        let ids: Vec<_> = device_sensors(&state, "b")
-            .into_iter()
-            .map(|s| s.id)
-            .collect();
-        assert_eq!(ids, vec!["b1".to_string(), "b2".to_string()]);
-        assert!(device_sensors(&state, "missing").is_empty());
     }
 
     #[test]

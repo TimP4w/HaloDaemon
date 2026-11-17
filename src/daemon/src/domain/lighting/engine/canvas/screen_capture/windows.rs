@@ -1,7 +1,8 @@
 // SPDX-License-Identifier: GPL-3.0-or-later
+use parking_lot::Mutex;
 use std::sync::{
     atomic::{AtomicBool, Ordering},
-    Arc, Mutex,
+    Arc,
 };
 
 use super::{FrameRotation, MonitorInfo, RawFrame};
@@ -10,7 +11,6 @@ pub fn list_monitors() -> Vec<MonitorInfo> {
     enumerate_dxgi_monitors().unwrap_or_else(|e| {
         log::warn!("DXGI monitor enumeration failed: {e}");
         vec![MonitorInfo {
-            index: 0,
             label: "Monitor 0".to_string(),
         }]
     })
@@ -20,8 +20,8 @@ pub fn start(
     monitor_index: usize,
     frame_slot: Arc<Mutex<Option<RawFrame>>>,
     stop: Arc<AtomicBool>,
-) -> Result<(), String> {
-    let (setup_tx, setup_rx) = std::sync::mpsc::sync_channel::<Result<(), String>>(1);
+) -> anyhow::Result<()> {
+    let (setup_tx, setup_rx) = std::sync::mpsc::sync_channel::<anyhow::Result<()>>(1);
     std::thread::spawn(move || {
         if let Err(e) = run_dxgi_capture(monitor_index, frame_slot, stop, setup_tx) {
             log::error!("DXGI capture error: {e}");
@@ -29,7 +29,7 @@ pub fn start(
     });
     setup_rx
         .recv()
-        .unwrap_or_else(|_| Err("DXGI capture thread exited before setup".into()))
+        .unwrap_or_else(|_| Err(anyhow::anyhow!("DXGI capture thread exited before setup")))
 }
 
 fn dxgi_to_frame_rotation(
@@ -46,25 +46,26 @@ fn dxgi_to_frame_rotation(
     }
 }
 
-fn enumerate_dxgi_monitors() -> Result<Vec<MonitorInfo>, String> {
+fn enumerate_dxgi_monitors() -> anyhow::Result<Vec<MonitorInfo>> {
     use windows::Win32::Graphics::Dxgi::{CreateDXGIFactory1, IDXGIFactory1};
 
     let mut monitors = Vec::new();
     unsafe {
         let factory: IDXGIFactory1 =
-            CreateDXGIFactory1().map_err(|e| format!("CreateDXGIFactory1: {e}"))?;
+            CreateDXGIFactory1().map_err(|e| anyhow::anyhow!("CreateDXGIFactory1: {e}"))?;
         let mut a = 0u32;
         while let Ok(adapter) = factory.EnumAdapters1(a) {
             let mut o = 0u32;
             while let Ok(output) = adapter.EnumOutputs(o) {
-                let desc = output.GetDesc().map_err(|e| format!("GetDesc: {e}"))?;
+                let desc = output
+                    .GetDesc()
+                    .map_err(|e| anyhow::anyhow!("GetDesc: {e}"))?;
                 let w =
                     (desc.DesktopCoordinates.right - desc.DesktopCoordinates.left).unsigned_abs();
                 let h =
                     (desc.DesktopCoordinates.bottom - desc.DesktopCoordinates.top).unsigned_abs();
                 let idx = monitors.len();
                 monitors.push(MonitorInfo {
-                    index: idx,
                     label: format!("Monitor {idx}: {w}×{h}"),
                 });
                 o += 1;
@@ -74,7 +75,6 @@ fn enumerate_dxgi_monitors() -> Result<Vec<MonitorInfo>, String> {
     }
     if monitors.is_empty() {
         monitors.push(MonitorInfo {
-            index: 0,
             label: "Monitor 0".to_string(),
         });
     }
@@ -85,8 +85,8 @@ fn run_dxgi_capture(
     monitor_index: usize,
     frame_slot: Arc<Mutex<Option<RawFrame>>>,
     stop: Arc<AtomicBool>,
-    setup_done: std::sync::mpsc::SyncSender<Result<(), String>>,
-) -> Result<(), String> {
+    setup_done: std::sync::mpsc::SyncSender<anyhow::Result<()>>,
+) -> anyhow::Result<()> {
     use windows::{
         core::Interface,
         Win32::Graphics::{
@@ -118,12 +118,12 @@ fn run_dxgi_capture(
                 None,
                 Some(&mut ctx),
             )
-            .map_err(|e| format!("D3D11CreateDevice: {e}"))?;
+            .map_err(|e| anyhow::anyhow!("D3D11CreateDevice: {e}"))?;
             (dev.unwrap(), ctx.unwrap())
         };
 
         let factory: IDXGIFactory1 =
-            CreateDXGIFactory1().map_err(|e| format!("CreateDXGIFactory1: {e}"))?;
+            CreateDXGIFactory1().map_err(|e| anyhow::anyhow!("CreateDXGIFactory1: {e}"))?;
         let mut output1: Option<IDXGIOutput1> = None;
         let mut flat = 0usize;
         'search: {
@@ -132,7 +132,10 @@ fn run_dxgi_capture(
                 let mut o = 0u32;
                 while let Ok(out) = adapter.EnumOutputs(o) {
                     if flat == monitor_index {
-                        output1 = Some(out.cast().map_err(|e| format!("IDXGIOutput1: {e}"))?);
+                        output1 = Some(
+                            out.cast()
+                                .map_err(|e| anyhow::anyhow!("IDXGIOutput1: {e}"))?,
+                        );
                         break 'search;
                     }
                     flat += 1;
@@ -146,15 +149,18 @@ fn run_dxgi_capture(
             None => {
                 let a = factory
                     .EnumAdapters1(0)
-                    .map_err(|e| format!("EnumAdapters1: {e}"))?;
-                let o = a.EnumOutputs(0).map_err(|e| format!("EnumOutputs: {e}"))?;
-                o.cast().map_err(|e| format!("IDXGIOutput1 cast: {e}"))?
+                    .map_err(|e| anyhow::anyhow!("EnumAdapters1: {e}"))?;
+                let o = a
+                    .EnumOutputs(0)
+                    .map_err(|e| anyhow::anyhow!("EnumOutputs: {e}"))?;
+                o.cast()
+                    .map_err(|e| anyhow::anyhow!("IDXGIOutput1 cast: {e}"))?
             }
         };
 
         let mut duplication = output1
             .DuplicateOutput(&device)
-            .map_err(|e| format!("DuplicateOutput: {e}"))?;
+            .map_err(|e| anyhow::anyhow!("DuplicateOutput: {e}"))?;
 
         // DXGI returns the buffer in the source surface's natural (landscape)
         // layout; the rotation hint is applied when the buffer is consumed.
@@ -174,12 +180,12 @@ fn run_dxgi_capture(
         let _ = setup_done.send(Ok(()));
 
         let frame_interval = std::time::Duration::from_millis(67); // ~15 fps
-        let mut last = std::time::Instant::now()
+        let mut last = tokio::time::Instant::now()
             .checked_sub(frame_interval)
-            .unwrap_or_else(std::time::Instant::now);
+            .unwrap_or_else(tokio::time::Instant::now);
 
         while !stop.load(Ordering::Relaxed) {
-            let now = std::time::Instant::now();
+            let now = tokio::time::Instant::now();
             if now.duration_since(last) < frame_interval {
                 std::thread::sleep(std::time::Duration::from_millis(10));
                 continue;
@@ -268,14 +274,13 @@ fn run_dxgi_capture(
                                 std::slice::from_raw_parts(mapped.pData as *const u8, byte_len)
                                     .to_vec();
                             context.Unmap(staging_ref, 0);
-                            *frame_slot.lock().unwrap_or_else(|e| e.into_inner()) =
-                                Some(RawFrame {
-                                    width: staging_w,
-                                    height: staging_h,
-                                    stride,
-                                    data: Arc::new(raw),
-                                    rotation,
-                                });
+                            *frame_slot.lock() = Some(RawFrame {
+                                width: staging_w,
+                                height: staging_h,
+                                stride,
+                                data: Arc::new(raw),
+                                rotation,
+                            });
                             last = now;
                         }
                     }
@@ -298,17 +303,6 @@ mod tests {
             !monitors.is_empty(),
             "list_monitors should always return at least one entry"
         );
-    }
-
-    #[test]
-    fn list_monitors_indices_match_position() {
-        let monitors = list_monitors();
-        for (pos, m) in monitors.iter().enumerate() {
-            assert_eq!(
-                m.index, pos,
-                "monitor at position {pos} should have index {pos}"
-            );
-        }
     }
 
     #[test]

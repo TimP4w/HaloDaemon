@@ -3,6 +3,9 @@ use std::sync::Arc;
 
 use crate::application::state::AppState;
 use crate::domain::device::Device;
+use crate::domain::profiles::model::Profile;
+use crate::domain::profiles::validate;
+use halod_shared::ids::DeviceId;
 use halod_shared::types::DEFAULT_PROFILE_NAME;
 
 /// Merge into `entry` only the keys of `new_state` that differ from `effective`.
@@ -34,7 +37,7 @@ pub(crate) fn record_changed_overrides(
 /// Existing keys are never overwritten — only the first value seen is kept.
 fn seed_missing_default_baselines(
     cfg: &mut crate::config::Config,
-    device_id: &str,
+    device_id: &DeviceId,
     state: &serde_json::Value,
 ) {
     let Some(state_obj) = state.as_object() else {
@@ -46,7 +49,7 @@ fn seed_missing_default_baselines(
         .or_default();
     let entry = default
         .device_states
-        .entry(device_id.to_string())
+        .entry(device_id.into())
         .or_insert_with(|| serde_json::json!({}));
     let Some(entry_obj) = entry.as_object_mut() else {
         return;
@@ -66,13 +69,11 @@ pub async fn persist_device_state(app: &Arc<AppState>, device: &dyn Device) {
         return;
     }
     let device_id = device.id().to_owned();
-    let mut validation_profile = crate::domain::profiles::model::Profile::default();
+    let mut validation_profile = Profile::default();
     validation_profile
         .device_states
         .insert(device_id.clone(), state.clone());
-    if let Err(e) =
-        crate::domain::profiles::validate::validate_profile("persisted state", &validation_profile)
-    {
+    if let Err(e) = validate::validate_profile("persisted state", &validation_profile) {
         log::warn!("[{device_id}] refusing to persist invalid device state: {e:#}");
         return;
     }
@@ -117,7 +118,7 @@ mod override_diff_tests {
         let mut cfg = Config::default();
         seed_missing_default_baselines(
             &mut cfg,
-            "dev1",
+            &"dev1".parse().unwrap(),
             &json!({ "rgb": {"m": "static"}, "fan_curve": {"a": 1} }),
         );
         let dflt = &cfg.profiles[DEFAULT_PROFILE_NAME].device_states["dev1"];
@@ -132,10 +133,10 @@ mod override_diff_tests {
             .get_mut(DEFAULT_PROFILE_NAME)
             .unwrap()
             .device_states
-            .insert("dev1".into(), json!({ "rgb": {"m": "wave"} }));
+            .insert("dev1".parse().unwrap(), json!({ "rgb": {"m": "wave"} }));
         seed_missing_default_baselines(
             &mut cfg,
-            "dev1",
+            &"dev1".parse().unwrap(),
             &json!({ "rgb": {"m": "static"}, "dpi": {"s": [800]} }),
         );
         let dflt = &cfg.profiles[DEFAULT_PROFILE_NAME].device_states["dev1"];
@@ -216,7 +217,7 @@ mod override_diff_tests {
         super::persist_device_state(&app, dev.as_ref()).await;
 
         let cfg = app.config.read().await;
-        let effective = cfg.effective_device_state("dev1");
+        let effective = cfg.effective_device_state(&"dev1".parse().unwrap());
         assert_eq!(
             effective["fan_curve"]["default"]["points"][0][1], 50.0,
             "gaming override must win for the changed capability"

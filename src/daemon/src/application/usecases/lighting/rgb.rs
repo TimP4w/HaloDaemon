@@ -6,8 +6,10 @@ use std::sync::Arc;
 
 use crate::application::state::AppState;
 use crate::application::usecases::registry::settings;
+use crate::domain::events::Change;
 use crate::domain::profiles::device_state::persist_device_state;
 use crate::domain::registry::require_device_owned_id;
+use halod_shared::ids::DeviceId;
 use halod_shared::types::{LightingChannel, LightingState, ZoneTopology};
 use halod_shared::zone_transform::ZoneContentTransform;
 
@@ -44,7 +46,7 @@ fn validate_channel_transform(
     Ok(())
 }
 
-pub async fn lighting_apply(id: String, state: LightingState, app: Arc<AppState>) -> Result<()> {
+pub async fn lighting_apply(id: DeviceId, state: LightingState, app: Arc<AppState>) -> Result<()> {
     let device = require_device_owned_id(&id, &app).await?;
     let lighting = device
         .as_lighting()
@@ -93,15 +95,14 @@ pub async fn lighting_apply(id: String, state: LightingState, app: Arc<AppState>
         .await;
         lighting.apply(state).await?;
     }
-    app.record_change(crate::domain::events::Change::LightingDevice(id))
-        .await;
+    app.record_change(Change::LightingDevice(id)).await;
     Ok(())
 }
 
 /// Set a zone's LED-content transform. The transform is a persistent per-device
 /// setting, applied to all daemon-driven output for that zone.
 pub async fn set_channel_transform(
-    id: String,
+    id: DeviceId,
     channel_id: String,
     mut transform: ZoneContentTransform,
     app: Arc<AppState>,
@@ -148,7 +149,7 @@ mod tests {
         let app = app_with(vec![dev.clone()]);
 
         set_channel_transform(
-            "dev1".into(),
+            "dev1".parse().unwrap(),
             "ring".into(),
             ZoneContentTransform {
                 reverse: true,
@@ -195,7 +196,7 @@ mod tests {
         dev.apply(LightingState::Static { color }).await.unwrap();
 
         set_channel_transform(
-            "dev1".into(),
+            "dev1".parse().unwrap(),
             "ring".into(),
             ZoneContentTransform {
                 reverse: true,
@@ -221,7 +222,7 @@ mod tests {
         let app = app_with(vec![dev.clone()]);
 
         set_channel_transform(
-            "dev1".into(),
+            "dev1".parse().unwrap(),
             "ring".into(),
             ZoneContentTransform {
                 reverse: true,
@@ -242,7 +243,7 @@ mod tests {
         let state = LightingState::Static {
             color: RgbColor { r: 255, g: 0, b: 0 },
         };
-        lighting_apply("dev1".into(), state.clone(), app.clone())
+        lighting_apply("dev1".parse().unwrap(), state.clone(), app.clone())
             .await
             .unwrap();
 
@@ -261,7 +262,7 @@ mod tests {
             .as_ref()
             .unwrap()
             .set_canvas_zones(vec![crate::config::PlacedZone {
-                device_id: "dev1".into(),
+                device_id: "dev1".parse().unwrap(),
                 channel_id: "ring".into(),
                 x: 0.0,
                 y: 0.0,
@@ -273,7 +274,7 @@ mod tests {
             }]);
 
         lighting_apply(
-            "dev1".into(),
+            "dev1".parse().unwrap(),
             LightingState::Static {
                 color: RgbColor { r: 1, g: 2, b: 3 },
             },
@@ -297,7 +298,7 @@ mod tests {
             .as_ref()
             .unwrap()
             .set_canvas_zones(vec![crate::config::PlacedZone {
-                device_id: "dev1".into(),
+                device_id: "dev1".parse().unwrap(),
                 channel_id: "ring".into(),
                 x: 0.0,
                 y: 0.0,
@@ -308,7 +309,7 @@ mod tests {
                 sampling_mode: Default::default(),
             }]);
 
-        lighting_apply("dev1".into(), LightingState::Engine, app)
+        lighting_apply("dev1".parse().unwrap(), LightingState::Engine, app)
             .await
             .unwrap();
 
@@ -334,7 +335,7 @@ mod tests {
         let black = LightingState::Static {
             color: RgbColor { r: 0, g: 0, b: 0 },
         };
-        lighting_apply("dev1".into(), black.clone(), app)
+        lighting_apply("dev1".parse().unwrap(), black.clone(), app)
             .await
             .unwrap();
 
@@ -363,7 +364,7 @@ mod tests {
             .store(0, std::sync::atomic::Ordering::SeqCst);
 
         lighting_apply(
-            "dev1".into(),
+            "dev1".parse().unwrap(),
             LightingState::Static {
                 color: RgbColor { r: 4, g: 5, b: 6 },
             },
@@ -386,7 +387,7 @@ mod tests {
         let app = app_with(vec![dev]);
 
         let err = lighting_apply(
-            "dev1".into(),
+            "dev1".parse().unwrap(),
             LightingState::Static {
                 color: RgbColor { r: 0, g: 0, b: 0 },
             },

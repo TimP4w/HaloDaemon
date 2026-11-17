@@ -5,7 +5,8 @@
 //! [`halod_shared::lifecycle::IDLE_SHUTDOWN_GRACE`]. `--headless` opts out.
 
 use std::sync::Arc;
-use std::time::{Duration, Instant};
+use std::time::Duration;
+use tokio::time::Instant;
 
 use halod_shared::lifecycle::IDLE_SHUTDOWN_GRACE;
 

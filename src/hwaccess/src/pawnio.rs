@@ -13,10 +13,11 @@
 //! re-read the same `.bin` from disk N times.
 
 use anyhow::{anyhow, Result};
+use parking_lot::Mutex;
 use std::collections::HashMap;
 use std::ffi::c_void;
 use std::ptr;
-use std::sync::{Mutex, OnceLock};
+use std::sync::OnceLock;
 
 // ── FFI ──────────────────────────────────────────────────────────────────────
 
@@ -121,7 +122,7 @@ fn load_blob(name: &str) -> Option<&'static [u8]> {
     static CACHE: OnceLock<Mutex<HashMap<String, &'static [u8]>>> = OnceLock::new();
     let cache = CACHE.get_or_init(|| Mutex::new(HashMap::new()));
     {
-        let g = cache.lock().unwrap_or_else(|e| e.into_inner());
+        let g = cache.lock();
         if let Some(b) = g.get(name) {
             return Some(*b);
         }
@@ -130,7 +131,7 @@ fn load_blob(name: &str) -> Option<&'static [u8]> {
     let data = read_blob_from_disk(name)?;
     // Re-acquire and re-check: a concurrent caller may have raced and already
     // inserted the same blob. Return the winner's slice rather than leaking twice.
-    let mut g = cache.lock().unwrap_or_else(|e| e.into_inner());
+    let mut g = cache.lock();
     if let Some(b) = g.get(name) {
         return Some(*b);
     }
@@ -154,7 +155,7 @@ fn read_blob_from_disk(name: &str) -> Option<Vec<u8>> {
     for dir in dirs {
         let path = dir.join(name);
         if let Ok(data) = std::fs::read(&path) {
-            log::debug!("[PawnIO] using blob {}", path.display());
+            log::debug!("using blob {}", path.display());
             return Some(data);
         }
     }
@@ -203,14 +204,14 @@ impl PawnioModule {
             };
             let hr = unsafe { (api.load)(handle, blob.as_ptr(), blob.len()) };
             if hr == 0 {
-                log::debug!("[PawnIO] loaded module {name}");
+                log::debug!("loaded module {name}");
                 return Ok(Self {
                     api,
                     handle: Mutex::new(handle),
                     blob_name: name.to_string(),
                 });
             }
-            log::debug!("[PawnIO] rejected {name}: HRESULT=0x{:08x}", hr as u32);
+            log::debug!("rejected {name}: HRESULT=0x{:08x}", hr as u32);
             last_err = Some(anyhow!("pawnio_load({name}): HRESULT=0x{:08x}", hr as u32));
         }
 
@@ -230,7 +231,7 @@ impl PawnioModule {
     /// Not metered here: broker RPC capabilities provide request bounds, while
     /// daemon transports apply their hardware-specific write limits.
     pub fn exec(&self, func: &std::ffi::CStr, input: &[u64], output: &mut [u64]) -> Result<usize> {
-        let handle = *self.handle.lock().unwrap_or_else(|e| e.into_inner());
+        let handle = *self.handle.lock();
         let mut ret = 0usize;
         let hr = unsafe {
             (self.api.execute)(
@@ -279,7 +280,7 @@ fn validate_execute_result(
 
 impl Drop for PawnioModule {
     fn drop(&mut self) {
-        let handle = *self.handle.lock().unwrap_or_else(|e| e.into_inner());
+        let handle = *self.handle.lock();
         unsafe {
             (self.api.close)(handle);
         }

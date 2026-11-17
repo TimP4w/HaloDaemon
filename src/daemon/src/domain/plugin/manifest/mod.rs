@@ -10,17 +10,18 @@ use anyhow::{anyhow, bail, Context, Result};
 use halod_shared::types::{
     Animation, CategoryLayout, ChoiceDisplay, ChoiceOption, DeviceType, EffectParamDescriptor,
     EffectParamValue, LcdPresetDescriptor, LcdWidgetDescriptor, LcdWidgetResize, LcdWidgetUpdates,
-    LightingChannel, LightingDescriptor, ParamKind, Permission, PluginConfigFieldKind,
-    PluginConfigVisibility, PluginKind, RangeDisplay, ZoneTopology,
+    LightingChannel, LightingDescriptor, ParamKind, PluginConfigFieldKind, PluginConfigVisibility,
+    PluginKind, RangeDisplay, ZoneTopology,
 };
 use serde::{Deserialize, Serialize};
 use std::collections::{HashMap, HashSet};
 use std::path::{Path, PathBuf};
 
-use super::engine::transport::{descriptor_for, known_kinds};
+use super::engine::transport::{descriptor_for, known_kinds, PluginTransportDescriptor};
+use crate::domain::device::lighting_segment::ring_led_positions;
 use crate::domain::registry::observers::discovery::DiscoveryHandle;
 use crate::infrastructure::drivers::transports::smbus::{PciMatch, SmbusBusKind};
-use crate::infrastructure::drivers::vendors::generic::devices::common::ring_led_positions;
+use halod_shared::ids::PluginId;
 
 fn default_report_size() -> usize {
     64
@@ -282,6 +283,8 @@ pub struct IntegrationDiscoveryConfig {
     pub mdns: Vec<String>,
     #[serde(default)]
     pub ssdp: Vec<String>,
+    #[serde(default)]
+    pub tcp: Vec<std::net::SocketAddr>,
 }
 
 #[derive(Debug, Clone, Default, Serialize, Deserialize)]
@@ -413,6 +416,59 @@ pub struct UsbControlConfig {
     pub max_transfer_size: usize,
     #[serde(default = "default_usb_timeout_ms")]
     pub max_timeout_ms: u64,
+    #[serde(default)]
+    pub requests: Vec<UsbControlRequest>,
+}
+
+#[derive(Debug, Clone, Copy, PartialEq, Eq, Serialize, Deserialize)]
+#[serde(deny_unknown_fields)]
+pub struct UsbControlRequest {
+    pub request_type: u8,
+    pub request: u8,
+}
+
+impl UsbControlConfig {
+    pub fn check(
+        &self,
+        request_type: u8,
+        request: u8,
+        out_len: usize,
+        read_len: usize,
+        timeout_ms: u64,
+    ) -> Result<()> {
+        if !self.permits(request_type, request) {
+            bail!("USB control request 0x{request_type:02x}/0x{request:02x} is not declared");
+        }
+        let length = out_len.max(read_len);
+        if length > self.max_transfer_size {
+            bail!(
+                "USB control transfer length {length} exceeds bound {}",
+                self.max_transfer_size
+            );
+        }
+        if timeout_ms == 0 || timeout_ms > self.max_timeout_ms {
+            bail!(
+                "USB control timeout {timeout_ms}ms exceeds bound {}ms",
+                self.max_timeout_ms
+            );
+        }
+        let input = request_type & 0x80 != 0;
+        if input && out_len != 0 {
+            bail!("USB control IN transfer cannot include output bytes");
+        }
+        if !input && read_len != 0 {
+            bail!("USB control OUT transfer cannot request input bytes");
+        }
+        Ok(())
+    }
+
+    fn permits(&self, request_type: u8, request: u8) -> bool {
+        self.requests.is_empty()
+            || self.requests.contains(&UsbControlRequest {
+                request_type,
+                request,
+            })
+    }
 }
 
 /// A named physical USB device. `primary` inherits VID/PID and physical
@@ -532,7 +588,13 @@ pub struct TransportsConfig {
     pub http: Option<HttpConfig>,
     #[serde(default)]
     pub udp: Option<UdpConfig>,
+    #[serde(default)]
+    pub audio_routing: Option<AudioRoutingConfig>,
 }
+
+#[derive(Debug, Clone, Default, Serialize, Deserialize)]
+#[serde(deny_unknown_fields)]
+pub struct AudioRoutingConfig {}
 
 impl TransportsConfig {
     fn is_empty(&self) -> bool {
@@ -720,11 +782,11 @@ pub struct EffectManifest {
 
 impl EffectManifest {
     /// The catalog id an effect is registered/built under.
-    pub fn catalog_id(&self, plugin_id: &str) -> String {
+    pub fn catalog_id(&self, plugin_id: &PluginId) -> String {
         format!("{plugin_id}:{}", self.id)
     }
 
-    pub fn descriptor(&self, plugin_id: &str) -> Animation {
+    pub fn descriptor(&self, plugin_id: &PluginId) -> Animation {
         Animation {
             id: self.catalog_id(plugin_id),
             name: self.name.clone(),
@@ -773,13 +835,13 @@ pub struct WidgetManifest {
 }
 
 impl WidgetManifest {
-    pub fn catalog_id(&self, plugin_id: &str) -> String {
+    pub fn catalog_id(&self, plugin_id: &PluginId) -> String {
         format!("{plugin_id}:{}", self.id)
     }
 
     pub fn descriptor(
         &self,
-        plugin_id: &str,
+        plugin_id: &PluginId,
         translations: &std::collections::BTreeMap<
             String,
             std::collections::BTreeMap<String, String>,
@@ -787,7 +849,7 @@ impl WidgetManifest {
     ) -> LcdWidgetDescriptor {
         LcdWidgetDescriptor {
             id: self.catalog_id(plugin_id),
-            plugin_id: plugin_id.to_owned(),
+            plugin_id: plugin_id.into(),
             name: self.name.clone(),
             name_key: self.name_key.clone(),
             translations: translations.clone(),
@@ -835,10 +897,10 @@ pub struct PresetManifest {
 }
 
 impl PresetManifest {
-    pub fn descriptor(&self, plugin_id: &str) -> LcdPresetDescriptor {
+    pub fn descriptor(&self, plugin_id: &PluginId) -> LcdPresetDescriptor {
         LcdPresetDescriptor {
             id: format!("{plugin_id}:{}", self.id),
-            plugin_id: plugin_id.to_owned(),
+            plugin_id: plugin_id.into(),
             name: self.name.clone(),
             file: self.file.clone(),
         }
@@ -1111,8 +1173,8 @@ impl DeviceSpec {
     /// Delegates to `self.transport`'s registered backend (unknown kind → never).
     pub fn matches(&self, handle: &DiscoveryHandle<'_>) -> bool {
         descriptor_for(self.transport.kind())
-            .and_then(|d| d.matches)
-            .is_some_and(|m| m(self, handle))
+            .and_then(|d| d.discovery())
+            .is_some_and(|discovery| (discovery.matches)(self, handle))
     }
 
     pub fn hid(&self) -> Option<&HidMatch> {
@@ -1202,7 +1264,7 @@ pub struct Identity {
 #[derive(Debug, Clone)]
 pub struct PluginManifest {
     /// Unique package id, equal to its directory name for external packages.
-    pub plugin_id: String,
+    pub plugin_id: PluginId,
     pub source_path: PathBuf,
     /// Full entry-script text, re-executed by the worker to build its own VM.
     pub script_source: String,
@@ -1236,8 +1298,8 @@ pub struct PluginManifest {
     /// Explicitly declared host requirements (see [`RequirementDef`]). Auto-
     /// derived requirements are computed on demand, not stored here.
     pub requirements: Vec<RequirementDef>,
-    /// Privileged capabilities this plugin needs, gated by user consent.
-    pub permissions: Vec<Permission>,
+    pub version: semver::Version,
+    pub api: halod_plugin_signing::PluginApi,
     pub provides: Vec<DataProvideDef>,
     pub consumes: Vec<String>,
     /// Platforms on which this package may execute. An omitted list means all
@@ -1250,6 +1312,7 @@ pub struct PluginManifest {
     pub capabilities: Vec<String>,
     pub config: Option<ConfigManifest>,
     pub setup: Option<IntegrationSetupConfig>,
+    pub declarations: halod_plugin_signing::declarations::PackageDeclarations,
 }
 
 /// Package-only fields from `plugin.yaml`. All declarative device, capability,
@@ -1261,7 +1324,7 @@ pub struct PluginManifest {
 #[serde(deny_unknown_fields)]
 pub struct PluginMeta {
     /// Required; must equal the plugin's directory name.
-    pub id: String,
+    pub id: PluginId,
     #[serde(rename = "type", default)]
     pub plugin_type: PluginKind,
     #[serde(default)]
@@ -1270,8 +1333,8 @@ pub struct PluginMeta {
     pub name: Option<String>,
     #[serde(default)]
     pub author: Option<String>,
-    #[serde(default)]
-    pub version: Option<String>,
+    pub version: String,
+    pub api: halod_plugin_signing::PluginApi,
     #[serde(default)]
     pub license: Option<String>,
     #[serde(default)]
@@ -1280,8 +1343,6 @@ pub struct PluginMeta {
     pub identity: Identity,
     #[serde(default = "default_entry")]
     pub entry: String,
-    #[serde(default)]
-    pub permissions: Vec<Permission>,
     #[serde(default)]
     pub provides: Vec<DataProvideDef>,
     #[serde(default)]
@@ -1428,10 +1489,7 @@ impl PluginManifest {
 
     /// Plugin display name (`identity.name`, falling back to the plugin id).
     pub fn display_name(&self) -> String {
-        self.identity
-            .name
-            .clone()
-            .unwrap_or_else(|| self.plugin_id.clone())
+        self.declarations.name.clone()
     }
 
     /// Declared plugin author (empty when unset).
@@ -1476,16 +1534,18 @@ impl PluginManifest {
     /// Whether this package may execute on the current host. Unsupported
     /// packages remain catalog-visible but discovery must leave them inert.
     pub fn supports_current_platform(&self) -> bool {
-        self.platforms.is_empty()
-            || self
-                .platforms
-                .iter()
-                .any(|platform| platform == std::env::consts::OS)
+        self.declarations
+            .matches
+            .supports_platform(std::env::consts::OS)
     }
 
     /// Human-readable capability labels for the management UI.
     pub fn capability_labels(&self) -> Vec<String> {
         self.capabilities.clone()
+    }
+
+    pub fn needs_setup(&self) -> bool {
+        self.setup.is_some()
     }
 
     /// Every user-editable config field this plugin declares (empty if none).
@@ -1679,31 +1739,6 @@ fn declares_only_platform(platforms: &[String], os: &str) -> bool {
     !platforms.is_empty() && platforms.iter().all(|platform| platform == os)
 }
 
-const TRANSPORT_PERMISSIONS: &[(&str, Permission, &str)] = &[
-    ("hid", Permission::Hid, "hid"),
-    ("usb", Permission::Usb, "usb"),
-    ("smbus", Permission::Smbus, "smbus"),
-    ("command", Permission::Command, "command"),
-    ("amd_smn", Permission::AmdSmn, "amd_smn"),
-    ("lpcio", Permission::Lpcio, "lpcio"),
-    ("tcp", Permission::Network, "network"),
-    ("hwmon", Permission::Hwmon, "hwmon"),
-    ("serial", Permission::Serial, "serial"),
-];
-
-fn require_transport_permission(manifest: &PluginManifest, transport: &str) -> Result<()> {
-    if let Some((permission, label)) = TRANSPORT_PERMISSIONS
-        .iter()
-        .find(|(name, _, _)| *name == transport)
-        .map(|(_, permission, label)| (*permission, *label))
-    {
-        if !manifest.permissions.contains(&permission) {
-            bail!("the {transport} transport requires the `{label}` permission");
-        }
-    }
-    Ok(())
-}
-
 /// Cross-field validation, gated by `plugin_type`.
 pub(super) fn validate_manifest(manifest: &PluginManifest) -> Result<()> {
     check_count("devices", manifest.devices.len(), MAX_PLUGIN_DEVICES)?;
@@ -1739,10 +1774,11 @@ pub(super) fn validate_manifest(manifest: &PluginManifest) -> Result<()> {
                 }
                 validate_control_layout(spec)?;
                 match descriptor_for(spec.transport.kind()) {
-                    Some(desc) => {
-                        if let Some(validate) = desc.validate {
-                            validate(spec)?;
-                        }
+                    Some(PluginTransportDescriptor::Discovered { discovery, .. }) => {
+                        (discovery.validate)(spec)?;
+                    }
+                    Some(PluginTransportDescriptor::Configured { kind, .. }) => {
+                        bail!("transport '{kind}' is configured by the integration, not matched by a device")
                     }
                     None => bail!(
                         "unsupported device transport '{}' (known: {})",
@@ -1750,7 +1786,6 @@ pub(super) fn validate_manifest(manifest: &PluginManifest) -> Result<()> {
                         known_kinds().join(", ")
                     ),
                 }
-                require_transport_permission(manifest, spec.transport.kind())?;
             }
         }
         PluginKind::Effect => {
@@ -1801,36 +1836,21 @@ pub(super) fn validate_manifest(manifest: &PluginManifest) -> Result<()> {
             }
         }
     }
-    // A tcp transport reaches the network, so the manifest must declare the
-    // `network` permission — that's what drives the consent prompt and what the
-    // tcp backend gates its connect on. Without this a plugin could ship a tcp
-    // integration with an empty permission list and auto-activate silently.
-    if manifest.transports.tcp.is_some() {
-        require_transport_permission(manifest, "tcp")?;
+    if manifest.transports.hwmon.is_some() && !declares_only_platform(&manifest.platforms, "linux")
+    {
+        bail!("an hwmon integration must declare platforms: [linux]");
     }
-    if manifest.transports.hwmon.is_some() {
-        require_transport_permission(manifest, "hwmon")?;
-        if !declares_only_platform(&manifest.platforms, "linux") {
-            bail!("an hwmon integration must declare platforms: [linux]");
-        }
+    if manifest.transports.amd_smn.is_some()
+        && !declares_only_platform(&manifest.platforms, "windows")
+    {
+        bail!("an amd_smn transport must declare platforms: [windows]");
     }
-    if manifest.transports.amd_smn.is_some() {
-        require_transport_permission(manifest, "amd_smn")?;
-        if !declares_only_platform(&manifest.platforms, "windows") {
-            bail!("an amd_smn transport must declare platforms: [windows]");
-        }
-    }
-    if manifest.transports.lpcio.is_some() {
-        require_transport_permission(manifest, "lpcio")?;
-        if !declares_only_platform(&manifest.platforms, "windows") {
-            bail!("an lpcio transport must declare platforms: [windows]");
-        }
-    }
-    if manifest.transports.usb.is_some() {
-        require_transport_permission(manifest, "usb")?;
+    if manifest.transports.lpcio.is_some()
+        && !declares_only_platform(&manifest.platforms, "windows")
+    {
+        bail!("an lpcio transport must declare platforms: [windows]");
     }
     if let Some(serial) = &manifest.transports.serial {
-        require_transport_permission(manifest, "serial")?;
         if serial.port_key.is_empty() {
             bail!("a serial transport requires a non-empty port_key");
         }
@@ -1849,7 +1869,7 @@ pub(super) fn validate_manifest(manifest: &PluginManifest) -> Result<()> {
     }
     validate_http_transport(manifest)?;
     validate_udp_transport(manifest)?;
-    validate_component("plugin id", &manifest.plugin_id)?;
+    validate_short_text("name", &manifest.declarations.name)?;
     Ok(())
 }
 
@@ -1870,18 +1890,14 @@ fn validate_integration_setup(manifest: &PluginManifest) -> Result<()> {
     if unique.contains(&halod_shared::types::IntegrationSetupMode::Automatic)
         && setup.discovery.mdns.is_empty()
         && setup.discovery.ssdp.is_empty()
+        && setup.discovery.tcp.is_empty()
     {
-        bail!("automatic integration setup requires an mdns or ssdp declaration");
+        bail!("automatic integration setup requires an mdns, ssdp or tcp declaration");
     }
     if unique.contains(&halod_shared::types::IntegrationSetupMode::Manual)
         && manifest.config_fields().iter().all(|field| field.secure)
     {
         bail!("manual integration setup requires a non-secure config field");
-    }
-    if (!setup.discovery.mdns.is_empty() || !setup.discovery.ssdp.is_empty())
-        && !manifest.permissions.contains(&Permission::Network)
-    {
-        bail!("integration discovery requires the network permission");
     }
     for service in &setup.discovery.mdns {
         let valid = service.starts_with('_')
@@ -1919,11 +1935,6 @@ fn validate_integration_setup(manifest: &PluginManifest) -> Result<()> {
             refresh_token_key,
             ..
         } => {
-            if !manifest.permissions.contains(&Permission::Network)
-                || !manifest.permissions.contains(&Permission::SecureStorage)
-            {
-                bail!("OAuth2 setup requires network and secure_storage permissions");
-            }
             for endpoint in [authorization_url, token_url] {
                 let parsed = url::Url::parse(endpoint)
                     .with_context(|| format!("invalid OAuth2 endpoint '{endpoint}'"))?;
@@ -1957,9 +1968,6 @@ fn validate_http_transport(manifest: &PluginManifest) -> Result<()> {
     let Some(http) = &manifest.transports.http else {
         return Ok(());
     };
-    if !manifest.permissions.contains(&Permission::Network) {
-        bail!("an http transport requires the 'network' permission to be declared");
-    }
     if http.origins.is_empty() {
         bail!("an http transport must declare at least one origin");
     }
@@ -2060,9 +2068,6 @@ fn validate_udp_transport(manifest: &PluginManifest) -> Result<()> {
     let Some(udp) = &manifest.transports.udp else {
         return Ok(());
     };
-    if !manifest.permissions.contains(&Permission::Network) {
-        bail!("a udp transport requires the 'network' permission to be declared");
-    }
     if udp.host_key.is_empty() || udp.port_key.is_empty() {
         bail!("a udp transport requires a non-empty host_key and port_key");
     }
@@ -2422,16 +2427,16 @@ fn validate_requirements(manifest: &PluginManifest) -> Result<()> {
 }
 
 pub(super) fn validate_short_text(what: &str, value: &str) -> Result<()> {
-    if value.is_empty() || value.len() > MAX_TEXT_BYTES || value.contains('\0') {
-        bail!("{what} must be non-empty, contain no NUL, and be at most {MAX_TEXT_BYTES} bytes");
+    if value.is_empty() || value.len() > MAX_TEXT_BYTES || value.chars().any(char::is_control) {
+        bail!("{what} must be non-empty, contain no control characters, and be at most {MAX_TEXT_BYTES} bytes");
     }
     Ok(())
 }
 
 fn validate_optional_text(what: &str, value: &Option<String>, max: usize) -> Result<()> {
     if let Some(value) = value {
-        if value.len() > max || value.contains('\0') {
-            bail!("{what} must contain no NUL and be at most {max} bytes");
+        if value.len() > max || value.chars().any(char::is_control) {
+            bail!("{what} must contain no control characters and be at most {max} bytes");
         }
     }
     Ok(())
@@ -2945,7 +2950,6 @@ fn validate_transports(manifest: &PluginManifest) -> Result<()> {
         }
     }
     if let Some(command) = &manifest.transports.command {
-        require_transport_permission(manifest, "command")?;
         if command.commands.is_empty() {
             bail!("command transport must declare at least one executable");
         }
@@ -3017,11 +3021,6 @@ fn validate_control_layout(spec: &DeviceSpec) -> Result<()> {
 
 fn validate_controls(manifest: &PluginManifest) -> Result<()> {
     if let Some(config) = &manifest.config {
-        if config.fields.iter().any(|field| field.secure)
-            && !manifest.permissions.contains(&Permission::SecureStorage)
-        {
-            bail!("secure config fields require the 'secure_storage' permission");
-        }
         check_count("config fields", config.fields.len(), MAX_CONFIG_FIELDS)?;
         let mut keys = HashSet::new();
         for field in &config.fields {
@@ -3299,6 +3298,8 @@ pub(super) fn build_manifest_from_dir(dir: &Path) -> Result<PluginManifest> {
         std::fs::read(&meta_path).with_context(|| format!("reading {}", meta_path.display()))?;
     let meta: PluginMeta = serde_yaml::from_slice(&manifest_bytes)
         .with_context(|| format!("parsing {}", meta_path.display()))?;
+    let declarations = halod_plugin_signing::declarations::read_declarations(&manifest_bytes)
+        .with_context(|| format!("parsing {}", meta_path.display()))?;
 
     if meta.id.is_empty() {
         bail!("{} declares an empty id", meta_path.display());
@@ -3328,6 +3329,8 @@ pub(super) fn build_manifest_from_dir(dir: &Path) -> Result<PluginManifest> {
     if !(50..=60_000).contains(&meta.poll_interval_ms) {
         bail!("poll_interval_ms must be between 50 and 60000");
     }
+    let version = semver::Version::parse(&meta.version)
+        .with_context(|| format!("plugin version '{}' is not semver", meta.version))?;
     let manifest = PluginManifest {
         plugin_id: meta.id.clone(),
         source_path: entry_path,
@@ -3341,9 +3344,9 @@ pub(super) fn build_manifest_from_dir(dir: &Path) -> Result<PluginManifest> {
             .collect::<Result<_>>()?,
         identity: Identity {
             name: meta.name.or(meta.identity.name),
-            id: meta.identity.id.or(Some(meta.id)),
+            id: meta.identity.id.or_else(|| Some(meta.id.to_string())),
             author: meta.author.or(meta.identity.author),
-            version: meta.version.or(meta.identity.version),
+            version: Some(meta.version),
             license: meta.license.or(meta.identity.license),
             description: meta.description.or(meta.identity.description),
         },
@@ -3359,13 +3362,15 @@ pub(super) fn build_manifest_from_dir(dir: &Path) -> Result<PluginManifest> {
         presets: meta.presets,
         transports: meta.transports,
         requirements: meta.requirements,
-        permissions: meta.permissions,
+        version,
+        api: meta.api,
         provides: meta.provides,
         consumes: meta.consumes,
         platforms: meta.platforms,
         capabilities: meta.capabilities,
         config: meta.config,
         setup: meta.setup,
+        declarations,
     };
 
     Ok(manifest)
@@ -3374,6 +3379,7 @@ pub(super) fn build_manifest_from_dir(dir: &Path) -> Result<PluginManifest> {
 #[cfg(test)]
 mod tests {
     use super::*;
+    use halod_shared::types::Permission;
 
     #[test]
     fn command_transport_uses_a_narrow_case_insensitive_allowlist() {
@@ -3393,7 +3399,11 @@ mod tests {
     fn write_plugin_dir(root: &Path, id: &str, yaml_extra: &str, lua: &str) -> PathBuf {
         let dir = root.join(id);
         std::fs::create_dir_all(&dir).unwrap();
-        std::fs::write(dir.join("plugin.yaml"), format!("id: {id}\n{yaml_extra}")).unwrap();
+        std::fs::write(
+            dir.join("plugin.yaml"),
+            format!("id: {id}\nversion: 1.0.0\napi: \"3.0\"\n{yaml_extra}"),
+        )
+        .unwrap();
         std::fs::write(dir.join("main.lua"), lua).unwrap();
         dir
     }
@@ -3464,27 +3474,6 @@ mod tests {
     }
 
     #[test]
-    fn http_transport_requires_network_permission() {
-        let tmp = tempfile::tempdir().unwrap();
-        let missing = write_plugin_dir(
-            tmp.path(),
-            "weather",
-            "type: integration\npermissions: [secure_storage]\ntransports:\n  http:\n    origins: [https://api.example.com]\n",
-            ENTRY_LUA,
-        );
-        let err = parse_manifest_from_dir(&missing).unwrap_err().to_string();
-        assert!(err.contains("network"), "{err}");
-
-        let ok = write_plugin_dir(
-            tmp.path(),
-            "weather2",
-            "type: integration\npermissions: [network]\ntransports:\n  http:\n    origins: [https://api.example.com]\n",
-            ENTRY_LUA,
-        );
-        assert!(parse_manifest_from_dir(&ok).is_ok());
-    }
-
-    #[test]
     fn http_host_placeholder_requires_a_declared_host_key() {
         let tmp = tempfile::tempdir().unwrap();
         // A `{host}` origin backed by a declared config field and the live
@@ -3492,7 +3481,7 @@ mod tests {
         let ok = write_plugin_dir(
             tmp.path(),
             "lan_light",
-            "type: integration\npermissions: [network]\ntransports:\n  http:\n    host_key: host\n    port_key: port\n    origins: [\"https://{host}\"]\n    allow_private: true\n    tls: { profile: default }\nconfig:\n  fields:\n    - { key: host, label: Host, kind: host }\n    - { key: port, label: Port, kind: port, default: 443 }\n",
+            "type: integration\ntransports:\n  http:\n    host_key: host\n    port_key: port\n    origins: [\"https://{host}\"]\n    allow_private: true\n    tls: { profile: default }\nconfig:\n  fields:\n    - { key: host, label: Host, kind: host }\n    - { key: port, label: Port, kind: port, default: 443 }\n",
             ENTRY_LUA,
         );
         assert!(
@@ -3505,7 +3494,7 @@ mod tests {
         let no_key = write_plugin_dir(
             tmp.path(),
             "lan_nokey",
-            "type: integration\npermissions: [network]\ntransports:\n  http:\n    origins: [\"https://{host}\"]\n",
+            "type: integration\ntransports:\n  http:\n    origins: [\"https://{host}\"]\n",
             ENTRY_LUA,
         );
         assert!(parse_manifest_from_dir(&no_key)
@@ -3518,7 +3507,7 @@ mod tests {
         let no_port_key = write_plugin_dir(
             tmp.path(),
             "lan_no_port_key",
-            "type: integration\npermissions: [network]\ntransports:\n  http:\n    host_key: host\n    origins: [\"https://{host}\"]\nconfig:\n  fields:\n    - { key: host, label: Host, kind: host }\n",
+            "type: integration\ntransports:\n  http:\n    host_key: host\n    origins: [\"https://{host}\"]\nconfig:\n  fields:\n    - { key: host, label: Host, kind: host }\n",
             ENTRY_LUA,
         );
         assert!(parse_manifest_from_dir(&no_port_key)
@@ -3530,7 +3519,7 @@ mod tests {
         let bad_key = write_plugin_dir(
             tmp.path(),
             "lan_badkey",
-            "type: integration\npermissions: [network]\ntransports:\n  http:\n    host_key: missing\n    port_key: port\n    origins: [\"https://{host}\"]\nconfig:\n  fields:\n    - { key: port, label: Port, kind: port }\n",
+            "type: integration\ntransports:\n  http:\n    host_key: missing\n    port_key: port\n    origins: [\"https://{host}\"]\nconfig:\n  fields:\n    - { key: port, label: Port, kind: port }\n",
             ENTRY_LUA,
         );
         assert!(parse_manifest_from_dir(&bad_key)
@@ -3543,7 +3532,7 @@ mod tests {
         let split = write_plugin_dir(
             tmp.path(),
             "lan_split",
-            "type: integration\npermissions: [network]\ntransports:\n  http:\n    host_key: host\n    port_key: http_port\n    origins: [\"http://{host}\"]\n    allow_private: true\nconfig:\n  fields:\n    - { key: host, label: Host, kind: host }\n    - { key: http_port, label: HTTP port, kind: port, default: 16021 }\n",
+            "type: integration\ntransports:\n  http:\n    host_key: host\n    port_key: http_port\n    origins: [\"http://{host}\"]\n    allow_private: true\nconfig:\n  fields:\n    - { key: host, label: Host, kind: host }\n    - { key: http_port, label: HTTP port, kind: port, default: 16021 }\n",
             ENTRY_LUA,
         );
         assert!(parse_manifest_from_dir(&split).is_ok());
@@ -3551,7 +3540,7 @@ mod tests {
         let untyped_split = write_plugin_dir(
             tmp.path(),
             "lan_untyped_split",
-            "type: integration\npermissions: [network]\ntransports:\n  http:\n    host_key: host\n    port_key: http_port\n    origins: [\"http://{host}\"]\n    allow_private: true\nconfig:\n  fields:\n    - { key: host, label: Host, kind: text }\n    - { key: http_port, label: HTTP port, kind: port }\n",
+            "type: integration\ntransports:\n  http:\n    host_key: host\n    port_key: http_port\n    origins: [\"http://{host}\"]\n    allow_private: true\nconfig:\n  fields:\n    - { key: host, label: Host, kind: text }\n    - { key: http_port, label: HTTP port, kind: port }\n",
             ENTRY_LUA,
         );
         assert!(parse_manifest_from_dir(&untyped_split)
@@ -3562,7 +3551,7 @@ mod tests {
         let unused_port = write_plugin_dir(
             tmp.path(),
             "lan_unused_port",
-            "type: integration\npermissions: [network]\ntransports:\n  http:\n    port_key: http_port\n    origins: [https://api.example.com]\nconfig:\n  fields:\n    - { key: http_port, label: HTTP port, kind: port }\n",
+            "type: integration\ntransports:\n  http:\n    port_key: http_port\n    origins: [https://api.example.com]\nconfig:\n  fields:\n    - { key: http_port, label: HTTP port, kind: port }\n",
             ENTRY_LUA,
         );
         assert!(parse_manifest_from_dir(&unused_port)
@@ -3574,7 +3563,7 @@ mod tests {
         let bad_tls = write_plugin_dir(
             tmp.path(),
             "bad_tls",
-            "type: integration\npermissions: [network]\ntransports:\n  http:\n    origins: [https://api.example.com]\n    tls: { profile: trust-me }\n",
+            "type: integration\ntransports:\n  http:\n    origins: [https://api.example.com]\n    tls: { profile: trust-me }\n",
             ENTRY_LUA,
         );
         assert!(parse_manifest_from_dir(&bad_tls)
@@ -3587,7 +3576,7 @@ mod tests {
         let custom_without_identity = write_plugin_dir(
             tmp.path(),
             "custom_without_identity",
-            "type: integration\npermissions: [network]\ntransports:\n  http:\n    origins: [https://api.example.com]\n    tls: { profile: custom-ca, ca_der_base64: Zm9v }\n",
+            "type: integration\ntransports:\n  http:\n    origins: [https://api.example.com]\n    tls: { profile: custom-ca, ca_der_base64: Zm9v }\n",
             ENTRY_LUA,
         );
         assert!(parse_manifest_from_dir(&custom_without_identity)
@@ -3598,7 +3587,7 @@ mod tests {
         let custom_with_identity = write_plugin_dir(
             tmp.path(),
             "custom_with_identity",
-            "type: integration\npermissions: [network]\nconfig:\n  fields:\n    - { key: device_id, label: Device ID, type: string }\ntransports:\n  http:\n    origins: [https://api.example.com]\n    tls: { profile: custom-ca, ca_der_base64: Zm9v, verify_identity: device_id, certificate_identity: subject-cn }\n",
+            "type: integration\nconfig:\n  fields:\n    - { key: device_id, label: Device ID, type: string }\ntransports:\n  http:\n    origins: [https://api.example.com]\n    tls: { profile: custom-ca, ca_der_base64: Zm9v, verify_identity: device_id, certificate_identity: subject-cn }\n",
             ENTRY_LUA,
         );
         assert!(parse_manifest_from_dir(&custom_with_identity).is_ok());
@@ -3606,7 +3595,7 @@ mod tests {
         let custom_with_unknown_identity = write_plugin_dir(
             tmp.path(),
             "custom_with_unknown_identity",
-            "type: integration\npermissions: [network]\nconfig:\n  fields:\n    - { key: device_id, label: Device ID, type: string }\ntransports:\n  http:\n    origins: [https://api.example.com]\n    tls: { profile: custom-ca, ca_der_base64: Zm9v, verify_identity: device_id, certificate_identity: unchecked }\n",
+            "type: integration\nconfig:\n  fields:\n    - { key: device_id, label: Device ID, type: string }\ntransports:\n  http:\n    origins: [https://api.example.com]\n    tls: { profile: custom-ca, ca_der_base64: Zm9v, verify_identity: device_id, certificate_identity: unchecked }\n",
             ENTRY_LUA,
         );
         assert!(parse_manifest_from_dir(&custom_with_unknown_identity)
@@ -3621,7 +3610,7 @@ mod tests {
         let valid = write_plugin_dir(
             tmp.path(),
             "telemetry",
-            "permissions: [hid]\nprovides: [telemetry.current]\nconsumes: [host.sensors.*]\ndevices:\n  - vendor: Test\n    model: Telemetry\n    match: { hid: { vid: 1, pid: 2 } }\n",
+            "provides: [telemetry.current]\nconsumes: [host.sensors.*]\ndevices:\n  - vendor: Test\n    model: Telemetry\n    match: { hid: { vid: 1, pid: 2 } }\n",
             ENTRY_LUA,
         );
         let manifest = parse_manifest_from_dir(&valid).unwrap();
@@ -3632,7 +3621,7 @@ mod tests {
         let foreign = write_plugin_dir(
             tmp.path(),
             "diagnostics",
-            "permissions: [hid]\nprovides:\n  - { key: telemetry.current, stale_after_ms: 60000, min_notify_interval_ms: 250 }\ndevices:\n  - vendor: Test\n    model: Diagnostics\n    match: { hid: { vid: 1, pid: 3 } }\n",
+            "provides:\n  - { key: telemetry.current, stale_after_ms: 60000, min_notify_interval_ms: 250 }\ndevices:\n  - vendor: Test\n    model: Diagnostics\n    match: { hid: { vid: 1, pid: 3 } }\n",
             ENTRY_LUA,
         );
         assert!(parse_manifest_from_dir(&foreign)
@@ -3659,7 +3648,7 @@ mod tests {
         assert_eq!(manifest.widgets[0].assets, ["sun.svg", "cloud.svg"]);
         assert_eq!(
             manifest.widgets[0]
-                .descriptor("lcd_assets", &manifest.translations)
+                .descriptor(&"lcd_assets".parse().unwrap(), &manifest.translations)
                 .assets,
             ["sun.svg", "cloud.svg"]
         );
@@ -3765,7 +3754,7 @@ mod tests {
         assert!(format!("{error:#}").contains("default_font without uses_font"));
     }
 
-    const LAYOUT_YAML: &str = "permissions: [hid]\ncapabilities: [controls]\ndevices:\n  - vendor: Acme\n    model: K1\n    type: headset\n    match:\n      hid: { vid: 1, pid: 2 }\n    control_layout:\n";
+    const LAYOUT_YAML: &str = "capabilities: [controls]\ndevices:\n  - vendor: Acme\n    model: K1\n    type: headset\n    match:\n      hid: { vid: 1, pid: 2 }\n    control_layout:\n";
 
     #[test]
     fn device_control_layout_parses_with_defaults() {
@@ -3831,7 +3820,7 @@ mod tests {
         let dir = write_plugin_dir(
             tmp.path(),
             "unsafe_command",
-            "type: integration\npermissions: [command]\ntransports:\n  command:\n    commands: [python3]\n",
+            "type: integration\ntransports:\n  command:\n    commands: [python3]\n",
             ENTRY_LUA,
         );
         let error = parse_manifest_from_dir(&dir).unwrap_err();
@@ -3850,7 +3839,7 @@ mod tests {
         let dir = write_plugin_dir(
             tmp.path(),
             "unsafe_req",
-            "type: integration\nplatforms: [linux]\npermissions: [hwmon]\ntransports:\n  hwmon: {}\nrequirements:\n  - { kind: kernel_module, name: ../evil, platforms: [linux] }\n",
+            "type: integration\nplatforms: [linux]\ntransports:\n  hwmon: {}\nrequirements:\n  - { kind: kernel_module, name: ../evil, platforms: [linux] }\n",
             ENTRY_LUA,
         );
         assert!(parse_manifest_from_dir(&dir).is_err());
@@ -3886,7 +3875,7 @@ mod tests {
         let dir = write_plugin_dir(
             tmp.path(),
             "dup_req",
-            "type: integration\npermissions: [command]\ntransports:\n  command:\n    commands: [liquidctl]\nrequirements:\n  - { kind: command, name: liquidctl }\n  - { kind: command, name: LIQUIDCTL }\n",
+            "type: integration\ntransports:\n  command:\n    commands: [liquidctl]\nrequirements:\n  - { kind: command, name: liquidctl }\n  - { kind: command, name: LIQUIDCTL }\n",
             ENTRY_LUA,
         );
         let err = parse_manifest_from_dir(&dir).unwrap_err();
@@ -3899,12 +3888,15 @@ mod tests {
         let dir = write_plugin_dir(
             tmp.path(),
             "presence_req",
-            "type: integration\npermissions: [network]\ntransports:\n  tcp: {}\nrequirements:\n  - { kind: command, name: openrgb }\nconfig:\n  fields:\n    - { key: host, label: Host, kind: host }\n    - { key: port, label: Port, kind: port }\n",
+            "type: integration\ntransports:\n  tcp: {}\nrequirements:\n  - { kind: command, name: openrgb }\nconfig:\n  fields:\n    - { key: host, label: Host, kind: host }\n    - { key: port, label: Port, kind: port }\n",
             ENTRY_LUA,
         );
         let manifest = parse_manifest_from_dir(&dir).unwrap();
         assert!(manifest.transports.command.is_none());
-        assert!(!manifest.permissions.contains(&Permission::Command));
+        assert_eq!(
+            manifest.declarations.uses.permissions,
+            [Permission::Network]
+        );
         assert_eq!(manifest.requirements[0].name, "openrgb");
     }
 
@@ -3934,7 +3926,7 @@ mod tests {
         let dir = write_plugin_dir(
             tmp.path(),
             "dirplug",
-            "permissions: [hid]\ncapabilities: [lighting]\ndevices:\n  - vendor: Acme\n    model: K1\n    type: led_strip\n    match:\n      hid: { vid: 1, pid: 2 }\n",
+            "capabilities: [lighting]\ndevices:\n  - vendor: Acme\n    model: K1\n    type: led_strip\n    match:\n      hid: { vid: 1, pid: 2 }\n",
             ENTRY_LUA,
         );
         let m = parse_manifest_from_dir(&dir).unwrap();
@@ -3947,7 +3939,7 @@ mod tests {
     #[test]
     fn rich_config_fields_parse_with_metadata_and_typed_defaults() {
         let tmp = tempfile::tempdir().unwrap();
-        let common = "permissions: [hid, secure_storage]\ncapabilities: [lighting]\ndevices:\n  - vendor: Acme\n    model: Device\n    match:\n      hid: { vid: 1, pid: 2 }\nconfig:\n  fields:\n    - { key: enabled, label: Enabled, kind: boolean, default: true }\n    - { key: mode, label: Mode, kind: enum, options: [auto, manual], default: auto }\n    - { key: host, label: Host, kind: host, default: localhost }\n    - { key: port, label: Port, kind: port, default: 6742 }\n    - { key: endpoint, label: Endpoint, kind: url, default: 'https://example.com/api' }\n    - { key: timeout, label: Timeout, kind: duration_ms, default: 2500, min: 100, max: 10000 }\n    - key: detail\n      label: Detail\n      placeholder: Optional value\n      help: Used only in manual mode.\n      visible_when: { field: mode, equals: manual }\n    - { key: token, label: Token, secure: true }\n";
+        let common = "capabilities: [lighting]\ndevices:\n  - vendor: Acme\n    model: Device\n    match:\n      hid: { vid: 1, pid: 2 }\nconfig:\n  fields:\n    - { key: enabled, label: Enabled, kind: boolean, default: true }\n    - { key: mode, label: Mode, kind: enum, options: [auto, manual], default: auto }\n    - { key: host, label: Host, kind: host, default: localhost }\n    - { key: port, label: Port, kind: port, default: 6742 }\n    - { key: endpoint, label: Endpoint, kind: url, default: 'https://example.com/api' }\n    - { key: timeout, label: Timeout, kind: duration_ms, default: 2500, min: 100, max: 10000 }\n    - key: detail\n      label: Detail\n      placeholder: Optional value\n      help: Used only in manual mode.\n      visible_when: { field: mode, equals: manual }\n    - { key: token, label: Token, secure: true }\n";
         let dir = write_plugin_dir(tmp.path(), "rich_config", common, ENTRY_LUA);
 
         let manifest = parse_manifest_from_dir(&dir).unwrap();
@@ -3967,23 +3959,9 @@ mod tests {
     }
 
     #[test]
-    fn secure_config_requires_secure_storage_permission() {
-        let tmp = tempfile::tempdir().unwrap();
-        let dir = write_plugin_dir(
-            tmp.path(),
-            "insecure_secret",
-            "permissions: [hid]\ncapabilities: [lighting]\ndevices:\n  - vendor: Acme\n    model: Device\n    match:\n      hid: { vid: 1, pid: 2 }\nconfig:\n  fields:\n    - { key: token, label: Token, secure: true }\n",
-            ENTRY_LUA,
-        );
-
-        let error = parse_manifest_from_dir(&dir).unwrap_err();
-        assert!(format!("{error:#}").contains("secure_storage"));
-    }
-
-    #[test]
     fn directory_plugin_indexes_only_its_package_local_lib_modules() {
         let tmp = tempfile::tempdir().unwrap();
-        let integration = "type: integration\nplatforms: [linux]\npermissions: [hwmon]\ntransports:\n  hwmon: {}\n";
+        let integration = "type: integration\nplatforms: [linux]\ntransports:\n  hwmon: {}\n";
         let dir = write_plugin_dir(tmp.path(), "modules", integration, "return {}");
         std::fs::create_dir_all(dir.join("lib").join("proto")).unwrap();
         std::fs::write(
@@ -4010,7 +3988,7 @@ mod tests {
         std::fs::create_dir_all(&dir).unwrap();
         std::fs::write(
             dir.join("plugin.yaml"),
-            "id: missing_compatibility\ncompatibility:\n  halod: '>=0.2.0'\n  plugin_api: 1\ntype: integration\n",
+            "id: missing_compatibility\nversion: 1.0.0\napi: \"3.0\"\ncompatibility:\n  halod: '>=0.2.0'\n  plugin_api: 1\ntype: integration\n",
         )
         .unwrap();
         std::fs::write(dir.join("main.lua"), "return { type = 'integration' }").unwrap();
@@ -4029,7 +4007,7 @@ mod tests {
         std::fs::create_dir_all(&dir).unwrap();
         std::fs::write(
             dir.join("plugin.yaml"),
-            "id: dirplug2\nentry: driver.lua\nlicense: GPL-3.0-or-later\npermissions: [hid]\ncapabilities: [lighting]\ndevices:\n  - vendor: Acme\n    model: K1\n    type: led_strip\n    match:\n      hid: { vid: 1, pid: 2 }\n",
+            "id: dirplug2\nversion: 1.0.0\napi: \"3.0\"\nentry: driver.lua\nlicense: GPL-3.0-or-later\ncapabilities: [lighting]\ndevices:\n  - vendor: Acme\n    model: K1\n    type: led_strip\n    match:\n      hid: { vid: 1, pid: 2 }\n",
         )
         .unwrap();
         std::fs::write(dir.join("driver.lua"), ENTRY_LUA).unwrap();
@@ -4053,7 +4031,7 @@ mod tests {
         let dir = write_plugin_dir(
             tmp.path(),
             "overlaid",
-            "type: device\nname: Real Name\npermissions: [hid]\ncapabilities: [lighting]\ndevices:\n  - vendor: Real\n    model: K1\n    type: led_strip\n    match:\n      hid: { vid: 1, pid: 2 }\n",
+            "type: device\nname: Real Name\ncapabilities: [lighting]\ndevices:\n  - vendor: Real\n    model: K1\n    type: led_strip\n    match:\n      hid: { vid: 1, pid: 2 }\n",
             lua,
         );
         let m = parse_manifest_from_dir(&dir).unwrap();
@@ -4066,8 +4044,7 @@ mod tests {
     #[test]
     fn directory_plugin_reads_experimental_marker() {
         let tmp = tempfile::tempdir().unwrap();
-        let integration =
-            "type: integration\nplatforms: [linux]\npermissions: [hwmon]\ntransports:\n  hwmon: {}\n";
+        let integration = "type: integration\nplatforms: [linux]\ntransports:\n  hwmon: {}\n";
         let experimental = write_plugin_dir(
             tmp.path(),
             "experimental_plugin",
@@ -4086,7 +4063,7 @@ mod tests {
         let dir = write_plugin_dir(
             tmp.path(),
             "inert_entry",
-            "type: integration\nplatforms: [linux]\npermissions: [hwmon]\ntransports:\n  hwmon: {}\n",
+            "type: integration\nplatforms: [linux]\ntransports:\n  hwmon: {}\n",
             "this is deliberately not valid Lua",
         );
         let manifest = parse_manifest_from_dir(&dir).unwrap();
@@ -4100,7 +4077,7 @@ mod tests {
         let dir = write_plugin_dir(
             tmp.path(),
             "hwmon",
-            "type: integration\nplatforms: [linux]\npermissions: [hwmon]\ncapabilities: [sensors, cooling]\ntransports:\n  hwmon: {}\n",
+            "type: integration\nplatforms: [linux]\ncapabilities: [sensors, cooling]\ntransports:\n  hwmon: {}\n",
             ENTRY_LUA,
         );
         let manifest = parse_manifest_from_dir(&dir).unwrap();
@@ -4116,7 +4093,7 @@ mod tests {
         let dir = write_plugin_dir(
             tmp.path(),
             "http_integration",
-            "type: integration\npermissions: [network]\ntransports:\n  http:\n    origins: [https://api.example.com]\n",
+            "type: integration\ntransports:\n  http:\n    origins: [https://api.example.com]\n",
             ENTRY_LUA,
         );
         let manifest = parse_manifest_from_dir(&dir).unwrap();
@@ -4132,7 +4109,7 @@ mod tests {
         let dir = write_plugin_dir(
             tmp.path(),
             "oauth_integration",
-            "type: integration\npermissions: [network, secure_storage]\ntransports:\n  http:\n    origins: [https://api.example.com]\nsetup:\n  modes: [automatic, manual]\n  discovery:\n    mdns: [_example._tcp.local.]\n    ssdp: [urn:example:device:1]\n  auth:\n    kind: oauth2_pkce\n    authorization_url: https://accounts.example.com/authorize\n    token_url: https://accounts.example.com/token\n    client_id: halo-desktop\n    scopes: [device.read]\n    access_token_key: access_token\n    refresh_token_key: refresh_token\nconfig:\n  fields:\n    - { key: host, label: Host, kind: host }\n    - { key: access_token, label: Access token, secure: true }\n    - { key: refresh_token, label: Refresh token, secure: true }\n",
+            "type: integration\ntransports:\n  http:\n    origins: [https://api.example.com]\nsetup:\n  modes: [automatic, manual]\n  discovery:\n    mdns: [_example._tcp.local.]\n    ssdp: [urn:example:device:1]\n  auth:\n    kind: oauth2_pkce\n    authorization_url: https://accounts.example.com/authorize\n    token_url: https://accounts.example.com/token\n    client_id: halo-desktop\n    scopes: [device.read]\n    access_token_key: access_token\n    refresh_token_key: refresh_token\nconfig:\n  fields:\n    - { key: host, label: Host, kind: host }\n    - { key: access_token, label: Access token, secure: true }\n    - { key: refresh_token, label: Refresh token, secure: true }\n",
             ENTRY_LUA,
         );
         let manifest = parse_manifest_from_dir(&dir).unwrap();
@@ -4145,38 +4122,81 @@ mod tests {
     }
 
     #[test]
+    fn a_name_with_a_line_break_cannot_reach_the_udev_rules() {
+        let tmp = tempfile::tempdir().unwrap();
+        let dir = write_plugin_dir(
+            tmp.path(),
+            "injected",
+            "name: \"x\\nACTION==\\\"add\\\", RUN+=\\\"/bin/sh\\\"\"\ncapabilities: [lighting]\ndevices:\n  - vendor: Acme\n    model: K1\n    type: keyboard\n    match:\n      hid: { vid: 0x1234, pid: 0x0001 }\ntransports:\n  hid: {}\n",
+            ENTRY_LUA,
+        );
+        let error = parse_manifest_from_dir(&dir).unwrap_err().to_string();
+        assert!(error.contains("control characters"), "{error}");
+    }
+
+    #[test]
+    fn a_declared_setup_needs_setup_even_when_every_field_has_a_default() {
+        let tmp = tempfile::tempdir().unwrap();
+        let manifest = |id: &str, fields: &str| {
+            let dir = write_plugin_dir(
+                tmp.path(),
+                id,
+                &format!("type: integration\ntransports:\n  tcp:\n    host_key: host\n    port_key: port\nsetup:\n  modes: [manual]\nconfig:\n  fields:\n{fields}"),
+                ENTRY_LUA,
+            );
+            parse_manifest_from_dir(&dir).unwrap()
+        };
+        let defaults = "    - { key: host, label: Host, kind: host, default: 127.0.0.1 }\n    - { key: port, label: Port, kind: port, default: '6742' }\n";
+        let missing = "    - { key: host, label: Host, kind: host }\n    - { key: port, label: Port, kind: port, default: '6742' }\n";
+        assert!(manifest("all_defaults", defaults).needs_setup());
+        assert!(manifest("needs_host", missing).needs_setup());
+    }
+
+    #[test]
     fn automatic_setup_requires_declared_discovery() {
         let tmp = tempfile::tempdir().unwrap();
         let dir = write_plugin_dir(
             tmp.path(),
             "missing_discovery",
-            "type: integration\npermissions: [network]\ntransports:\n  http:\n    origins: [https://api.example.com]\nsetup:\n  modes: [automatic]\n",
+            "type: integration\ntransports:\n  http:\n    origins: [https://api.example.com]\nsetup:\n  modes: [automatic]\n",
             ENTRY_LUA,
         );
         assert!(parse_manifest_from_dir(&dir)
             .unwrap_err()
             .to_string()
-            .contains("requires an mdns or ssdp"));
+            .contains("requires an mdns, ssdp or tcp"));
     }
 
     #[test]
-    fn hwmon_integration_requires_permission_and_linux_platform() {
+    fn tcp_discovery_takes_socket_addresses_only() {
         let tmp = tempfile::tempdir().unwrap();
-        let missing_permission = write_plugin_dir(
-            tmp.path(),
-            "missing_permission",
-            "type: integration\nplatforms: [linux]\ntransports:\n  hwmon: {}\n",
-            ENTRY_LUA,
+        let manifest = |id: &str, endpoint: &str| {
+            let dir = write_plugin_dir(
+                tmp.path(),
+                id,
+                &format!("type: integration\ntransports:\n  tcp:\n    host_key: host\n    port_key: port\nsetup:\n  modes: [automatic]\n  discovery:\n    tcp: [\"{endpoint}\"]\nconfig:\n  fields:\n    - {{ key: host, label: Host, kind: host }}\n    - {{ key: port, label: Port, kind: port }}\n"),
+                ENTRY_LUA,
+            );
+            parse_manifest_from_dir(&dir)
+        };
+        let setup = manifest("tcp_probe", "127.0.0.1:6742")
+            .unwrap()
+            .setup
+            .unwrap();
+        assert_eq!(
+            setup.discovery.tcp,
+            ["127.0.0.1:6742".parse::<std::net::SocketAddr>().unwrap()]
         );
-        assert!(parse_manifest_from_dir(&missing_permission)
-            .unwrap_err()
-            .to_string()
-            .contains("hwmon"));
+        assert!(manifest("tcp_hostname", "localhost:6742").is_err());
+    }
 
+    #[test]
+    fn hwmon_integration_requires_the_linux_platform() {
+        let tmp = tempfile::tempdir().unwrap();
         let wrong_platform = write_plugin_dir(
             tmp.path(),
             "wrong_platform",
-            "type: integration\nplatforms: [windows]\npermissions: [hwmon]\ntransports:\n  hwmon: {}\n",
+            "type: integration\nplatforms: [windows]\ntransports:\n  hwmon: {}\n",
             ENTRY_LUA,
         );
         assert!(parse_manifest_from_dir(&wrong_platform)
@@ -4190,7 +4210,7 @@ mod tests {
         let tmp = tempfile::tempdir().unwrap();
         let body = |platforms: &str| {
             format!(
-                "{platforms}permissions: [amd_smn]\ncapabilities: [sensors]\ndevices:\n  - vendor: AMD\n    model: AMD Zen CPU\n    type: sensor\n    match:\n      amd_smn: {{ any: true }}\ntransports:\n  amd_smn: {{}}\n"
+                "{platforms}capabilities: [sensors]\ndevices:\n  - vendor: AMD\n    model: AMD Zen CPU\n    type: sensor\n    match:\n      amd_smn: {{ any: true }}\ntransports:\n  amd_smn: {{}}\n"
             )
         };
 
@@ -4217,7 +4237,7 @@ mod tests {
         let dir = write_plugin_dir(
             tmp.path(),
             "hwmon_plus_http",
-            "type: integration\nplatforms: [linux]\npermissions: [hwmon, network]\ntransports:\n  hwmon: {}\n  http:\n    origins: [https://api.example.com]\n",
+            "type: integration\nplatforms: [linux]\ntransports:\n  hwmon: {}\n  http:\n    origins: [https://api.example.com]\n",
             ENTRY_LUA,
         );
         let manifest = parse_manifest_from_dir(&dir).unwrap();
@@ -4233,7 +4253,7 @@ mod tests {
         let dir = write_plugin_dir(
             tmp.path(),
             "serial_ok",
-            "type: integration\npermissions: [serial]\ntransports:\n  serial:\n    port_key: serial_port\n    baud: 9600\n    parity: even\nconfig:\n  fields:\n    - { key: serial_port, label: Port, kind: serial_port }\n",
+            "type: integration\ntransports:\n  serial:\n    port_key: serial_port\n    baud: 9600\n    parity: even\nconfig:\n  fields:\n    - { key: serial_port, label: Port, kind: serial_port }\n",
             ENTRY_LUA,
         );
         let manifest = parse_manifest_from_dir(&dir).unwrap();
@@ -4247,27 +4267,12 @@ mod tests {
     }
 
     #[test]
-    fn serial_transport_requires_the_serial_permission() {
-        let tmp = tempfile::tempdir().unwrap();
-        let dir = write_plugin_dir(
-            tmp.path(),
-            "serial_no_perm",
-            "type: integration\ntransports:\n  serial:\n    port_key: serial_port\nconfig:\n  fields:\n    - { key: serial_port, label: Port, kind: serial_port }\n",
-            ENTRY_LUA,
-        );
-        assert!(parse_manifest_from_dir(&dir)
-            .unwrap_err()
-            .to_string()
-            .contains("serial"));
-    }
-
-    #[test]
     fn serial_transport_rejects_out_of_range_line_settings() {
         let tmp = tempfile::tempdir().unwrap();
         let dir = write_plugin_dir(
             tmp.path(),
             "serial_bad_bits",
-            "type: integration\npermissions: [serial]\ntransports:\n  serial:\n    port_key: serial_port\n    data_bits: 9\nconfig:\n  fields:\n    - { key: serial_port, label: Port, kind: serial_port }\n",
+            "type: integration\ntransports:\n  serial:\n    port_key: serial_port\n    data_bits: 9\nconfig:\n  fields:\n    - { key: serial_port, label: Port, kind: serial_port }\n",
             ENTRY_LUA,
         );
         assert!(parse_manifest_from_dir(&dir)
@@ -4282,7 +4287,7 @@ mod tests {
         let dir = write_plugin_dir(
             tmp.path(),
             "udp_ok",
-            "permissions: [hid, network]\ncapabilities: [lighting]\ndevices:\n  - vendor: A\n    model: B\n    type: led_strip\n    match: { hid: { vid: 1, pid: 2 } }\ntransports:\n  udp:\n    host_key: host\n    port_key: port\n    max_datagram_bytes: 1024\nconfig:\n  fields:\n    - { key: host, label: Host, kind: host }\n    - { key: port, label: Port, kind: port }\n",
+            "capabilities: [lighting]\ndevices:\n  - vendor: A\n    model: B\n    type: led_strip\n    match: { hid: { vid: 1, pid: 2 } }\ntransports:\n  udp:\n    host_key: host\n    port_key: port\n    max_datagram_bytes: 1024\nconfig:\n  fields:\n    - { key: host, label: Host, kind: host }\n    - { key: port, label: Port, kind: port }\n",
             ENTRY_LUA,
         );
         let manifest = parse_manifest_from_dir(&dir).unwrap();
@@ -4300,7 +4305,7 @@ mod tests {
         let dir = write_plugin_dir(
             tmp.path(),
             "udp_defaults",
-            "permissions: [hid, network]\ncapabilities: [lighting]\ndevices:\n  - vendor: A\n    model: B\n    type: led_strip\n    match: { hid: { vid: 1, pid: 2 } }\ntransports:\n  udp:\n    host_key: host\n    port_key: port\nconfig:\n  fields:\n    - { key: host, label: Host, kind: host }\n    - { key: port, label: Port, kind: port }\n",
+            "capabilities: [lighting]\ndevices:\n  - vendor: A\n    model: B\n    type: led_strip\n    match: { hid: { vid: 1, pid: 2 } }\ntransports:\n  udp:\n    host_key: host\n    port_key: port\nconfig:\n  fields:\n    - { key: host, label: Host, kind: host }\n    - { key: port, label: Port, kind: port }\n",
             ENTRY_LUA,
         );
         let manifest = parse_manifest_from_dir(&dir).unwrap();
@@ -4316,7 +4321,7 @@ mod tests {
         let dir = write_plugin_dir(
             tmp.path(),
             "udp_wrong_kinds",
-            "permissions: [hid, network]\ncapabilities: [lighting]\ndevices:\n  - vendor: A\n    model: B\n    type: led_strip\n    match: { hid: { vid: 1, pid: 2 } }\ntransports:\n  udp:\n    host_key: host\n    port_key: port\nconfig:\n  fields:\n    - { key: host, label: Host, kind: text }\n    - { key: port, label: Port, kind: text }\n",
+            "capabilities: [lighting]\ndevices:\n  - vendor: A\n    model: B\n    type: led_strip\n    match: { hid: { vid: 1, pid: 2 } }\ntransports:\n  udp:\n    host_key: host\n    port_key: port\nconfig:\n  fields:\n    - { key: host, label: Host, kind: text }\n    - { key: port, label: Port, kind: text }\n",
             ENTRY_LUA,
         );
         assert!(parse_manifest_from_dir(&dir)
@@ -4326,27 +4331,12 @@ mod tests {
     }
 
     #[test]
-    fn udp_transport_requires_the_network_permission() {
-        let tmp = tempfile::tempdir().unwrap();
-        let dir = write_plugin_dir(
-            tmp.path(),
-            "udp_no_net",
-            "permissions: [hid]\ncapabilities: [lighting]\ndevices:\n  - vendor: A\n    model: B\n    type: led_strip\n    match: { hid: { vid: 1, pid: 2 } }\ntransports:\n  udp:\n    host_key: host\n    port_key: port\nconfig:\n  fields:\n    - { key: host, label: Host, kind: host }\n    - { key: port, label: Port, kind: port }\n",
-            ENTRY_LUA,
-        );
-        assert!(parse_manifest_from_dir(&dir)
-            .unwrap_err()
-            .to_string()
-            .contains("network"));
-    }
-
-    #[test]
     fn udp_transport_rejects_oversized_datagram_bound() {
         let tmp = tempfile::tempdir().unwrap();
         let dir = write_plugin_dir(
             tmp.path(),
             "udp_big",
-            "permissions: [hid, network]\ncapabilities: [lighting]\ndevices:\n  - vendor: A\n    model: B\n    type: led_strip\n    match: { hid: { vid: 1, pid: 2 } }\ntransports:\n  udp:\n    host_key: host\n    port_key: port\n    max_datagram_bytes: 70000\nconfig:\n  fields:\n    - { key: host, label: Host, kind: host }\n    - { key: port, label: Port, kind: port }\n",
+            "capabilities: [lighting]\ndevices:\n  - vendor: A\n    model: B\n    type: led_strip\n    match: { hid: { vid: 1, pid: 2 } }\ntransports:\n  udp:\n    host_key: host\n    port_key: port\n    max_datagram_bytes: 70000\nconfig:\n  fields:\n    - { key: host, label: Host, kind: host }\n    - { key: port, label: Port, kind: port }\n",
             ENTRY_LUA,
         );
         assert!(parse_manifest_from_dir(&dir)
@@ -4361,7 +4351,7 @@ mod tests {
         let dir = write_plugin_dir(
             tmp.path(),
             "multiple_roots",
-            "type: integration\nplatforms: [linux]\npermissions: [hwmon, network]\ntransports:\n  hwmon: {}\n  tcp:\n    host_key: host\n    port_key: port\nconfig:\n  fields:\n    - { key: host, label: Host, kind: host }\n    - { key: port, label: Port, kind: port }\n",
+            "type: integration\nplatforms: [linux]\ntransports:\n  hwmon: {}\n  tcp:\n    host_key: host\n    port_key: port\nconfig:\n  fields:\n    - { key: host, label: Host, kind: host }\n    - { key: port, label: Port, kind: port }\n",
             ENTRY_LUA,
         );
         assert!(parse_manifest_from_dir(&dir)
@@ -4376,13 +4366,13 @@ mod tests {
         let dir = write_plugin_dir(
             tmp.path(),
             "actual-dir-name",
-            "permissions: [hid]\ncapabilities: [lighting]\ndevices:\n  - vendor: A\n    model: B\n    type: led_strip\n    match:\n      hid: { vid: 1, pid: 2 }\n",
+            "capabilities: [lighting]\ndevices:\n  - vendor: A\n    model: B\n    type: led_strip\n    match:\n      hid: { vid: 1, pid: 2 }\n",
             ENTRY_LUA,
         );
         // Rewrite plugin.yaml claiming a different id than the directory name.
         std::fs::write(
             dir.join("plugin.yaml"),
-            "id: someone-else\npermissions: [hid]\ncapabilities: [lighting]\ndevices:\n  - vendor: A\n    model: B\n    type: led_strip\n    match:\n      hid: { vid: 1, pid: 2 }\n",
+            "id: someone-else\ncapabilities: [lighting]\ndevices:\n  - vendor: A\n    model: B\n    type: led_strip\n    match:\n      hid: { vid: 1, pid: 2 }\n",
         )
         .unwrap();
         assert!(parse_manifest_from_dir(&dir).is_err());
@@ -4399,7 +4389,7 @@ mod tests {
         let no_entry = write_plugin_dir(
             tmp.path(),
             "no_entry",
-            "permissions: [hid]\ncapabilities: [lighting]\ndevices:\n  - vendor: A\n    model: B\n    type: led_strip\n    match:\n      hid: { vid: 1, pid: 2 }\n",
+            "capabilities: [lighting]\ndevices:\n  - vendor: A\n    model: B\n    type: led_strip\n    match:\n      hid: { vid: 1, pid: 2 }\n",
             ENTRY_LUA,
         );
         std::fs::remove_file(no_entry.join("main.lua")).unwrap();
@@ -4408,7 +4398,7 @@ mod tests {
 
     #[test]
     fn plugin_meta_devices_round_trip_through_yaml() {
-        let yaml = "id: rt\ndevices:\n  - vendor: Acme\n    model: K1\n    type: led_strip\n    match:\n      hid: { vid: 1 }\n  - vendor: Acme\n    model: K2\n    type: led_strip\n    match:\n      hid: { vid: 2 }\n";
+        let yaml = "id: rt\nversion: 1.0.0\napi: \"3.0\"\ndevices:\n  - vendor: Acme\n    model: K1\n    type: led_strip\n    match:\n      hid: { vid: 1 }\n  - vendor: Acme\n    model: K2\n    type: led_strip\n    match:\n      hid: { vid: 2 }\n";
         let parsed: PluginMeta = serde_yaml::from_str(yaml).unwrap();
         assert_eq!(parsed.devices.len(), 2);
         assert_eq!(parsed.devices[0].vendor, "Acme");
@@ -4422,7 +4412,7 @@ mod tests {
         let dir = write_plugin_dir(
             tmp.path(),
             "noassets",
-            "permissions: [hid]\ncapabilities: [lighting]\ndevices:\n  - vendor: A\n    model: B\n    type: led_strip\n    match:\n      hid: { vid: 1, pid: 2 }\n",
+            "capabilities: [lighting]\ndevices:\n  - vendor: A\n    model: B\n    type: led_strip\n    match:\n      hid: { vid: 1, pid: 2 }\n",
             ENTRY_LUA,
         );
         let m = parse_manifest_from_dir(&dir).unwrap();
@@ -4436,7 +4426,7 @@ mod tests {
         let dir = write_plugin_dir(
             tmp.path(),
             "withassets",
-            "permissions: [hid]\ncapabilities: [lighting]\ndevices:\n  - vendor: A\n    model: B\n    type: led_strip\n    match:\n      hid: { vid: 1, pid: 2 }\n\
+            "capabilities: [lighting]\ndevices:\n  - vendor: A\n    model: B\n    type: led_strip\n    match:\n      hid: { vid: 1, pid: 2 }\n\
              logo: logo.png\n\
              effects:\n  - kind: pixmap\n    id: rainbow\n    name: Rainbow\n\
              effect_assets:\n  - id: rainbow\n    thumbnail: rainbow.png\n",
@@ -4455,7 +4445,7 @@ mod tests {
         let dir = write_plugin_dir(
             tmp.path(),
             "conv",
-            "permissions: [hid]\ncapabilities: [lighting]\ndevices:\n  - vendor: A\n    model: B\n    type: led_strip\n    match:\n      hid: { vid: 1, pid: 2 }\n",
+            "capabilities: [lighting]\ndevices:\n  - vendor: A\n    model: B\n    type: led_strip\n    match:\n      hid: { vid: 1, pid: 2 }\n",
             ENTRY_LUA,
         );
         // No `logo:` in the manifest, but the file is present.
@@ -4474,7 +4464,7 @@ mod tests {
         std::fs::create_dir_all(&dir).unwrap();
         std::fs::write(
             dir.join("plugin.yaml"),
-            "id: nested_match\nname: Nested Match\npermissions: [hid]\ncapabilities: [lighting]\ndevices:\n  - vendor: Acme\n    model: K1\n    type: mouse\n    match:\n      hid:\n        vid: 0x1234\n        pid: 0x5678\n",
+            "id: nested_match\nversion: 1.0.0\napi: \"3.0\"\nname: Nested Match\ncapabilities: [lighting]\ndevices:\n  - vendor: Acme\n    model: K1\n    type: mouse\n    match:\n      hid:\n        vid: 0x1234\n        pid: 0x5678\n",
         )
         .unwrap();
         std::fs::write(dir.join("main.lua"), ENTRY_LUA).unwrap();
@@ -4494,7 +4484,7 @@ mod tests {
         std::fs::create_dir_all(&dir).unwrap();
         std::fs::write(
             dir.join("plugin.yaml"),
-            "id: nested_smbus\npermissions: [smbus]\ncapabilities: [lighting]\ndevices:\n  - vendor: Acme\n    model: DRAM\n    type: ram\n    match:\n      smbus:\n        bus: chipset\n        addresses: [0x50]\n",
+            "id: nested_smbus\nversion: 1.0.0\napi: \"3.0\"\ncapabilities: [lighting]\ndevices:\n  - vendor: Acme\n    model: DRAM\n    type: ram\n    match:\n      smbus:\n        bus: chipset\n        addresses: [0x50]\n",
         )
         .unwrap();
         std::fs::write(dir.join("main.lua"), ENTRY_LUA).unwrap();
@@ -4513,7 +4503,7 @@ mod tests {
         std::fs::create_dir_all(&dir).unwrap();
         std::fs::write(
             dir.join("plugin.yaml"),
-            "id: nested_usb\npermissions: [usb]\ncapabilities: [controls]\ndevices:\n  - vendor: Acme\n    model: Panel\n    type: monitor\n    match:\n      usb: { vid: 0x1234, pid: 0x5678, interface: 0 }\ntransports:\n  usb:\n    devices:\n      - id: primary\n        interface: 0\n        control: { max_transfer_size: 64, max_timeout_ms: 1000 }\n",
+            "id: nested_usb\nversion: 1.0.0\napi: \"3.0\"\ncapabilities: [controls]\ndevices:\n  - vendor: Acme\n    model: Panel\n    type: monitor\n    match:\n      usb: { vid: 0x1234, pid: 0x5678, interface: 0 }\ntransports:\n  usb:\n    devices:\n      - id: primary\n        interface: 0\n        control: { max_transfer_size: 64, max_timeout_ms: 1000 }\n",
         )
         .unwrap();
         std::fs::write(dir.join("main.lua"), ENTRY_LUA).unwrap();
@@ -4531,7 +4521,7 @@ mod tests {
         let dir = write_plugin_dir(
             tmp.path(),
             "usb_family",
-            "permissions: [usb]\ncapabilities: [controls]\ndevices:\n  - vendor: Acme\n    model: Panel\n    type: monitor\n    match:\n      usb: { vid: 0x1234, pids: [0x1, 0x2], serial: ABC123, max_bytes_per_sec: 1500, interface: 0 }\ntransports:\n  usb:\n    devices:\n      - id: primary\n        interface: 0\n        control: { max_transfer_size: 64, max_timeout_ms: 1000 }\n",
+            "capabilities: [controls]\ndevices:\n  - vendor: Acme\n    model: Panel\n    type: monitor\n    match:\n      usb: { vid: 0x1234, pids: [0x1, 0x2], serial: ABC123, max_bytes_per_sec: 1500, interface: 0 }\ntransports:\n  usb:\n    devices:\n      - id: primary\n        interface: 0\n        control: { max_transfer_size: 64, max_timeout_ms: 1000 }\n",
             ENTRY_LUA,
         );
         let device = &parse_manifest_from_dir(&dir).unwrap().devices[0];
@@ -4551,7 +4541,7 @@ mod tests {
         let dir = write_plugin_dir(
             tmp.path(),
             "usb_scope",
-            "permissions: [usb]\ncapabilities: [controls]\ndevices:\n  - vendor: A\n    model: B\n    match: { usb: { vid: 0x1234, pids: [0x1, 0x2], serial: ABC, interface: 0 } }\ntransports:\n  usb:\n    devices:\n      - id: primary\n        control: { max_transfer_size: 64, max_timeout_ms: 1000 }\n",
+            "capabilities: [controls]\ndevices:\n  - vendor: A\n    model: B\n    match: { usb: { vid: 0x1234, pids: [0x1, 0x2], serial: ABC, interface: 0 } }\ntransports:\n  usb:\n    devices:\n      - id: primary\n        control: { max_transfer_size: 64, max_timeout_ms: 1000 }\n",
             ENTRY_LUA,
         );
         let manifest = parse_manifest_from_dir(&dir).unwrap();
@@ -4578,7 +4568,7 @@ mod tests {
         let ok = write_plugin_dir(
             tmp.path(),
             "dev_caps",
-            "permissions: [hid]\ncapabilities: [lighting, pairing]\ndevices:\n  - vendor: A\n    model: B\n    type: mouse\n    capabilities: [pairing]\n    match:\n      hid: { vid: 1, pid: 2 }\n",
+            "capabilities: [lighting, pairing]\ndevices:\n  - vendor: A\n    model: B\n    type: mouse\n    capabilities: [pairing]\n    match:\n      hid: { vid: 1, pid: 2 }\n",
             ENTRY_LUA,
         );
         let manifest = parse_manifest_from_dir(&ok).unwrap();
@@ -4587,7 +4577,7 @@ mod tests {
         let unknown = write_plugin_dir(
             tmp.path(),
             "dev_caps_unknown",
-            "permissions: [hid]\ncapabilities: [lighting]\ndevices:\n  - vendor: A\n    model: B\n    type: mouse\n    capabilities: [warp_drive]\n    match:\n      hid: { vid: 1, pid: 2 }\n",
+            "capabilities: [lighting]\ndevices:\n  - vendor: A\n    model: B\n    type: mouse\n    capabilities: [warp_drive]\n    match:\n      hid: { vid: 1, pid: 2 }\n",
             ENTRY_LUA,
         );
         assert!(parse_manifest_from_dir(&unknown)
@@ -4598,7 +4588,7 @@ mod tests {
         let unadvertised = write_plugin_dir(
             tmp.path(),
             "dev_caps_subset",
-            "permissions: [hid]\ncapabilities: [lighting]\ndevices:\n  - vendor: A\n    model: B\n    type: mouse\n    capabilities: [pairing]\n    match:\n      hid: { vid: 1, pid: 2 }\n",
+            "capabilities: [lighting]\ndevices:\n  - vendor: A\n    model: B\n    type: mouse\n    capabilities: [pairing]\n    match:\n      hid: { vid: 1, pid: 2 }\n",
             ENTRY_LUA,
         );
         assert!(parse_manifest_from_dir(&unadvertised)
@@ -4613,7 +4603,7 @@ mod tests {
         let dir = write_plugin_dir(
             tmp.path(),
             "usb_no_ids",
-            "permissions: [usb]\ncapabilities: [controls]\ndevices:\n  - vendor: A\n    model: B\n    match: { usb: { vid: 0x1234, interface: 0 } }\ntransports:\n  usb:\n    devices:\n      - id: primary\n        control: { max_transfer_size: 64, max_timeout_ms: 1000 }\n",
+            "capabilities: [controls]\ndevices:\n  - vendor: A\n    model: B\n    match: { usb: { vid: 0x1234, interface: 0 } }\ntransports:\n  usb:\n    devices:\n      - id: primary\n        control: { max_transfer_size: 64, max_timeout_ms: 1000 }\n",
             ENTRY_LUA,
         );
         assert!(parse_manifest_from_dir(&dir)
@@ -4623,25 +4613,12 @@ mod tests {
     }
 
     #[test]
-    fn usb_manifest_requires_permission_and_primary_device() {
-        let tmp = tempfile::tempdir().unwrap();
-        let dir = write_plugin_dir(
-            tmp.path(),
-            "usb_no_permission",
-            "capabilities: [controls]\ndevices:\n  - vendor: A\n    model: B\n    match: { usb: { vid: 1, pid: 2, interface: 0 } }\ntransports:\n  usb:\n    devices:\n      - id: primary\n        control: { max_transfer_size: 64, max_timeout_ms: 1000 }\n",
-            ENTRY_LUA,
-        );
-        let error = parse_manifest_from_dir(&dir).unwrap_err();
-        assert!(format!("{error:#}").contains("usb` permission"));
-    }
-
-    #[test]
     fn usb_manifest_rejects_undeclared_or_duplicate_endpoint_scope() {
         let tmp = tempfile::tempdir().unwrap();
         let dir = write_plugin_dir(
             tmp.path(),
             "usb_bad_endpoints",
-            "permissions: [usb]\ncapabilities: [controls]\ndevices:\n  - vendor: A\n    model: B\n    match: { usb: { vid: 1, pid: 2, interface: 0 } }\ntransports:\n  usb:\n    devices:\n      - id: primary\n        endpoints:\n          - { address: 0x02, type: bulk, max_transfer_size: 64, max_timeout_ms: 1000 }\n          - { address: 0x02, type: interrupt, max_transfer_size: 64, max_timeout_ms: 1000 }\n",
+            "capabilities: [controls]\ndevices:\n  - vendor: A\n    model: B\n    match: { usb: { vid: 1, pid: 2, interface: 0 } }\ntransports:\n  usb:\n    devices:\n      - id: primary\n        endpoints:\n          - { address: 0x02, type: bulk, max_transfer_size: 64, max_timeout_ms: 1000 }\n          - { address: 0x02, type: interrupt, max_transfer_size: 64, max_timeout_ms: 1000 }\n",
             ENTRY_LUA,
         );
         let error = parse_manifest_from_dir(&dir).unwrap_err();
@@ -4664,10 +4641,10 @@ mod tests {
     #[test]
     fn widget_name_uses_plugin_catalog_with_fallbacks() {
         let meta: PluginMeta = serde_yaml::from_str(
-            "id: demo\ntype: lcd\ntranslations:\n  it:\n    widgets.date.name: Data\nwidgets:\n  - id: date\n    name: Date\n    name_key: widgets.date.name\n    icon: date.svg\n",
+            "id: demo\nversion: 1.0.0\napi: \"3.0\"\ntype: lcd\ntranslations:\n  it:\n    widgets.date.name: Data\nwidgets:\n  - id: date\n    name: Date\n    name_key: widgets.date.name\n    icon: date.svg\n",
         )
         .unwrap();
-        let descriptor = meta.widgets[0].descriptor("demo", &meta.translations);
+        let descriptor = meta.widgets[0].descriptor(&"demo".parse().unwrap(), &meta.translations);
         assert_eq!(descriptor.localized_name("it-CH"), "Data");
         assert_eq!(descriptor.localized_name("de"), "Date");
     }
@@ -4678,7 +4655,7 @@ mod tests {
         let dir = write_plugin_dir(
             tmp.path(),
             "tcp_no_config",
-            "type: integration\npermissions: [network]\ntransports:\n  tcp: {}\n",
+            "type: integration\ntransports:\n  tcp: {}\n",
             ENTRY_LUA,
         );
         let manifest = build_manifest_from_dir(&dir).unwrap();
@@ -4698,23 +4675,91 @@ mod tests {
     }
 
     #[test]
-    fn every_gated_transport_requires_its_permission() {
-        let tmp = tempfile::tempdir().unwrap();
-        let dir = write_plugin_dir(tmp.path(), "gated", "", ENTRY_LUA);
-        let base = build_manifest_from_dir(&dir).unwrap();
-        for &(transport, permission, label) in TRANSPORT_PERMISSIONS {
-            let mut missing = base.clone();
-            missing.permissions = Vec::new();
-            assert_eq!(
-                require_transport_permission(&missing, transport)
-                    .unwrap_err()
-                    .to_string(),
-                format!("the {transport} transport requires the `{label}` permission")
-            );
-            let mut granted = base.clone();
-            granted.permissions = vec![permission];
-            assert!(require_transport_permission(&granted, transport).is_ok());
+    fn usb_control_allowlist_limits_requests_when_declared() {
+        let open: UsbControlConfig = serde_yaml::from_str("{}").unwrap();
+        assert!(open.permits(0x00, 0x09));
+        let scoped: UsbControlConfig = serde_yaml::from_str(
+            "requests: [{ request_type: 0x21, request: 0x09 }, { request_type: 0xa1, request: 0x01 }]",
+        )
+        .unwrap();
+        assert!(scoped.permits(0x21, 0x09));
+        assert!(scoped.permits(0xa1, 0x01));
+        assert!(
+            !scoped.permits(0x00, 0x09),
+            "SET_CONFIGURATION is not listed"
+        );
+        assert!(!scoped.permits(0x21, 0x01));
+    }
+
+    #[test]
+    fn usb_control_check_names_each_rejection_and_accepts_a_declared_transfer() {
+        let policy: UsbControlConfig = serde_yaml::from_str(
+            "{ max_transfer_size: 8, max_timeout_ms: 100, requests: [{ request_type: 0x21, request: 0x09 }, { request_type: 0xa1, request: 0x01 }] }",
+        )
+        .unwrap();
+        let cases: [((u8, u8, usize, usize, u64), Option<&str>); 7] = [
+            ((0x21, 0x09, 8, 0, 100), None),
+            ((0x00, 0x09, 0, 0, 100), Some("is not declared")),
+            ((0x21, 0x09, 9, 0, 100), Some("exceeds bound 8")),
+            ((0xa1, 0x01, 0, 9, 100), Some("exceeds bound 8")),
+            ((0x21, 0x09, 1, 0, 0), Some("timeout 0ms")),
+            ((0x21, 0x09, 1, 0, 101), Some("timeout 101ms")),
+            (
+                (0xa1, 0x01, 1, 1, 100),
+                Some("IN transfer cannot include output"),
+            ),
+        ];
+        for ((request_type, request, out_len, read_len, timeout), expected) in cases {
+            let result = policy.check(request_type, request, out_len, read_len, timeout);
+            match expected {
+                None => assert!(result.is_ok(), "{result:?}"),
+                Some(reason) => assert!(
+                    result.as_ref().unwrap_err().to_string().contains(reason),
+                    "{reason}: {result:?}"
+                ),
+            }
         }
+        assert!(policy
+            .check(0x21, 0x09, 0, 1, 100)
+            .unwrap_err()
+            .to_string()
+            .contains("OUT transfer cannot request input"));
+    }
+
+    #[test]
+    fn permissions_follow_declarations() {
+        let tmp = tempfile::tempdir().unwrap();
+        let cases = [
+            ("hid_dev", "devices:\n  - vendor: Acme\n    model: K1\n    match: { hid: { vid: 1, pid: 2 } }\n", vec![Permission::Hid]),
+            ("http_int", "type: integration\ntransports:\n  http:\n    origins: [https://api.example.com]\n", vec![Permission::Network]),
+            ("audio_int", "type: integration\ntransports:\n  audio_routing: {}\n", vec![Permission::AudioRouting]),
+            ("secure_int", "type: integration\ntransports:\n  http:\n    origins: [https://api.example.com]\nconfig:\n  fields:\n    - { key: token, label: Token, secure: true }\n", vec![Permission::Network, Permission::SecureStorage]),
+            ("plain", "", vec![]),
+        ];
+        for (id, yaml, expected) in cases {
+            let dir = write_plugin_dir(tmp.path(), id, yaml, ENTRY_LUA);
+            assert_eq!(
+                build_manifest_from_dir(&dir)
+                    .unwrap()
+                    .declarations
+                    .uses
+                    .permissions,
+                expected,
+                "{id}"
+            );
+        }
+    }
+
+    #[test]
+    fn permissions_lists_are_rejected() {
+        let tmp = tempfile::tempdir().unwrap();
+        let dir = write_plugin_dir(
+            tmp.path(),
+            "legacy",
+            concat!("permissions", ": [hid]\n"),
+            ENTRY_LUA,
+        );
+        assert!(build_manifest_from_dir(&dir).is_err());
     }
 
     #[test]

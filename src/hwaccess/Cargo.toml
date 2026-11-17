@@ -13,17 +13,19 @@ workspace = true
 [dependencies]
 anyhow     = { workspace = true }
 log        = { workspace = true }
+parking_lot = { workspace = true }
 serde      = { workspace = true }
 serde_json = { workspace = true }
 
 [dev-dependencies]
 proptest = "1.11.0"
+tempfile = "3.27.0"
 
 [target.'cfg(target_os = "linux")'.dependencies]
 libc = "0.2.186"
 
 [target.'cfg(target_os = "windows")'.dependencies]
-wmi        = "0.18.4"
+wmi        = { version = "0.18.4", default-features = false }
 libloading = "0.9.0"
 windows    = { version = "0.62.2", features = [
     "Win32_Foundation",

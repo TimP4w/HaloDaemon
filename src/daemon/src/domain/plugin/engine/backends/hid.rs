@@ -6,10 +6,14 @@ use std::sync::Arc;
 
 use anyhow::{bail, Result};
 
-use crate::domain::plugin::engine::transport::{PluginIo, PluginTransportDescriptor};
+use crate::domain::plugin::engine::transport::{
+    accept_spec, Discovery, PluginIo, PluginTransportDescriptor,
+};
 use crate::domain::plugin::manifest::{DeviceSpec, PluginManifest};
+use crate::domain::plugin::ResolvedConfig;
 use crate::domain::registry::observers::discovery::DiscoveryHandle;
 use crate::infrastructure::drivers::transports::hid::HidTransport;
+use crate::infrastructure::drivers::transports::usb::UsbCollection;
 use crate::infrastructure::drivers::transports::usb::UsbSelector;
 
 fn matches(spec: &DeviceSpec, handle: &DiscoveryHandle<'_>) -> bool {
@@ -43,7 +47,7 @@ fn matches(spec: &DeviceSpec, handle: &DiscoveryHandle<'_>) -> bool {
 fn open(
     manifest: &PluginManifest,
     handle: &DiscoveryHandle<'_>,
-    _config: &crate::domain::plugin::ResolvedConfig,
+    _config: &ResolvedConfig,
     granted: &[halod_shared::types::Permission],
     limit: Option<halod_shared::types::WriteRateLimit>,
 ) -> Result<PluginIo> {
@@ -103,10 +107,7 @@ fn open(
             },
             granted,
             limit,
-        )?
-            as Arc<
-                dyn crate::infrastructure::drivers::transports::usb::UsbCollection,
-            >)
+        )? as Arc<dyn UsbCollection>)
     } else {
         None
     };
@@ -136,12 +137,14 @@ fn id_suffix(handle: &DiscoveryHandle<'_>) -> String {
     }
 }
 
-pub(super) const DESCRIPTOR: PluginTransportDescriptor = PluginTransportDescriptor {
+pub(super) const DESCRIPTOR: PluginTransportDescriptor = PluginTransportDescriptor::Discovered {
     kind: "hid",
-    matches: Some(matches),
     open,
-    id_suffix: Some(id_suffix),
-    validate: None,
+    discovery: Discovery {
+        matches,
+        id_suffix,
+        validate: accept_spec,
+    },
 };
 
 #[cfg(test)]
