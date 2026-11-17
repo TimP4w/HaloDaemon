@@ -336,20 +336,23 @@ pub(crate) mod tests {
     #[test]
     fn extraction_rejects_escaping_paths_and_links() {
         let root = tempfile::tempdir().unwrap();
-        for (index, (path, kind)) in [
-            ("../escape.lua", tar::EntryType::Regular),
-            ("/abs.lua", tar::EntryType::Regular),
-            ("link.lua", tar::EntryType::Symlink),
+        for (index, (path, kind, reason)) in [
+            (
+                "../escape.lua",
+                tar::EntryType::Regular,
+                "invalid relative path",
+            ),
+            ("/abs.lua", tar::EntryType::Regular, "invalid relative path"),
+            ("link.lua", tar::EntryType::Symlink, "link or special file"),
         ]
         .into_iter()
         .enumerate()
         {
             let out = root.path().join(index.to_string());
-            assert!(
-                extract_archive(&raw_archive(path, kind), &out).is_err(),
-                "{path}"
-            );
+            let error = extract_archive(&raw_archive(path, kind), &out).unwrap_err();
+            assert!(format!("{error:#}").contains(reason), "{path}: {error:#}");
         }
+        assert!(!root.path().join("escape.lua").exists());
     }
 
     #[test]

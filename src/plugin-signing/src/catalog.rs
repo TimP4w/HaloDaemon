@@ -225,11 +225,15 @@ pub fn open_catalog(
             .ok_or_else(|| CatalogError::UnknownKey(key_id.to_owned()))?,
         None => advertised.public_key.as_str(),
     };
-    let public = decode_array::<32>(public_key).map_err(malformed)?;
-    let key = VerifyingKey::from_bytes(&public).map_err(malformed)?;
+    let key = verifying_key(public_key)?;
     key.verify(body, &Signature::from_bytes(&signature))
         .map_err(|_| CatalogError::SignatureMismatch)?;
     Ok(catalog)
+}
+
+pub fn verifying_key(public_key: &str) -> Result<VerifyingKey, CatalogError> {
+    let public = decode_array::<32>(public_key).map_err(malformed)?;
+    VerifyingKey::from_bytes(&public).map_err(malformed)
 }
 
 pub fn sign_catalog(catalog: &mut Catalog, key_id: &str, key: &SigningKey) -> Vec<u8> {
@@ -573,6 +577,43 @@ mod tests {
         let first = build(repo.path(), None).unwrap();
         fs::remove_dir_all(repo.path().join("demo")).unwrap();
         package(repo.path(), "demo", "1.0.0", "3.0");
-        assert!(build(repo.path(), Some(&first)).is_err());
+        let error = build(repo.path(), Some(&first)).unwrap_err();
+        assert!(
+            error
+                .to_string()
+                .contains("'demo' 1.0.0 is older than published 2.0.0"),
+            "{error}"
+        );
+    }
+
+    #[test]
+    fn signature_framing_errors_name_the_exact_problem() {
+        let (signed_bytes, _) = signed(catalog(Vec::new()));
+        let text = String::from_utf8(signed_bytes).unwrap();
+        let (signature_line, body) = text.split_once('\n').unwrap();
+        let wrong_id = format!(
+            "{}\n{body}",
+            signature_line.replacen("test-key", "other-key", 1)
+        );
+        let cases = [
+            (
+                wrong_id.as_bytes(),
+                "signature key id does not match the advertised key",
+            ),
+            (
+                body.as_bytes(),
+                "advertises a signing key but carries no signature",
+            ),
+            (
+                b"# halod-sig: test-key AAAA".as_slice(),
+                "signature line is not terminated",
+            ),
+        ];
+        for (bytes, detail) in cases {
+            assert_eq!(
+                open_catalog(bytes, None).unwrap_err(),
+                CatalogError::Malformed(detail.into())
+            );
+        }
     }
 }

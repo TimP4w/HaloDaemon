@@ -38,3 +38,19 @@ pub const OFFICIAL_PLUGIN_REPO_PUBLIC_KEYS: &[(&str, &str)] = &[(
     "halodaemon-official-2026",
     "tjbwm5X4f70e+soVNV1AfRyb/TtnEsNNl+93YMO6IhQ=",
 )];
+
+#[cfg(test)]
+mod tests {
+    use super::OFFICIAL_PLUGIN_REPO_PUBLIC_KEYS;
+    use halod_plugin_signing::catalog::verifying_key;
+    use halod_plugin_signing::package::validate_identifier;
+
+    #[test]
+    fn official_pinned_keys_are_valid_ed25519_keys() {
+        assert!(!OFFICIAL_PLUGIN_REPO_PUBLIC_KEYS.is_empty());
+        for (id, key) in OFFICIAL_PLUGIN_REPO_PUBLIC_KEYS {
+            validate_identifier("signing key id", id).unwrap();
+            verifying_key(key).unwrap();
+        }
+    }
+}

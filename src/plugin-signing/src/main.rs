@@ -170,3 +170,36 @@ fn option<'a>(args: &'a [String], name: &str) -> Result<Option<&'a str>> {
         .map(|value| Some(value.as_str()))
         .ok_or_else(|| anyhow!("{name} requires a value"))
 }
+
+#[cfg(test)]
+mod tests {
+    use super::run;
+
+    fn catalog_args(extra: &[&str]) -> Vec<String> {
+        ["catalog", "repo", "--out", "out", "--name", "Test"]
+            .iter()
+            .chain(extra)
+            .map(|arg| (*arg).to_owned())
+            .collect()
+    }
+
+    #[test]
+    fn catalog_needs_exactly_one_of_previous_or_bootstrap() {
+        for extra in [
+            &[][..],
+            &[
+                "--previous",
+                "https://example.org/catalog.yaml",
+                "--bootstrap",
+            ][..],
+        ] {
+            let error = run(catalog_args(extra)).unwrap_err();
+            assert!(
+                error
+                    .to_string()
+                    .contains("pass exactly one of --previous <url> or --bootstrap"),
+                "{extra:?}: {error}"
+            );
+        }
+    }
+}

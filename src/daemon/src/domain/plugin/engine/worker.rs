@@ -2083,6 +2083,29 @@ mod tests {
     }
 
     #[tokio::test]
+    async fn undeclared_transports_leave_their_globals_nil() {
+        let source = tempfile::tempdir().unwrap();
+        let dir = crate::test_support::write_plugin_package(source.path(), "plain", "1.0.0", "3.0");
+        let manifest = crate::domain::plugin::parse_manifest_from_dir(&dir).unwrap();
+        let granted = manifest.permissions();
+        let config = HashMap::new();
+        assert!(http_runtime_for(&manifest, &granted, &config).is_none());
+        assert!(udp_runtime_for(&manifest, &granted, &config).is_none());
+
+        let h = spawn(
+            "return { initialize = function()
+                assert(halod.http == nil, 'halod.http')
+                assert(halod.udp == nil, 'halod.udp')
+                assert(command == nil, 'command')
+                return { ok = true }
+            end }",
+            granted,
+        );
+        assert!(h.initialize().await.unwrap().ok);
+        h.close().await.unwrap();
+    }
+
+    #[tokio::test]
     async fn canonical_match_fields_override_colliding_extra_keys() {
         let h = PluginHandle::spawn(
             "return { initialize = function(dev) return { model = tostring(dev.match.index) } end }"
