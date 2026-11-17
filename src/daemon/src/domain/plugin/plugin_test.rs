@@ -414,13 +414,7 @@ impl UsbCollection for RecordingUsb {
             .control
             .as_ref()
             .ok_or_else(|| anyhow::anyhow!("USB control outside recording allowlist"))?;
-        let length = bytes.len().max(read_length);
-        if length > policy.max_transfer_size
-            || timeout_ms == 0
-            || timeout_ms > policy.max_timeout_ms
-        {
-            anyhow::bail!("USB recording control exceeds policy");
-        }
+        policy.check(request_type, request, bytes.len(), read_length, timeout_ms)?;
         if request_type & 0x80 != 0 {
             return Ok(UsbControlResult::Read(self.scripted_read(read_length)?));
         }
@@ -2171,6 +2165,23 @@ fn table_to_rgb_state(state: &Table) -> Result<LightingState> {
 #[cfg(test)]
 mod tests {
     use super::*;
+
+    #[test]
+    fn recording_usb_control_rejects_undeclared_requests() {
+        let config: UsbConfig = serde_yaml::from_str(
+            "devices: [{ id: primary, control: { max_transfer_size: 64, max_timeout_ms: 1000, requests: [{ request_type: 0x21, request: 0x09 }] } }]",
+        )
+        .unwrap();
+        let usb = RecordingUsb::new(config, Vec::new());
+        let control = |request_type, request| {
+            UsbCollection::control(&usb, None, request_type, request, 0, 0, &[1], 0, 100)
+        };
+        assert!(control(0x21, 0x09).is_ok());
+        assert!(control(0x21, 0x01)
+            .err()
+            .is_some_and(|error| error.to_string().contains("is not declared")));
+        assert_eq!(usb.written.lock().len(), 1);
+    }
 
     #[test]
     fn table_to_rgb_state_supports_direct_effects() {

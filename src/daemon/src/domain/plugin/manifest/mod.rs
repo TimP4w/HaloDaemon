@@ -426,7 +426,41 @@ pub struct UsbControlRequest {
 }
 
 impl UsbControlConfig {
-    pub fn permits(&self, request_type: u8, request: u8) -> bool {
+    pub fn check(
+        &self,
+        request_type: u8,
+        request: u8,
+        out_len: usize,
+        read_len: usize,
+        timeout_ms: u64,
+    ) -> Result<()> {
+        if !self.permits(request_type, request) {
+            bail!("USB control request 0x{request_type:02x}/0x{request:02x} is not declared");
+        }
+        let length = out_len.max(read_len);
+        if length > self.max_transfer_size {
+            bail!(
+                "USB control transfer length {length} exceeds bound {}",
+                self.max_transfer_size
+            );
+        }
+        if timeout_ms == 0 || timeout_ms > self.max_timeout_ms {
+            bail!(
+                "USB control timeout {timeout_ms}ms exceeds bound {}ms",
+                self.max_timeout_ms
+            );
+        }
+        let input = request_type & 0x80 != 0;
+        if input && out_len != 0 {
+            bail!("USB control IN transfer cannot include output bytes");
+        }
+        if !input && read_len != 0 {
+            bail!("USB control OUT transfer cannot request input bytes");
+        }
+        Ok(())
+    }
+
+    fn permits(&self, request_type: u8, request: u8) -> bool {
         self.requests.is_empty()
             || self.requests.contains(&UsbControlRequest {
                 request_type,
@@ -4682,6 +4716,41 @@ mod tests {
             "SET_CONFIGURATION is not listed"
         );
         assert!(!scoped.permits(0x21, 0x01));
+    }
+
+    #[test]
+    fn usb_control_check_names_each_rejection_and_accepts_a_declared_transfer() {
+        let policy: UsbControlConfig = serde_yaml::from_str(
+            "{ max_transfer_size: 8, max_timeout_ms: 100, requests: [{ request_type: 0x21, request: 0x09 }, { request_type: 0xa1, request: 0x01 }] }",
+        )
+        .unwrap();
+        let cases: [((u8, u8, usize, usize, u64), Option<&str>); 7] = [
+            ((0x21, 0x09, 8, 0, 100), None),
+            ((0x00, 0x09, 0, 0, 100), Some("is not declared")),
+            ((0x21, 0x09, 9, 0, 100), Some("exceeds bound 8")),
+            ((0xa1, 0x01, 0, 9, 100), Some("exceeds bound 8")),
+            ((0x21, 0x09, 1, 0, 0), Some("timeout 0ms")),
+            ((0x21, 0x09, 1, 0, 101), Some("timeout 101ms")),
+            (
+                (0xa1, 0x01, 1, 1, 100),
+                Some("IN transfer cannot include output"),
+            ),
+        ];
+        for ((request_type, request, out_len, read_len, timeout), expected) in cases {
+            let result = policy.check(request_type, request, out_len, read_len, timeout);
+            match expected {
+                None => assert!(result.is_ok(), "{result:?}"),
+                Some(reason) => assert!(
+                    result.as_ref().unwrap_err().to_string().contains(reason),
+                    "{reason}: {result:?}"
+                ),
+            }
+        }
+        assert!(policy
+            .check(0x21, 0x09, 0, 1, 100)
+            .unwrap_err()
+            .to_string()
+            .contains("OUT transfer cannot request input"));
     }
 
     #[test]

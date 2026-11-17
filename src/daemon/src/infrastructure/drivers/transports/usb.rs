@@ -204,29 +204,8 @@ impl UsbEndpointTransport {
             .control
             .as_ref()
             .ok_or_else(|| anyhow!("USB control transfers are not declared for this device"))?;
-        if !policy.permits(request_type, request) {
-            bail!("USB control request 0x{request_type:02x}/0x{request:02x} is not declared");
-        }
-        let length = bytes.len().max(read_length);
-        if length > policy.max_transfer_size {
-            bail!(
-                "USB control transfer length {length} exceeds bound {}",
-                policy.max_transfer_size
-            );
-        }
-        if timeout_ms == 0 || timeout_ms > policy.max_timeout_ms {
-            bail!(
-                "USB control timeout {timeout_ms}ms exceeds bound {}ms",
-                policy.max_timeout_ms
-            );
-        }
+        policy.check(request_type, request, bytes.len(), read_length, timeout_ms)?;
         let input = request_type & 0x80 != 0;
-        if input && !bytes.is_empty() {
-            bail!("USB control IN transfer cannot include output bytes");
-        }
-        if !input && read_length != 0 {
-            bail!("USB control OUT transfer cannot request input bytes");
-        }
         let _guard = self.transfer_lock.lock();
         let timeout = Duration::from_millis(timeout_ms);
         if input {
