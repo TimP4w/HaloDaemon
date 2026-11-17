@@ -474,17 +474,14 @@ pub(super) fn repo_row(
 
 /// `last_sync` is RFC 3339; show it as a compact relative age.
 pub(super) fn format_last_sync(raw: &str) -> String {
-    let Ok(parsed) = chrono::DateTime::parse_from_rfc3339(raw) else {
+    let Ok(parsed) = raw.parse::<jiff::Timestamp>() else {
         return raw.to_owned();
     };
-    format_last_sync_at(parsed.with_timezone(&chrono::Utc), chrono::Utc::now())
+    format_last_sync_at(parsed, jiff::Timestamp::now())
 }
 
-pub(super) fn format_last_sync_at(
-    parsed: chrono::DateTime<chrono::Utc>,
-    now: chrono::DateTime<chrono::Utc>,
-) -> String {
-    let seconds = (now - parsed).num_seconds().max(0);
+pub(super) fn format_last_sync_at(parsed: jiff::Timestamp, now: jiff::Timestamp) -> String {
+    let seconds = now.duration_since(parsed).as_secs().max(0);
     if seconds < 60 {
         t!("plugins.repo_sync_just_now").to_string()
     } else if seconds < 3_600 {
@@ -854,12 +851,8 @@ mod tests {
 
     #[test]
     fn format_last_sync_trims_fractional_seconds_and_offset() {
-        let now = chrono::DateTime::parse_from_rfc3339("2026-07-11T23:46:00+00:00")
-            .unwrap()
-            .with_timezone(&chrono::Utc);
-        let parsed = chrono::DateTime::parse_from_rfc3339("2026-07-11T23:44:00.021314418+00:00")
-            .unwrap()
-            .with_timezone(&chrono::Utc);
+        let now: jiff::Timestamp = "2026-07-11T23:46:00+00:00".parse().unwrap();
+        let parsed: jiff::Timestamp = "2026-07-11T23:44:00.021314418+00:00".parse().unwrap();
         assert_eq!(format_last_sync_at(parsed, now), "1m ago");
     }
 

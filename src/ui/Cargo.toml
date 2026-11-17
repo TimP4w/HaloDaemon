@@ -39,7 +39,7 @@ image = { version = "0.25.10", default-features = false, features = ["png", "jpe
 base64 = "0.23.1"
 resvg = { version = "0.50.0", default-features = false, features = ["text", "system-fonts", "memmap-fonts"] }
 rust-i18n = "4.2.1"
-chrono = { version = "0.4.45", default-features = false, features = ["clock"] }
+jiff = "0.2.46"
 webbrowser = "1.2.1"
 
 [target.'cfg(unix)'.dependencies]

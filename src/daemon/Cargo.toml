@@ -60,7 +60,7 @@ ab_glyph   = "0.2.32"
 unicode-segmentation = "1.13.3"
 tiny-skia = "0.12.0"
 resvg      = { version = "0.50.0", default-features = false }
-chrono     = { version = "0.4.45", default-features = false, features = ["clock"] }
+jiff       = "0.2.46"
 rustfft    = "6.4.1"
 chacha20poly1305 = "0.11.0"
 keyring = "4.1.5"
@@ -95,7 +95,7 @@ version = "0.6.1"
 default-features = false
 
 [target.'cfg(target_os = "windows")'.dependencies]
-wmi        = "0.18.4"
+wmi        = { version = "0.18.4", default-features = false }
 windows    = { version = "0.62.2", features = [
     "Win32_Foundation",
     "Win32_Security",

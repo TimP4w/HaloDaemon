@@ -78,7 +78,7 @@ async fn remember(app: &Arc<AppState>, slug: &str, catalog: halod_plugin_signing
         slug.to_owned(),
         RepoCatalog {
             catalog,
-            last_sync: Some(chrono::Utc::now().to_rfc3339()),
+            last_sync: Some(jiff::Timestamp::now().to_string()),
         },
     );
     refresh_recommendations(app).await;

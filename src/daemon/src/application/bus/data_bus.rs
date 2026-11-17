@@ -1118,7 +1118,7 @@ pub fn publish_environment(bus: &DataBus) {
     );
     value.insert(
         "timezone".into(),
-        DataValue::String(chrono::Local::now().format("%Z").to_string()),
+        DataValue::String(jiff::Zoned::now().strftime("%:z").to_string()),
     );
     value.insert(
         "platform".into(),

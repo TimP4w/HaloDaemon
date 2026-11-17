@@ -673,11 +673,10 @@ impl UserData for RenderCtx {
             },
         );
         methods.add_method("local_time", |lua, this, ()| {
-            use chrono::{Datelike as _, Timelike as _};
             let (year, month, day, hour, minute, second, weekday) = if this.preview {
                 (2026, 1, 15, 10, 9, 36, "Thu".to_owned())
             } else {
-                let now = chrono::Local::now();
+                let now = jiff::Zoned::now();
                 (
                     now.year(),
                     now.month(),
@@ -685,7 +684,7 @@ impl UserData for RenderCtx {
                     now.hour(),
                     now.minute(),
                     now.second(),
-                    now.format("%a").to_string(),
+                    now.strftime("%a").to_string(),
                 )
             };
             let table = lua.create_table()?;
