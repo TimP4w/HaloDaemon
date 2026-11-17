@@ -26,3 +26,206 @@ KERNEL=="uinput", SUBSYSTEM=="misc", TAG+="uaccess", OPTIONS+="static_node=uinpu
 # `halod` group; uaccess is not usable because hwmon nodes have no seat
 # association.
 SUBSYSTEM=="hwmon", KERNEL=="hwmon[0-9]*", ACTION=="add|change", RUN{program}+="/bin/sh -c 'chgrp halod /sys%p/pwm[1-7] /sys%p/pwm[1-7]_enable 2>/dev/null; chmod g+w /sys%p/pwm[1-7] /sys%p/pwm[1-7]_enable 2>/dev/null; true'"
+
+# ─── Plugin devices (generated) ──────────────────────────────────────────────
+
+# Logitech HID++ (logitech)
+KERNEL=="hidraw*", ATTRS{idVendor}=="046d", ATTRS{idProduct}=="0a66", TAG+="uaccess"
+
+# Logitech G560 (logitech_g560)
+KERNEL=="hidraw*", ATTRS{idVendor}=="046d", ATTRS{idProduct}=="0a78", TAG+="uaccess"
+
+# Logitech HID++ (logitech)
+KERNEL=="hidraw*", ATTRS{idVendor}=="046d", ATTRS{idProduct}=="0a87", TAG+="uaccess"
+
+# Logitech HID++ (logitech)
+KERNEL=="hidraw*", ATTRS{idVendor}=="046d", ATTRS{idProduct}=="0ab5", TAG+="uaccess"
+
+# Logitech HID++ (logitech)
+KERNEL=="hidraw*", ATTRS{idVendor}=="046d", ATTRS{idProduct}=="0aba", TAG+="uaccess"
+
+# Logitech HID++ (logitech)
+KERNEL=="hidraw*", ATTRS{idVendor}=="046d", ATTRS{idProduct}=="0ac4", TAG+="uaccess"
+
+# Logitech HID++ (logitech)
+KERNEL=="hidraw*", ATTRS{idVendor}=="046d", ATTRS{idProduct}=="0af7", TAG+="uaccess"
+
+# Logitech HID++ (logitech)
+KERNEL=="hidraw*", ATTRS{idVendor}=="046d", ATTRS{idProduct}=="0afe", TAG+="uaccess"
+
+# Logitech HID++ (logitech)
+KERNEL=="hidraw*", ATTRS{idVendor}=="046d", ATTRS{idProduct}=="c08b", TAG+="uaccess"
+
+# Logitech HID++ (logitech)
+KERNEL=="hidraw*", ATTRS{idVendor}=="046d", ATTRS{idProduct}=="c095", TAG+="uaccess"
+
+# Logitech HID++ (logitech)
+KERNEL=="hidraw*", ATTRS{idVendor}=="046d", ATTRS{idProduct}=="c352", TAG+="uaccess"
+
+# Logitech HID++ (logitech)
+KERNEL=="hidraw*", ATTRS{idVendor}=="046d", ATTRS{idProduct}=="c518", TAG+="uaccess"
+
+# Logitech HID++ (logitech)
+KERNEL=="hidraw*", ATTRS{idVendor}=="046d", ATTRS{idProduct}=="c51a", TAG+="uaccess"
+
+# Logitech HID++ (logitech)
+KERNEL=="hidraw*", ATTRS{idVendor}=="046d", ATTRS{idProduct}=="c51b", TAG+="uaccess"
+
+# Logitech HID++ (logitech)
+KERNEL=="hidraw*", ATTRS{idVendor}=="046d", ATTRS{idProduct}=="c521", TAG+="uaccess"
+
+# Logitech HID++ (logitech)
+KERNEL=="hidraw*", ATTRS{idVendor}=="046d", ATTRS{idProduct}=="c525", TAG+="uaccess"
+
+# Logitech HID++ (logitech)
+KERNEL=="hidraw*", ATTRS{idVendor}=="046d", ATTRS{idProduct}=="c526", TAG+="uaccess"
+
+# Logitech HID++ (logitech)
+KERNEL=="hidraw*", ATTRS{idVendor}=="046d", ATTRS{idProduct}=="c52b", TAG+="uaccess"
+
+# Logitech HID++ (logitech)
+KERNEL=="hidraw*", ATTRS{idVendor}=="046d", ATTRS{idProduct}=="c52e", TAG+="uaccess"
+
+# Logitech HID++ (logitech)
+KERNEL=="hidraw*", ATTRS{idVendor}=="046d", ATTRS{idProduct}=="c52f", TAG+="uaccess"
+
+# Logitech HID++ (logitech)
+KERNEL=="hidraw*", ATTRS{idVendor}=="046d", ATTRS{idProduct}=="c531", TAG+="uaccess"
+
+# Logitech HID++ (logitech)
+KERNEL=="hidraw*", ATTRS{idVendor}=="046d", ATTRS{idProduct}=="c532", TAG+="uaccess"
+
+# Logitech HID++ (logitech)
+KERNEL=="hidraw*", ATTRS{idVendor}=="046d", ATTRS{idProduct}=="c534", TAG+="uaccess"
+
+# Logitech HID++ (logitech)
+KERNEL=="hidraw*", ATTRS{idVendor}=="046d", ATTRS{idProduct}=="c535", TAG+="uaccess"
+
+# Logitech HID++ (logitech)
+KERNEL=="hidraw*", ATTRS{idVendor}=="046d", ATTRS{idProduct}=="c537", TAG+="uaccess"
+
+# Logitech HID++ (logitech)
+KERNEL=="hidraw*", ATTRS{idVendor}=="046d", ATTRS{idProduct}=="c539", TAG+="uaccess"
+
+# Logitech HID++ (logitech)
+KERNEL=="hidraw*", ATTRS{idVendor}=="046d", ATTRS{idProduct}=="c53a", TAG+="uaccess"
+
+# Logitech HID++ (logitech)
+KERNEL=="hidraw*", ATTRS{idVendor}=="046d", ATTRS{idProduct}=="c53d", TAG+="uaccess"
+
+# Logitech HID++ (logitech)
+KERNEL=="hidraw*", ATTRS{idVendor}=="046d", ATTRS{idProduct}=="c53f", TAG+="uaccess"
+
+# Logitech HID++ (logitech)
+KERNEL=="hidraw*", ATTRS{idVendor}=="046d", ATTRS{idProduct}=="c541", TAG+="uaccess"
+
+# Logitech HID++ (logitech)
+KERNEL=="hidraw*", ATTRS{idVendor}=="046d", ATTRS{idProduct}=="c545", TAG+="uaccess"
+
+# Logitech HID++ (logitech)
+KERNEL=="hidraw*", ATTRS{idVendor}=="046d", ATTRS{idProduct}=="c547", TAG+="uaccess"
+
+# Logitech HID++ (logitech)
+KERNEL=="hidraw*", ATTRS{idVendor}=="046d", ATTRS{idProduct}=="c54d", TAG+="uaccess"
+
+# ASUS Aura USB (asus_aura_usb)
+KERNEL=="hidraw*", ATTRS{idVendor}=="0b05", ATTRS{idProduct}=="1866", TAG+="uaccess"
+
+# ASUS Aura USB (asus_aura_usb)
+KERNEL=="hidraw*", ATTRS{idVendor}=="0b05", ATTRS{idProduct}=="1867", TAG+="uaccess"
+
+# ASUS Aura USB (asus_aura_usb)
+KERNEL=="hidraw*", ATTRS{idVendor}=="0b05", ATTRS{idProduct}=="1872", TAG+="uaccess"
+
+# ASUS Aura USB (asus_aura_usb)
+KERNEL=="hidraw*", ATTRS{idVendor}=="0b05", ATTRS{idProduct}=="18a3", TAG+="uaccess"
+
+# ASUS Aura USB (asus_aura_usb)
+KERNEL=="hidraw*", ATTRS{idVendor}=="0b05", ATTRS{idProduct}=="18a5", TAG+="uaccess"
+
+# ASUS Aura USB (asus_aura_usb)
+KERNEL=="hidraw*", ATTRS{idVendor}=="0b05", ATTRS{idProduct}=="18f3", TAG+="uaccess"
+
+# ASUS Aura USB (asus_aura_usb)
+KERNEL=="hidraw*", ATTRS{idVendor}=="0b05", ATTRS{idProduct}=="1939", TAG+="uaccess"
+
+# ASUS Aura USB (asus_aura_usb)
+KERNEL=="hidraw*", ATTRS{idVendor}=="0b05", ATTRS{idProduct}=="19af", TAG+="uaccess"
+
+# ASUS Aura USB (asus_aura_usb)
+KERNEL=="hidraw*", ATTRS{idVendor}=="0b05", ATTRS{idProduct}=="1a30", TAG+="uaccess"
+
+# ASUS Aura USB (asus_aura_usb)
+KERNEL=="hidraw*", ATTRS{idVendor}=="0b05", ATTRS{idProduct}=="1a6c", TAG+="uaccess"
+
+# ASUS Aura USB (asus_aura_usb)
+KERNEL=="hidraw*", ATTRS{idVendor}=="0b05", ATTRS{idProduct}=="1aa6", TAG+="uaccess"
+
+# ASUS Aura USB (asus_aura_usb)
+KERNEL=="hidraw*", ATTRS{idVendor}=="0b05", ATTRS{idProduct}=="1b3b", TAG+="uaccess"
+
+# ASUS Aura USB (asus_aura_usb)
+KERNEL=="hidraw*", ATTRS{idVendor}=="0b05", ATTRS{idProduct}=="1bed", TAG+="uaccess"
+
+# SteelSeries Arctis Nova Pro Wireless (steelseries_arctis)
+KERNEL=="hidraw*", ATTRS{idVendor}=="1038", ATTRS{idProduct}=="12e0", TAG+="uaccess"
+
+# SteelSeries Arctis Nova Pro Wireless (steelseries_arctis)
+KERNEL=="hidraw*", ATTRS{idVendor}=="1038", ATTRS{idProduct}=="12e5", TAG+="uaccess"
+
+# SteelSeries Arctis Nova Pro Wireless (steelseries_arctis)
+KERNEL=="hidraw*", ATTRS{idVendor}=="1038", ATTRS{idProduct}=="225d", TAG+="uaccess"
+
+# NZXT Kraken X53/X63/X73 (nzxt_kraken_x3)
+KERNEL=="hidraw*", ATTRS{idVendor}=="1e71", ATTRS{idProduct}=="2007", TAG+="uaccess"
+
+# NZXT Kraken X53/X63/X73 (nzxt_kraken_x3)
+KERNEL=="hidraw*", ATTRS{idVendor}=="1e71", ATTRS{idProduct}=="2014", TAG+="uaccess"
+
+# NZXT RGB & Fan Controller (nzxt_control_hub)
+KERNEL=="hidraw*", ATTRS{idVendor}=="1e71", ATTRS{idProduct}=="2022", TAG+="uaccess"
+
+# NZXT Kraken Z/Elite (nzxt_kraken)
+KERNEL=="hidraw*", ATTRS{idVendor}=="1e71", ATTRS{idProduct}=="3008", TAG+="uaccess"
+
+# NZXT Kraken Z/Elite (nzxt_kraken)
+KERNEL=="hidraw*", ATTRS{idVendor}=="1e71", ATTRS{idProduct}=="300c", TAG+="uaccess"
+
+# NZXT Kraken Z/Elite (nzxt_kraken)
+KERNEL=="hidraw*", ATTRS{idVendor}=="1e71", ATTRS{idProduct}=="300e", TAG+="uaccess"
+
+# NZXT Kraken Z/Elite (nzxt_kraken)
+KERNEL=="hidraw*", ATTRS{idVendor}=="1e71", ATTRS{idProduct}=="3012", TAG+="uaccess"
+
+# NZXT Kraken Z/Elite (nzxt_kraken)
+KERNEL=="hidraw*", ATTRS{idVendor}=="1e71", ATTRS{idProduct}=="3014", TAG+="uaccess"
+
+# Philips Evnia 49 (philips_evnia)
+SUBSYSTEM=="usb", ATTRS{idVendor}=="0cf2", ATTRS{idProduct}=="b201", TAG+="uaccess"
+
+# NZXT Kraken Z/Elite (nzxt_kraken)
+SUBSYSTEM=="usb", ATTRS{idVendor}=="1e71", ATTRS{idProduct}=="3008", TAG+="uaccess"
+
+# NZXT Kraken Z/Elite (nzxt_kraken)
+SUBSYSTEM=="usb", ATTRS{idVendor}=="1e71", ATTRS{idProduct}=="300c", TAG+="uaccess"
+
+# NZXT Kraken Z/Elite (nzxt_kraken)
+SUBSYSTEM=="usb", ATTRS{idVendor}=="1e71", ATTRS{idProduct}=="300e", TAG+="uaccess"
+
+# NZXT Kraken Z/Elite (nzxt_kraken)
+SUBSYSTEM=="usb", ATTRS{idVendor}=="1e71", ATTRS{idProduct}=="3012", TAG+="uaccess"
+
+# NZXT Kraken Z/Elite (nzxt_kraken)
+SUBSYSTEM=="usb", ATTRS{idVendor}=="1e71", ATTRS{idProduct}=="3014", TAG+="uaccess"
+
+# Philips Evnia 49 (philips_evnia)
+SUBSYSTEM=="usb", ATTRS{idVendor}=="2109", ATTRS{idProduct}=="8884", TAG+="uaccess"
+
+# ASUS/ENE SMBus RGB (ene_smbus), Corsair DRAM RGB (corsair_dram) — chipset SMBus
+SUBSYSTEM=="i2c-dev", DRIVERS=="i801_smbus|piix4_smbus", GROUP="halod", MODE="0660"
+
+# ASUS/ENE SMBus RGB (ene_smbus) — GPU SMBus
+SUBSYSTEM=="i2c-dev", ATTRS{vendor}=="0x1002", GROUP="halod", MODE="0660"
+
+# ASUS/ENE SMBus RGB (ene_smbus) — GPU SMBus
+SUBSYSTEM=="i2c-dev", ATTRS{vendor}=="0x10de", GROUP="halod", MODE="0660"
