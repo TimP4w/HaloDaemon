@@ -96,7 +96,7 @@ async fn runtime_recovery_budget_is_spent_once_and_refunded_by_a_real_recovery()
     assert!(!queue_recovery(&registry, "plug_a"));
 
     registry.set_health(
-        "plug_a::sick-dev",
+        super::HealthScope::device("plug_a", "sick-dev"),
         halod_shared::types::PluginIssueKind::RuntimeError,
         "connection reset".into(),
     );
@@ -213,12 +213,12 @@ fn fresh_integration_runtime_clears_stale_device_errors() {
     let registry = super::Registry::default();
     registry.set_load_warning("openrgb", "logo is unavailable".into());
     registry.set_health(
-        "openrgb::old-controller",
+        super::HealthScope::device("openrgb", "old-controller"),
         halod_shared::types::PluginIssueKind::RuntimeError,
         "connection reset".into(),
     );
     registry.set_health(
-        "unrelated",
+        super::HealthScope::plugin("unrelated"),
         halod_shared::types::PluginIssueKind::ConnectFailed,
         "still offline".into(),
     );
@@ -237,7 +237,7 @@ fn fresh_integration_runtime_clears_stale_device_errors() {
     );
 
     registry.set_health(
-        "openrgb",
+        super::HealthScope::plugin("openrgb"),
         halod_shared::types::PluginIssueKind::ConnectFailed,
         "old connect error".into(),
     );

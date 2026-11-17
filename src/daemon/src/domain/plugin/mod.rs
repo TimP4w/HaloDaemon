@@ -220,7 +220,7 @@ pub struct Registry {
     /// Health episodes keyed by a plugin id or by `plugin_id::device_id`.
     /// Keeping device failures separate makes recovery and one-shot
     /// notifications precise while `health_for` derives the plugin aggregate.
-    health: RwLock<HashMap<String, HealthState>>,
+    health: RwLock<HashMap<HealthScope, HealthState>>,
     invalid_manifests: RwLock<Vec<(PluginManifest, PluginIssue)>>,
     skipped: RwLock<Vec<SkippedPlugin>>,
     /// Hardware recommendations, computed once at startup (and on plugin reload)
@@ -863,15 +863,34 @@ fn resolved_config_value(
     }
 }
 
-impl Registry {
-    fn device_health_scope(plugin_id: &str, device_id: &str) -> String {
-        format!("{plugin_id}::{device_id}")
+/// What a health record is about: a whole plugin, or one of its devices.
+#[derive(Debug, Clone, PartialEq, Eq, Hash)]
+struct HealthScope {
+    plugin: String,
+    device: Option<String>,
+}
+
+impl HealthScope {
+    fn plugin(plugin_id: &str) -> Self {
+        Self {
+            plugin: plugin_id.to_owned(),
+            device: None,
+        }
     }
 
+    fn device(plugin_id: &str, device_id: &str) -> Self {
+        Self {
+            plugin: plugin_id.to_owned(),
+            device: Some(device_id.to_owned()),
+        }
+    }
+}
+
+impl Registry {
     /// Update a scoped failure episode. Equivalent repeat failures update the
     /// visible detail but preserve `notification_sent`; callers notify only on
     /// the returned `true` transition.
-    fn set_health(&self, scope: &str, kind: PluginIssueKind, detail: String) -> bool {
+    fn set_health(&self, scope: HealthScope, kind: PluginIssueKind, detail: String) -> bool {
         let status = match kind {
             PluginIssueKind::ConnectFailed
             | PluginIssueKind::InitFailed
@@ -880,10 +899,10 @@ impl Registry {
         };
         let mut health = self.health.write();
         let notification_sent = health
-            .get(scope)
+            .get(&scope)
             .is_some_and(|state| state.notification_sent);
         health.insert(
-            scope.to_owned(),
+            scope,
             HealthState {
                 status,
                 issue: Some(PluginIssue {
@@ -898,14 +917,13 @@ impl Registry {
         !notification_sent
     }
 
-    fn clear_health(&self, scope: &str) -> bool {
+    fn clear_health(&self, scope: &HealthScope) -> bool {
         self.health.write().remove(scope).is_some()
     }
 
     /// Aggregate direct plugin and per-device health records. Failed wins over
     /// degraded; the newest issue at that severity is retained for display.
     fn health_for(&self, plugin_id: &str) -> HealthState {
-        let prefix = format!("{plugin_id}::");
         let mut aggregate = HealthState::default();
         let severity = |status| match status {
             HealthStatus::Healthy => 0,
@@ -913,7 +931,7 @@ impl Registry {
             HealthStatus::Failed => 2,
         };
         for (scope, state) in self.health.read().iter() {
-            if scope != plugin_id && !scope.starts_with(&prefix) {
+            if scope.plugin != plugin_id {
                 continue;
             }
             if severity(state.status) > severity(aggregate.status)
@@ -947,8 +965,8 @@ impl Registry {
         if self.is_disabled(plugin_id) || self.is_integration_disabled(plugin_id) {
             return;
         }
-        let scope = Self::device_health_scope(plugin_id, device_id);
-        let notify = self.set_health(&scope, PluginIssueKind::RuntimeError, detail.clone());
+        let scope = HealthScope::device(plugin_id, device_id);
+        let notify = self.set_health(scope.clone(), PluginIssueKind::RuntimeError, detail.clone());
         // Close the check/write race: if disable landed between the first
         // policy read and `set_issue`, remove the stale write before anything
         // can observe or broadcast it. If disable starts after this check, its
@@ -980,7 +998,7 @@ impl Registry {
         device_id: &str,
         detail: String,
     ) {
-        let scope = Self::device_health_scope(plugin_id, device_id);
+        let scope = HealthScope::device(plugin_id, device_id);
         if !self.health.read().contains_key(&scope) {
             return;
         }
@@ -1050,7 +1068,7 @@ impl Registry {
     /// Clear a device's outstanding-error flag after a successful call. On the
     /// failing→ok transition the plugin's persisted runtime issue is cleared too.
     pub(super) fn clear_runtime_error(&self, plugin_id: &str, device_id: &str) {
-        if self.clear_health(&Self::device_health_scope(plugin_id, device_id)) {
+        if self.clear_health(&HealthScope::device(plugin_id, device_id)) {
             self.runtime_recovery.clear(plugin_id);
         }
     }
@@ -1064,8 +1082,8 @@ impl Registry {
         device_id: &str,
         detail: String,
     ) -> u32 {
-        let scope = Self::device_health_scope(plugin_id, device_id);
-        self.set_health(&scope, PluginIssueKind::InitFailed, detail);
+        let scope = HealthScope::device(plugin_id, device_id);
+        self.set_health(scope, PluginIssueKind::InitFailed, detail);
         self.note_transport_open_failure((plugin_id.to_owned(), device_id.to_owned()))
     }
 
@@ -1074,7 +1092,7 @@ impl Registry {
         self.transport_open_failures
             .write()
             .remove(&(plugin_id.to_owned(), device_id.to_owned()));
-        let scope = Self::device_health_scope(plugin_id, device_id);
+        let scope = HealthScope::device(plugin_id, device_id);
         let should_clear = self
             .health
             .read()
@@ -1102,16 +1120,20 @@ impl Registry {
         if self.is_disabled(plugin_id) || self.is_integration_disabled(plugin_id) {
             return;
         }
-        let notify = self.set_health(plugin_id, PluginIssueKind::ConnectFailed, detail.clone());
+        let notify = self.set_health(
+            HealthScope::plugin(plugin_id),
+            PluginIssueKind::ConnectFailed,
+            detail.clone(),
+        );
         if self.is_disabled(plugin_id) || self.is_integration_disabled(plugin_id) {
-            self.clear_health(plugin_id);
+            self.clear_health(&HealthScope::plugin(plugin_id));
             return;
         }
         if !notify {
             return; // already reported this episode
         }
         if self.is_disabled(plugin_id) || self.is_integration_disabled(plugin_id) {
-            self.clear_health(plugin_id);
+            self.clear_health(&HealthScope::plugin(plugin_id));
             return;
         }
         crate::application::notifications::send(
@@ -1126,7 +1148,7 @@ impl Registry {
 
     /// Clear a plugin's outstanding connect-error flag after a successful connect.
     pub(super) fn clear_connect_error(&self, plugin_id: &str) {
-        self.clear_health(plugin_id);
+        self.clear_health(&HealthScope::plugin(plugin_id));
     }
 
     /// Clear all operational error state when a plugin or integration is
@@ -1134,14 +1156,12 @@ impl Registry {
     /// report a genuinely fresh failure, while clearing the persisted issue
     /// immediately removes its card/sidebar warning.
     pub(crate) fn clear_operational_errors(&self, plugin_id: &str, device_ids: &[String]) {
-        let prefix = format!("{plugin_id}::");
-        let devices: HashSet<_> = device_ids.iter().collect();
         self.health.write().retain(|scope, _| {
-            scope != plugin_id
-                && !(scope.starts_with(&prefix)
-                    && devices
-                        .iter()
-                        .any(|device| scope == &Self::device_health_scope(plugin_id, device)))
+            scope.plugin != plugin_id
+                || scope
+                    .device
+                    .as_ref()
+                    .is_some_and(|device| !device_ids.contains(device))
         });
     }
 
@@ -1151,9 +1171,8 @@ impl Registry {
     /// leave their aggregated sidebar issue stuck forever. Load diagnostics are
     /// retained because reconnecting cannot resolve package-content problems.
     pub(crate) fn clear_integration_operational_errors(&self, plugin_id: &str) {
-        let prefix = format!("{plugin_id}::");
         self.health.write().retain(|scope, state| {
-            let belongs_to_integration = scope == plugin_id || scope.starts_with(&prefix);
+            let belongs_to_integration = scope.plugin == plugin_id;
             let operational = state.issue.as_ref().is_some_and(|issue| {
                 matches!(
                     issue.kind,
@@ -1169,7 +1188,11 @@ impl Registry {
     /// Record a non-fatal load warning (bad logo, id collision) as a persisted
     /// plugin issue, surfaced on the plugin page / sidebar without a toast.
     fn set_load_warning(&self, plugin_id: &str, reason: String) {
-        self.set_health(plugin_id, PluginIssueKind::LoadWarning, reason);
+        self.set_health(
+            HealthScope::plugin(plugin_id),
+            PluginIssueKind::LoadWarning,
+            reason,
+        );
     }
 
     /// Drop any stale load-warning issues before a reload re-derives them, so a
