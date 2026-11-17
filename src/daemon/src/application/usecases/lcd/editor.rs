@@ -15,6 +15,9 @@ use std::sync::Arc;
 
 use crate::application::ipc::ClientHandle;
 use crate::application::state::AppState;
+use crate::application::usecases::lcd::templates;
+use crate::config;
+use crate::domain::events::Change;
 use crate::domain::lcd::engine::custom;
 use crate::domain::registry::require_device_owned_id;
 use halod_shared::lcd_custom::{CustomTemplateDef, LcdEditorRender};
@@ -26,8 +29,8 @@ pub async fn render(
     app: Arc<AppState>,
     client: ClientHandle,
 ) -> Result<()> {
-    crate::application::usecases::lcd::templates::validate_template(&def)?;
-    crate::application::usecases::lcd::templates::validate_template_catalog(&def, &app.registry)?;
+    templates::validate_template(&def)?;
+    templates::validate_template_catalog(&def, &app.registry)?;
     let device = require_device_owned_id(&device_id, &app).await?;
     let lcd = device
         .as_lcd()
@@ -51,7 +54,7 @@ pub async fn render(
     lcd.lcd_state().set_editor_preview();
     lcd.lcd_state()
         .set_health(halod_shared::types::LcdHealth::Starting);
-    let images_dir = crate::config::lcd_images_dir();
+    let images_dir = config::lcd_images_dir();
     let render_device_id = device_id.clone();
     let editor_generation = app.lcd.editor_generation();
     let mut session = app.lcd.editor_session.lock().take();
@@ -85,14 +88,14 @@ pub async fn render(
         Err(error) => {
             lcd.lcd_state()
                 .set_health(halod_shared::types::LcdHealth::Failed(error.to_string()));
-            app.record_change(crate::domain::events::Change::LcdDevice(device_id.clone()))
+            app.record_change(Change::LcdDevice(device_id.clone()))
                 .await;
             return Err(error.into());
         }
     };
     lcd.lcd_state()
         .set_health(halod_shared::types::LcdHealth::Stable);
-    app.record_change(crate::domain::events::Change::LcdDevice(device_id.clone()))
+    app.record_change(Change::LcdDevice(device_id.clone()))
         .await;
     let (sprites, signatures) = result;
 

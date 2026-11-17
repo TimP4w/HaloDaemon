@@ -10,13 +10,16 @@ use halod_shared::types::{Permission, WriteRateLimit};
 
 use crate::domain::plugin::engine::transport::{PluginIo, PluginTransportDescriptor};
 use crate::domain::plugin::manifest::PluginManifest;
+use crate::domain::plugin::ResolvedConfig;
+use crate::domain::plugin::ResolvedConfigValue;
 use crate::domain::registry::observers::discovery::DiscoveryHandle;
 use crate::infrastructure::drivers::transports::serial::SerialTransport;
+use crate::infrastructure::drivers::transports::Transport;
 
 fn open(
     manifest: &PluginManifest,
     _handle: &DiscoveryHandle<'_>,
-    config: &crate::domain::plugin::ResolvedConfig,
+    config: &ResolvedConfig,
     granted: &[Permission],
     limit: Option<WriteRateLimit>,
 ) -> Result<PluginIo> {
@@ -29,7 +32,7 @@ fn open(
     let serial = manifest.transports.serial.clone().unwrap_or_default();
     let port = config
         .get(&serial.port_key)
-        .map(crate::domain::plugin::ResolvedConfigValue::to_config_string)
+        .map(ResolvedConfigValue::to_config_string)
         .unwrap_or_default();
     if port.is_empty() {
         bail!(
@@ -43,9 +46,7 @@ fn open(
     // A manifest write ceiling overrides the config's own, matching every other
     // backend where the declared per-device limit wins.
     if limit.is_some() {
-        crate::infrastructure::drivers::transports::Transport::set_write_rate_limit(
-            &transport, limit,
-        );
+        Transport::set_write_rate_limit(&transport, limit);
     }
     Ok(PluginIo::Stream {
         transport: std::sync::Arc::new(transport),

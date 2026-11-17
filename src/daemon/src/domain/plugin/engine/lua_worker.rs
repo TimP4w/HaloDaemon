@@ -18,6 +18,7 @@ use std::sync::atomic::{AtomicU64, AtomicUsize, Ordering};
 use std::sync::Arc;
 use std::time::Duration;
 
+use crate::domain::plugin::ResolvedConfig;
 use anyhow::{anyhow, Result};
 use mlua::Lua;
 use tokio::sync::{mpsc, oneshot};
@@ -28,7 +29,7 @@ pub(super) trait VmCtx {
 }
 
 pub(super) fn bootstrap_worker_vm(
-    config: &crate::domain::plugin::ResolvedConfig,
+    config: &ResolvedConfig,
     modules: &std::collections::BTreeMap<String, String>,
     data: super::data_api::DataRuntime,
 ) -> Result<(Lua, Rc<Cell<u64>>)> {

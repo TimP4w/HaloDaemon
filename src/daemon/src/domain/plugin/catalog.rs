@@ -8,6 +8,8 @@ use halod_plugin_signing::package::{extract_archive, read_package_meta, MAX_ARCH
 use halod_plugin_signing::{open_catalog, Catalog, CatalogError, CatalogPackage};
 
 use super::repo::RepositoryTrust;
+use crate::config;
+use crate::util::fs;
 
 #[derive(Debug, Clone)]
 pub struct RepoCatalog {
@@ -16,7 +18,7 @@ pub struct RepoCatalog {
 }
 
 pub fn repo_dir(slug: &str) -> PathBuf {
-    crate::config::plugins_dir().join(slug)
+    config::plugins_dir().join(slug)
 }
 
 pub fn cached(slug: &str, trust: &RepositoryTrust) -> Option<Catalog> {
@@ -40,7 +42,7 @@ pub fn fetch(slug: &str, url: &str, trust: &RepositoryTrust) -> Result<Catalog> 
     }
     let dir = repo_dir(slug);
     std::fs::create_dir_all(&dir)?;
-    crate::util::fs::atomic_write(&dir.join(CATALOG_FILE), &bytes)?;
+    fs::atomic_write(&dir.join(CATALOG_FILE), &bytes)?;
     Ok(catalog)
 }
 

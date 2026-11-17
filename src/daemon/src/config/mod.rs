@@ -11,7 +11,9 @@ use std::collections::{HashMap, HashSet};
 use std::path::{Path, PathBuf};
 
 use crate::domain::profiles::model::Profile;
+use crate::domain::profiles::validate;
 use crate::domain::registry::model::{DeviceLayout, DeviceRecord};
+use crate::util::fs;
 use halod_shared::keyboard::KeyboardLayoutSelection;
 
 // ── On-disk layout ───────────────────────────────────────────────────────────
@@ -59,7 +61,7 @@ pub fn load() -> Result<Config> {
 }
 
 pub fn save(cfg: &Config) -> Result<()> {
-    crate::util::fs::atomic_write(
+    fs::atomic_write(
         &main_config_path(),
         &serde_yaml::to_string(&MainFile {
             active_profile: cfg.active_profile.clone(),
@@ -69,7 +71,7 @@ pub fn save(cfg: &Config) -> Result<()> {
             gui: cfg.gui.clone(),
         })?,
     )?;
-    crate::util::fs::atomic_write(
+    fs::atomic_write(
         &devices_config_path(),
         &serde_yaml::to_string(&DevicesFile {
             known_devices: cfg.known_devices.clone(),
@@ -79,13 +81,13 @@ pub fn save(cfg: &Config) -> Result<()> {
             keyboard_layouts: cfg.keyboard_layouts.clone(),
         })?,
     )?;
-    crate::util::fs::atomic_write(
+    fs::atomic_write(
         &app_rules_config_path(),
         &serde_yaml::to_string(&AppRulesFile {
             app_rules: cfg.app_rules.clone(),
         })?,
     )?;
-    crate::util::fs::atomic_write(
+    fs::atomic_write(
         &plugins_config_path(),
         &serde_yaml::to_string(&cfg.plugins)?,
     )?;
@@ -149,7 +151,7 @@ fn load_profiles() -> Result<HashMap<String, Profile>> {
         let raw = read_bounded(&path, "profile")?;
         let mut file: ProfileFile = serde_yaml::from_str(&raw)
             .map_err(|e| anyhow::anyhow!("Failed to parse profile at {}: {e}", path.display()))?;
-        crate::domain::profiles::validate::validate_profile(&file.name, &file.profile)?;
+        validate::validate_profile(&file.name, &file.profile)?;
         if let Some(canvas) = file.profile.lighting.canvas.as_mut() {
             canvas.sanitize();
         }
@@ -171,7 +173,7 @@ fn save_profiles(profiles: &HashMap<String, Profile>) -> Result<()> {
             name: name.clone(),
             profile: profile.clone(),
         })?;
-        crate::util::fs::atomic_write(&dir.join(&filename), &yaml)?;
+        fs::atomic_write(&dir.join(&filename), &yaml)?;
         expected.insert(filename);
     }
 

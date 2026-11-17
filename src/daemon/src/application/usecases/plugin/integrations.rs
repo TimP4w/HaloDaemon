@@ -23,13 +23,26 @@ use std::time::Duration;
 
 use crate::application::state::AppState;
 use crate::application::usecases::registry::registration::unregister_device_and_children;
+use crate::domain::events::Change;
+use crate::domain::plugin::engine::transport::PluginIo;
+use crate::domain::plugin::engine::worker;
+use crate::domain::plugin::engine::worker::DevMatch;
+use crate::domain::plugin::engine::worker::PluginHandle;
+use crate::domain::plugin::engine::worker::SetupHookResult;
+use crate::domain::plugin::manifest::HttpConfig;
+use crate::domain::plugin::manifest::IntegrationAuthConfig;
+use crate::domain::plugin::manifest::PluginManifest;
 use crate::domain::plugin::observers::integration_scan;
+use crate::domain::plugin::ResolvedConfig;
+use crate::infrastructure::http::HttpRequest;
+use crate::infrastructure::http::HttpRuntime;
+use crate::infrastructure::integration_discovery;
 
 async fn resolved_config(
     app: &Arc<AppState>,
     id: &str,
     granted: &[halod_shared::types::Permission],
-) -> Result<crate::domain::plugin::ResolvedConfig> {
+) -> Result<ResolvedConfig> {
     let app = Arc::clone(app);
     let id = id.to_owned();
     let granted = granted.to_vec();
@@ -41,32 +54,27 @@ async fn resolved_config(
     .context("secret-store task failed")
 }
 
-async fn setup_worker(
-    app: &Arc<AppState>,
-    manifest: &crate::domain::plugin::manifest::PluginManifest,
-) -> Result<crate::domain::plugin::engine::worker::PluginHandle> {
+async fn setup_worker(app: &Arc<AppState>, manifest: &PluginManifest) -> Result<PluginHandle> {
     let granted = app.registry.granted_for(&manifest.plugin_id);
     let config = resolved_config(app, &manifest.plugin_id, &granted).await?;
-    let http = crate::domain::plugin::engine::worker::http_runtime_for(manifest, &granted, &config);
-    let udp = crate::domain::plugin::engine::worker::udp_runtime_for(manifest, &granted, &config);
-    Ok(
-        crate::domain::plugin::engine::worker::PluginHandle::spawn_with_data(
-            manifest.script_source.clone(),
-            manifest.module_sources.clone(),
-            crate::domain::plugin::engine::transport::PluginIo::None,
-            crate::domain::plugin::engine::worker::DevMatch {
-                transport: "setup".into(),
-                ..Default::default()
-            },
-            granted,
-            config,
-            tokio::runtime::Handle::current(),
-            Default::default(),
-            Default::default(),
-            http,
-            udp,
-        ),
-    )
+    let http = worker::http_runtime_for(manifest, &granted, &config);
+    let udp = worker::udp_runtime_for(manifest, &granted, &config);
+    Ok(PluginHandle::spawn_with_data(
+        manifest.script_source.clone(),
+        manifest.module_sources.clone(),
+        PluginIo::None,
+        DevMatch {
+            transport: "setup".into(),
+            ..Default::default()
+        },
+        granted,
+        config,
+        tokio::runtime::Handle::current(),
+        Default::default(),
+        Default::default(),
+        http,
+        udp,
+    ))
 }
 
 async fn config_context(app: &Arc<AppState>, id: &str) -> Result<serde_json::Value> {
@@ -82,8 +90,7 @@ async fn config_context(app: &Arc<AppState>, id: &str) -> Result<serde_json::Val
 async fn publish_setup(app: &Arc<AppState>, id: &str, status: IntegrationSetupStatus) {
     app.registry
         .set_integration_setup_status(id.to_owned(), status);
-    app.record_change(crate::domain::events::Change::PluginTopology)
-        .await;
+    app.record_change(Change::PluginTopology).await;
 }
 
 pub async fn begin_setup(id: String, app: Arc<AppState>) -> Result<()> {
@@ -97,7 +104,7 @@ pub async fn begin_setup(id: String, app: Arc<AppState>) -> Result<()> {
         .context("integration does not require an interactive setup flow")?;
     let locale = app.config.read().await.gui.language.clone();
     let (title, instructions) = match &setup.auth {
-        crate::domain::plugin::manifest::IntegrationAuthConfig::Button {
+        IntegrationAuthConfig::Button {
             title,
             instructions,
         } => (
@@ -210,8 +217,7 @@ pub async fn select_setup_mode(
     status.candidates.clear();
     publish_setup(&app, &id, status.clone()).await;
     let candidates = match async {
-        let raw =
-            crate::infrastructure::integration_discovery::scan(setup.discovery.clone()).await?;
+        let raw = integration_discovery::scan(setup.discovery.clone()).await?;
         let candidates = setup_worker(&app, &manifest)
             .await?
             .setup_discover(raw)
@@ -240,7 +246,7 @@ pub async fn select_setup_mode(
 }
 
 fn validate_candidates(
-    manifest: &crate::domain::plugin::manifest::PluginManifest,
+    manifest: &PluginManifest,
     candidates: &[halod_shared::types::IntegrationSetupCandidate],
 ) -> Result<()> {
     let mut ids = std::collections::HashSet::new();
@@ -268,7 +274,7 @@ fn validate_candidates(
 }
 
 fn validate_pair_result_values(
-    manifest: &crate::domain::plugin::manifest::PluginManifest,
+    manifest: &PluginManifest,
     values: &HashMap<String, String>,
 ) -> Result<()> {
     for (key, value) in values {
@@ -381,7 +387,7 @@ pub async fn retry_pairing(id: String, app: Arc<AppState>) -> Result<()> {
 
 async fn finish_setup(
     id: &str,
-    manifest: &crate::domain::plugin::manifest::PluginManifest,
+    manifest: &PluginManifest,
     mut status: IntegrationSetupStatus,
     app: Arc<AppState>,
 ) -> Result<()> {
@@ -391,7 +397,7 @@ async fn finish_setup(
         .await
     {
         Ok(validation) => validation,
-        Err(error) => crate::domain::plugin::engine::worker::SetupHookResult {
+        Err(error) => SetupHookResult {
             ok: false,
             pending: false,
             reason: Some(error.to_string()),
@@ -440,11 +446,11 @@ async fn finish_setup(
 }
 
 async fn start_oauth(
-    manifest: crate::domain::plugin::manifest::PluginManifest,
+    manifest: PluginManifest,
     mut status: IntegrationSetupStatus,
     app: Arc<AppState>,
 ) -> Result<()> {
-    let crate::domain::plugin::manifest::IntegrationAuthConfig::Oauth2Pkce {
+    let IntegrationAuthConfig::Oauth2Pkce {
         authorization_url,
         token_url,
         client_id,
@@ -544,7 +550,7 @@ async fn start_oauth(
                     .append_pair("code_verifier", &verifier);
                 serializer.finish().into_bytes()
             };
-            let policy = crate::domain::plugin::manifest::HttpConfig {
+            let policy = HttpConfig {
                 origins: vec![origin.clone()],
                 host_key: None,
                 port_key: None,
@@ -556,8 +562,8 @@ async fn start_oauth(
                 allow_private: false,
                 tls: None,
             };
-            let runtime = crate::infrastructure::http::HttpRuntime::from_config(&policy, None, None, None)?;
-            let response = runtime.request(crate::infrastructure::http::HttpRequest {
+            let runtime = HttpRuntime::from_config(&policy, None, None, None)?;
+            let response = runtime.request(HttpRequest {
                 method: "POST".into(),
                 origin,
                 path: match token.query() {
@@ -612,8 +618,7 @@ async fn start_oauth(
 
 pub async fn cancel_setup(id: String, app: Arc<AppState>) -> Result<()> {
     app.registry.clear_integration_setup_status(&id);
-    app.record_change(crate::domain::events::Change::PluginTopology)
-        .await;
+    app.record_change(Change::PluginTopology).await;
     Ok(())
 }
 
@@ -686,8 +691,7 @@ pub async fn set_integration_enabled(id: String, enabled: bool, app: Arc<AppStat
         disable_one(&app, &id).await;
         app.registry.clear_integration_operational_errors(&id);
     }
-    app.record_change(crate::domain::events::Change::PluginTopology)
-        .await;
+    app.record_change(Change::PluginTopology).await;
     Ok(())
 }
 
@@ -705,8 +709,7 @@ pub async fn set_integration_config(
     disable_one(&app, &id).await;
     app.registry.clear_integration_operational_errors(&id);
     enable_one(&app, &id).await;
-    app.record_change(crate::domain::events::Change::PluginTopology)
-        .await;
+    app.record_change(Change::PluginTopology).await;
     Ok(())
 }
 

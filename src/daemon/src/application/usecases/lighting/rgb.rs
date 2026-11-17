@@ -6,6 +6,7 @@ use std::sync::Arc;
 
 use crate::application::state::AppState;
 use crate::application::usecases::registry::settings;
+use crate::domain::events::Change;
 use crate::domain::profiles::device_state::persist_device_state;
 use crate::domain::registry::require_device_owned_id;
 use halod_shared::types::{LightingChannel, LightingState, ZoneTopology};
@@ -93,8 +94,7 @@ pub async fn lighting_apply(id: String, state: LightingState, app: Arc<AppState>
         .await;
         lighting.apply(state).await?;
     }
-    app.record_change(crate::domain::events::Change::LightingDevice(id))
-        .await;
+    app.record_change(Change::LightingDevice(id)).await;
     Ok(())
 }
 

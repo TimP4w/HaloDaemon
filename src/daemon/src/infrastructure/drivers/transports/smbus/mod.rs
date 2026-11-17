@@ -29,6 +29,9 @@ use std::sync::Arc;
 use halod_hwaccess::smbus::{enumerate_buses, enumerate_gpu_buses};
 pub use halod_hwaccess::smbus::{BusInfo, SmBusSyncOps};
 
+use crate::domain::plugin;
+use crate::domain::plugin::ProbeMode;
+use crate::domain::plugin::Registry;
 pub use halod_shared::debug_info::SmbusBusKind;
 
 /// A PCI-identity filter that gates a GPU-bus scan to known cards, so the daemon
@@ -234,7 +237,7 @@ enum Probe {
     ReadByte,
 }
 
-fn plugin_scan_jobs(registry: &crate::domain::plugin::Registry) -> Vec<ScanJob> {
+fn plugin_scan_jobs(registry: &Registry) -> Vec<ScanJob> {
     registry
         .plugin_smbus_scan_entries()
         .into_iter()
@@ -243,9 +246,9 @@ fn plugin_scan_jobs(registry: &crate::domain::plugin::Registry) -> Vec<ScanJob> 
             addresses: e.addresses.clone(),
             write_rate_limit: e.write_rate_limit,
             probe: match e.probe {
-                crate::domain::plugin::ProbeMode::Quick => Probe::Quick,
-                crate::domain::plugin::ProbeMode::ReadByte => Probe::ReadByte,
-                crate::domain::plugin::ProbeMode::None => Probe::Always,
+                ProbeMode::Quick => Probe::Quick,
+                ProbeMode::ReadByte => Probe::ReadByte,
+                ProbeMode::None => Probe::Always,
             },
             pre_scan: if e.pre_scan {
                 PreScan::Plugin {
@@ -407,7 +410,7 @@ async fn discover(app: Arc<AppState>) -> Result<()> {
 
 /// Run a job's Lua pre-scan against a freshly opened bus.
 async fn run_pre_scan(
-    registry: &crate::domain::plugin::Registry,
+    registry: &Registry,
     pre_scan: &PreScan,
     bus: &Arc<SmBusDevice>,
     bus_number: u8,
@@ -426,7 +429,7 @@ async fn run_pre_scan(
             let scope = scope.clone();
             let granted = registry.granted_for(plugin_id);
             tokio::task::spawn_blocking(move || {
-                crate::domain::plugin::run_pre_scan(&source, &modules, bus, scope, &granted)
+                plugin::run_pre_scan(&source, &modules, bus, scope, &granted)
             })
             .await
             .unwrap_or_else(|e| Err(anyhow!("pre_scan task panicked: {e}")))

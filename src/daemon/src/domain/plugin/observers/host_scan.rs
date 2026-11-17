@@ -4,6 +4,7 @@
 
 use std::sync::Arc;
 
+use crate::domain::plugin::TRANSPORT_OPEN_BACKOFF;
 use crate::{
     application::state::AppState,
     domain::registry::observers::discovery::{self, DiscoveryHandle, TransportScanner},
@@ -18,7 +19,7 @@ pub(crate) const SCANNER: TransportScanner = TransportScanner {
 
 pub(crate) async fn retry_failed_opens(app: Arc<AppState>) {
     loop {
-        tokio::time::sleep(crate::domain::plugin::TRANSPORT_OPEN_BACKOFF).await;
+        tokio::time::sleep(TRANSPORT_OPEN_BACKOFF).await;
         let kinds = app.registry.retryable_open_failure_kinds();
         if kinds
             .iter()

@@ -1,6 +1,13 @@
 // SPDX-License-Identifier: GPL-3.0-or-later
 //! Generic plugin-machinery tests. Vendor-specific equivalence tests live in
 //! the official plugin repository's `halod plugin-test` CI run.
+use crate::infrastructure::secrets::FileKeyStore;
+use crate::infrastructure::secrets::SecretStore;
+use crate::test_support;
+use crate::test_support::MockDevice;
+use crate::util::backoff;
+use crate::util::backoff::FailureStreak;
+use crate::util::backoff::Retry;
 
 // Registry coverage uses real directory packages beside the production loader.
 #[test]
@@ -53,7 +60,7 @@ fn transport_open_failures_back_off_between_attempts() {
         let mut failures = registry.transport_open_failures.write();
         let streak = failures.get_mut(&key).unwrap();
         let then = std::time::Instant::now() - super::TRANSPORT_OPEN_BACKOFF;
-        let mut aged = crate::util::backoff::FailureStreak::first(then);
+        let mut aged = FailureStreak::first(then);
         for _ in 1..streak.failures() {
             aged.record(then);
         }
@@ -73,11 +80,11 @@ fn transport_open_failures_back_off_between_attempts() {
 /// Queue a recovery for `plugin_id` the way a runtime error would, standing in
 /// for the reconcile the daemon would run.
 fn queue_recovery(registry: &super::Registry, plugin_id: &str) -> bool {
-    crate::util::backoff::schedule(
+    backoff::schedule(
         &registry.runtime_recovery,
         plugin_id,
         super::RUNTIME_RECOVERY_ATTEMPTS,
-        |_| async { crate::util::backoff::Retry::Stop },
+        |_| async { Retry::Stop },
     )
 }
 
@@ -155,7 +162,7 @@ fn init_failures_share_the_open_budget_until_a_successful_init() {
 
 #[tokio::test(start_paused = true)]
 async fn runtime_error_from_a_device_that_left_is_dropped_after_the_grace() {
-    let app = crate::test_support::app_with(vec![]);
+    let app = test_support::app_with(vec![]);
     app.registry
         .report_runtime_error(&app, "plug_a", "plug_a-gone", "Broken pipe".into())
         .await;
@@ -178,8 +185,8 @@ async fn runtime_error_from_a_device_that_left_is_dropped_after_the_grace() {
 
 #[tokio::test(start_paused = true)]
 async fn runtime_error_from_a_present_device_queues_recovery_after_the_grace() {
-    let device = std::sync::Arc::new(crate::test_support::MockDevice::new("plug_a-live"));
-    let app = crate::test_support::app_with(vec![device]);
+    let device = std::sync::Arc::new(MockDevice::new("plug_a-live"));
+    let app = test_support::app_with(vec![device]);
     app.registry
         .report_runtime_error(&app, "plug_a", "plug_a-live", "Broken pipe".into())
         .await;
@@ -196,8 +203,8 @@ async fn runtime_error_from_a_present_device_queues_recovery_after_the_grace() {
 
 #[tokio::test(start_paused = true)]
 async fn runtime_error_that_recovers_within_the_grace_stays_silent() {
-    let device = std::sync::Arc::new(crate::test_support::MockDevice::new("plug_a-live"));
-    let app = crate::test_support::app_with(vec![device]);
+    let device = std::sync::Arc::new(MockDevice::new("plug_a-live"));
+    let app = test_support::app_with(vec![device]);
     app.registry
         .report_runtime_error(&app, "plug_a", "plug_a-live", "Broken pipe".into())
         .await;
@@ -276,7 +283,7 @@ fn integration_with_missing_command_is_gated_out() {
 #[test]
 fn disabled_integration_is_not_reported_active() {
     struct NoSecrets;
-    impl crate::infrastructure::secrets::SecretStore for NoSecrets {
+    impl SecretStore for NoSecrets {
         fn set(&self, _: &str, _: &str, _: &str) -> anyhow::Result<()> {
             Ok(())
         }
@@ -336,7 +343,7 @@ fn write_plugin(root: &std::path::Path, id: &str, api: &str) {
 fn a_local_repo_shadows_an_installed_plugin() {
     use crate::config::{PluginRepoRecord, PluginRepoSource};
     use halod_shared::types::PluginProvenance;
-    let _config = crate::test_support::tmp_config_dir();
+    let _config = test_support::tmp_config_dir();
     let installed = crate::config::plugins_dir().join("community");
     write_plugin(&installed, "demo", "3.0");
     write_plugin(&installed, "other", "3.0");
@@ -358,7 +365,7 @@ fn a_local_repo_shadows_an_installed_plugin() {
         },
     ]);
 
-    let plugins = registry.list(&crate::infrastructure::secrets::FileKeyStore::new());
+    let plugins = registry.list(&FileKeyStore::new());
     let origin = |id: &str| {
         let plugin = plugins.iter().find(|p| p.id == id).unwrap();
         (plugin.repo.clone(), plugin.provenance)
@@ -383,7 +390,7 @@ fn an_incompatible_api_is_listed_but_not_loaded() {
 
     assert!(registry.origin("future").is_none());
     let issue = registry
-        .list(&crate::infrastructure::secrets::FileKeyStore::new())
+        .list(&FileKeyStore::new())
         .pop()
         .and_then(|info| info.health.issue)
         .unwrap();

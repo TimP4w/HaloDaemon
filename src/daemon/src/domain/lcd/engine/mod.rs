@@ -12,7 +12,10 @@ use halod_shared::types::{EffectParamValue, LcdEngineFrame, WireLcdEngineState};
 use image::RgbaImage;
 use tokio::sync::Mutex;
 
+use crate::application::run_loop::EngineConfigReceiver;
 use crate::application::state::AppState;
+use crate::application::usecases::lcd::runtime;
+use crate::domain::plugin::Registry;
 use custom::CustomTemplate;
 use templates::TemplateCtx;
 
@@ -224,11 +227,7 @@ impl LcdEngine {
                     lcd.lcd_state().end_editor_preview();
                     lcd.lcd_state()
                         .set_health(halod_shared::types::LcdHealth::Stable);
-                    crate::application::usecases::lcd::runtime::device_changed(
-                        &self.app_state,
-                        &device_id,
-                    )
-                    .await;
+                    runtime::device_changed(&self.app_state, &device_id).await;
                 }
             }
         }
@@ -239,7 +238,7 @@ impl LcdEngine {
     }
 
     pub fn wire_state(
-        registry: &crate::domain::plugin::Registry,
+        registry: &Registry,
         device_templates: HashMap<String, String>,
         device_template_params: HashMap<String, HashMap<String, EffectParamValue>>,
     ) -> WireLcdEngineState {
@@ -264,7 +263,7 @@ impl LcdEngine {
 
     pub async fn start(
         self: Arc<Self>,
-        cfg_rx: crate::application::run_loop::EngineConfigReceiver<LcdConfig>,
+        cfg_rx: EngineConfigReceiver<LcdConfig>,
     ) -> tokio::task::JoinHandle<()> {
         tokio::spawn(async move {
             let start = Instant::now();

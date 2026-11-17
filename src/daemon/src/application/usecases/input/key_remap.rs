@@ -5,6 +5,7 @@ use anyhow::{Context, Result};
 use std::sync::Arc;
 
 use crate::application::state::AppState;
+use crate::domain::events::Change;
 use crate::domain::input::validate::{validate_button_mapping, validate_macro};
 use crate::domain::profiles::device_state::persist_device_state;
 use crate::domain::registry::require_device_owned_id;
@@ -23,8 +24,7 @@ pub async fn set_button_mapping(
 
     cap.set_button_mapping(mapping).await?;
     persist_device_state(&app, device.as_ref()).await;
-    app.record_change(crate::domain::events::Change::Device(id))
-        .await;
+    app.record_change(Change::Device(id)).await;
     Ok(())
 }
 
@@ -36,8 +36,7 @@ pub async fn reset_button_mapping(id: String, cid: u16, app: Arc<AppState>) -> R
 
     cap.reset_button_mapping(cid).await?;
     persist_device_state(&app, device.as_ref()).await;
-    app.record_change(crate::domain::events::Change::Device(id))
-        .await;
+    app.record_change(Change::Device(id)).await;
     Ok(())
 }
 
@@ -49,8 +48,7 @@ pub async fn reset_all_button_mappings(id: String, app: Arc<AppState>) -> Result
 
     cap.reset_all_button_mappings().await?;
     persist_device_state(&app, device.as_ref()).await;
-    app.record_change(crate::domain::events::Change::Device(id))
-        .await;
+    app.record_change(Change::Device(id)).await;
     Ok(())
 }
 
@@ -80,8 +78,7 @@ pub async fn set_software_dpi_steps(id: String, steps: Vec<u32>, app: Arc<AppSta
 
     cap.set_dpi_steps(steps).await?;
     persist_device_state(&app, device.as_ref()).await;
-    app.record_change(crate::domain::events::Change::Device(id))
-        .await;
+    app.record_change(Change::Device(id)).await;
     Ok(())
 }
 

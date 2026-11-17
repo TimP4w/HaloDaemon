@@ -7,6 +7,7 @@ use std::sync::Arc;
 
 use crate::application::state::AppState;
 use crate::domain::device::Device;
+use crate::domain::events::Change;
 use crate::domain::profiles::device_state::persist_device_state;
 use crate::domain::registry::require_device_owned_id;
 
@@ -39,8 +40,7 @@ pub async fn set_capability_param(
     if effects.persist {
         persist_device_state(&app, dev.as_ref()).await;
     }
-    app.record_change(crate::domain::events::Change::Device(id))
-        .await;
+    app.record_change(Change::Device(id)).await;
     Ok(())
 }
 

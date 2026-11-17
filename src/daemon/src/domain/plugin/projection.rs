@@ -7,11 +7,13 @@ use halod_shared::types::{
 };
 
 use super::catalog::RepoCatalog;
+use crate::application::bus::data_bus::SnapshotStatus;
 use crate::application::state::AppState;
 use crate::config::{Config, PluginRepoRecord, PluginRepoSource};
+use crate::constants::OFFICIAL_PLUGIN_REPO_SLUG;
 
 fn repo_info(record: &PluginRepoRecord, catalog: Option<&RepoCatalog>) -> PluginRepoInfo {
-    let official = record.slug == crate::constants::OFFICIAL_PLUGIN_REPO_SLUG;
+    let official = record.slug == OFFICIAL_PLUGIN_REPO_SLUG;
     let signing_key = catalog
         .and_then(|repo| repo.catalog.signing_key.as_ref())
         .or(record.trusted_key.as_ref());
@@ -74,11 +76,9 @@ pub async fn project(app: &AppState, cfg: &Config, devices: &[WireDevice]) -> Pl
                 |(key, snapshot)| halod_shared::types::PluginDataRecordStatus {
                     key,
                     status: match snapshot.status {
-                        crate::application::bus::data_bus::SnapshotStatus::Fresh => "fresh",
-                        crate::application::bus::data_bus::SnapshotStatus::Stale => "stale",
-                        crate::application::bus::data_bus::SnapshotStatus::Unavailable => {
-                            "unavailable"
-                        }
+                        SnapshotStatus::Fresh => "fresh",
+                        SnapshotStatus::Stale => "stale",
+                        SnapshotStatus::Unavailable => "unavailable",
                     }
                     .to_owned(),
                     updated_at: snapshot.published_at,

@@ -11,6 +11,10 @@ use halod_shared::messages::DaemonMessage;
 
 use crate::application::ipc::ClientHandle;
 use crate::application::state::AppState;
+use crate::config;
+use crate::domain::events::Change;
+use crate::domain::plugin::Registry;
+use crate::util::fs;
 use halod_shared::lcd_custom::{
     CustomTemplateDef, OPACITY_PARAM, SCALE_Y_PARAM, TEXT_ITALIC_PARAM, TEXT_STRIKETHROUGH_PARAM,
     TEXT_UNDERLINE_PARAM, TEXT_WEIGHT_PARAM,
@@ -18,7 +22,7 @@ use halod_shared::lcd_custom::{
 use halod_shared::types::{EffectParamValue, LcdWidgetResize, ParamKind};
 
 pub fn lcd_templates_dir() -> std::path::PathBuf {
-    crate::config::config_dir().join("lcd")
+    config::config_dir().join("lcd")
 }
 
 /// Validate a user-supplied template name before joining it onto
@@ -71,10 +75,7 @@ pub fn validate_template(def: &CustomTemplateDef) -> Result<()> {
 
 /// Validate parameters against the active plugin catalog. Missing plugins are
 /// deliberately accepted so saved layouts can retain their placeholder.
-pub fn validate_template_catalog(
-    def: &CustomTemplateDef,
-    registry: &crate::domain::plugin::Registry,
-) -> Result<()> {
+pub fn validate_template_catalog(def: &CustomTemplateDef, registry: &Registry) -> Result<()> {
     for widget in &def.widgets {
         let Some(descriptor) = registry.widget_descriptor(&widget.widget) else {
             continue;
@@ -223,11 +224,10 @@ pub async fn save_template(name: String, def: CustomTemplateDef, app: Arc<AppSta
         "template too large"
     );
     let path = template_path(&name);
-    tokio::task::spawn_blocking(move || crate::util::fs::atomic_write(&path, &yaml)).await??;
+    tokio::task::spawn_blocking(move || fs::atomic_write(&path, &yaml)).await??;
     log::info!("[LCD] saved template '{name}'");
     app.lcd.refresh_templates().await;
-    app.record_change(crate::domain::events::Change::LcdCatalog)
-        .await;
+    app.record_change(Change::LcdCatalog).await;
     Ok(())
 }
 
@@ -256,8 +256,7 @@ pub async fn delete_template(name: String, app: Arc<AppState>) -> Result<()> {
         Err(e) => return Err(e.into()),
     }
     app.lcd.refresh_templates().await;
-    app.record_change(crate::domain::events::Change::LcdCatalog)
-        .await;
+    app.record_change(Change::LcdCatalog).await;
     Ok(())
 }
 

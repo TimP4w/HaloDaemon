@@ -16,6 +16,7 @@ use crate::application::usecases::registry::registration::{
 };
 
 use super::integration_scan;
+use crate::application::usecases::plugin::runtime;
 use crate::domain::plugin::manifest::PluginManifest;
 
 /// Base cadence between ticks when everything is healthy.
@@ -168,7 +169,7 @@ pub(super) async fn tick_once(app: &Arc<AppState>, states: &mut HashMap<String, 
                 match integration_scan::discover_one(app, &plugin_id).await {
                     integration_scan::DiscoveryOutcome::Registered => {
                         states.insert(plugin_id, MonitorState::Online);
-                        crate::application::usecases::plugin::runtime::topology_changed(app).await;
+                        runtime::topology_changed(app).await;
                     }
                     integration_scan::DiscoveryOutcome::Unrecoverable => {
                         states.insert(plugin_id, MonitorState::Unrecoverable);
@@ -210,7 +211,7 @@ async fn reconcile_live_root(
             // device. Surface the new offline state to the GUI. Next tick's
             // liveness check routes this plugin through Case B.
             log::info!("[integration] {} dropped: {e:#}", root.id());
-            crate::application::usecases::plugin::runtime::topology_changed(app).await;
+            runtime::topology_changed(app).await;
         }
         Ok((added, gone)) => {
             let changed = !added.is_empty() || !gone.is_empty();
@@ -232,7 +233,7 @@ async fn reconcile_live_root(
             }
             remove_children(app, &gone).await;
             if changed {
-                crate::application::usecases::plugin::runtime::topology_changed(app).await;
+                runtime::topology_changed(app).await;
             }
             if let Some(id) = root.integration_id() {
                 states.insert(id, MonitorState::Online);
@@ -270,7 +271,7 @@ async fn reconnect_offline_root(
                 integration_scan::DiscoveryOutcome::Registered => {
                     states.insert(plugin_id.clone(), MonitorState::Online);
                     app.registry.clear_connect_error(&plugin_id);
-                    crate::application::usecases::plugin::runtime::topology_changed(app).await;
+                    runtime::topology_changed(app).await;
                 }
                 integration_scan::DiscoveryOutcome::Unrecoverable => {
                     states.insert(plugin_id, MonitorState::Unrecoverable);
@@ -308,7 +309,7 @@ async fn report_connect_failure(
     app.registry
         .report_connect_error(app, plugin_id, &manifest.display_name(), detail)
         .await;
-    crate::application::usecases::plugin::runtime::topology_changed(app).await;
+    runtime::topology_changed(app).await;
 }
 
 /// The registered integration root for `plugin_id`, if any.

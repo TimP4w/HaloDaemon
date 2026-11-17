@@ -6,6 +6,7 @@ use anyhow::{anyhow, Result};
 use std::sync::Arc;
 
 use crate::application::state::AppState;
+use crate::domain::events::Change;
 use halod_shared::keyboard::KeyboardLayoutSelection;
 
 /// Apply a keyboard's layout selection in place: update the live slot, persist
@@ -47,8 +48,7 @@ pub async fn set_keyboard_layout(
         }
     }
 
-    app.record_change(crate::domain::events::Change::Device(id))
-        .await;
+    app.record_change(Change::Device(id)).await;
     Ok(())
 }
 

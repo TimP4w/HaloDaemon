@@ -1,4 +1,5 @@
 // SPDX-License-Identifier: GPL-3.0-or-later
+use crate::domain::device::Device;
 use serde::{Deserialize, Serialize};
 use std::collections::HashMap;
 
@@ -19,7 +20,7 @@ pub struct DeviceRecord {
 pub fn ensure_record<'a>(
     known: &'a mut HashMap<String, DeviceRecord>,
     device_id: &str,
-    device: Option<&dyn crate::domain::device::Device>,
+    device: Option<&dyn Device>,
 ) -> &'a mut DeviceRecord {
     known
         .entry(device_id.to_string())

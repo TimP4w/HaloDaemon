@@ -4,6 +4,8 @@
 //! `domain::device` so domain services depend on abstractions rather than drivers.
 
 use super::*;
+use crate::config::PlacedZone;
+use crate::domain::cooling::model::FanCurveRecord;
 use anyhow::Result;
 use async_trait::async_trait;
 use halod_shared::keyboard::{
@@ -99,13 +101,13 @@ pub trait CoolingCapability: Send + Sync {
         Vec::new()
     }
 
-    fn curves(&self) -> HashMap<String, crate::domain::cooling::model::FanCurveRecord> {
+    fn curves(&self) -> HashMap<String, FanCurveRecord> {
         self.cooling_state().curves()
     }
-    fn curve(&self, channel_id: &str) -> Option<crate::domain::cooling::model::FanCurveRecord> {
+    fn curve(&self, channel_id: &str) -> Option<FanCurveRecord> {
         self.cooling_state().curve(channel_id)
     }
-    fn set_curve(&self, channel_id: String, curve: crate::domain::cooling::model::FanCurveRecord) {
+    fn set_curve(&self, channel_id: String, curve: FanCurveRecord) {
         self.cooling_state().set_curve(channel_id, curve);
     }
     fn clear_curve(&self, channel_id: &str) {
@@ -169,10 +171,10 @@ pub trait LightingCapability: Send + Sync {
         self.lighting_state().current_state()
     }
 
-    fn placed_channels(&self) -> Vec<crate::config::PlacedZone> {
+    fn placed_channels(&self) -> Vec<PlacedZone> {
         self.lighting_state().placed_channels()
     }
-    fn set_canvas_zones(&self, channels: Vec<crate::config::PlacedZone>) {
+    fn set_canvas_zones(&self, channels: Vec<PlacedZone>) {
         self.lighting_state().set_canvas_zones(channels);
     }
 

@@ -10,6 +10,8 @@ use std::sync::Arc;
 
 use crate::application::ipc::ClientHandle;
 use crate::application::state::AppState;
+use crate::domain::device::Device;
+use crate::domain::lcd::engine::video;
 use crate::infrastructure::drivers::transports::smbus::{BusInfo, SmBusTransport};
 use halod_shared::debug_info::{
     DebugInfo, DependencyRule, DependencyStatus, DeviceDebugInfo, HidEntryDebugInfo, OsKind,
@@ -62,7 +64,7 @@ async fn collect(app: Arc<AppState>) -> DebugInfo {
 /// runs on. Only rows that apply to the current platform are emitted, so the
 /// UI never shows e.g. a Windows-only helper on Linux.
 async fn collect_dependencies(_app: &Arc<AppState>) -> Vec<DependencyStatus> {
-    let ffmpeg = crate::domain::lcd::engine::video::ffmpeg_available();
+    let ffmpeg = video::ffmpeg_available();
     #[cfg_attr(not(target_os = "linux"), allow(unused_mut))]
     let mut deps = tokio::task::spawn_blocking(move || collect_binary_dependencies(ffmpeg))
         .await
@@ -354,7 +356,7 @@ fn matches_hid_key(key: &str, entry: &HidEntryDebugInfo) -> bool {
 }
 
 async fn build_device_debug(
-    device: &dyn crate::domain::device::Device,
+    device: &dyn Device,
     tracking_keys: &[(String, String)],
     hid_entries: &[HidEntryDebugInfo],
 ) -> DeviceDebugInfo {
@@ -418,7 +420,7 @@ async fn build_device_debug(
 /// Ownership metadata is deliberately emitted for every device, not merely
 /// Lua-backed devices. It makes a debug export answer the practical question
 /// behind a duplicate report: which component is talking to this hardware?
-fn source_fields(device: &dyn crate::domain::device::Device) -> Vec<(String, String)> {
+fn source_fields(device: &dyn Device) -> Vec<(String, String)> {
     use crate::domain::registry::identity::DeviceOrigin;
 
     let origin = device.conflict_origin();

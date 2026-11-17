@@ -2,9 +2,19 @@
 use std::sync::Arc;
 use tokio::sync::{watch, Mutex, RwLock};
 
+use crate::application::bus::coordinator::EffectiveStatePublisher;
+use crate::application::bus::data_bus::DataBus;
 use crate::application::ipc::ClientHandle;
 use crate::config::Config;
+use crate::domain::events::Change;
+use crate::domain::events::ChangeSink;
+use crate::domain::input::InputEventBus;
+use crate::domain::plugin::catalog::RepoCatalog;
+use crate::domain::plugin::Registry;
 use crate::domain::registry::observers::discovery::{DiscoveryScope, PendingRediscovery};
+use crate::infrastructure::secrets::FileKeyStore;
+use crate::infrastructure::secrets::SecretStore;
+use crate::util::backoff::RetryQueue;
 use halod_shared::types::DiscoveryStatus;
 
 mod config_repository;
@@ -40,7 +50,7 @@ pub struct AppState {
     pub lcd: LcdEngineState,
     pub focus: FocusState,
     pub input: InputState,
-    pub input_events: crate::domain::input::InputEventBus,
+    pub input_events: InputEventBus,
 
     // --- Runtime / lifecycle infra ---
     /// Per-device command serialization. Commands targeting the same device
@@ -50,7 +60,7 @@ pub struct AppState {
     /// Serializes atomic topic production. Concurrent changes can otherwise
     /// snapshot the same plugin devices at once and fill their single-threaded
     /// worker queues ahead of interactive writes.
-    pub effective_state: crate::application::bus::coordinator::EffectiveStatePublisher,
+    pub effective_state: EffectiveStatePublisher,
     pub clients: Mutex<Vec<ClientHandle>>,
     /// Flipped to `true` once every domain's engine has been set
     pub engines_ready: watch::Sender<bool>,
@@ -65,19 +75,18 @@ pub struct AppState {
     /// then wait on this gate until their request has been consumed.
     pub rediscovery_runner: Mutex<()>,
     /// Last verified catalog per remote repository slug.
-    pub plugin_catalogs:
-        Mutex<std::collections::HashMap<String, crate::domain::plugin::catalog::RepoCatalog>>,
-    pub repo_refresh_retry: Arc<crate::util::backoff::RetryQueue>,
+    pub plugin_catalogs: Mutex<std::collections::HashMap<String, RepoCatalog>>,
+    pub repo_refresh_retry: Arc<RetryQueue>,
     /// The device-plugin registry (loaded manifests, consent/config, notice
     /// dedup, load warnings).
-    pub registry: crate::domain::plugin::Registry,
-    pub data_bus: Arc<crate::application::bus::data_bus::DataBus>,
+    pub registry: Registry,
+    pub data_bus: Arc<DataBus>,
     /// Backing store for plugin-declared secret config values.
-    pub secret_store: Arc<dyn crate::infrastructure::secrets::SecretStore>,
+    pub secret_store: Arc<dyn SecretStore>,
     /// Pending state-restore retries, keyed by device id. A device that is
     /// still waking (wireless link not up, firmware not answering) drops the
     /// writes it is sent, so a one-shot restore silently loses the user's state.
-    pub restore_retry: Arc<crate::util::backoff::RetryQueue>,
+    pub restore_retry: Arc<RetryQueue>,
 }
 
 impl AppState {
@@ -92,9 +101,8 @@ impl AppState {
             lcd: LcdEngineState::new(),
             focus: FocusState::new(),
             input: InputState::new(),
-            input_events: crate::domain::input::InputEventBus::new(),
-            effective_state: crate::application::bus::coordinator::EffectiveStatePublisher::default(
-            ),
+            input_events: InputEventBus::new(),
+            effective_state: EffectiveStatePublisher::default(),
             clients: Mutex::new(Vec::new()),
             engines_ready: watch::channel(false).0,
             shutdown: tokio::sync::Notify::new(),
@@ -103,9 +111,9 @@ impl AppState {
             rediscovery_runner: Mutex::new(()),
             plugin_catalogs: Mutex::default(),
             repo_refresh_retry: Arc::default(),
-            registry: crate::domain::plugin::Registry::default(),
-            data_bus: Arc::new(crate::application::bus::data_bus::DataBus::default()),
-            secret_store: Arc::new(crate::infrastructure::secrets::FileKeyStore::new()),
+            registry: Registry::default(),
+            data_bus: Arc::new(DataBus::default()),
+            secret_store: Arc::new(FileKeyStore::new()),
             restore_retry: Arc::default(),
         }
     }
@@ -125,10 +133,7 @@ impl AppState {
 
     /// Override the secret store (e.g. with `crate::infrastructure::secrets::open_secret_store()`
     /// to prefer the OS keyring). Builder-style, like `with_secret_store`.
-    pub fn with_secret_store(
-        mut self,
-        store: Arc<dyn crate::infrastructure::secrets::SecretStore>,
-    ) -> Self {
+    pub fn with_secret_store(mut self, store: Arc<dyn SecretStore>) -> Self {
         self.secret_store = store;
         self
     }
@@ -159,8 +164,8 @@ impl AppState {
 }
 
 #[async_trait::async_trait]
-impl crate::domain::events::ChangeSink for AppState {
-    async fn record_change(&self, change: crate::domain::events::Change) {
+impl ChangeSink for AppState {
+    async fn record_change(&self, change: Change) {
         self.effective_state.record(self, change).await;
     }
 }

@@ -9,6 +9,7 @@ use halod_shared::types::{
 
 use crate::config::{Config, PlacedZone};
 use crate::domain::lighting::engine::RgbEngine;
+use crate::domain::plugin::Registry;
 
 fn sanitize_zone(mut p: PlacedZone) -> PlacedZone {
     p.sanitize();
@@ -69,7 +70,7 @@ impl LightingState {
 
     pub async fn snapshot(
         &self,
-        registry: &crate::domain::plugin::Registry,
+        registry: &Registry,
         cfg: &Config,
         placed_zones: Vec<PlacedZone>,
     ) -> WireLightingState {

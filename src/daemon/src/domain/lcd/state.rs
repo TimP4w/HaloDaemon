@@ -8,6 +8,7 @@ use halod_shared::types::EffectParamValue;
 
 use crate::domain::lcd::engine::custom::EditorSession;
 use crate::domain::lcd::engine::{video::VideoEngine, LcdEngine};
+use crate::domain::plugin::Registry;
 
 struct Engine {
     handle: Arc<LcdEngine>,
@@ -70,7 +71,7 @@ impl LcdEngineState {
 
     pub async fn snapshot(
         &self,
-        registry: &crate::domain::plugin::Registry,
+        registry: &Registry,
         device_templates: HashMap<String, String>,
         device_template_params: HashMap<String, HashMap<String, EffectParamValue>>,
     ) -> halod_shared::types::LcdState {

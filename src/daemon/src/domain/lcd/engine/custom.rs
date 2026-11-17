@@ -22,6 +22,12 @@ use halod_shared::lcd_custom::{
 use halod_shared::types::{EffectParamValue, LcdEngineTemplateDescriptor, RgbColor};
 
 use super::templates::{dim_color, rgba, Background, TemplateCtx};
+use crate::application::state::AppState;
+use crate::domain::plugin::PluginWidgetHandle;
+use crate::domain::plugin::WidgetAudioInput;
+use crate::domain::plugin::WidgetImageInput;
+use crate::domain::plugin::WidgetRenderInput;
+use crate::util::backoff::FailureStreak;
 
 struct PluginSprite {
     signature: u64,
@@ -79,12 +85,12 @@ pub struct CustomTemplate {
     /// Acquired only when the layout has a `NowPlaying` widget — `None`
     /// renders the "no player" dimmed placeholder.
     media: Option<Arc<MediaHandle>>,
-    plugin_handles: HashMap<String, crate::domain::plugin::PluginWidgetHandle>,
-    plugin_backoff: HashMap<String, crate::util::backoff::FailureStreak>,
+    plugin_handles: HashMap<String, PluginWidgetHandle>,
+    plugin_backoff: HashMap<String, FailureStreak>,
     plugin_sprites: HashMap<String, PluginSprite>,
     composite_cache: RefCell<HashMap<String, CachedComposite>>,
     system_fonts: HashMap<String, ab_glyph::FontArc>,
-    plugin_assets: HashMap<(String, String, u32), crate::domain::plugin::WidgetImageInput>,
+    plugin_assets: HashMap<(String, String, u32), WidgetImageInput>,
     plugin_revision: u64,
     last_plugin_render_t: Option<f64>,
 }
@@ -182,11 +188,7 @@ impl CustomTemplate {
         }
     }
 
-    pub(super) async fn gather_plugin_sprites(
-        &mut self,
-        ctx: &TemplateCtx,
-        app: &crate::application::state::AppState,
-    ) {
+    pub(super) async fn gather_plugin_sprites(&mut self, ctx: &TemplateCtx, app: &AppState) {
         let dt = self
             .last_plugin_render_t
             .map(|last| (ctx.t - last).max(0.0) as f32)
@@ -347,7 +349,7 @@ impl CustomTemplate {
                     EffectParamValue::Str(weight.clone()),
                 );
             }
-            let input = crate::domain::plugin::WidgetRenderInput {
+            let input = WidgetRenderInput {
                 widget_id,
                 width,
                 height,
@@ -363,7 +365,7 @@ impl CustomTemplate {
                     .filter(|frame| frame.seq != 0)
                     .map(widget_audio),
                 media_art: media_info.and_then(|info| {
-                    info.art.map(|art| crate::domain::plugin::WidgetImageInput {
+                    info.art.map(|art| WidgetImageInput {
                         width: art.width(),
                         height: art.height(),
                         rgba: art.as_raw().clone(),
@@ -382,7 +384,7 @@ impl CustomTemplate {
                         let frame = decoded.frames.get(index)?;
                         Some((
                             filename,
-                            crate::domain::plugin::WidgetImageInput {
+                            WidgetImageInput {
                                 width: frame.width(),
                                 height: frame.height(),
                                 rgba: frame.as_raw().clone(),
@@ -445,7 +447,7 @@ impl CustomTemplate {
                         self.plugin_backoff
                             .entry(entry.plugin_id.clone())
                             .and_modify(|backoff| backoff.record(now))
-                            .or_insert_with(|| crate::util::backoff::FailureStreak::first(now));
+                            .or_insert_with(|| FailureStreak::first(now));
                     }
                 }
             }
@@ -1062,13 +1064,7 @@ impl EditorSession {
         self.tmpl.invalidate_image_cache();
     }
 
-    pub(crate) async fn gather_plugin_sprites(
-        &mut self,
-        cw: u32,
-        ch: u32,
-        t: f64,
-        app: &crate::application::state::AppState,
-    ) {
+    pub(crate) async fn gather_plugin_sprites(&mut self, cw: u32, ch: u32, t: f64, app: &AppState) {
         let ctx = TemplateCtx {
             width: cw,
             height: ch,
@@ -1146,8 +1142,8 @@ pub(crate) fn render_editor_sprites(
     s.tmpl.editor_sprites_delta(&ctx, known)
 }
 
-fn widget_audio(frame: &audio::SpectrumFrame) -> crate::domain::plugin::WidgetAudioInput {
-    crate::domain::plugin::WidgetAudioInput {
+fn widget_audio(frame: &audio::SpectrumFrame) -> WidgetAudioInput {
+    WidgetAudioInput {
         level: frame.level,
         flux: frame.flux,
         beat: frame.beat,

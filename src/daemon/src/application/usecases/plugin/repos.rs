@@ -14,6 +14,8 @@ use crate::domain::plugin::repo::RepositoryTrust;
 use crate::util::backoff::{schedule, Retry};
 
 use super::plugins::{purge_plugin_state, reconcile_plugins, reload_registry};
+use crate::application::usecases::registry::runtime;
+use crate::constants::OFFICIAL_PLUGIN_REPO_SLUG;
 
 const REFRESH_ATTEMPTS: u32 = 4;
 
@@ -94,7 +96,7 @@ pub async fn add_repo(source: PluginRepoLocation, app: Arc<AppState>) -> Result<
     };
     {
         let cfg = app.config.read().await;
-        if slug == crate::constants::OFFICIAL_PLUGIN_REPO_SLUG
+        if slug == OFFICIAL_PLUGIN_REPO_SLUG
             || cfg
                 .plugins
                 .repos
@@ -129,7 +131,7 @@ pub async fn add_repo(source: PluginRepoLocation, app: Arc<AppState>) -> Result<
 }
 
 pub async fn remove_repo(slug: String, app: Arc<AppState>) -> Result<()> {
-    if slug == crate::constants::OFFICIAL_PLUGIN_REPO_SLUG {
+    if slug == OFFICIAL_PLUGIN_REPO_SLUG {
         bail!("the official plugin repository cannot be removed");
     }
     let record = record(&app, &slug).await?;
@@ -211,7 +213,7 @@ pub async fn refresh_repos(app: Arc<AppState>) -> Result<()> {
 pub fn refresh_in_background(app: Arc<AppState>) {
     tokio::spawn(async move {
         app.discovery.lock().await.checking_updates = true;
-        crate::application::usecases::registry::runtime::topology_changed(&app).await;
+        runtime::topology_changed(&app).await;
         for slug in remote_slugs(&app).await {
             if let Err(error) = refresh_one(&app, &slug).await {
                 log::warn!("refreshing plugin repository '{slug}': {error:#}");
@@ -238,7 +240,7 @@ pub fn refresh_in_background(app: Arc<AppState>) {
             }
         }
         app.discovery.lock().await.checking_updates = false;
-        crate::application::usecases::registry::runtime::topology_changed(&app).await;
+        runtime::topology_changed(&app).await;
         app.record_change(Change::PluginData).await;
     });
 }

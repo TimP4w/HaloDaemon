@@ -11,6 +11,13 @@ use halod_shared::messages::DaemonMessage;
 
 use crate::application::ipc::ClientHandle;
 use crate::application::state::AppState;
+use crate::application::usecases::registry::chain;
+use crate::application::usecases::registry::debug;
+use crate::application::usecases::registry::registration;
+use crate::domain::events::Change;
+use crate::domain::plugin::recommend;
+use crate::infrastructure::drivers::transports::serial;
+use crate::infrastructure::drivers::transports::smbus::SmBusTransport;
 
 pub async fn set_enabled(id: String, enabled: bool, app: Arc<AppState>) -> Result<()> {
     if enabled && !app.registry.supports_current_platform(&id) {
@@ -136,7 +143,7 @@ pub async fn get_lcd_preset(
 
 /// Enumerate the host's serial ports for a `serial_port` config-field dropdown.
 pub async fn list_serial_ports(client: ClientHandle) -> Result<()> {
-    let ports = crate::infrastructure::drivers::transports::serial::list_ports();
+    let ports = serial::list_ports();
     client.send(&DaemonMessage::SerialPorts { ports });
     Ok(())
 }
@@ -221,15 +228,9 @@ pub(crate) async fn refresh_requirements(app: &Arc<AppState>) -> Result<()> {
 /// and USB enumeration are blocking; SMBus enumeration only lists controllers
 /// and does not probe device addresses.
 pub(crate) async fn refresh_recommendations(app: &Arc<AppState>) {
-    let hid_usb = tokio::task::spawn_blocking(|| {
-        (
-            crate::application::usecases::registry::debug::enumerate_hid(),
-            crate::domain::plugin::recommend::enumerate_usb(),
-        )
-    });
-    let (_, gpu_smbus) =
-        crate::infrastructure::drivers::transports::smbus::SmBusTransport::enumerate_for_debug()
-            .await;
+    let hid_usb =
+        tokio::task::spawn_blocking(|| (debug::enumerate_hid(), recommend::enumerate_usb()));
+    let (_, gpu_smbus) = SmBusTransport::enumerate_for_debug().await;
     let (hid, usb) = match hid_usb.await {
         Ok(snapshot) => snapshot,
         Err(error) => {
@@ -261,11 +262,7 @@ async fn teardown_owned_devices(app: &Arc<AppState>, plugins: &[String]) {
     // never comes back on re-enable.
     let mut torn_down: std::collections::HashSet<String> = std::collections::HashSet::new();
     for id in &owned_ids {
-        let removed =
-            crate::application::usecases::registry::registration::unregister_device_and_children(
-                app, id,
-            )
-            .await;
+        let removed = registration::unregister_device_and_children(app, id).await;
         torn_down.extend(removed);
     }
     app.hid.untrack_devices(&torn_down).await;
@@ -354,9 +351,8 @@ async fn reconcile_plugin_set(app: &Arc<AppState>, plugins: &[String]) {
     //    leave alone (mirroring the integration scoped path).
     app.set_discovery_scope(DiscoveryScope::Clean).await;
     crate::domain::registry::seed_known_devices(Arc::clone(app)).await;
-    crate::application::usecases::registry::chain::restore_saved_chains(Arc::clone(app)).await;
-    app.record_change(crate::domain::events::Change::PluginTopology)
-        .await;
+    chain::restore_saved_chains(Arc::clone(app)).await;
+    app.record_change(Change::PluginTopology).await;
 }
 
 #[cfg(test)]

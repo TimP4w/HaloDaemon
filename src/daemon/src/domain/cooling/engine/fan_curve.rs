@@ -11,7 +11,10 @@ use halod_shared::bus::{topic, BusValue};
 use std::collections::HashMap;
 use std::sync::Arc;
 
+use crate::application::notifications;
+use crate::application::run_loop::EngineConfigReceiver;
 use crate::application::state::AppState;
+use crate::application::usecases::cooling::runtime;
 use crate::domain::cooling::model::FanCurveRecord;
 use crate::domain::cooling::state::curve_key;
 use halod_shared::types::FanCurveStatus;
@@ -350,7 +353,7 @@ impl FanCurveEngine {
 
     pub fn start(
         self: Arc<Self>,
-        cfg_rx: crate::application::run_loop::EngineConfigReceiver<CoolingConfig>,
+        cfg_rx: EngineConfigReceiver<CoolingConfig>,
     ) -> tokio::task::JoinHandle<()> {
         tokio::spawn(async move {
             crate::application::run_loop::engine_run_loop_idle(
@@ -446,7 +449,7 @@ impl FanCurveEngine {
             }
         };
         if changed {
-            crate::application::usecases::cooling::runtime::status_changed(&self.app_state).await;
+            runtime::status_changed(&self.app_state).await;
         }
     }
 
@@ -524,7 +527,7 @@ impl FanCurveEngine {
                     );
                     return FanCurveStatus::WriteError(e.to_string());
                 }
-                crate::application::usecases::cooling::runtime::duty_applied(
+                runtime::duty_applied(
                     &self.app_state,
                     &curve_target.device_id,
                     &curve_target.channel_id,
@@ -678,7 +681,7 @@ impl FanCurveEngine {
                             .map(|channel| channel.name)
                     })
                     .unwrap_or_else(|| device.name().to_owned());
-                crate::application::notifications::send(
+                notifications::send(
                     &self.app_state,
                     halod_shared::types::NotificationCode::FanStalled { fan: fan_name },
                 )
@@ -718,7 +721,7 @@ impl FanCurveEngine {
             match apply_duty(device, &target.channel_id, duty).await {
                 Ok(()) => {
                     self.clear_failsafe_error(key);
-                    crate::application::usecases::cooling::runtime::duty_applied(
+                    runtime::duty_applied(
                         &self.app_state,
                         &target.device_id,
                         &target.channel_id,

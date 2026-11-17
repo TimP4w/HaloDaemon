@@ -17,6 +17,7 @@ use tokio::task::JoinHandle;
 
 use super::FrameTx;
 use crate::application::state::AppState;
+use crate::application::usecases::lcd::runtime;
 use crate::domain::device::Device;
 use halod_shared::types::LcdHealth;
 
@@ -326,8 +327,7 @@ impl VideoEngine {
                 }
             };
             if changed {
-                crate::application::usecases::lcd::runtime::device_changed(&engine.app, &device_id)
-                    .await;
+                runtime::device_changed(&engine.app, &device_id).await;
             }
         });
         Ok((task, child))

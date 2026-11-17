@@ -15,6 +15,7 @@ use std::time::{Duration, Instant};
 
 use anyhow::{anyhow, bail, Context, Result};
 
+use crate::infrastructure::platform::elevation;
 use halod_hwaccess::proto::{
     self, BrokerError, CapabilityScope, Request, Response, BROKER_IDLE_GRACE_MS,
     BROKER_SERVICE_NAME, MAX_OPERATIONS_PER_CAPABILITY, MAX_OPERATIONS_PER_SECOND, PIPE_NAME,
@@ -116,11 +117,7 @@ fn ensure_broker_running(auth: &BrokerAuth) {
                 "[register_ops] broker service unavailable ({e}); trying dev-run UAC spawn"
             );
             if !BROKER_SPAWN_REQUESTED.swap(true, Ordering::SeqCst) {
-                match crate::infrastructure::platform::elevation::spawn_broker_elevated(
-                    &auth.token,
-                    &auth.sid,
-                    auth.session,
-                ) {
+                match elevation::spawn_broker_elevated(&auth.token, &auth.sid, auth.session) {
                     Ok(()) => log::info!("[register_ops] requested elevated halod-broker (dev)"),
                     Err(se) => log::warn!(
                         "[register_ops] could not launch halod-broker ({se}); \

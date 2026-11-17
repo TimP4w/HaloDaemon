@@ -9,6 +9,10 @@ use uuid::Uuid;
 
 use crate::application::ipc::ClientHandle;
 use crate::application::state::AppState;
+use crate::config;
+use crate::domain::device::Device;
+use crate::domain::device::LcdCapability;
+use crate::domain::events::Change;
 use crate::domain::profiles::device_state::persist_device_state;
 use crate::domain::registry::require_device_owned_id;
 use crate::util::image::compress_for_storage;
@@ -16,7 +20,7 @@ use halod_shared::types::{
     validate_image_filename, LcdHealth, LcdUploadProgress, LcdUploadStage, LightingState,
 };
 
-fn transition_failed(lcd: &dyn crate::domain::device::LcdCapability, error: &anyhow::Error) {
+fn transition_failed(lcd: &dyn LcdCapability, error: &anyhow::Error) {
     lcd.lcd_state()
         .set_health(LcdHealth::Failed(error.to_string()));
 }
@@ -34,11 +38,7 @@ fn invalidate_editor_image_cache(app: &Arc<AppState>) {
 /// to another mode so a stale video subprocess can't keep driving the panel.
 /// Also asks glibc to return freed pages to the OS, since stopping a video
 /// stream drops its ~230 KB+ frame buffer (the allocator retains those pages).
-async fn stop_video_for_device(
-    app: &Arc<AppState>,
-    lcd: &dyn crate::domain::device::LcdCapability,
-    device_id: &str,
-) {
+async fn stop_video_for_device(app: &Arc<AppState>, lcd: &dyn LcdCapability, device_id: &str) {
     if let Some(video) = app.lcd.video() {
         video.stop(device_id).await;
         #[cfg(target_os = "linux")]
@@ -58,7 +58,7 @@ async fn stop_video_for_device(
 /// template is persisted by the caller's `persist_device_state`.
 async fn deactivate_engine_for_device(
     app: &Arc<AppState>,
-    lcd: &dyn crate::domain::device::LcdCapability,
+    lcd: &dyn LcdCapability,
     device_id: &str,
 ) {
     app.lcd.invalidate_editor_session();
@@ -88,10 +88,7 @@ async fn deactivate_engine_for_device(
 /// Re-apply the device's saved RGB state after an LCD image upload, for devices
 /// whose panel upload resets the LEDs (see `needs_rgb_restore_after_upload`).
 /// Skipped when the current state is Engine (controlled externally) or not yet set.
-async fn restore_rgb(
-    device: &dyn crate::domain::device::Device,
-    lcd: &dyn crate::domain::device::LcdCapability,
-) {
+async fn restore_rgb(device: &dyn Device, lcd: &dyn LcdCapability) {
     if !lcd.needs_rgb_restore_after_upload() {
         return;
     }
@@ -164,8 +161,7 @@ pub async fn set_screen_image(
     client: ClientHandle,
 ) -> Result<()> {
     let result = set_screen_image_inner(&id, data_b64, &app, &client).await;
-    app.record_change(crate::domain::events::Change::LcdDevice(id.clone()))
-        .await;
+    app.record_change(Change::LcdDevice(id.clone())).await;
     finish_upload(&client, &id, result)
 }
 
@@ -207,7 +203,7 @@ async fn set_screen_image_inner(
     send_upload_progress(client, device.id(), LcdUploadStage::Applying, None);
 
     let filename = format!("{}.{}", Uuid::new_v4(), ext);
-    let dir = crate::config::lcd_images_dir();
+    let dir = config::lcd_images_dir();
     tokio::fs::create_dir_all(&dir).await?;
     tokio::fs::write(dir.join(&filename), &compressed).await?;
     log::info!("[LCD] saved image as {}", filename);
@@ -244,8 +240,7 @@ pub async fn set_screen_image_from_library(
     client: ClientHandle,
 ) -> Result<()> {
     let result = set_screen_image_from_library_inner(&id, filename, &app, &client).await;
-    app.record_change(crate::domain::events::Change::LcdDevice(id.clone()))
-        .await;
+    app.record_change(Change::LcdDevice(id.clone())).await;
     finish_upload(&client, &id, result)
 }
 
@@ -262,7 +257,7 @@ async fn set_screen_image_from_library_inner(
 
     validate_image_filename(&filename).map_err(|e| anyhow!(e))?;
 
-    let path = crate::config::lcd_images_dir().join(&filename);
+    let path = config::lcd_images_dir().join(&filename);
     let data = crate::util::image::read_image_bounded_async(&path)
         .await
         .map_err(|e| anyhow!("image not found: {e}"))?;
@@ -303,10 +298,7 @@ fn rotation_needs_image_reapply(mode: halod_shared::types::LcdMode) -> bool {
     matches!(mode, LcdMode::Image | LcdMode::Gif)
 }
 
-async fn reapply_static_image(
-    device: &dyn crate::domain::device::Device,
-    lcd: &dyn crate::domain::device::LcdCapability,
-) -> Result<()> {
+async fn reapply_static_image(device: &dyn Device, lcd: &dyn LcdCapability) -> Result<()> {
     let state = lcd.current_state();
     if !rotation_needs_image_reapply(state.mode) {
         return Ok(());
@@ -314,7 +306,7 @@ async fn reapply_static_image(
     let Some(filename) = state.active_image else {
         return Ok(());
     };
-    let path = crate::config::lcd_images_dir().join(&filename);
+    let path = config::lcd_images_dir().join(&filename);
     match crate::util::image::read_image_bounded_async(&path).await {
         Ok(data) => {
             lcd.set_image(&data).await.map_err(|error| {
@@ -353,8 +345,7 @@ pub async fn set_screen_rotation(
     }
     lcd.lcd_state().set_health(LcdHealth::Stable);
     persist_device_state(&app, device.as_ref()).await;
-    app.record_change(crate::domain::events::Change::LcdDevice(id))
-        .await;
+    app.record_change(Change::LcdDevice(id)).await;
     Ok(())
 }
 
@@ -375,8 +366,7 @@ pub async fn set_screen_brightness(id: String, brightness: u8, app: Arc<AppState
     }
     lcd.lcd_state().set_health(LcdHealth::Stable);
     persist_device_state(&app, device.as_ref()).await;
-    app.record_change(crate::domain::events::Change::LcdDevice(id))
-        .await;
+    app.record_change(Change::LcdDevice(id)).await;
     Ok(())
 }
 
@@ -397,8 +387,7 @@ pub async fn set_screen_default(id: String, app: Arc<AppState>) -> Result<()> {
     lcd.set_active_image_filename(None).await;
     lcd.lcd_state().set_health(LcdHealth::Stable);
     persist_device_state(&app, device.as_ref()).await;
-    app.record_change(crate::domain::events::Change::LcdDevice(id))
-        .await;
+    app.record_change(Change::LcdDevice(id)).await;
     Ok(())
 }
 
@@ -413,8 +402,7 @@ pub async fn set_screen_raw_streaming(id: String, enabled: bool, app: Arc<AppSta
     lcd.set_raw_streaming(enabled);
     lcd.lcd_state().set_health(LcdHealth::Stable);
     persist_device_state(&app, device.as_ref()).await;
-    app.record_change(crate::domain::events::Change::LcdDevice(id))
-        .await;
+    app.record_change(Change::LcdDevice(id)).await;
     Ok(())
 }
 
@@ -472,15 +460,14 @@ pub async fn set_screen_video(id: String, path: String, app: Arc<AppState>) -> R
     lcd.set_video_path(Some(canonical));
 
     persist_device_state(&app, device.as_ref()).await;
-    app.record_change(crate::domain::events::Change::LcdDevice(id))
-        .await;
+    app.record_change(Change::LcdDevice(id)).await;
     Ok(())
 }
 
 /// Return a list of all images in the lcd_images_dir to the requesting client.
 pub async fn list_lcd_images(client: ClientHandle) -> Result<()> {
     const MAX_ENTRIES: usize = 4096;
-    let dir = crate::config::lcd_images_dir();
+    let dir = config::lcd_images_dir();
     let mut items: Vec<(String, u64)> = Vec::new();
     if let Ok(mut entries) = tokio::fs::read_dir(&dir).await {
         while let Ok(Some(entry)) = entries.next_entry().await {
@@ -513,7 +500,7 @@ pub async fn list_lcd_images(client: ClientHandle) -> Result<()> {
 /// Delete a named image from the lcd_images_dir.
 pub async fn delete_lcd_image(filename: String, app: Arc<AppState>) -> Result<()> {
     validate_image_filename(&filename).map_err(|e| anyhow!(e))?;
-    let path = crate::config::lcd_images_dir().join(&filename);
+    let path = config::lcd_images_dir().join(&filename);
     match tokio::fs::remove_file(&path).await {
         Ok(()) => log::info!("[LCD] deleted image {}", filename),
         Err(e) if e.kind() == std::io::ErrorKind::NotFound => {}

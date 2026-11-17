@@ -19,6 +19,8 @@ use windows::Win32::UI::WindowsAndMessaging::{
     IsWindowVisible, HICON, ICONINFO,
 };
 
+use crate::config;
+use crate::domain::profiles::observers::active_window;
 use halod_shared::types::RunningApp;
 
 struct AccItem {
@@ -69,7 +71,7 @@ unsafe extern "system" fn enum_proc(hwnd: HWND, lparam: LPARAM) -> BOOL {
         let proc_name = exe_path
             .file_name()
             .and_then(|f| f.to_str())
-            .map(crate::domain::profiles::observers::active_window::normalize_name)
+            .map(active_window::normalize_name)
             .unwrap_or_default();
         if proc_name.is_empty() {
             return BOOL(1);
@@ -183,10 +185,7 @@ fn icon_path_for_exe(exe_path: &Path) -> Option<String> {
         .file_stem()
         .and_then(|s| s.to_str())
         .unwrap_or("app");
-    let cache_file = cache_dir.join(format!(
-        "{stem}-{:016x}.png",
-        crate::config::fnv1a64(&key_bytes)
-    ));
+    let cache_file = cache_dir.join(format!("{stem}-{:016x}.png", config::fnv1a64(&key_bytes)));
     if cache_file.exists() {
         return cache_file.to_str().map(|s| s.to_string());
     }

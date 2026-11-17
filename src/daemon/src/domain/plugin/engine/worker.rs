@@ -36,7 +36,13 @@ use super::manifest::{
 use super::sandbox;
 use super::transport::{AddrScope, PluginIo, RegisterBus};
 use super::transport_api::TransportApi;
+use crate::domain::input::validate;
+use crate::domain::plugin::manifest::PluginManifest;
+use crate::domain::plugin::ResolvedConfig;
+use crate::domain::plugin::ResolvedConfigValue;
 use crate::infrastructure::drivers::transports::smbus::SmBusDevice;
+use crate::infrastructure::http::HttpRuntime;
+use crate::infrastructure::udp::UdpRuntime;
 
 /// Maximum HID reports handled by one serialized Lua-worker job. Event input,
 /// RGB frames, status polling, and capability commands share that worker; a
@@ -669,7 +675,7 @@ impl PluginHandle {
         transport: PluginIo,
         dev_match: DevMatch,
         granted: Vec<Permission>,
-        config: crate::domain::plugin::ResolvedConfig,
+        config: ResolvedConfig,
         handle: Handle,
         audio_registry: super::audio_api::SinkRegistry,
     ) -> Self {
@@ -695,12 +701,12 @@ impl PluginHandle {
         transport: PluginIo,
         dev_match: DevMatch,
         granted: Vec<Permission>,
-        config: crate::domain::plugin::ResolvedConfig,
+        config: ResolvedConfig,
         handle: Handle,
         audio_registry: super::audio_api::SinkRegistry,
         data: super::data_api::DataRuntime,
-        http: Option<crate::infrastructure::http::HttpRuntime>,
-        udp: Option<crate::infrastructure::udp::UdpRuntime>,
+        http: Option<HttpRuntime>,
+        udp: Option<UdpRuntime>,
     ) -> Self {
         let worker = LuaWorker::spawn_vm(
             "halod-plugin",
@@ -890,7 +896,7 @@ impl PluginHandle {
                         }
                     }
                     if let Some(key_remap) = &t.key_remap {
-                        crate::domain::input::validate::validate_button_mappings(
+                        validate::validate_button_mappings(
                             &key_remap.buttons,
                             &key_remap.default_mappings,
                         )?;
@@ -1407,40 +1413,29 @@ pub(crate) fn network_granted(granted: &[Permission]) -> bool {
 /// `None` (with a log) when the transport is absent, ungranted, or its policy
 /// fails to build, so a plugin simply lacks `halod.http` rather than failing to spawn.
 pub(crate) fn http_runtime_for(
-    manifest: &crate::domain::plugin::manifest::PluginManifest,
+    manifest: &PluginManifest,
     granted: &[Permission],
-    config: &crate::domain::plugin::ResolvedConfig,
-) -> Option<crate::infrastructure::http::HttpRuntime> {
+    config: &ResolvedConfig,
+) -> Option<HttpRuntime> {
     let http = manifest.transports.http.as_ref()?;
     if !network_granted(granted) {
         return None;
     }
-    let host = http.host_key.as_ref().and_then(|key| {
-        config
-            .get(key)
-            .map(crate::domain::plugin::ResolvedConfigValue::to_config_string)
-    });
-    let port = http.port_key.as_ref().and_then(|key| {
-        config
-            .get(key)
-            .map(crate::domain::plugin::ResolvedConfigValue::to_config_string)
-    });
+    let host = http
+        .host_key
+        .as_ref()
+        .and_then(|key| config.get(key).map(ResolvedConfigValue::to_config_string));
+    let port = http
+        .port_key
+        .as_ref()
+        .and_then(|key| config.get(key).map(ResolvedConfigValue::to_config_string));
     let identity = http
         .tls
         .as_ref()
         .and_then(|tls| tls.verify_identity.as_ref())
-        .and_then(|key| {
-            config
-                .get(key)
-                .map(crate::domain::plugin::ResolvedConfigValue::to_config_string)
-        })
+        .and_then(|key| config.get(key).map(ResolvedConfigValue::to_config_string))
         .filter(|value| !value.trim().is_empty());
-    match crate::infrastructure::http::HttpRuntime::from_config(
-        http,
-        host.as_deref(),
-        port.as_deref(),
-        identity.as_deref(),
-    ) {
+    match HttpRuntime::from_config(http, host.as_deref(), port.as_deref(), identity.as_deref()) {
         Ok(runtime) => Some(runtime),
         Err(e) => {
             log::error!(
@@ -1457,10 +1452,10 @@ pub(crate) fn http_runtime_for(
 /// ungranted, or its socket fails to connect — a plugin simply lacks `halod.udp`
 /// rather than failing to spawn.
 pub(crate) fn udp_runtime_for(
-    manifest: &crate::domain::plugin::manifest::PluginManifest,
+    manifest: &PluginManifest,
     granted: &[Permission],
-    config: &crate::domain::plugin::ResolvedConfig,
-) -> Option<crate::infrastructure::udp::UdpRuntime> {
+    config: &ResolvedConfig,
+) -> Option<UdpRuntime> {
     let udp = manifest.transports.udp.as_ref()?;
     if !network_granted(granted) {
         return None;
@@ -1468,7 +1463,7 @@ pub(crate) fn udp_runtime_for(
     let value = |key: &str| {
         config
             .get(key)
-            .map(crate::domain::plugin::ResolvedConfigValue::to_config_string)
+            .map(ResolvedConfigValue::to_config_string)
             .unwrap_or_default()
     };
     let host = value(&udp.host_key);
@@ -1483,7 +1478,7 @@ pub(crate) fn udp_runtime_for(
             return None;
         }
     };
-    match crate::infrastructure::udp::UdpRuntime::from_config(udp, &host, port) {
+    match UdpRuntime::from_config(udp, &host, port) {
         Ok(runtime) => Some(runtime),
         Err(e) => {
             log::error!(
@@ -1504,12 +1499,12 @@ fn build_ctx(
     transport: PluginIo,
     dev_match: DevMatch,
     granted: &[Permission],
-    config: &crate::domain::plugin::ResolvedConfig,
+    config: &ResolvedConfig,
     handle: Handle,
     audio_registry: super::audio_api::SinkRegistry,
     data: super::data_api::DataRuntime,
-    http: Option<crate::infrastructure::http::HttpRuntime>,
-    udp: Option<crate::infrastructure::udp::UdpRuntime>,
+    http: Option<HttpRuntime>,
+    udp: Option<UdpRuntime>,
 ) -> Result<WorkerCtx> {
     debug_assert!(!super::contract::active().tables.is_empty());
     let controller_index = dev_match.index;

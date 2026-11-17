@@ -8,6 +8,7 @@ use crate::domain::plugin::engine::transport::{
     AddrScope, Discovery, PluginIo, PluginTransportDescriptor, RegisterBus,
 };
 use crate::domain::plugin::manifest::{DeviceSpec, PluginManifest};
+use crate::domain::plugin::ResolvedConfig;
 use crate::domain::registry::observers::discovery::DiscoveryHandle;
 use crate::infrastructure::drivers::transports::smbus::SmbusBusKind;
 
@@ -24,7 +25,7 @@ fn matches(spec: &DeviceSpec, handle: &DiscoveryHandle<'_>) -> bool {
 fn open(
     _manifest: &PluginManifest,
     handle: &DiscoveryHandle<'_>,
-    _config: &crate::domain::plugin::ResolvedConfig,
+    _config: &ResolvedConfig,
     granted: &[halod_shared::types::Permission],
     limit: Option<halod_shared::types::WriteRateLimit>,
 ) -> Result<PluginIo> {

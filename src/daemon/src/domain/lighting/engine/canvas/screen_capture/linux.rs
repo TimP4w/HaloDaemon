@@ -1,4 +1,5 @@
 // SPDX-License-Identifier: GPL-3.0-or-later
+use crate::constants::SCREEN_CAPTURE_CLIENT;
 use parking_lot::Mutex;
 use std::{
     os::fd::{FromRawFd, IntoRawFd, OwnedFd},
@@ -382,7 +383,7 @@ fn run_pipewire(
 
     let stream = pipewire::stream::StreamBox::new(
         &core,
-        crate::constants::SCREEN_CAPTURE_CLIENT,
+        SCREEN_CAPTURE_CLIENT,
         pipewire::properties::properties! {
             *pipewire::keys::MEDIA_TYPE     => "Video",
             *pipewire::keys::MEDIA_CATEGORY => "Capture",

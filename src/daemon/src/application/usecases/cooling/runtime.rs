@@ -6,10 +6,10 @@ use crate::domain::events::ChangeSink as _;
 use std::sync::Arc;
 
 use crate::application::state::AppState;
+use crate::domain::events::Change;
 
 pub async fn status_changed(app: &Arc<AppState>) {
-    app.record_change(crate::domain::events::Change::Cooling)
-        .await;
+    app.record_change(Change::Cooling).await;
 }
 
 /// Record a duty command only after the device accepted it, then publish the
@@ -20,7 +20,7 @@ pub async fn duty_applied(app: &Arc<AppState>, device_id: &str, channel_id: &str
         .record_applied_duty(device_id, channel_id, duty)
         .await
     {
-        app.record_change(crate::domain::events::Change::Device(device_id.to_owned()))
+        app.record_change(Change::Device(device_id.to_owned()))
             .await;
     }
 }

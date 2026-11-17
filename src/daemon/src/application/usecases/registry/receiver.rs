@@ -5,6 +5,8 @@ use anyhow::{Context, Result};
 use std::sync::Arc;
 
 use crate::application::state::AppState;
+use crate::application::usecases::registry::registration;
+use crate::domain::events::Change;
 use crate::domain::registry::require_device_owned_id;
 
 /// Reconcile the explicitly-owned children of a dynamic controller. Plugin
@@ -32,7 +34,7 @@ pub(crate) async fn reconcile_owned_children(
     let mut registered = std::collections::HashSet::new();
     for child in added {
         let child_id = child.id().to_owned();
-        if crate::application::usecases::registry::registration::register_device(app, child).await {
+        if registration::register_device(app, child).await {
             registered.insert(child_id);
         }
     }
@@ -124,8 +126,7 @@ pub async fn start_pairing(id: String, timeout_secs: u8, app: Arc<AppState>) -> 
         .as_pairing()
         .context("device does not support pairing")?;
     cap.start_pairing(timeout_secs).await?;
-    app.record_change(crate::domain::events::Change::Device(id))
-        .await;
+    app.record_change(Change::Device(id)).await;
     Ok(())
 }
 
@@ -135,8 +136,7 @@ pub async fn stop_pairing(id: String, app: Arc<AppState>) -> Result<()> {
         .as_pairing()
         .context("device does not support pairing")?;
     cap.stop_pairing().await?;
-    app.record_change(crate::domain::events::Change::Device(id))
-        .await;
+    app.record_change(Change::Device(id)).await;
     Ok(())
 }
 
@@ -159,8 +159,7 @@ pub async fn unpair(id: String, slot: u8, app: Arc<AppState>) -> Result<()> {
         // instead, which removes the slot that the plugin just cleared.
         reconcile_owned_children(&device, &app).await;
     }
-    app.record_change(crate::domain::events::Change::PluginTopology)
-        .await;
+    app.record_change(Change::PluginTopology).await;
     Ok(())
 }
 

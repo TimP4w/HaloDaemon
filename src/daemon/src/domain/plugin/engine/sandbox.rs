@@ -12,6 +12,8 @@ use mlua::debug::DebugEvent;
 use mlua::{HookTriggers, Lua, LuaOptions, StdLib, Table, VmState};
 
 use super::bytebuf;
+use crate::domain::plugin::ResolvedConfig;
+use crate::domain::plugin::ResolvedConfigValue;
 
 /// Globals removed before a plugin script runs.
 const REMOVED: &[&str] = &[
@@ -39,7 +41,7 @@ fn plugin_log_level(name: Option<&str>) -> log::Level {
     }
 }
 
-pub fn apply(lua: &Lua, config: &crate::domain::plugin::ResolvedConfig) -> mlua::Result<()> {
+pub fn apply(lua: &Lua, config: &ResolvedConfig) -> mlua::Result<()> {
     let globals = lua.globals();
     strip_escape_hatches(lua)?;
     let logger = lua.create_function(
@@ -127,7 +129,7 @@ pub(super) fn strip_escape_hatches(lua: &Lua) -> mlua::Result<()> {
 /// earlier drift left the effect VM with no memory cap; another the manifest
 /// parser hand-rolling the trio outside this chokepoint).
 pub(super) fn bootstrap_vm(
-    config: &crate::domain::plugin::ResolvedConfig,
+    config: &ResolvedConfig,
     memory_limit: usize,
     instruction_budget: u64,
 ) -> mlua::Result<(Lua, Rc<Cell<u64>>)> {
@@ -241,23 +243,15 @@ fn inject_platform(lua: &Lua) -> mlua::Result<()> {
 /// Populate `halod.config` with this plugin's resolved values. Read-only in
 /// spirit (nothing enforces it in Lua, but plugins have no reason to mutate
 /// it and no callback ever reads it back from the host).
-fn inject_config(lua: &Lua, config: &crate::domain::plugin::ResolvedConfig) -> mlua::Result<()> {
+fn inject_config(lua: &Lua, config: &ResolvedConfig) -> mlua::Result<()> {
     let halod: Table = lua.globals().get("halod")?;
     let table = lua.create_table()?;
     for (key, value) in config {
         match value {
-            crate::domain::plugin::ResolvedConfigValue::Boolean(value) => {
-                table.set(key.as_str(), *value)?
-            }
-            crate::domain::plugin::ResolvedConfigValue::Number(value) => {
-                table.set(key.as_str(), *value)?
-            }
-            crate::domain::plugin::ResolvedConfigValue::Integer(value) => {
-                table.set(key.as_str(), *value)?
-            }
-            crate::domain::plugin::ResolvedConfigValue::String(value) => {
-                table.set(key.as_str(), value.as_str())?
-            }
+            ResolvedConfigValue::Boolean(value) => table.set(key.as_str(), *value)?,
+            ResolvedConfigValue::Number(value) => table.set(key.as_str(), *value)?,
+            ResolvedConfigValue::Integer(value) => table.set(key.as_str(), *value)?,
+            ResolvedConfigValue::String(value) => table.set(key.as_str(), value.as_str())?,
         }
     }
     halod.set("config", table)

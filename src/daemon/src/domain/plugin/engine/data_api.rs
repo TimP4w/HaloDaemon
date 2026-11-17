@@ -8,6 +8,7 @@ use mlua::{Lua, Table, Value};
 
 use crate::application::bus::data_bus::{self, DataBus, DataPolicy, DataValue};
 use crate::domain::plugin::manifest::DataProvideDef;
+use crate::infrastructure::media::MediaHandle;
 
 #[derive(Clone, Default)]
 pub struct DataRuntime {
@@ -15,7 +16,7 @@ pub struct DataRuntime {
     pub plugin_id: String,
     pub provides: HashMap<String, DataPolicy>,
     pub consumes: Vec<String>,
-    _media: Option<Arc<crate::infrastructure::media::MediaHandle>>,
+    _media: Option<Arc<MediaHandle>>,
 }
 
 impl DataRuntime {

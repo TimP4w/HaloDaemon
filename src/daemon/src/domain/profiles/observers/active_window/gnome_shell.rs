@@ -5,6 +5,8 @@ use zbus::zvariant::Value;
 use zbus::{Connection, MatchRule, MessageStream};
 
 use super::FocusEvent;
+use crate::constants::FOCUS_WATCHER_DBUS_INTERFACE;
+use crate::constants::GNOME_EXTENSION_UUID;
 
 /// Detected state of the `halod@halod` GNOME Shell extension, for the settings
 /// dependency panel.
@@ -30,7 +32,7 @@ pub async fn extension_status() -> Option<ExtensionStatus> {
             "/org/gnome/Shell",
             Some("org.gnome.Shell.Extensions"),
             "GetExtensionInfo",
-            &(crate::constants::GNOME_EXTENSION_UUID,),
+            &(GNOME_EXTENSION_UUID,),
         )
         .await
         .ok()?;
@@ -81,7 +83,7 @@ pub async fn spawn() -> anyhow::Result<mpsc::Receiver<FocusEvent>> {
             "/org/gnome/Shell",
             Some("org.gnome.Shell.Extensions"),
             "GetExtensionInfo",
-            &(crate::constants::GNOME_EXTENSION_UUID,),
+            &(GNOME_EXTENSION_UUID,),
         )
         .await
         .map_err(|e| anyhow::anyhow!("GNOME Shell Extensions API unavailable: {e}"))?;
@@ -113,7 +115,7 @@ pub async fn spawn() -> anyhow::Result<mpsc::Receiver<FocusEvent>> {
 
     let rule = MatchRule::builder()
         .msg_type(zbus::message::Type::Signal)
-        .interface(crate::constants::FOCUS_WATCHER_DBUS_INTERFACE)?
+        .interface(FOCUS_WATCHER_DBUS_INTERFACE)?
         .member("FocusChanged")?
         .build();
     let stream = MessageStream::for_match_rule(rule, &session, Some(32)).await?;

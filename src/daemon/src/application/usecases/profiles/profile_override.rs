@@ -5,6 +5,7 @@ use anyhow::{bail, Result};
 use std::sync::Arc;
 
 use crate::application::state::AppState;
+use crate::domain::events::Change;
 use halod_shared::commands::OverrideTarget;
 use halod_shared::types::DEFAULT_PROFILE_NAME;
 
@@ -54,11 +55,9 @@ pub async fn remove_profile_override(
     app.request_config_save();
     if is_active {
         super::lifecycle::load_active_profile(app.clone()).await;
-        app.record_change(crate::domain::events::Change::ProfileSwitch)
-            .await;
+        app.record_change(Change::ProfileSwitch).await;
     } else {
-        app.record_change(crate::domain::events::Change::Profiles)
-            .await;
+        app.record_change(Change::Profiles).await;
     }
     Ok(())
 }

@@ -21,6 +21,12 @@ use tokio::sync::{Mutex, Notify};
 use super::canvas::{self, FrameSource, Sampler};
 use super::color::linear_to_led;
 use super::direct::{self, DirectLedEffect};
+use crate::application::run_loop::EngineConfigReceiver;
+use crate::domain::plugin::EffectFrameInput;
+use crate::domain::plugin::EffectZoneInput;
+use crate::domain::plugin::LedCoord;
+use crate::domain::plugin::PluginEffectHandle;
+use crate::domain::plugin::Registry;
 use crate::{
     application::state::AppState,
     config::{CanvasState, PlacedZone},
@@ -64,7 +70,7 @@ struct LivePixmap {
 
 enum PixmapRuntime {
     BuiltIn(Box<dyn FrameSource>),
-    Plugin(crate::domain::plugin::PluginEffectHandle),
+    Plugin(PluginEffectHandle),
     Off,
 }
 
@@ -76,7 +82,7 @@ struct LiveDirect {
 
 enum DirectRuntime {
     BuiltIn(Box<dyn DirectLedEffect>),
-    Plugin(crate::domain::plugin::PluginEffectHandle),
+    Plugin(PluginEffectHandle),
     Off,
 }
 
@@ -335,9 +341,7 @@ impl RgbEngine {
     /// Built-in host effects plus plugin-declared pixmap effects. The built-in
     /// boundary is intentionally narrow; see `canvas::effects`. Not memoized
     /// because plugins can load/unload at runtime.
-    pub fn available_effect_descriptors(
-        registry: &crate::domain::plugin::Registry,
-    ) -> Vec<Animation> {
+    pub fn available_effect_descriptors(registry: &Registry) -> Vec<Animation> {
         let mut v = canvas::builtin_descriptors();
         v.extend(registry.pixmap_effect_descriptors());
         v
@@ -345,7 +349,7 @@ impl RgbEngine {
 
     /// Built-in host effects plus plugin-declared direct effects. See
     /// [`Self::available_effect_descriptors`] for why this isn't memoized.
-    pub fn direct_effect_descriptors(registry: &crate::domain::plugin::Registry) -> Vec<Animation> {
+    pub fn direct_effect_descriptors(registry: &Registry) -> Vec<Animation> {
         let mut v = direct::builtin_descriptors();
         v.extend(registry.direct_effect_descriptors());
         v
@@ -353,7 +357,7 @@ impl RgbEngine {
 
     pub async fn start(
         self: Arc<Self>,
-        cfg_rx: crate::application::run_loop::EngineConfigReceiver<RgbConfig>,
+        cfg_rx: EngineConfigReceiver<RgbConfig>,
     ) -> tokio::task::JoinHandle<()> {
         tokio::spawn(async move {
             let engine_start = Instant::now();
@@ -423,7 +427,7 @@ impl RgbEngine {
         let mut pending: PendingWrites = HashMap::new();
         let mut led_colors: Vec<LedFrameEntry> = Vec::new();
         let sensor_snapshot = self.app_state.data_bus.sensors();
-        let effect_frame = crate::domain::plugin::EffectFrameInput {
+        let effect_frame = EffectFrameInput {
             time: t,
             dt,
             frame: frame_id,
@@ -474,7 +478,7 @@ impl RgbEngine {
         sampler: &Sampler,
         t: f32,
         dt: f32,
-        effect_frame: &crate::domain::plugin::EffectFrameInput,
+        effect_frame: &EffectFrameInput,
         pending: &mut PendingWrites,
         led_colors: &mut Vec<LedFrameEntry>,
     ) -> Option<Vec<u8>> {
@@ -624,7 +628,7 @@ impl RgbEngine {
     async fn direct_pass(
         &self,
         direct_devices: &[DirectDevice],
-        effect_frame: &crate::domain::plugin::EffectFrameInput,
+        effect_frame: &EffectFrameInput,
         sensor_snapshot: &HashMap<String, halod_shared::types::Sensor>,
         pending: &mut PendingWrites,
         led_colors: &mut Vec<LedFrameEntry>,
@@ -680,21 +684,19 @@ impl RgbEngine {
                 let handle = handle.clone();
                 for rgb_zone in &rgb.descriptor().channels {
                     let coords = zone_led_coords(rgb_zone);
-                    let leds: Vec<crate::domain::plugin::LedCoord> = coords
+                    let leds: Vec<LedCoord> = coords
                         .iter()
                         .zip(&rgb_zone.leds)
-                        .map(
-                            |(&(p, p_ring, nx, ny), led)| crate::domain::plugin::LedCoord {
-                                id: led.id,
-                                channel_id: rgb_zone.id.clone(),
-                                p,
-                                p_ring,
-                                nx,
-                                ny,
-                            },
-                        )
+                        .map(|(&(p, p_ring, nx, ny), led)| LedCoord {
+                            id: led.id,
+                            channel_id: rgb_zone.id.clone(),
+                            p,
+                            p_ring,
+                            nx,
+                            ny,
+                        })
                         .collect();
-                    let zone = crate::domain::plugin::EffectZoneInput {
+                    let zone = EffectZoneInput {
                         id: rgb_zone.id.clone(),
                         topology: zone_topology_name(&rgb_zone.topology).into(),
                         led_count: rgb_zone.leds.len(),

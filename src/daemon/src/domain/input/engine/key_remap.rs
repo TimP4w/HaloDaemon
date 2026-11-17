@@ -7,6 +7,7 @@ use halod_shared::types::{ButtonAction, ButtonMapping};
 use tokio::sync::broadcast::error::RecvError;
 
 use crate::application::state::{AppState, ButtonEvent};
+use crate::application::usecases::input::runtime;
 use crate::domain::input::engine::action_executor::ActionExecutor;
 
 #[derive(Debug)]
@@ -230,8 +231,7 @@ impl KeyRemapEngine {
             held.insert(key, MomentaryDpiState::RestorePending { original });
         } else {
             held.remove(&key);
-            crate::application::usecases::input::runtime::device_changed(&self.app, device_id)
-                .await;
+            runtime::device_changed(&self.app, device_id).await;
         }
     }
 
@@ -293,10 +293,7 @@ impl KeyRemapEngine {
                                         temporary: *dpi,
                                     },
                                 );
-                                crate::application::usecases::input::runtime::device_changed(
-                                    &self.app, device_id,
-                                )
-                                .await;
+                                runtime::device_changed(&self.app, device_id).await;
                             }
                         }
                     }

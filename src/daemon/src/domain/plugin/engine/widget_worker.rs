@@ -21,6 +21,7 @@ use halod_shared::types::{EffectParamValue, RgbColor};
 use super::bytebuf::{alloc_zeroed, ByteBuf};
 use super::lua_worker::LuaWorker;
 use super::raster;
+use crate::domain::plugin::ResolvedConfig;
 
 const MAX_WIDGET_SIDE: u32 = 1024;
 const MAX_DRAW_TEXT_BYTES: usize = halod_shared::lcd_custom::MAX_WIDGET_TEXT_BYTES;
@@ -99,7 +100,7 @@ impl PluginWidgetHandle {
         source: String,
         modules: BTreeMap<String, String>,
         widget_ids: Vec<String>,
-        config: crate::domain::plugin::ResolvedConfig,
+        config: ResolvedConfig,
     ) -> Self {
         Self::spawn_with_data(source, modules, widget_ids, config, Default::default())
     }
@@ -108,7 +109,7 @@ impl PluginWidgetHandle {
         source: String,
         modules: BTreeMap<String, String>,
         widget_ids: Vec<String>,
-        config: crate::domain::plugin::ResolvedConfig,
+        config: ResolvedConfig,
         data: super::data_api::DataRuntime,
     ) -> Self {
         let (ready_tx, ready_rx) = std::sync::mpsc::channel::<()>();
@@ -149,7 +150,7 @@ fn build_ctx(
     source: &str,
     modules: &BTreeMap<String, String>,
     widget_ids: &[String],
-    config: &crate::domain::plugin::ResolvedConfig,
+    config: &ResolvedConfig,
     data: super::data_api::DataRuntime,
 ) -> Result<WidgetCtx> {
     let (lua, budget) = super::lua_worker::bootstrap_worker_vm(config, modules, data.clone())?;

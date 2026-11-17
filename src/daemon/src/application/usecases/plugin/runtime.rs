@@ -6,15 +6,14 @@ use crate::domain::events::ChangeSink as _;
 use std::sync::Arc;
 
 use crate::application::state::AppState;
+use crate::domain::events::Change;
 
 pub async fn topology_changed(app: &Arc<AppState>) {
-    app.record_change(crate::domain::events::Change::PluginTopology)
-        .await;
+    app.record_change(Change::PluginTopology).await;
 }
 
 pub async fn data_changed(app: &Arc<AppState>) {
-    app.record_change(crate::domain::events::Change::PluginData)
-        .await;
+    app.record_change(Change::PluginData).await;
 }
 
 pub async fn device_changed(app: &Arc<AppState>, device_id: &str) {
@@ -27,13 +26,10 @@ pub async fn device_changed(app: &Arc<AppState>, device_id: &str) {
             .filter(|device| device.state_source_id() == Some(device_id))
             .map(|device| device.id().to_owned()),
     );
-    app.record_change(crate::domain::events::Change::Devices(ids))
-        .await;
+    app.record_change(Change::Devices(ids)).await;
 }
 
 pub async fn device_status_changed(app: &Arc<AppState>, device_id: &str) {
-    app.record_change(crate::domain::events::Change::PluginDeviceStatus(
-        device_id.to_owned(),
-    ))
-    .await;
+    app.record_change(Change::PluginDeviceStatus(device_id.to_owned()))
+        .await;
 }

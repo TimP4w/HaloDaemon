@@ -4,6 +4,9 @@ use std::collections::{HashMap, HashSet};
 use std::sync::Arc;
 use std::time::{Duration, Instant};
 
+use crate::application::usecases::registry::registration;
+use crate::application::usecases::registry::runtime;
+use crate::domain::plugin::Registry;
 use crate::util::backoff::{respawn_wait, FailureStreak};
 use crate::{
     application::state::{AppState, HidTrackingEntry},
@@ -188,7 +191,7 @@ impl From<&hidapi::DeviceInfo> for HidDeviceInfo {
 /// wins. Result order follows enumeration first-occurrence so device `idx`
 /// assignment stays stable.
 fn pick_hid_devices<'a>(
-    registry: &crate::domain::plugin::Registry,
+    registry: &Registry,
     entries: &'a [HidDeviceInfo],
 ) -> Vec<&'a HidDeviceInfo> {
     let make_probe = |e: &HidDeviceInfo| DiscoveryHandle::Hid {
@@ -313,10 +316,10 @@ pub(crate) async fn handle_hid_key_removed(app: Arc<AppState>, key: String) {
         }
         // Children register after their root, so reverse order closes them first.
         for d in to_close.iter().rev() {
-            crate::application::usecases::registry::registration::close_device(&app, d).await;
+            registration::close_device(&app, d).await;
         }
         log::info!("Hotplug: removed device(s) for key {key}");
-        crate::application::usecases::registry::runtime::topology_changed(&app).await;
+        runtime::topology_changed(&app).await;
 
         // The device may now be available through its paired receiver, whose
         // pairing table only shows the slot once the cable is gone — rescan
@@ -338,10 +341,7 @@ pub(crate) async fn handle_hid_key_removed(app: Arc<AppState>, key: String) {
                         if let Some(ctrl) = ctrl_dev.as_controller() {
                             let children = ctrl.rescan_children().await;
                             for child in children {
-                                crate::application::usecases::registry::registration::register_device(
-                                    &app2, child,
-                                )
-                                .await;
+                                registration::register_device(&app2, child).await;
                             }
                         }
                     }
@@ -409,13 +409,10 @@ async fn add_hid_device(
 
     let _ = scoped;
 
-    crate::application::usecases::registry::registration::release_wireless_twin(app, impl_.id())
-        .await;
+    registration::release_wireless_twin(app, impl_.id()).await;
 
     // Register as a new primary device via the centralised registration lifecycle.
-    let registered =
-        crate::application::usecases::registry::registration::register_device(app, impl_.clone())
-            .await;
+    let registered = registration::register_device(app, impl_.clone()).await;
     if !registered {
         return;
     }
@@ -423,8 +420,7 @@ async fn add_hid_device(
     if impl_.active_state() != halod_shared::types::VisibilityState::Disabled {
         if let Some(ctrl) = impl_.as_controller() {
             for child in ctrl.discover_children().await {
-                crate::application::usecases::registry::registration::register_device(app, child)
-                    .await;
+                registration::register_device(app, child).await;
             }
         }
     }

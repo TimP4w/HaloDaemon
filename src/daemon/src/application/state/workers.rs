@@ -3,6 +3,7 @@ use std::sync::Arc;
 
 use super::persistence::ConfigSaveState;
 use super::AppState;
+use crate::domain::profiles::device_state;
 
 const SAVE_DEBOUNCE: std::time::Duration = std::time::Duration::from_millis(250);
 const SAVE_MAX_DEBOUNCE: std::time::Duration = std::time::Duration::from_secs(2);
@@ -147,8 +148,7 @@ pub fn start_persist_worker(app: Arc<AppState>) -> tokio::task::JoinHandle<()> {
             }
             let devices = app.device_registry.read().await.clone();
             for device in &devices {
-                crate::domain::profiles::device_state::persist_device_state(&app, device.as_ref())
-                    .await;
+                device_state::persist_device_state(&app, device.as_ref()).await;
             }
             // Engine-originated persistence does not pass through a command
             // use case, so explicitly refresh the profile projection here.

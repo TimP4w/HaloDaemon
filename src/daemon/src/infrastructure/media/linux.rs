@@ -9,6 +9,7 @@ use zbus::zvariant::{OwnedValue, Value};
 use zbus::{Connection, MatchRule, MessageStream};
 
 use super::{ArtCache, MediaHandle, MediaInfo, PlaybackStatus, ART_CACHE_CAP};
+use crate::infrastructure::http::NetGuardResolver;
 
 const MPRIS_PREFIX: &str = "org.mpris.MediaPlayer2.";
 const PLAYER_IFACE: &str = "org.mpris.MediaPlayer2.Player";
@@ -194,7 +195,7 @@ fn fetch_http_bytes(url: &str) -> Option<Vec<u8>> {
     let agent = ureq::Agent::with_parts(
         config,
         ureq::unversioned::transport::DefaultConnector::default(),
-        crate::infrastructure::http::NetGuardResolver::new(false, None),
+        NetGuardResolver::new(false, None),
     );
     let mut resp = agent.get(url).call().ok()?;
     let mut buf = Vec::new();

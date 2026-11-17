@@ -3,10 +3,12 @@
 //! Shared mock device + builders for unit tests. Test-only.
 
 use crate::application::state::AppState;
+use crate::config::Config;
 use crate::domain::cooling::model::FanCurveRecord;
 use crate::domain::device::chain::{
     ChannelDescriptor, LightingDivisionAdapter, LightingDivisionHost,
 };
+use crate::domain::device::OnboardProfilesCapability;
 use crate::domain::device::{
     ActionCapability, BooleanCapability, CapabilityRef, ChoiceCapability, ChoiceStateCache,
     Controller, CoolingCapability, CoolingStateSlot, Device, DpiCapability, EqualizerCapability,
@@ -15,6 +17,7 @@ use crate::domain::device::{
     SensorCapability, VisibilitySlot,
 };
 use crate::domain::lcd::engine::{video::VideoEngine, LcdEngine};
+use crate::domain::plugin;
 use crate::domain::registry::identity::{DeviceIdentity, DeviceOrigin};
 use anyhow::Result;
 use async_trait::async_trait;
@@ -35,7 +38,7 @@ use std::sync::{
 pub static HALOD_CONFIG_DIR_LOCK: Mutex<()> = Mutex::new(());
 
 pub fn app_with(devices: Vec<Arc<dyn Device>>) -> Arc<AppState> {
-    let app = Arc::new(AppState::new(crate::config::Config::default()));
+    let app = Arc::new(AppState::new(Config::default()));
     *app.device_registry.try_write().unwrap() = devices;
     app
 }
@@ -82,7 +85,7 @@ where
     let tmp = tempfile::tempdir().unwrap();
     unsafe { std::env::set_var("HALOD_CONFIG_DIR", tmp.path()) };
     f(Arc::new(crate::application::state::AppState::new(
-        crate::config::Config::default(),
+        Config::default(),
     )))
     .await;
     unsafe { std::env::remove_var("HALOD_CONFIG_DIR") };
@@ -809,9 +812,7 @@ impl ChoiceCapability for MockDevice {
         }
         self.choice_cache().record(key, selected);
         self.write_order.lock().push("choice");
-        self.restore_scoped
-            .lock()
-            .push(crate::domain::plugin::restore_in_flight());
+        self.restore_scoped.lock().push(plugin::restore_in_flight());
         *self
             .choice_last_set
             .as_ref()
@@ -822,7 +823,7 @@ impl ChoiceCapability for MockDevice {
 }
 
 #[async_trait]
-impl crate::domain::device::OnboardProfilesCapability for MockDevice {
+impl OnboardProfilesCapability for MockDevice {
     async fn switch_profile(&self, slot: u16) -> Result<()> {
         self.record_call(format!("switch {slot}"));
         Ok(())

@@ -12,6 +12,7 @@ use halod_shared::types::{PluginRecommendation, PluginRecommendationMatch};
 
 use super::manifest::{HidMatch, PluginManifest};
 use crate::infrastructure::drivers::transports::smbus::BusInfo;
+use crate::infrastructure::drivers::transports::smbus::SmbusBusKind;
 
 /// The USB identity fields needed for recommendation matching. Enumeration is
 /// descriptor-only and never claims an interface or opens an endpoint.
@@ -175,9 +176,7 @@ pub fn recommendations(
             // SMBus device addresses cannot be probed before the user grants
             // that permission. A GPU declaration has a mandatory PCI allowlist,
             // however, so controller identity alone is a safe passive match.
-            if spec.bus_kind()
-                == Some(crate::infrastructure::drivers::transports::smbus::SmbusBusKind::Gpu)
-            {
+            if spec.bus_kind() == Some(SmbusBusKind::Gpu) {
                 for bus in gpu_smbus.iter().filter(|bus| {
                     spec.smbus()
                         .is_some_and(|smbus| smbus.pci_match.iter().any(|pci| pci.accepts(bus)))

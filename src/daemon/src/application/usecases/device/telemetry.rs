@@ -7,6 +7,7 @@ use std::sync::Arc;
 
 use crate::application::state::AppState;
 use crate::domain::device::Device;
+use crate::domain::events::Change;
 use halod_shared::types::Sensor;
 
 const DEVICE_SAMPLE_TIMEOUT: std::time::Duration = std::time::Duration::from_secs(2);
@@ -89,10 +90,8 @@ async fn sample_device(device: Arc<dyn Device>) -> Vec<(String, Sensor)> {
 pub async fn refresh(app: &Arc<AppState>) {
     let changed = observe(app).await;
     if !changed.is_empty() {
-        app.record_change(crate::domain::events::Change::SensorTelemetry(
-            changed.into_iter().collect(),
-        ))
-        .await;
+        app.record_change(Change::SensorTelemetry(changed.into_iter().collect()))
+            .await;
     }
 }
 

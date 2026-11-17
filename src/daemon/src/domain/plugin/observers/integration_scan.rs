@@ -20,11 +20,16 @@ use crate::application::usecases::registry::registration::{
 };
 use crate::domain::registry::observers::discovery::{DiscoveryHandle, TransportScanner};
 
+use crate::domain::plugin::engine::data_api::DataRuntime;
+use crate::domain::plugin::engine::device::RuntimeState;
 use crate::domain::plugin::engine::device::{
     LuaDevice, LuaDeviceParts, LuaDeviceSpawnParts, LuaDeviceWorker,
 };
 use crate::domain::plugin::engine::transport::PluginIo;
+use crate::domain::plugin::engine::worker::DevMatch;
 use crate::domain::plugin::manifest::PluginManifest;
+use crate::domain::plugin::ResolvedConfig;
+use crate::domain::plugin::ResolvedConfigValue;
 
 #[derive(Debug, Clone, Copy, PartialEq, Eq)]
 pub(crate) enum DiscoveryOutcome {
@@ -44,16 +49,13 @@ fn sanitize(value: &str) -> String {
 
 /// Stable device id for an integration root. TCP roots include their endpoint;
 /// local host integrations use a fixed headless root id.
-fn root_device_id(
-    manifest: &PluginManifest,
-    config: &crate::domain::plugin::ResolvedConfig,
-) -> String {
+fn root_device_id(manifest: &PluginManifest, config: &ResolvedConfig) -> String {
     // A serial root's stable identity is the configured port (ideally a
     // replug-stable /dev/serial/by-id path), sanitized into the device id.
     if let Some(serial) = &manifest.transports.serial {
         let port = config
             .get(&serial.port_key)
-            .map(crate::domain::plugin::ResolvedConfigValue::to_config_string)
+            .map(ResolvedConfigValue::to_config_string)
             .unwrap_or_default();
         return format!("{}-{}", manifest.id_prefix(), sanitize(&port));
     }
@@ -63,11 +65,11 @@ fn root_device_id(
     let tcp = manifest.transports.tcp.clone().unwrap_or_default();
     let host = config
         .get(&tcp.host_key)
-        .map(crate::domain::plugin::ResolvedConfigValue::to_config_string)
+        .map(ResolvedConfigValue::to_config_string)
         .unwrap_or_default();
     let port = config
         .get(&tcp.port_key)
-        .map(crate::domain::plugin::ResolvedConfigValue::to_config_string)
+        .map(ResolvedConfigValue::to_config_string)
         .unwrap_or_default();
     format!(
         "{}-{}_{}",
@@ -97,7 +99,7 @@ fn placeholder_handle<'a>() -> DiscoveryHandle<'a> {
 /// callers run this off-runtime; local transports use the same path.
 pub(super) fn open_probe(
     manifest: &PluginManifest,
-    config: &crate::domain::plugin::ResolvedConfig,
+    config: &ResolvedConfig,
     granted: &[Permission],
 ) -> Result<PluginIo> {
     let kind = manifest
@@ -151,9 +153,7 @@ async fn build_and_register(app: &Arc<AppState>, manifest: PluginManifest) -> Di
 
     // Created before the transport opens, so `OpeningTransport` is real — if
     // connect fails, this Arc is simply dropped unobserved.
-    let runtime_state = Arc::new(parking_lot::Mutex::new(
-        crate::domain::plugin::engine::device::RuntimeState::OpeningTransport,
-    ));
+    let runtime_state = Arc::new(parking_lot::Mutex::new(RuntimeState::OpeningTransport));
 
     // Drive every controller over the *one* root connection: a slot-shared
     // `Transport` serialises each controller's frame write behind the same
@@ -212,7 +212,7 @@ async fn build_and_register(app: &Arc<AppState>, manifest: PluginManifest) -> Di
             notify,
             runtime: Some(runtime_state),
             worker: LuaDeviceWorker::Spawn(Box::new(LuaDeviceSpawnParts {
-                dev_match: crate::domain::plugin::engine::worker::DevMatch {
+                dev_match: DevMatch {
                     transport: transport_kind.to_owned(),
                     ..Default::default()
                 },
@@ -220,7 +220,7 @@ async fn build_and_register(app: &Arc<AppState>, manifest: PluginManifest) -> Di
                 handle: runtime,
                 granted,
                 config,
-                data: crate::domain::plugin::engine::data_api::DataRuntime::new(
+                data: DataRuntime::new(
                     app.data_bus.clone(),
                     manifest.plugin_id.clone(),
                     &manifest.provides,

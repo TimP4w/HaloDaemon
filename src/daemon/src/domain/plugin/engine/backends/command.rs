@@ -10,6 +10,7 @@ use super::super::manifest::{DeviceSpec, PluginManifest};
 use super::super::transport::{
     accept_spec, CommandExecutor, Discovery, PluginIo, PluginTransportDescriptor,
 };
+use crate::domain::plugin::ResolvedConfig;
 
 fn matches(spec: &DeviceSpec, handle: &DiscoveryHandle<'_>) -> bool {
     matches!(handle, DiscoveryHandle::Command { executable } if spec.command().is_some_and(|m| m.command() == *executable))
@@ -22,7 +23,7 @@ fn single_instance(_: &DiscoveryHandle<'_>) -> String {
 fn open(
     manifest: &PluginManifest,
     _: &DiscoveryHandle<'_>,
-    _: &crate::domain::plugin::ResolvedConfig,
+    _: &ResolvedConfig,
     granted: &[Permission],
     _: Option<WriteRateLimit>,
 ) -> Result<PluginIo> {

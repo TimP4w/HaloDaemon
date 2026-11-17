@@ -11,9 +11,12 @@ use halod_shared::effect_designer::{validate_effect_name, DesignerParams, DESIGN
 use halod_shared::types::{EffectDef, EffectParamValue};
 
 use crate::application::state::AppState;
+use crate::config;
+use crate::domain::events::Change;
+use crate::util::fs;
 
 pub fn custom_effects_dir() -> std::path::PathBuf {
-    crate::config::config_dir().join("effects")
+    config::config_dir().join("effects")
 }
 
 fn effect_path(name: &str) -> std::path::PathBuf {
@@ -48,7 +51,7 @@ pub fn list_custom_effects() -> Vec<EffectDef> {
                 log::warn!("[RGB] ignoring custom effect with invalid name: {stem}");
                 return None;
             }
-            let raw = crate::config::read_bounded(&path, "custom effect").ok()?;
+            let raw = config::read_bounded(&path, "custom effect").ok()?;
             let mut def = serde_yaml::from_str::<EffectDef>(&raw).ok()?;
             def.params = DesignerParams::from_params(&def.params).to_params();
             def.effect_id = DESIGNER_EFFECT_ID.to_string();
@@ -80,11 +83,10 @@ pub async fn save_custom_effect(
     };
     let path = effect_path(&name);
     let yaml = serde_yaml::to_string(&def)?;
-    tokio::task::spawn_blocking(move || crate::util::fs::atomic_write(&path, &yaml)).await??;
+    tokio::task::spawn_blocking(move || fs::atomic_write(&path, &yaml)).await??;
     log::info!("[RGB] saved custom effect '{name}'");
     app.lighting.custom_effects.refresh().await;
-    app.record_change(crate::domain::events::Change::LightingCatalog)
-        .await;
+    app.record_change(Change::LightingCatalog).await;
     Ok(())
 }
 
@@ -98,8 +100,7 @@ pub async fn delete_custom_effect(name: String, app: Arc<AppState>) -> Result<()
         Err(e) => return Err(e.into()),
     }
     app.lighting.custom_effects.refresh().await;
-    app.record_change(crate::domain::events::Change::LightingCatalog)
-        .await;
+    app.record_change(Change::LightingCatalog).await;
     Ok(())
 }
 

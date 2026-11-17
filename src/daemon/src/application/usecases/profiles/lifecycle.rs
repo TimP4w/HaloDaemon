@@ -4,7 +4,10 @@ use crate::domain::events::ChangeSink as _;
 use anyhow::Result;
 use std::sync::Arc;
 
+use crate::application::notifications;
 use crate::application::state::AppState;
+use crate::application::usecases::registry::registration;
+use crate::domain::events::Change;
 use crate::domain::profiles::device_state::persist_device_state;
 use crate::domain::profiles::model::Profile;
 use crate::domain::profiles::observers::active_window::ControlMsg;
@@ -37,8 +40,7 @@ pub async fn load_active_profile(app: Arc<AppState>) {
         devices.len()
     );
     for device in &devices {
-        crate::application::usecases::registry::registration::restore_saved_state(&app, device)
-            .await;
+        registration::restore_saved_state(&app, device).await;
         if let Some(record) = known_devices.get(device.id()) {
             device.set_active_state(record.active_state.clone());
         }
@@ -101,10 +103,9 @@ pub async fn switch_profile_direct(name: String, app: Arc<AppState>) {
         cfg.active_profile = name;
     }
     load_active_profile(app.clone()).await;
-    app.record_change(crate::domain::events::Change::ProfileSwitch)
-        .await;
+    app.record_change(Change::ProfileSwitch).await;
     let profile = app.config.read().await.active_profile.clone();
-    crate::application::notifications::send(
+    notifications::send(
         &app,
         halod_shared::types::NotificationCode::ProfileSwitched { profile },
     )
@@ -123,9 +124,8 @@ pub async fn switch_profile(name: String, app: Arc<AppState>) -> Result<()> {
     };
     app.request_config_save();
     load_active_profile(app.clone()).await;
-    app.record_change(crate::domain::events::Change::ProfileSwitch)
-        .await;
-    crate::application::notifications::send(
+    app.record_change(Change::ProfileSwitch).await;
+    notifications::send(
         &app,
         halod_shared::types::NotificationCode::ProfileSwitched {
             profile: snap.active_profile.clone(),
@@ -159,8 +159,7 @@ pub async fn add_profile(name: String, app: Arc<AppState>) -> Result<()> {
     app.focus
         .notify(ControlMsg::ManualSwitch { profile: name })
         .await;
-    app.record_change(crate::domain::events::Change::ProfileSwitch)
-        .await;
+    app.record_change(Change::ProfileSwitch).await;
     Ok(())
 }
 
@@ -190,11 +189,9 @@ pub async fn remove_profile(name: String, app: Arc<AppState>) -> Result<()> {
                 profile: DEFAULT_PROFILE_NAME.to_string(),
             })
             .await;
-        app.record_change(crate::domain::events::Change::ProfileSwitch)
-            .await;
+        app.record_change(Change::ProfileSwitch).await;
     } else {
-        app.record_change(crate::domain::events::Change::Profiles)
-            .await;
+        app.record_change(Change::Profiles).await;
     }
     Ok(())
 }
@@ -233,8 +230,7 @@ pub async fn rename_profile(old_name: String, new_name: String, app: Arc<AppStat
             .notify(ControlMsg::ManualSwitch { profile: new_name })
             .await;
     }
-    app.record_change(crate::domain::events::Change::Profiles)
-        .await;
+    app.record_change(Change::Profiles).await;
     Ok(())
 }
 
@@ -261,8 +257,7 @@ pub async fn set_lighting_targets(
         channels,
     };
     app.request_config_save();
-    app.record_change(crate::domain::events::Change::Lighting)
-        .await;
+    app.record_change(Change::Lighting).await;
     Ok(())
 }
 

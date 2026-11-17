@@ -7,6 +7,7 @@ use std::time::{Duration, Instant};
 
 use tokio::sync::watch;
 
+use crate::application::notifications;
 use crate::application::state::AppState;
 use crate::util::backoff::{respawn_wait, FailureStreak};
 use crate::util::task::TaskHandle;
@@ -120,7 +121,7 @@ impl TaskSupervisor {
                 set_state(&manager_state, TaskState::Failed(reason.clone()));
                 log::error!("{name} {reason}");
                 if !failure_detail.is_empty() {
-                    crate::application::notifications::send(
+                    notifications::send(
                         &app,
                         halod_shared::types::NotificationCode::EngineStopped {
                             detail: failure_detail.to_owned(),

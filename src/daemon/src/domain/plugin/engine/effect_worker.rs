@@ -20,6 +20,9 @@ use halod_shared::types::EffectParamValue;
 use super::bytebuf::ByteBuf;
 use super::ffi::lua_err;
 use super::lua_worker::LuaWorker;
+use crate::application::bus::data_bus;
+use crate::domain::plugin::ResolvedConfig;
+use crate::infrastructure::audio::SpectrumFrame;
 
 pub const CANVAS_W: u32 = 400;
 pub const CANVAS_H: u32 = 300;
@@ -41,7 +44,7 @@ pub struct EffectFrameInput {
     pub time: f32,
     pub dt: f32,
     pub frame: u64,
-    pub audio: crate::infrastructure::audio::SpectrumFrame,
+    pub audio: SpectrumFrame,
 }
 
 #[derive(Debug, Clone, Serialize)]
@@ -162,7 +165,7 @@ impl PluginEffectHandle {
         module_sources: std::collections::BTreeMap<String, String>,
         effect_id: String,
         params: HashMap<String, EffectParamValue>,
-        config: crate::domain::plugin::ResolvedConfig,
+        config: ResolvedConfig,
     ) -> Self {
         Self::spawn_with_data(
             script_source,
@@ -179,7 +182,7 @@ impl PluginEffectHandle {
         module_sources: std::collections::BTreeMap<String, String>,
         effect_id: String,
         params: HashMap<String, EffectParamValue>,
-        config: crate::domain::plugin::ResolvedConfig,
+        config: ResolvedConfig,
         data: super::data_api::DataRuntime,
     ) -> Self {
         let worker = LuaWorker::spawn_vm(
@@ -422,7 +425,7 @@ fn effect_context_table(
                     "data key '{key}' is not declared in consumes"
                 )));
             }
-            crate::application::bus::data_bus::snapshot_to_lua(lua, &data.bus.read(&key))
+            data_bus::snapshot_to_lua(lua, &data.bus.read(&key))
         })?,
     )?;
 
@@ -551,7 +554,7 @@ fn build_ctx(
     module_sources: &std::collections::BTreeMap<String, String>,
     effect_id: &str,
     params: &HashMap<String, EffectParamValue>,
-    config: &crate::domain::plugin::ResolvedConfig,
+    config: &ResolvedConfig,
     data: super::data_api::DataRuntime,
 ) -> Result<EffectCtx> {
     let (lua, budget) =

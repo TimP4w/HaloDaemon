@@ -5,6 +5,8 @@ use anyhow::{Context, Result};
 use std::sync::Arc;
 
 use crate::application::state::AppState;
+use crate::domain::device::OnboardProfilesCapability;
+use crate::domain::events::Change;
 use crate::domain::registry::require_device_owned_id;
 
 fn validate_slot(slot: u16) -> Result<()> {
@@ -14,10 +16,7 @@ fn validate_slot(slot: u16) -> Result<()> {
     Ok(())
 }
 
-async fn ensure_writable(
-    cap: &dyn crate::domain::device::OnboardProfilesCapability,
-    slot: u16,
-) -> Result<()> {
+async fn ensure_writable(cap: &dyn OnboardProfilesCapability, slot: u16) -> Result<()> {
     if let Some(halod_shared::types::DeviceCapability::OnboardProfiles(profiles)) =
         cap.to_wire().await
     {
@@ -43,8 +42,7 @@ pub async fn switch_onboard_profile(id: String, slot: u16, app: Arc<AppState>) -
         device.name()
     );
     cap.switch_profile(slot).await?;
-    app.record_change(crate::domain::events::Change::Device(id))
-        .await;
+    app.record_change(Change::Device(id)).await;
     Ok(())
 }
 
@@ -57,8 +55,7 @@ pub async fn restore_onboard_profile(id: String, slot: u16, app: Arc<AppState>) 
     ensure_writable(cap, slot).await?;
     log::info!("[OnboardProfile] Restoring '{}' slot {slot}", device.name());
     cap.restore_profile(slot).await?;
-    app.record_change(crate::domain::events::Change::Device(id))
-        .await;
+    app.record_change(Change::Device(id)).await;
     Ok(())
 }
 
@@ -79,8 +76,7 @@ pub async fn set_onboard_profile_enabled(
         device.name()
     );
     cap.set_profile_enabled(slot, enabled).await?;
-    app.record_change(crate::domain::events::Change::Device(id))
-        .await;
+    app.record_change(Change::Device(id)).await;
     Ok(())
 }
 

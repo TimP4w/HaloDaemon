@@ -5,7 +5,9 @@ use std::collections::HashSet;
 use std::sync::Arc;
 
 use crate::application::state::AppState;
+use crate::application::usecases::registry::registration;
 use crate::domain::device::UsbLocation;
+use crate::domain::registry::observers::discovery;
 use crate::infrastructure::drivers::transports::usb::{
     present_usb_locations, stale_usb_ids, USB_LIVENESS_POLL,
 };
@@ -32,17 +34,14 @@ pub async fn run(app: Arc<AppState>) {
                 .collect::<Vec<_>>()
         };
         for id in stale_usb_ids(&registered, &present) {
-            crate::application::usecases::registry::registration::unregister_device_and_children(
-                &app, &id,
-            )
-            .await;
+            registration::unregister_device_and_children(&app, &id).await;
         }
         if present != last_present {
             for arrived in present.difference(&last_present) {
                 app.registry
                     .reset_transport_open_failures_for_usb(arrived.vid, arrived.pid);
             }
-            crate::domain::registry::observers::discovery::scan_usb_non_hid(Arc::clone(&app)).await;
+            discovery::scan_usb_non_hid(Arc::clone(&app)).await;
         }
         last_present = present;
     }

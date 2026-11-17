@@ -7,6 +7,7 @@ use std::sync::Arc;
 use crate::application::state::AppState;
 use crate::domain::cooling::engine::fan_curve::preset_curves;
 use crate::domain::cooling::model::FanCurveRecord;
+use crate::domain::events::Change;
 use crate::domain::profiles::device_state::persist_device_state;
 use crate::domain::registry::require_device_owned_id;
 
@@ -37,8 +38,7 @@ pub async fn set_cooling_curve_points(
     );
     cooling.set_curve(channel_id, record);
     persist_device_state(&app, device.as_ref()).await;
-    app.record_change(crate::domain::events::Change::CoolingDevice(device_id))
-        .await;
+    app.record_change(Change::CoolingDevice(device_id)).await;
     Ok(())
 }
 
@@ -86,8 +86,7 @@ pub async fn remove_cooling_curve(
     );
     cooling.clear_curve(&channel_id);
     persist_device_state(&app, device.as_ref()).await;
-    app.record_change(crate::domain::events::Change::CoolingDevice(device_id))
-        .await;
+    app.record_change(Change::CoolingDevice(device_id)).await;
     Ok(())
 }
 

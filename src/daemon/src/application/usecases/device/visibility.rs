@@ -6,6 +6,9 @@ use anyhow::{anyhow, Result};
 use std::sync::Arc;
 
 use crate::application::state::AppState;
+use crate::application::usecases::plugin::plugins;
+use crate::application::usecases::registry::registration;
+use crate::domain::events::Change;
 use crate::domain::profiles::device_state::persist_device_state;
 use crate::domain::registry::model::ensure_record;
 use halod_shared::types::{ChannelKind, VisibilityState};
@@ -36,11 +39,11 @@ pub async fn set_device_visibility(
 
         // Clear slots before state change (gates check active_state == Visible).
         if new_state != VisibilityState::Visible {
-            crate::application::usecases::registry::registration::clear_engine_slots(device);
+            registration::clear_engine_slots(device);
         }
 
         if new_state == VisibilityState::Disabled {
-            crate::application::usecases::registry::registration::close_device(&app, device).await;
+            registration::close_device(&app, device).await;
         }
 
         if new_state != VisibilityState::Disabled {
@@ -67,23 +70,18 @@ pub async fn set_device_visibility(
         new_state == VisibilityState::Visible && prev_state == Some(VisibilityState::Disabled);
     if enabling_from_disabled {
         if let Some(plugin_id) = owning_plugin_id {
-            crate::application::usecases::plugin::plugins::reconcile_plugins(
-                &app,
-                std::slice::from_ref(&plugin_id),
-            )
-            .await;
+            plugins::reconcile_plugins(&app, std::slice::from_ref(&plugin_id)).await;
             return Ok(());
         }
         app.device_registry
             .write()
             .await
             .retain(|d| d.id() != device_id);
-        crate::application::usecases::plugin::plugins::reconcile_full(&app).await;
+        plugins::reconcile_full(&app).await;
         return Ok(());
     }
 
-    app.record_change(crate::domain::events::Change::Device(device_id))
-        .await;
+    app.record_change(Change::Device(device_id)).await;
     Ok(())
 }
 
@@ -141,8 +139,7 @@ pub async fn set_channel_visibility(
         app.request_config_save();
     }
 
-    app.record_change(crate::domain::events::Change::Device(device_id))
-        .await;
+    app.record_change(Change::Device(device_id)).await;
     Ok(())
 }
 

@@ -4,6 +4,7 @@
 use crate::application::state::AppState;
 use crate::config::Config;
 use crate::domain::device::projection::DevicesSnapshot;
+use crate::domain::lcd::engine::video;
 use halod_shared::bus::{topic, BusValue};
 
 #[derive(Debug, Clone, PartialEq, Eq)]
@@ -118,7 +119,7 @@ pub async fn produce(app: &AppState, cfg: &Config, requested: &[Topic]) -> Vec<(
                 topic::HEALTH.into(),
                 BusValue::Health(halod_shared::types::HealthCheckState {
                     focus_watcher_supported: app.focus.supported(),
-                    ffmpeg_available: crate::domain::lcd::engine::video::ffmpeg_available(),
+                    ffmpeg_available: video::ffmpeg_available(),
                 }),
             )),
             Topic::ProcessIcons => records.push((

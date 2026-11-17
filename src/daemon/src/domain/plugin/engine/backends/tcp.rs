@@ -11,14 +11,18 @@ use halod_shared::types::Permission;
 
 use crate::domain::plugin::engine::backends::net_guard::resolve_vetted_addr;
 use crate::domain::plugin::engine::transport::{PluginIo, PluginTransportDescriptor};
+use crate::domain::plugin::engine::worker;
 use crate::domain::plugin::manifest::PluginManifest;
+use crate::domain::plugin::ResolvedConfig;
+use crate::domain::plugin::ResolvedConfigValue;
 use crate::domain::registry::observers::discovery::DiscoveryHandle;
 use crate::infrastructure::drivers::transports::tcp::TcpTransport;
+use crate::infrastructure::drivers::transports::Transport;
 
 fn open(
     manifest: &PluginManifest,
     _handle: &DiscoveryHandle<'_>,
-    config: &crate::domain::plugin::ResolvedConfig,
+    config: &ResolvedConfig,
     granted: &[Permission],
     limit: Option<halod_shared::types::WriteRateLimit>,
 ) -> Result<PluginIo> {
@@ -26,7 +30,7 @@ fn open(
     // is gated on the explicit Network grant (defence in depth: validate_manifest
     // also forces the manifest to declare it, which is what drives the consent
     // prompt — this rejects the actual connect if the grant is somehow absent).
-    if !crate::domain::plugin::engine::worker::network_granted(granted) {
+    if !worker::network_granted(granted) {
         bail!(
             "plugin '{}': tcp transport requires the 'network' permission",
             manifest.plugin_id
@@ -35,7 +39,7 @@ fn open(
     let tcp = manifest.transports.tcp.clone().unwrap_or_default();
     let host = config
         .get(&tcp.host_key)
-        .map(crate::domain::plugin::ResolvedConfigValue::to_config_string)
+        .map(ResolvedConfigValue::to_config_string)
         .unwrap_or_default();
     if host.is_empty() {
         bail!(
@@ -46,7 +50,7 @@ fn open(
     }
     let port_str = config
         .get(&tcp.port_key)
-        .map(crate::domain::plugin::ResolvedConfigValue::to_config_string)
+        .map(ResolvedConfigValue::to_config_string)
         .unwrap_or_default();
     let port: u16 = port_str.parse().with_context(|| {
         format!(
@@ -62,7 +66,7 @@ fn open(
             manifest.plugin_id
         )
     })?;
-    crate::infrastructure::drivers::transports::Transport::set_write_rate_limit(&transport, limit);
+    Transport::set_write_rate_limit(&transport, limit);
     Ok(PluginIo::Stream {
         transport: std::sync::Arc::new(transport),
         usb: None,

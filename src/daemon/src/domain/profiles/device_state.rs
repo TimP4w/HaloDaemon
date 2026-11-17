@@ -3,6 +3,8 @@ use std::sync::Arc;
 
 use crate::application::state::AppState;
 use crate::domain::device::Device;
+use crate::domain::profiles::model::Profile;
+use crate::domain::profiles::validate;
 use halod_shared::types::DEFAULT_PROFILE_NAME;
 
 /// Merge into `entry` only the keys of `new_state` that differ from `effective`.
@@ -66,13 +68,11 @@ pub async fn persist_device_state(app: &Arc<AppState>, device: &dyn Device) {
         return;
     }
     let device_id = device.id().to_owned();
-    let mut validation_profile = crate::domain::profiles::model::Profile::default();
+    let mut validation_profile = Profile::default();
     validation_profile
         .device_states
         .insert(device_id.clone(), state.clone());
-    if let Err(e) =
-        crate::domain::profiles::validate::validate_profile("persisted state", &validation_profile)
-    {
+    if let Err(e) = validate::validate_profile("persisted state", &validation_profile) {
         log::warn!("[{device_id}] refusing to persist invalid device state: {e:#}");
         return;
     }

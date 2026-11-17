@@ -10,6 +10,7 @@ use std::sync::Arc;
 use crate::application::state::AppState;
 use crate::domain::device::chain::LightingDivisionHost;
 use crate::domain::device::{ChainLinkSpec, Device};
+use crate::domain::events::Change;
 use crate::domain::registry::model::{ChainLinkRecord, ChannelLayoutRecord, DeviceLayout};
 use halod_shared::types::ZoneTopology;
 
@@ -82,8 +83,7 @@ pub async fn lighting_add_segment(
     }
 
     persist_layout(&app, device.as_ref()).await?;
-    app.record_change(crate::domain::events::Change::LightingTopology)
-        .await;
+    app.record_change(Change::LightingTopology).await;
     Ok(())
 }
 
@@ -105,8 +105,7 @@ pub async fn lighting_remove_segment(
     }
 
     persist_layout(&app, device.as_ref()).await?;
-    app.record_change(crate::domain::events::Change::LightingTopology)
-        .await;
+    app.record_change(Change::LightingTopology).await;
     Ok(())
 }
 
@@ -125,8 +124,7 @@ pub async fn lighting_reorder_segment(
     }
 
     persist_layout(&app, device.as_ref()).await?;
-    app.record_change(crate::domain::events::Change::LightingDevice(id))
-        .await;
+    app.record_change(Change::LightingDevice(id)).await;
     Ok(())
 }
 

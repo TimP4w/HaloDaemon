@@ -9,6 +9,7 @@ use crate::domain::plugin::engine::transport::{
     accept_spec, Discovery, PluginIo, PluginTransportDescriptor,
 };
 use crate::domain::plugin::manifest::{DeviceSpec, PluginManifest};
+use crate::domain::plugin::ResolvedConfig;
 use crate::domain::registry::observers::discovery::DiscoveryHandle;
 use crate::infrastructure::drivers::transports::usb::{UsbDevices, UsbSelector};
 
@@ -59,7 +60,7 @@ pub(crate) fn open_usb(
 fn open(
     manifest: &PluginManifest,
     handle: &DiscoveryHandle<'_>,
-    _config: &crate::domain::plugin::ResolvedConfig,
+    _config: &ResolvedConfig,
     granted: &[Permission],
     limit: Option<WriteRateLimit>,
 ) -> Result<PluginIo> {

@@ -10,6 +10,7 @@ use halod_shared::types::{
 };
 
 use super::{PluginManifest, RequirementDef};
+use crate::domain::plugin::engine::command_resolve;
 
 #[derive(Debug, Clone, PartialEq, Eq)]
 pub struct DerivedRequirement {
@@ -176,7 +177,7 @@ pub fn evaluate_with(
 
 pub fn evaluate(manifest: &PluginManifest) -> Vec<PluginRequirementStatus> {
     evaluate_with(manifest, std::env::consts::OS, &|executable| {
-        crate::domain::plugin::engine::command_resolve::resolve(executable).is_some()
+        command_resolve::resolve(executable).is_some()
     })
 }
 

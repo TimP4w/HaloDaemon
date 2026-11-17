@@ -1,4 +1,5 @@
 // SPDX-License-Identifier: GPL-3.0-or-later
+use crate::domain::cooling::engine::fan_curve;
 use halod_shared::types::FanCurveStatus;
 use std::collections::HashMap;
 use tokio::sync::Mutex;
@@ -49,7 +50,7 @@ impl CoolingEngineState {
 
         halod_shared::types::CoolingState {
             fan_curves,
-            preset_curves: crate::domain::cooling::engine::fan_curve::preset_curves()
+            preset_curves: fan_curve::preset_curves()
                 .iter()
                 .map(|p| p.serialize())
                 .collect(),

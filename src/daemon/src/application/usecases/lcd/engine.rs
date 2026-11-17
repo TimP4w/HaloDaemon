@@ -6,6 +6,8 @@ use std::collections::HashMap;
 use anyhow::Result;
 use std::sync::Arc;
 
+use crate::application::usecases::lcd::templates;
+use crate::domain::events::Change;
 use crate::domain::profiles::device_state::persist_device_state;
 use crate::domain::registry::require_device_owned_id;
 use crate::{application::state::AppState, lcd::engine::LcdEngine};
@@ -32,11 +34,8 @@ pub async fn set_template(
         } else {
             serde_json::from_str(raw)?
         };
-        crate::application::usecases::lcd::templates::validate_template(&def)?;
-        crate::application::usecases::lcd::templates::validate_template_catalog(
-            &def,
-            &app.registry,
-        )?;
+        templates::validate_template(&def)?;
+        templates::validate_template_catalog(&def, &app.registry)?;
     }
 
     let device = require_device_owned_id(&device_id, &app).await?;
@@ -58,8 +57,7 @@ pub async fn set_template(
     }
     slot.lcd_state().set_health(LcdHealth::Stable);
 
-    app.record_change(crate::domain::events::Change::LcdDevice(device_id))
-        .await;
+    app.record_change(Change::LcdDevice(device_id)).await;
     Ok(())
 }
 
@@ -78,8 +76,7 @@ pub async fn deactivate(device_id: String, app: Arc<AppState>) -> Result<()> {
     }
     slot.lcd_state().set_health(LcdHealth::Stable);
 
-    app.record_change(crate::domain::events::Change::LcdDevice(device_id))
-        .await;
+    app.record_change(Change::LcdDevice(device_id)).await;
     Ok(())
 }
 

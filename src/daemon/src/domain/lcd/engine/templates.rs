@@ -3,6 +3,8 @@ use std::path::Path;
 
 use image::{Rgba, RgbaImage};
 
+use crate::util::image::MAX_DECODE_DIM;
+use crate::util::image::MAX_DECODE_RGBA_BYTES;
 use halod_shared::types::RgbColor;
 
 static FONT_BYTES: &[u8] = include_bytes!("../../../../../assets/fonts/NotoSans-Regular.ttf");
@@ -49,7 +51,7 @@ fn add_decoded_frame_bytes(total: u64, width: u32, height: u32) -> anyhow::Resul
     let total = total
         .checked_add(u64::from(width) * u64::from(height) * 4)
         .ok_or_else(|| anyhow::anyhow!("GIF decoded-byte count overflow"))?;
-    if total > crate::util::image::MAX_DECODE_RGBA_BYTES {
+    if total > MAX_DECODE_RGBA_BYTES {
         return Err(anyhow::anyhow!(
             "GIF frames exceed the cumulative decoded-byte limit"
         ));
@@ -71,8 +73,8 @@ pub(super) fn decode_image_frames(data: &[u8]) -> anyhow::Result<Vec<(RgbaImage,
     }
     let mut decoder = GifDecoder::new(Cursor::new(data))?;
     let mut limits = image::Limits::default();
-    limits.max_image_width = Some(crate::util::image::MAX_DECODE_DIM);
-    limits.max_image_height = Some(crate::util::image::MAX_DECODE_DIM);
+    limits.max_image_width = Some(MAX_DECODE_DIM);
+    limits.max_image_height = Some(MAX_DECODE_DIM);
     decoder.set_limits(limits)?;
     let mut out = Vec::new();
     let mut decoded_bytes = 0u64;

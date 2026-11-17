@@ -4,20 +4,20 @@
 use std::sync::Arc;
 
 use crate::application::state::AppState;
+use crate::application::usecases::registry::registration;
+use crate::domain::registry::observers::discovery::TransportScanner;
+use crate::infrastructure::drivers::vendors::generic::devices::computer;
 
 async fn discover(app: Arc<AppState>) {
-    let Some(device) =
-        crate::infrastructure::drivers::vendors::generic::devices::computer::make_device().await
-    else {
+    let Some(device) = computer::make_device().await else {
         return;
     };
-    crate::application::usecases::registry::registration::register_device(&app, device).await;
+    registration::register_device(&app, device).await;
 }
 
-pub(crate) const SCANNER: crate::domain::registry::observers::discovery::TransportScanner =
-    crate::domain::registry::observers::discovery::TransportScanner {
-        name: "computer",
-        detail: halod_shared::types::DiscoveryDetail::Computer,
-        platform: None,
-        scan: |app| Box::pin(discover(app)),
-    };
+pub(crate) const SCANNER: TransportScanner = TransportScanner {
+    name: "computer",
+    detail: halod_shared::types::DiscoveryDetail::Computer,
+    platform: None,
+    scan: |app| Box::pin(discover(app)),
+};

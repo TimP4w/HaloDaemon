@@ -11,6 +11,10 @@ use crate::application::state::AppState;
 use crate::domain::device::Device;
 use halod_shared::types::VisibilityState;
 
+use crate::application::usecases::profiles::lifecycle;
+use crate::application::usecases::registry::chain;
+use crate::domain::plugin::catalog::RepoCatalog;
+use crate::domain::plugin::repo::RepositoryTrust;
 pub use state::{HidTracking, HidTrackingEntry};
 
 /// Look up the device with the given `id` and return an owned clone, holding the
@@ -49,11 +53,11 @@ pub async fn initialize_app_state(app: Arc<AppState>) {
             .iter()
             .filter(|record| matches!(record.source, crate::config::PluginRepoSource::Url(_)))
             .filter_map(|record| {
-                let trust = crate::domain::plugin::repo::RepositoryTrust::for_record(record);
+                let trust = RepositoryTrust::for_record(record);
                 let catalog = crate::domain::plugin::catalog::cached(&record.slug, &trust)?;
                 Some((
                     record.slug.clone(),
-                    crate::domain::plugin::catalog::RepoCatalog {
+                    RepoCatalog {
                         catalog,
                         last_sync: None,
                     },
@@ -72,8 +76,8 @@ pub async fn initialize_app_state(app: Arc<AppState>) {
     crate::application::usecases::plugin::repos::refresh_in_background(app.clone());
     observers::discovery::discover_devices(app.clone()).await;
     seed_known_devices(app.clone()).await;
-    crate::application::usecases::registry::chain::restore_saved_chains(app.clone()).await;
-    crate::application::usecases::profiles::lifecycle::load_active_profile(app.clone()).await;
+    chain::restore_saved_chains(app.clone()).await;
+    lifecycle::load_active_profile(app.clone()).await;
 }
 
 /// Seed the non-removable official repository record, pointing it at the

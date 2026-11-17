@@ -4,6 +4,10 @@ use crate::domain::events::ChangeSink as _;
 use anyhow::Result;
 use std::sync::Arc;
 
+use crate::application::usecases::registry::settings;
+use crate::domain::device::Device;
+use crate::domain::events::Change;
+use crate::domain::lighting::engine::RgbEngine;
 use crate::domain::profiles::device_state::persist_device_state;
 use crate::domain::registry::require_device_owned_id;
 use crate::{application::state::AppState, config};
@@ -58,10 +62,9 @@ fn validate_effect_def(instance_id: &str, def: &EffectDef, app: &AppState) -> Re
             EffectParamValue::Color(_) | EffectParamValue::Bool(_) => {}
         }
     }
-    let known =
-        crate::domain::lighting::engine::RgbEngine::available_effect_descriptors(&app.registry)
-            .iter()
-            .any(|descriptor| descriptor.id == def.effect_id);
+    let known = RgbEngine::available_effect_descriptors(&app.registry)
+        .iter()
+        .any(|descriptor| descriptor.id == def.effect_id);
     anyhow::ensure!(known, "unknown canvas effect '{}'", def.effect_id);
     Ok(())
 }
@@ -144,8 +147,7 @@ pub async fn upsert_effect(
         effects.insert(instance_id, def);
     }
     app.request_config_save();
-    app.record_change(crate::domain::events::Change::Canvas)
-        .await;
+    app.record_change(Change::Canvas).await;
     Ok(())
 }
 
@@ -165,8 +167,7 @@ pub async fn remove_effect(instance_id: String, app: Arc<AppState>) -> Result<()
         }
     }
     app.request_config_save();
-    app.record_change(crate::domain::events::Change::Canvas)
-        .await;
+    app.record_change(Change::Canvas).await;
     Ok(())
 }
 
@@ -184,8 +185,7 @@ pub async fn set_default_effect(instance_id: Option<String>, app: Arc<AppState>)
         cs.default_effect = instance_id;
     }
     app.request_config_save();
-    app.record_change(crate::domain::events::Change::Canvas)
-        .await;
+    app.record_change(Change::Canvas).await;
     Ok(())
 }
 
@@ -196,7 +196,7 @@ async fn modify_canvas_zones(
     device_id: &str,
     app: &Arc<AppState>,
     mutate: impl FnOnce(&mut Vec<config::PlacedZone>),
-) -> Result<Arc<dyn crate::domain::device::Device>> {
+) -> Result<Arc<dyn Device>> {
     let device = require_device_owned_id(device_id, app).await?;
     let rgb = device
         .as_lighting()
@@ -276,7 +276,7 @@ pub async fn place_zone(
         rgb.apply(LightingState::Engine).await?;
     }
 
-    crate::application::usecases::registry::settings::set_engine_config(
+    settings::set_engine_config(
         EngineKind::Canvas,
         Some(true),
         None,
@@ -286,8 +286,7 @@ pub async fn place_zone(
     )
     .await?;
 
-    app.record_change(crate::domain::events::Change::CanvasDevice(device_id))
-        .await;
+    app.record_change(Change::CanvasDevice(device_id)).await;
     Ok(())
 }
 
@@ -305,8 +304,7 @@ pub async fn remove_zone(device_id: String, channel_id: String, app: Arc<AppStat
         "zone '{channel_id}' is not placed on device '{device_id}'"
     );
 
-    app.record_change(crate::domain::events::Change::CanvasDevice(device_id))
-        .await;
+    app.record_change(Change::CanvasDevice(device_id)).await;
     Ok(())
 }
 
@@ -372,8 +370,7 @@ pub async fn move_zone(
     // The UI keeps an optimistic transform until the daemon confirms the new
     // placement. Report the semantic topology change so the retained lighting
     // and device records are committed together.
-    app.record_change(crate::domain::events::Change::CanvasDevice(device_id))
-        .await;
+    app.record_change(Change::CanvasDevice(device_id)).await;
     Ok(())
 }
 

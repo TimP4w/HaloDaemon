@@ -11,6 +11,7 @@ use std::sync::Arc;
 
 use crate::application::state::AppState;
 use crate::domain::device::Device;
+use crate::domain::events::Change;
 use crate::domain::registry::model::ensure_record;
 
 const MAX_NAME_LEN: usize = 64;
@@ -82,10 +83,8 @@ async fn rename_chain_link(
     chain.rename_link(&channel_id, child_id, &new_name)?;
 
     crate::application::usecases::registry::chain::persist_layout(app, parent.as_ref()).await?;
-    app.record_change(crate::domain::events::Change::LightingDevice(
-        child_id.to_owned(),
-    ))
-    .await;
+    app.record_change(Change::LightingDevice(child_id.to_owned()))
+        .await;
     Ok(())
 }
 
@@ -113,7 +112,7 @@ async fn rename_normal_device(
         app.request_config_save();
     }
 
-    app.record_change(crate::domain::events::Change::Device(device_id.to_owned()))
+    app.record_change(Change::Device(device_id.to_owned()))
         .await;
     Ok(())
 }

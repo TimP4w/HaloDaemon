@@ -19,6 +19,7 @@ use std::path::PathBuf;
 use std::sync::OnceLock;
 
 use super::SecretStore;
+use crate::config;
 
 const KEY_FILE: &str = "secret.key";
 const SECRETS_FILE: &str = "plugin_secrets.yaml";
@@ -144,11 +145,11 @@ impl SecretStore for FileKeyStore {
 }
 
 fn secrets_file_path() -> PathBuf {
-    crate::config::config_dir().join(SECRETS_FILE)
+    config::config_dir().join(SECRETS_FILE)
 }
 
 fn key_file_path() -> PathBuf {
-    crate::config::config_dir().join(KEY_FILE)
+    config::config_dir().join(KEY_FILE)
 }
 
 fn load_secrets_file() -> Result<SecretsFile> {
@@ -156,7 +157,7 @@ fn load_secrets_file() -> Result<SecretsFile> {
     if !path.exists() {
         return Ok(SecretsFile::default());
     }
-    let raw = crate::config::read_bounded(&path, "plugin secrets")?;
+    let raw = config::read_bounded(&path, "plugin secrets")?;
     Ok(serde_yaml::from_str(&raw)?)
 }
 

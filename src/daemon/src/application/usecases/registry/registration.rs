@@ -2,8 +2,11 @@
 use anyhow::Result;
 use std::sync::Arc;
 
+use crate::application::notifications;
 use crate::application::state::AppState;
 use crate::domain::device::Device;
+use crate::domain::plugin;
+use crate::domain::registry::identity::MatchEvidence;
 use halod_shared::types::{ConnectionType, VisibilityState, DEFAULT_PROFILE_NAME};
 
 /// Close a device after releasing any global input state it owns. Every
@@ -70,7 +73,7 @@ pub(crate) async fn restore_saved_state(app: &Arc<AppState>, device: &Arc<dyn De
 /// One restore pass. Returns whether every capability's state reached the
 /// hardware.
 async fn restore_once(app: &Arc<AppState>, device: &Arc<dyn Device>) -> bool {
-    crate::domain::plugin::as_restore(restore_pass(app, device)).await
+    plugin::as_restore(restore_pass(app, device)).await
 }
 
 async fn restore_pass(app: &Arc<AppState>, device: &Arc<dyn Device>) -> bool {
@@ -173,7 +176,7 @@ pub async fn init_device(app: &Arc<AppState>, device: &Arc<dyn Device>) -> Resul
                 )
             });
             if attempt == 1 {
-                crate::application::notifications::send(
+                notifications::send(
                     app,
                     halod_shared::types::NotificationCode::DeviceInitFailed {
                         device: device.name().to_string(),
@@ -287,7 +290,7 @@ async fn prefer_wired_transport(app: &Arc<AppState>, device: &Arc<dyn Device>) -
                         &other.identity(),
                         &other.conflict_origin(),
                     ),
-                    crate::domain::registry::identity::MatchEvidence::ConfirmedSerial
+                    MatchEvidence::ConfirmedSerial
                 )
         })
         .cloned()
@@ -380,13 +383,12 @@ async fn log_registration_conflicts(app: &Arc<AppState>, device: &Arc<dyn Device
             &other.identity(),
             &other.conflict_origin(),
         ) {
-            crate::domain::registry::identity::MatchEvidence::ConfirmedSerial
-            | crate::domain::registry::identity::MatchEvidence::ConfirmedLocation => log::warn!(
+            MatchEvidence::ConfirmedSerial | MatchEvidence::ConfirmedLocation => log::warn!(
                 "device '{}' may conflict with '{}' (same physical hardware)",
                 device.id(),
                 other.id()
             ),
-            crate::domain::registry::identity::MatchEvidence::PossibleUsb => log::info!(
+            MatchEvidence::PossibleUsb => log::info!(
                 "device '{}' may conflict with '{}' (matching VID/PID)",
                 device.id(),
                 other.id()

@@ -5,6 +5,10 @@ use anyhow::Result;
 use std::sync::Arc;
 
 use crate::application::state::AppState;
+use crate::application::usecases::plugin::plugins;
+use crate::domain::device::Device;
+use crate::domain::events::Change;
+use crate::logger;
 use halod_shared::commands::EngineKind;
 
 pub async fn set_engine_config(
@@ -53,9 +57,9 @@ pub async fn set_engine_config(
     app.request_config_save();
 
     let change = match kind {
-        EngineKind::FanCurve => crate::domain::events::Change::Cooling,
-        EngineKind::Canvas => crate::domain::events::Change::Lighting,
-        EngineKind::Lcd => crate::domain::events::Change::Lcd,
+        EngineKind::FanCurve => Change::Cooling,
+        EngineKind::Canvas => Change::Lighting,
+        EngineKind::Lcd => Change::Lcd,
     };
     app.record_change(change).await;
     Ok(())
@@ -69,7 +73,7 @@ pub async fn set_log_level(level: String, app: Arc<AppState>) -> Result<()> {
         anyhow::bail!("trace logging is not supported");
     }
 
-    log::set_max_level(crate::logger::without_trace(level_filter));
+    log::set_max_level(logger::without_trace(level_filter));
 
     {
         let mut cfg = app.config.write().await;
@@ -77,7 +81,7 @@ pub async fn set_log_level(level: String, app: Arc<AppState>) -> Result<()> {
     }
     app.request_config_save();
     log::info!("Log level changed to {level}");
-    app.record_change(crate::domain::events::Change::Gui).await;
+    app.record_change(Change::Gui).await;
     Ok(())
 }
 
@@ -92,7 +96,7 @@ pub async fn set_language(lang: String, app: Arc<AppState>) -> Result<()> {
     }
     app.request_config_save();
     log::info!("UI language changed to {lang}");
-    app.record_change(crate::domain::events::Change::Gui).await;
+    app.record_change(Change::Gui).await;
     Ok(())
 }
 
@@ -106,7 +110,7 @@ pub async fn set_home_widgets(
         cfg.gui.home_widgets = widgets;
     }
     app.request_config_save();
-    app.record_change(crate::domain::events::Change::Gui).await;
+    app.record_change(Change::Gui).await;
     Ok(())
 }
 
@@ -120,7 +124,7 @@ pub async fn set_cooling_widgets(
         cfg.gui.cooling_widgets = widgets;
     }
     app.request_config_save();
-    app.record_change(crate::domain::events::Change::Gui).await;
+    app.record_change(Change::Gui).await;
     Ok(())
 }
 
@@ -139,7 +143,7 @@ pub async fn set_ui_config(
         cfg.gui.low_battery_notifications = low_battery_notifications;
     }
     app.request_config_save();
-    app.record_change(crate::domain::events::Change::Gui).await;
+    app.record_change(Change::Gui).await;
     Ok(())
 }
 
@@ -149,7 +153,7 @@ pub async fn mark_tour_seen(tour: String, app: Arc<AppState>) -> Result<()> {
         cfg.gui.seen_tours.insert(tour);
     }
     app.request_config_save();
-    app.record_change(crate::domain::events::Change::Gui).await;
+    app.record_change(Change::Gui).await;
     Ok(())
 }
 
@@ -159,7 +163,7 @@ pub async fn reset_tours_seen(app: Arc<AppState>) -> Result<()> {
         cfg.gui.seen_tours.clear();
     }
     app.request_config_save();
-    app.record_change(crate::domain::events::Change::Gui).await;
+    app.record_change(Change::Gui).await;
     Ok(())
 }
 
@@ -168,11 +172,10 @@ pub async fn rediscover(app: Arc<AppState>) -> Result<()> {
     // Re-read all sources so a freshly-dropped package is picked up by a
     // "Scan now" without restarting the daemon. This must use the shared
     // reload path to retain a process-local development repository.
-    crate::application::usecases::plugin::plugins::reload_registry(&app).await;
-    crate::application::usecases::plugin::plugins::reconcile_full(&app).await;
+    plugins::reload_registry(&app).await;
+    plugins::reconcile_full(&app).await;
 
-    let controllers: Vec<std::sync::Arc<dyn crate::domain::device::Device>> =
-        app.device_registry.read().await.clone();
+    let controllers: Vec<std::sync::Arc<dyn Device>> = app.device_registry.read().await.clone();
     for dev in controllers {
         super::receiver::reconcile_owned_children(&dev, &app).await;
     }
