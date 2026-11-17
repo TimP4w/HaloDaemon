@@ -13,7 +13,7 @@ use super::TabCtx;
 use crate::domain::topic_store::TopicStore;
 use crate::domain::tour;
 use crate::domain::tour::AnchorId;
-use crate::runtime::ipc;
+use crate::runtime::ipc::{self, CommandTx};
 use crate::ui::theme;
 
 const ADD_LEDS_DEFAULT: u32 = 30;
@@ -123,7 +123,6 @@ pub fn show(ui: &mut egui::Ui, ctx: &TabCtx) {
         );
         ui.with_layout(egui::Layout::right_to_left(egui::Align::Center), |ui| {
             ui.spacing_mut().item_spacing.x = theme::SPACE_6;
-            discover_button(ui, ctx, dev_id, &channels);
             ui.label(
                 egui::RichText::new(t!(
                     "device.chains_summary",
@@ -138,12 +137,13 @@ pub fn show(ui: &mut egui::Ui, ctx: &TabCtx) {
     ui.add_space(theme::SPACE_8);
 
     const COLS: usize = 3;
-    for row in channels.chunks(COLS) {
+    for (row_index, row) in channels.chunks(COLS).enumerate() {
         ui.scope(|ui| {
             ui.spacing_mut().item_spacing.x = theme::SPACE_8;
             ui.columns(COLS, |columns| {
-                for (col, channel) in columns.iter_mut().zip(row) {
-                    channel_card(col, ctx, dev_id, channel);
+                for (index, (col, channel)) in columns.iter_mut().zip(row).enumerate() {
+                    let first = row_index == 0 && index == 0;
+                    channel_card(col, ctx, dev_id, channel, first);
                 }
             });
         });
@@ -151,7 +151,13 @@ pub fn show(ui: &mut egui::Ui, ctx: &TabCtx) {
     }
 }
 
-fn channel_card(ui: &mut egui::Ui, ctx: &TabCtx, dev_id: &str, channel: &LightingChannel) {
+fn channel_card(
+    ui: &mut egui::Ui,
+    ctx: &TabCtx,
+    dev_id: &str,
+    channel: &LightingChannel,
+    tour_anchor: bool,
+) {
     let used = used_leds(channel);
     let max = max_leds(channel);
     widgets::card_with_margin(ui, egui::Margin::same(16), |ui| {
@@ -167,6 +173,7 @@ fn channel_card(ui: &mut egui::Ui, ctx: &TabCtx, dev_id: &str, channel: &Lightin
                 );
             },
             |ui| {
+                discover_button(ui, ctx, dev_id, &channel.id, tour_anchor);
                 ui.label(
                     egui::RichText::new(t!("device.chains_usage", used = used, max = max))
                         .font(theme::body_md())
@@ -213,8 +220,14 @@ fn empty_header(ui: &mut egui::Ui) {
     );
 }
 
-fn discover_button(ui: &mut egui::Ui, ctx: &TabCtx, dev_id: &str, channels: &[&LightingChannel]) {
-    let flash_at_key = egui::Id::unique(("ch_flash_at", dev_id));
+fn discover_button(
+    ui: &mut egui::Ui,
+    ctx: &TabCtx,
+    dev_id: &str,
+    channel_id: &str,
+    tour_anchor: bool,
+) {
+    let flash_at_key = egui::Id::unique(("ch_flash_at", dev_id, channel_id));
     let now = ui.ctx().input(|i| i.time);
     let flashing = ui
         .ctx()
@@ -232,24 +245,28 @@ fn discover_button(ui: &mut egui::Ui, ctx: &TabCtx, dev_id: &str, channels: &[&L
         ui,
         &label,
         widgets::ButtonKind::Secondary,
-        Vec2::new(88.0, 36.0),
+        Vec2::new(88.0, 28.0),
     );
-    tour::anchor(ui.ctx(), AnchorId::ChainsDiscover, resp.rect);
+    if tour_anchor {
+        tour::anchor(ui.ctx(), AnchorId::ChainsDiscover, resp.rect);
+    }
     if resp.clicked() && !flashing {
         ui.ctx()
             .data_mut(|d| d.insert_temp(flash_at_key, now + 2.4));
-        for channel in channels {
-            ipc::send(
-                ctx.cmd,
-                DaemonCommand::Device {
-                    device_id: dev_id.to_string(),
-                    op: DeviceOp::LightingDetectSegments {
-                        channel_id: channel.id.clone(),
-                    },
-                },
-            );
-        }
+        request_detect(ctx.cmd, dev_id, channel_id);
     }
+}
+
+fn request_detect(cmd: &CommandTx, dev_id: &str, channel_id: &str) {
+    ipc::send(
+        cmd,
+        DaemonCommand::Device {
+            device_id: dev_id.to_owned(),
+            op: DeviceOp::LightingDetectSegments {
+                channel_id: channel_id.to_owned(),
+            },
+        },
+    );
 }
 
 fn link_row(
@@ -528,6 +545,20 @@ mod tests {
     use super::*;
     use halod_shared::types::KeyboardFormFactor;
     use halod_shared::types::KeyboardLayout;
+
+    #[test]
+    fn discovering_a_header_flashes_only_that_header() {
+        let (cmd, mut rx) = tokio::sync::mpsc::unbounded_channel();
+        request_detect(&cmd, "hub", "ch2");
+        assert!(matches!(
+            rx.try_recv(),
+            Ok(DaemonCommand::Device {
+                device_id,
+                op: DeviceOp::LightingDetectSegments { channel_id },
+            }) if device_id == "hub" && channel_id == "ch2"
+        ));
+        assert!(rx.try_recv().is_err());
+    }
 
     #[test]
     fn topology_labels_all_variants() {
