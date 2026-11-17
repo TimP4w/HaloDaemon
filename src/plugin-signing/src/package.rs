@@ -165,7 +165,17 @@ pub fn reject_symlinks(root: &Path) -> Result<()> {
     walk_files(root).map(drop)
 }
 
+/// Wire-format relative path (`/`-separated) as it appears in archives,
+/// catalogs and URLs; host separators are never accepted.
 pub fn normalized_relative_path(path: &Path) -> Result<String> {
+    if path.to_str().is_some_and(|raw| raw.contains('\\')) {
+        bail!("invalid relative path '{}'", path.display());
+    }
+    host_relative_path(path)
+}
+
+/// Relative path from the host filesystem, normalized to `/` separators.
+fn host_relative_path(path: &Path) -> Result<String> {
     if path.is_absolute() || path.as_os_str().is_empty() {
         bail!("invalid relative path '{}'", path.display());
     }
@@ -189,7 +199,7 @@ pub fn normalized_relative_path(path: &Path) -> Result<String> {
 fn sorted_files(root: &Path) -> Result<Vec<(String, PathBuf)>> {
     let mut files = walk_files(root)?
         .into_iter()
-        .map(|relative| Ok((normalized_relative_path(&relative)?, root.join(relative))))
+        .map(|relative| Ok((host_relative_path(&relative)?, root.join(relative))))
         .collect::<Result<Vec<_>>>()?;
     files.sort_by(|left, right| left.0.as_bytes().cmp(right.0.as_bytes()));
     Ok(files)

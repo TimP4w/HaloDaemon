@@ -2055,7 +2055,7 @@ fn device_id(
     // plugin identity verbatim instead of adding CPUID-derived churn.
     #[cfg(target_os = "windows")]
     if matches!(handle, DiscoveryHandle::AmdSmn { .. }) && manifest.identity.id.is_some() {
-        return manifest.id_prefix().into();
+        return DeviceId::sanitized(manifest.id_prefix());
     }
     let suffix = transport::descriptor_for(spec.transport.kind())
         .and_then(transport::PluginTransportDescriptor::discovery)
