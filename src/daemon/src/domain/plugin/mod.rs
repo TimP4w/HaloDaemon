@@ -672,7 +672,7 @@ impl Registry {
             .collect()
     }
 
-    fn transport_open_blocked(&self, key: &(PluginId, DeviceId)) -> bool {
+    pub(crate) fn transport_open_blocked(&self, key: &(PluginId, DeviceId)) -> bool {
         self.transport_open_failures
             .read()
             .get(key)
@@ -1069,7 +1069,13 @@ impl Registry {
     ) -> u32 {
         let scope = HealthScope::device(plugin_id, device_id);
         self.set_health(scope, PluginIssueKind::InitFailed, detail);
-        self.note_transport_open_failure((plugin_id.clone(), device_id.clone()))
+        let attempt = self.note_transport_open_failure((plugin_id.clone(), device_id.clone()));
+        if attempt == TRANSPORT_OPEN_ATTEMPTS {
+            log::warn!(
+                "plugin '{plugin_id}' initialize failed (attempt {attempt}/{TRANSPORT_OPEN_ATTEMPTS}); giving up until a replug, rescan, or plugin reload"
+            );
+        }
+        attempt
     }
 
     /// A later successful initialization ends the per-device failure episode.
