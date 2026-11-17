@@ -13,6 +13,7 @@ use crate::{hex_lower, PluginApi};
 
 pub const MAX_ARCHIVE_BYTES: u64 = 64 * 1024 * 1024;
 const MAX_EXTRACTED_BYTES: u64 = 256 * 1024 * 1024;
+const MAX_ARCHIVE_ENTRIES: usize = 4096;
 
 #[derive(Debug, Clone, PartialEq, Eq, Deserialize)]
 pub struct PackageMeta {
@@ -113,7 +114,14 @@ pub fn extract_archive(bytes: &[u8], destination: &Path) -> Result<()> {
     fs::create_dir_all(destination)?;
     let mut archive = tar::Archive::new(flate2::read::GzDecoder::new(bytes));
     let mut extracted = 0_u64;
-    for entry in archive.entries().context("reading package archive")? {
+    for (index, entry) in archive
+        .entries()
+        .context("reading package archive")?
+        .enumerate()
+    {
+        if index >= MAX_ARCHIVE_ENTRIES {
+            bail!("package archive has more than {MAX_ARCHIVE_ENTRIES} entries");
+        }
         let mut entry = entry?;
         let relative = entry.path()?.into_owned();
         let relative = normalized_relative_path(&relative)
@@ -287,6 +295,27 @@ pub(crate) mod tests {
         let dir = package(root.path(), "demo", "1.0.0", "3.0");
         let archive = write_archive(&dir).unwrap();
         assert!(extract_archive(&archive, &dir).is_err());
+    }
+
+    #[test]
+    fn extraction_stops_at_the_entry_cap() {
+        let mut builder = tar::Builder::new(GzEncoder::new(Vec::new(), Compression::fast()));
+        for index in 0..=MAX_ARCHIVE_ENTRIES {
+            let mut header = tar::Header::new_gnu();
+            header.set_entry_type(tar::EntryType::Directory);
+            header.set_mode(0o755);
+            header.set_size(0);
+            builder
+                .append_data(&mut header, format!("d{index}"), std::io::empty())
+                .unwrap();
+        }
+        let archive = builder.into_inner().unwrap().finish().unwrap();
+        let out = tempfile::tempdir().unwrap();
+        let error = extract_archive(&archive, &out.path().join("x")).unwrap_err();
+        assert!(
+            error.to_string().contains("more than 4096 entries"),
+            "{error}"
+        );
     }
 
     fn raw_archive(path: &str, kind: tar::EntryType) -> Vec<u8> {
