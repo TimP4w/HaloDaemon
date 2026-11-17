@@ -42,7 +42,6 @@ notify:
   plugin_recommended:
     title: Recommended plugin available
     message: "%{plugin} is recommended for this system. Open Plugins to enable it."
-  repository_integrity:
 
 tray:
   open: Open HaloDaemon

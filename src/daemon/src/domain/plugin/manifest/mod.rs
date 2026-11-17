@@ -413,7 +413,6 @@ pub struct UsbControlConfig {
     pub max_transfer_size: usize,
     #[serde(default = "default_usb_timeout_ms")]
     pub max_timeout_ms: u64,
-    /// Empty allows any request; otherwise only the listed pairs.
     #[serde(default)]
     pub requests: Vec<UsbControlRequest>,
 }
@@ -1546,9 +1545,6 @@ impl PluginManifest {
         self.capabilities.clone()
     }
 
-    /// Every user-editable config field this plugin declares (empty if none).
-    /// Whether the integration's setup asks the user for anything. A manual
-    /// flow without auth whose every field has a default needs no input.
     pub fn needs_setup(&self) -> bool {
         self.setup.as_ref().is_some_and(|setup| {
             setup.auth.kind() != halod_shared::types::IntegrationAuthKind::None
@@ -1562,6 +1558,7 @@ impl PluginManifest {
         })
     }
 
+    /// Every user-editable config field this plugin declares (empty if none).
     pub fn config_fields(&self) -> &[ConfigFieldDef] {
         self.config
             .as_ref()
@@ -1768,8 +1765,6 @@ fn transport_permission(kind: &str) -> Option<Permission> {
 }
 
 impl PluginManifest {
-    /// What the manifest's declarations give the plugin access to. Shown to
-    /// the user, and the set every backend and sandbox global checks.
     pub fn permissions(&self) -> Vec<Permission> {
         let t = &self.transports;
         let setup_network = self.setup.as_ref().is_some_and(|setup| {

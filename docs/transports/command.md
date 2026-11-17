@@ -8,7 +8,7 @@ vendor command-line tool, such as querying and setting an NVIDIA GPU with
 
 ## Overview
 
-A device matched by a `command` transport receives a `command` userdata that can
+A device matched by a `command` transport gets `dev.transport:run`, which can
 run only the executables the manifest declares. There is no shell: each call
 spawns one process directly with an argument list, so nothing the plugin passes
 is ever interpreted as a shell expression.
@@ -17,7 +17,7 @@ is ever interpreted as a shell expression.
 
 | Operation | Purpose |
 |---|---|
-| `command.run(executable, args)` | Run a declared executable with an argument list and return its result. |
+| `dev.transport:run(executable, args)` | Run a declared executable with an argument list and return its result. |
 
 The result table carries `success`, `exit_code`, `stdout`, `stderr`, and
 `timed_out`. Output is bounded, and a process that exceeds its output or time
@@ -28,7 +28,6 @@ limit fails rather than blocking the worker.
 The manifest lists the exact executables the plugin may run:
 
 ```yaml
-permissions: [command]
 transports:
   command:
     commands: [nvidia-smi]
@@ -47,4 +46,4 @@ the declared set is a hard error.
 - The plugin cannot spawn a shell or interpreter to escape the allowlist.
 
 See the plugin repository's manifest reference (`transports.command`) and Lua API
-(`command.run`) for the full authoring contract.
+(`dev.transport:run`) for the full authoring contract.

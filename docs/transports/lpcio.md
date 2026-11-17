@@ -12,7 +12,7 @@ control through LPC I/O. This access requires elevated hardware operations, so
 HaloDaemon routes requests through its privileged Windows broker while the
 daemon and plugin remain unprivileged.
 
-A plugin must request the `lpcio` permission and declare the chip families it
+A plugin reaches it by declaring an `lpcio` transport with the chip families it
 supports. The transport exposes typed LPCIO operations rather than a raw broker
 or unrestricted system I/O interface.
 

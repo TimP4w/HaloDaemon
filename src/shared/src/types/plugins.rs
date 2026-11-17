@@ -253,7 +253,6 @@ pub enum RequirementFailureReason {
     Busy,
 }
 
-/// Not a permission: never enters the consented authority snapshot.
 #[derive(Debug, Clone, PartialEq, Eq, Serialize, Deserialize)]
 #[serde(tag = "kind", rename_all = "snake_case")]
 pub enum PluginRequirement {
@@ -356,7 +355,6 @@ pub struct IntegrationSetupStatus {
     pub external_url: Option<String>,
 }
 
-/// Distinct from consent and from runtime health.
 #[derive(Debug, Clone, PartialEq, Eq, Serialize, Deserialize)]
 #[serde(tag = "type", rename_all = "snake_case")]
 pub enum PluginActivationBlocker {
@@ -391,7 +389,6 @@ pub enum PluginRecommendationMatch {
     },
 }
 
-/// Enabling still requires explicit authority consent.
 #[derive(Debug, Clone, PartialEq, Eq, Serialize, Deserialize)]
 pub struct PluginRecommendation {
     pub plugin_id: String,

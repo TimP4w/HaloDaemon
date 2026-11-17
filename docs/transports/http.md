@@ -8,8 +8,7 @@ API or a web service, such as a Philips Hue bridge or a weather provider.
 ## Overview
 
 Unlike the stream transports, HTTP is not exposed as `dev.transport` userdata.
-A plugin that declares an `http` transport and holds the `network` permission
-gets the `halod.http:request{…}` capability global. Each call is a synchronous,
+A plugin that declares an `http` transport gets the `halod.http:request{…}` capability global. Each call is a synchronous,
 bounded request/response validated against the manifest before a socket opens;
 there is no persistent connection the plugin controls.
 

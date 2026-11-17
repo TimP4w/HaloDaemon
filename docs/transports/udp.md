@@ -8,7 +8,7 @@ over datagrams, such as a Nanoleaf panel or a WLED controller.
 ## Overview
 
 Like HTTP, UDP is not exposed as `dev.transport` userdata. A plugin that
-declares a `udp` transport and holds the `network` permission gets the
+declares a `udp` transport gets the
 `halod.udp` capability global. The socket is *connected* to the single
 destination named in plugin configuration and bound to an ephemeral local port,
 so the plugin has no free-roaming socket: every datagram goes to and comes from

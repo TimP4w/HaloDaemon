@@ -12,8 +12,7 @@ management. Access requires elevated hardware I/O, so HaloDaemon routes requests
 through its privileged Windows broker while the daemon and plugin remain
 unprivileged.
 
-Plugins must request the `amd_smn` permission and declare an `amd_smn` device
-match. The transport becomes available only on supported AMD systems with the
+Plugins reach it by declaring an `amd_smn` device match. The transport becomes available only on supported AMD systems with the
 required PawnIO components installed.
 
 ## Operations for plugins

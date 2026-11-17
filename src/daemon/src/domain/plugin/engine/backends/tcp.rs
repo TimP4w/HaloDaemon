@@ -26,10 +26,6 @@ fn open(
     granted: &[Permission],
     limit: Option<halod_shared::types::WriteRateLimit>,
 ) -> Result<PluginIo> {
-    // A tcp transport reaches off the matched hardware onto the network, so it
-    // is gated on the explicit Network grant (defence in depth: validate_manifest
-    // also forces the manifest to declare it, which is what drives the consent
-    // prompt — this rejects the actual connect if the grant is somehow absent).
     if !worker::network_granted(granted) {
         bail!(
             "plugin '{}': tcp transport requires the 'network' permission",

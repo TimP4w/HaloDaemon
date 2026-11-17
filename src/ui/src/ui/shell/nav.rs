@@ -36,7 +36,7 @@ pub fn plugins_needing_action(state: &TopicStore) -> usize {
 }
 
 /// Whether the Plugins attention badge includes a real failure. Load warnings,
-/// updates, and consent prompts remain amber; connect/runtime/load failures use
+/// updates, and pending setups remain amber; connect/runtime/load failures use
 /// the same red severity color as their plugin issue banner.
 fn plugins_have_errors(state: &TopicStore) -> bool {
     state.plugins.plugins.iter().any(|plugin| {

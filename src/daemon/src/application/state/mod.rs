@@ -78,7 +78,7 @@ pub struct AppState {
     pub plugin_catalogs: Mutex<std::collections::HashMap<String, RepoCatalog>>,
     pub plugin_store: Mutex<()>,
     pub repo_refresh_retry: Arc<RetryQueue>,
-    /// The device-plugin registry (loaded manifests, consent/config, notice
+    /// The device-plugin registry (loaded manifests, config, notice
     /// dedup, load warnings).
     pub registry: Registry,
     pub data_bus: Arc<DataBus>,
