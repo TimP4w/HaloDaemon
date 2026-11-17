@@ -28,9 +28,16 @@ pub fn cached(slug: &str, trust: &RepositoryTrust) -> Option<Catalog> {
 }
 
 pub fn fetch(slug: &str, url: &str, trust: &RepositoryTrust) -> Result<Catalog> {
-    let bytes = https_get(&https_url(url)?, MAX_CATALOG_BYTES)?;
+    accept(
+        slug,
+        &https_get(&https_url(url)?, MAX_CATALOG_BYTES)?,
+        trust,
+    )
+}
+
+fn accept(slug: &str, bytes: &[u8], trust: &RepositoryTrust) -> Result<Catalog> {
     let keys = trust.pinned_keys();
-    let catalog = open_catalog(&bytes, keys.as_deref())?;
+    let catalog = open_catalog(bytes, keys.as_deref())?;
     if let Some(previous) = cached(slug, trust) {
         if catalog.published < previous.published {
             return Err(CatalogError::Stale {
@@ -42,15 +49,22 @@ pub fn fetch(slug: &str, url: &str, trust: &RepositoryTrust) -> Result<Catalog> 
     }
     let dir = repo_dir(slug);
     std::fs::create_dir_all(&dir)?;
-    fs::atomic_write(&dir.join(CATALOG_FILE), &bytes)?;
+    fs::atomic_write(&dir.join(CATALOG_FILE), bytes)?;
     Ok(catalog)
 }
 
 pub fn stage(slug: &str, url: &str, entry: &CatalogPackage) -> Result<PathBuf> {
-    let bytes = https_get(&package_url(url, &entry.path)?, MAX_ARCHIVE_BYTES)?;
-    entry.verify(&bytes)?;
+    stage_bytes(
+        slug,
+        entry,
+        &https_get(&package_url(url, &entry.path)?, MAX_ARCHIVE_BYTES)?,
+    )
+}
+
+fn stage_bytes(slug: &str, entry: &CatalogPackage, bytes: &[u8]) -> Result<PathBuf> {
+    entry.verify(bytes)?;
     let staging = repo_dir(slug).join(format!(".{}.staging-{}", entry.id, uuid::Uuid::new_v4()));
-    let checked = extract_archive(&bytes, &staging).and_then(|()| {
+    let checked = extract_archive(bytes, &staging).and_then(|()| {
         let meta = read_package_meta(&staging)?;
         if meta.id != entry.id || meta.version != entry.version || meta.api != entry.api {
             bail!(
@@ -119,6 +133,65 @@ mod tests {
             .collect();
         names.sort();
         assert_eq!(names, ["catalog.yaml", "demo"]);
+    }
+
+    fn unsigned(published: u64) -> Vec<u8> {
+        Catalog {
+            schema: halod_plugin_signing::catalog::CATALOG_SCHEMA,
+            name: "Test".into(),
+            commit: None,
+            published,
+            signing_key: None,
+            packages: Vec::new(),
+        }
+        .to_bytes()
+    }
+
+    #[test]
+    fn an_older_catalog_is_rejected_and_the_cache_kept() {
+        let _config = crate::test_support::tmp_config_dir();
+        accept("community", &unsigned(200), &RepositoryTrust::FirstUse).unwrap();
+        let error = accept("community", &unsigned(100), &RepositoryTrust::FirstUse).unwrap_err();
+        assert_eq!(
+            error.downcast_ref::<CatalogError>(),
+            Some(&CatalogError::Stale {
+                cached: 200,
+                fetched: 100
+            })
+        );
+        let kept = cached("community", &RepositoryTrust::FirstUse).unwrap();
+        assert_eq!(kept.published, 200);
+    }
+
+    #[test]
+    fn staging_rejects_a_package_that_disagrees_with_its_entry_and_cleans_up() {
+        let _config = crate::test_support::tmp_config_dir();
+        let source = tempfile::tempdir().unwrap();
+        let package =
+            crate::test_support::write_plugin_package(source.path(), "demo", "1.0.0", "3.0");
+        let archive = halod_plugin_signing::package::write_archive(&package).unwrap();
+        let entry = |version: &str, api: &str| CatalogPackage {
+            id: "demo".into(),
+            version: version.parse().unwrap(),
+            api: api.parse().unwrap(),
+            path: "packages/demo.tar.gz".into(),
+            sha256: halod_plugin_signing::sha256_hex(&archive),
+            size: archive.len() as u64,
+        };
+        for mismatched in [entry("2.0.0", "3.0"), entry("1.0.0", "3.1")] {
+            let error = stage_bytes("official", &mismatched, &archive).unwrap_err();
+            assert!(error
+                .to_string()
+                .contains("does not match its catalog entry"));
+        }
+        let leftovers = std::fs::read_dir(repo_dir("official"))
+            .map(|entries| entries.count())
+            .unwrap_or(0);
+        assert_eq!(leftovers, 0);
+        assert!(stage_bytes("official", &entry("1.0.0", "3.0"), &archive)
+            .unwrap()
+            .join("plugin.yaml")
+            .is_file());
     }
 
     #[test]

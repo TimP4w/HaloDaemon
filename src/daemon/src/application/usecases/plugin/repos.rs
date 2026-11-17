@@ -352,25 +352,7 @@ pub async fn uninstall_plugin(id: String, app: Arc<AppState>) -> Result<()> {
 
 pub async fn update_all_plugins(app: Arc<AppState>) -> Result<()> {
     let _store = app.plugin_store.lock().await;
-    let updates: Vec<(String, String)> = {
-        let catalogs = app.plugin_catalogs.lock().await;
-        app.registry
-            .installed()
-            .into_iter()
-            .filter(|(slug, id, version)| {
-                catalogs.get(slug).is_some_and(|repo| {
-                    repo.catalog
-                        .select(HOST_PLUGIN_API)
-                        .get(id.as_str())
-                        .is_some_and(|entry| {
-                            entry.api.is_compatible_with(HOST_PLUGIN_API)
-                                && entry.version > *version
-                        })
-                })
-            })
-            .map(|(slug, id, _)| (slug, id))
-            .collect()
-    };
+    let updates = pending_updates(app.registry.installed(), &*app.plugin_catalogs.lock().await);
     let mut failures = Vec::new();
     for (slug, id) in updates {
         let installed = match fetch_and_stage(&app, &slug, &id).await {
@@ -385,6 +367,26 @@ pub async fn update_all_plugins(app: Arc<AppState>) -> Result<()> {
         bail!("updating plugins failed: {}", failures.join("; "));
     }
     Ok(())
+}
+
+fn pending_updates(
+    installed: Vec<(String, String, semver::Version)>,
+    catalogs: &std::collections::HashMap<String, RepoCatalog>,
+) -> Vec<(String, String)> {
+    installed
+        .into_iter()
+        .filter(|(slug, id, version)| {
+            catalogs.get(slug).is_some_and(|repo| {
+                repo.catalog
+                    .select(HOST_PLUGIN_API)
+                    .get(id.as_str())
+                    .is_some_and(|entry| {
+                        entry.api.is_compatible_with(HOST_PLUGIN_API) && entry.version > *version
+                    })
+            })
+        })
+        .map(|(slug, id, _)| (slug, id))
+        .collect()
 }
 
 fn swap_in(staging: &Path, target: &Path, backup: &Path) -> Result<()> {
@@ -569,6 +571,111 @@ mod tests {
             assert!(leftovers.is_empty(), "{leftovers:?}");
         })
         .await;
+    }
+
+    #[tokio::test]
+    async fn a_package_that_fails_to_load_rolls_back_to_the_previous_install() {
+        crate::test_support::with_tmp_config(|app| async move {
+            with_remote_repo(&app, "official").await;
+            install_staged(
+                &app,
+                "official",
+                "demo",
+                staged("official", "demo", "1.0.0"),
+            )
+            .await
+            .unwrap();
+            let broken = staged("official", "demo", "2.0.0");
+            std::fs::write(broken.join("plugin.yaml"), "id: demo\n").unwrap();
+
+            let error = install_staged(&app, "official", "demo", broken)
+                .await
+                .unwrap_err();
+
+            assert!(error.to_string().contains("demo failed to load"), "{error}");
+            assert_eq!(installed_version(&app, "demo").as_deref(), Some("1.0.0"));
+            assert!(!catalog::repo_dir("official").join(".demo.old").exists());
+        })
+        .await;
+    }
+
+    #[tokio::test]
+    async fn adding_a_repo_rejects_plain_http_and_duplicates() {
+        crate::test_support::with_tmp_config(|app| async move {
+            let insecure = add_repo(
+                PluginRepoLocation::Url("http://example.org/catalog.yaml".into()),
+                Arc::clone(&app),
+            )
+            .await;
+            assert!(insecure.is_err());
+            let folder = tempfile::tempdir().unwrap();
+            let local = || PluginRepoLocation::Local(folder.path().display().to_string());
+            add_repo(local(), Arc::clone(&app)).await.unwrap();
+            let duplicate = add_repo(local(), Arc::clone(&app)).await.unwrap_err();
+            assert!(duplicate.to_string().contains("already added"));
+            assert_eq!(app.config.read().await.plugins.repos.len(), 1);
+        })
+        .await;
+    }
+
+    #[tokio::test]
+    async fn the_official_repo_cannot_be_removed() {
+        crate::test_support::with_tmp_config(|app| async move {
+            with_remote_repo(&app, OFFICIAL_PLUGIN_REPO_SLUG).await;
+            assert!(
+                remove_repo(OFFICIAL_PLUGIN_REPO_SLUG.to_owned(), Arc::clone(&app))
+                    .await
+                    .is_err()
+            );
+            assert_eq!(app.config.read().await.plugins.repos.len(), 1);
+        })
+        .await;
+    }
+
+    #[test]
+    fn updates_are_only_offered_for_newer_compatible_versions() {
+        let package = |id: &str, version: &str, api: &str| CatalogPackage {
+            id: id.into(),
+            version: version.parse().unwrap(),
+            api: api.parse().unwrap(),
+            path: format!("packages/{id}.tar.gz"),
+            sha256: "a".repeat(64),
+            size: 1,
+        };
+        let catalog = halod_plugin_signing::Catalog {
+            schema: halod_plugin_signing::catalog::CATALOG_SCHEMA,
+            name: "Test".into(),
+            commit: None,
+            published: 1,
+            signing_key: None,
+            packages: vec![
+                package("newer", "1.1.0", "3.0"),
+                package("same", "1.0.0", "3.0"),
+                package("older", "0.9.0", "3.0"),
+                package("future", "2.0.0", "9.0"),
+            ],
+        };
+        let catalogs = std::collections::HashMap::from([(
+            "official".to_owned(),
+            RepoCatalog {
+                catalog,
+                last_sync: None,
+            },
+        )]);
+        let installed = ["newer", "same", "older", "future", "elsewhere"]
+            .into_iter()
+            .map(|id| {
+                (
+                    "official".to_owned(),
+                    id.to_owned(),
+                    "1.0.0".parse().unwrap(),
+                )
+            })
+            .collect();
+        assert_eq!(
+            pending_updates(installed, &catalogs),
+            [("official".to_owned(), "newer".to_owned())]
+        );
     }
 
     #[tokio::test]
