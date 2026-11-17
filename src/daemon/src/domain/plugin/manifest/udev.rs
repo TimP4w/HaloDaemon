@@ -5,7 +5,18 @@ use std::collections::{BTreeMap, BTreeSet};
 
 use super::PluginManifest;
 
-const BASE_RULES: &str = include_str!("../../../../../../udev/60-halod.rules");
+/// The shipped file is regenerated on every release, so its baseline is
+/// everything before the generated section marker.
+const SHIPPED_RULES: &str = include_str!("../../../../../../udev/60-halod.rules");
+const GENERATED_MARKER: &str =
+    "# ─── Plugin devices (generated) ──────────────────────────────────────────────";
+
+fn baseline_rules() -> &'static str {
+    SHIPPED_RULES
+        .split_once(GENERATED_MARKER)
+        .map_or(SHIPPED_RULES, |(baseline, _)| baseline)
+        .trim_end()
+}
 
 #[derive(Debug, Clone, Copy, PartialEq, Eq, PartialOrd, Ord)]
 enum NodeKind {
@@ -80,11 +91,11 @@ pub fn assemble(manifests: &[PluginManifest]) -> String {
         }
     }
 
-    let mut output = BASE_RULES.trim_end().to_owned();
+    let mut output = baseline_rules().to_owned();
     if !rules.is_empty() || !chipset_i2c.is_empty() || !gpu_i2c.is_empty() {
-        output.push_str(
-            "\n\n# ─── Plugin devices (generated) ──────────────────────────────────────────────\n",
-        );
+        output.push_str("\n\n");
+        output.push_str(GENERATED_MARKER);
+        output.push('\n');
         for ((kind, vid, pid), plugins) in rules {
             output.push_str("\n# ");
             output.push_str(&plugins.into_iter().collect::<Vec<_>>().join(", "));
@@ -325,6 +336,14 @@ mod tests {
         assert_eq!(output.matches("GROUP=\"halod\"").count(), 3);
         assert!(!output.contains("GROUP=\"i2c\""));
         assert_eq!(device_rule_count(&output), 3);
+    }
+
+    #[test]
+    fn baseline_excludes_the_generated_section_of_the_shipped_file() {
+        let baseline = assemble(&[]);
+        assert!(!baseline.contains(GENERATED_MARKER));
+        assert_eq!(device_rule_count(&baseline), 0);
+        assert!(SHIPPED_RULES.starts_with(baseline.trim_end()));
     }
 
     #[test]
