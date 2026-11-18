@@ -19,6 +19,7 @@ devtabs:
   tab_controls: Controlli
   tab_onboard: Onboard
   tab_pairing: Accoppiamento
+  tab_sensors: Sensori
   tab_info: Info
 
   back_all_devices: Tutti i dispositivi
@@ -105,3 +106,17 @@ devtabs:
   dpi_help: Trascina uno stadio lungo l'asse oppure digita un valore esatto. Il mouse usa lo stadio attuale.
   stage_current: Attuale
   stage_n: "Stadio %{n}"
+
+  sensors_title: Sensori
+  sensors_summary: "%{n} sensori · minimo e massimo negli ultimi %{secs} s"
+  sensors_empty: Ancora nessuna lettura
+  sensors_empty_desc: Questo dispositivo espone dei sensori, ma al momento nessuno ha un valore.
+  sensor_min: "Min %{v}"
+  sensor_max: "Max %{v}"
+  sensor_kind_temperature: Temperatura
+  sensor_kind_load: Carico
+  sensor_kind_memory: Memoria
+  sensor_kind_frequency: Frequenza
+  sensor_kind_uptime: Tempo di attività
+  sensor_kind_fan_speed: Velocità ventola
+  sensor_kind_fan_duty: Duty ventola

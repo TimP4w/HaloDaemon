@@ -42,21 +42,19 @@ pub struct IntegrationStatus {
     pub sensor_count: usize,
 }
 
-/// Devices an integration exposes: children of its root, whose ids carry the
-/// `{root_id}_ctrl_` prefix the daemon assigns.
 fn exposed_devices<'a>(
     state: &'a TopicStore,
     plugin_id: &PluginId,
 ) -> impl Iterator<Item = &'a WireDevice> {
-    let prefix = state
+    let root = state
         .devices
         .iter()
         .find(|d| d.integration_id.as_deref() == Some(plugin_id))
-        .map(|root| format!("{}_ctrl_", root.id));
+        .map(|root| &root.id);
     state
         .devices
         .iter()
-        .filter(move |d| prefix.as_deref().is_some_and(|p| d.id.starts_with(p)))
+        .filter(move |d| root.is_some_and(|root| d.parent_id.as_ref() == Some(root)))
 }
 
 /// Sensors on the integration's root and on every device it exposes.
@@ -1385,6 +1383,13 @@ mod tests {
         }
     }
 
+    fn child(id: &str, parent: &str) -> WireDevice {
+        WireDevice {
+            parent_id: Some(parent.parse().unwrap()),
+            ..device(id, None, true)
+        }
+    }
+
     #[test]
     fn integration_status_is_absent_when_root_not_registered() {
         let state = TopicStore {
@@ -1401,11 +1406,10 @@ mod tests {
         let state = TopicStore {
             devices: vec![
                 device("openrgb-root", Some("openrgb"), true),
-                device("openrgb-root_ctrl_0", None, true),
-                device("openrgb-root_ctrl_1", None, true),
-                // A second integration's root/child must never be counted.
+                child("openrgb-root_ctrl_0", "openrgb-root"),
+                child("openrgb-root_ctrl_1", "openrgb-root"),
                 device("wled-root", Some("wled"), true),
-                device("wled-root_ctrl_0", None, true),
+                child("wled-root_ctrl_0", "wled-root"),
                 device("unrelated", None, true),
             ],
             ..Default::default()
@@ -1500,8 +1504,8 @@ mod tests {
         let state = TopicStore {
             devices: vec![
                 with_sensor(device("hw-root", Some("hw"), true), "cpu"),
-                with_sensor(device("hw-root_ctrl_0", None, true), "gpu"),
-                with_sensor(device("other_ctrl_0", None, true), "foreign"),
+                with_sensor(child("hwmon_sensors", "hw-root"), "gpu"),
+                with_sensor(child("other_ctrl_0", "other"), "foreign"),
             ],
             ..Default::default()
         };
@@ -1521,15 +1525,16 @@ mod tests {
         let state = TopicStore {
             devices: vec![
                 device("openrgb-root", Some("openrgb"), true),
-                device("openrgb-root_ctrl_0", None, true),
-                device("wled-root_ctrl_0", None, true),
+                child("openrgb_fan1", "openrgb-root"),
+                child("openrgb-root_ctrl_0", "wled-root"),
+                device("openrgb-root_ctrl_1", None, true),
             ],
             ..Default::default()
         };
         let ids: Vec<&str> = exposed_devices(&state, &"openrgb".parse().unwrap())
             .map(|d| d.id.as_str())
             .collect();
-        assert_eq!(ids, vec!["openrgb-root_ctrl_0"]);
+        assert_eq!(ids, vec!["openrgb_fan1"]);
     }
 
     const PHASES: [IntegrationSetupPhase; 4] = [

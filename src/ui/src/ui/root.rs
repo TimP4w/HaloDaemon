@@ -349,6 +349,7 @@ impl App {
                             led_colors: self.canvas_ui.led_colors(),
                             write_rate_history: &self.write_rate_history,
                             plugin_assets: &plugin_assets,
+                            sensor_history: &self.sensor_history,
                         };
                         device::show(ui, frame, &id, &mut self.device_ui, &mut self.page);
                     }

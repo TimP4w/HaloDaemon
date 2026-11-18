@@ -355,7 +355,7 @@ fn command_manifest(commands: &[&str]) -> super::PluginManifest {
     std::fs::write(
         dir.join("plugin.yaml"),
         format!(
-            "id: command_scope_test\nversion: 1.0.0\napi: \"3.0\"\ntype: integration\ntransports:\n  command:\n    commands: [{commands}]\n"
+            "id: command_scope_test\nversion: 1.0.0\napi: \"1.0\"\ntype: integration\ntransports:\n  command:\n    commands: [{commands}]\n"
         ),
     )
     .unwrap();
@@ -373,11 +373,11 @@ fn a_local_repo_shadows_an_installed_plugin() {
     use halod_shared::types::PluginProvenance;
     let _config = test_support::tmp_config_dir();
     let installed = crate::config::plugins_dir().join("community");
-    write_plugin(&installed, "demo", "3.0");
-    write_plugin(&installed, "other", "3.0");
+    write_plugin(&installed, "demo", "1.0");
+    write_plugin(&installed, "other", "1.0");
     std::fs::create_dir_all(installed.join(".demo.staging-1")).unwrap();
     let local = tempfile::tempdir().unwrap();
-    write_plugin(local.path(), "demo", "3.0");
+    write_plugin(local.path(), "demo", "1.0");
 
     let registry = super::Registry::default();
     registry.load_all(&[

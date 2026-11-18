@@ -126,7 +126,7 @@ pub fn add_app_tile(ui: &mut egui::Ui, label: &str) -> Response {
 }
 
 /// Closed polyline around a rounded rect, for dashed outlines.
-fn rounded_outline(rect: Rect, r: f32) -> Vec<Pos2> {
+pub fn rounded_outline(rect: Rect, r: f32) -> Vec<Pos2> {
     use std::f32::consts::FRAC_PI_2;
     let corners = [
         (Pos2::new(rect.right() - r, rect.top() + r), -FRAC_PI_2),

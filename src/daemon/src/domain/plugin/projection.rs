@@ -143,8 +143,8 @@ mod tests {
             (
                 "official".to_owned(),
                 repo(vec![
-                    entry("demo", "1.0.0", "3.0"),
-                    entry("demo", "2.0.0", "3.9"),
+                    entry("demo", "1.0.0", "1.0"),
+                    entry("demo", "2.0.0", "1.9"),
                 ]),
             ),
             (

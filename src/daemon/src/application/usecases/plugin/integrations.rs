@@ -746,7 +746,7 @@ mod tests {
         std::fs::create_dir_all(&plugin_dir).unwrap();
         std::fs::write(
             plugin_dir.join("plugin.yaml"),
-            "id: inttest\nversion: 1.0.0\napi: \"3.0\"\ntype: integration\ntransports:\n  tcp:\n    host_key: host\n    port_key: port\n    timeout_ms: 50\nconfig:\n  fields:\n    - key: host\n      label: Host\n      kind: host\n      default: 127.0.0.1\n    - key: port\n      label: Port\n      kind: port\n      default: '12345'\n    - key: token\n      label: Token\n      secure: true\n",
+            "id: inttest\nversion: 1.0.0\napi: \"1.0\"\ntype: integration\ntransports:\n  tcp:\n    host_key: host\n    port_key: port\n    timeout_ms: 50\nconfig:\n  fields:\n    - key: host\n      label: Host\n      kind: host\n      default: 127.0.0.1\n    - key: port\n      label: Port\n      kind: port\n      default: '12345'\n    - key: token\n      label: Token\n      secure: true\n",
         )
         .unwrap();
         std::fs::write(plugin_dir.join("main.lua"), INTEGRATION_CONFIG_TEST_PLUGIN).unwrap();
@@ -949,7 +949,7 @@ mod tests {
             std::fs::create_dir_all(&plugin_dir).unwrap();
             std::fs::write(
                 plugin_dir.join("plugin.yaml"),
-                "id: empty_pair\nversion: 1.0.0\napi: \"3.0\"\ntype: integration\ntranslations:\n  it:\n    setup.auth.title: Associa\n    setup.auth.instructions.0: Premi il pulsante\ntransports:\n  http:\n    origins: [https://api.example.com]\n    methods: [POST]\nsetup:\n  modes: [manual]\n  auth:\n    kind: button\n    title: Pair\n    instructions: [Press the button]\nconfig:\n  fields:\n    - { key: host, label: Host, default: api.example.com }\n    - { key: token, label: Token, secure: true }\n",
+                "id: empty_pair\nversion: 1.0.0\napi: \"1.0\"\ntype: integration\ntranslations:\n  it:\n    setup.auth.title: Associa\n    setup.auth.instructions.0: Premi il pulsante\ntransports:\n  http:\n    origins: [https://api.example.com]\n    methods: [POST]\nsetup:\n  modes: [manual]\n  auth:\n    kind: button\n    title: Pair\n    instructions: [Press the button]\nconfig:\n  fields:\n    - { key: host, label: Host, default: api.example.com }\n    - { key: token, label: Token, secure: true }\n",
             )
             .unwrap();
             std::fs::write(
@@ -1010,7 +1010,7 @@ mod tests {
             std::fs::create_dir_all(&plugin_dir).unwrap();
             std::fs::write(
                 plugin_dir.join("plugin.yaml"),
-                "id: resettable\nversion: 1.0.0\napi: \"3.0\"\ntype: integration\ntransports:\n  http:\n    origins: [https://api.example.com]\nsetup:\n  modes: [manual]\n  auth: { kind: none }\nconfig:\n  fields:\n    - { key: host, label: Host, kind: host, default: controller.local }\n    - { key: token, label: Token, secure: true }\n",
+                "id: resettable\nversion: 1.0.0\napi: \"1.0\"\ntype: integration\ntransports:\n  http:\n    origins: [https://api.example.com]\nsetup:\n  modes: [manual]\n  auth: { kind: none }\nconfig:\n  fields:\n    - { key: host, label: Host, kind: host, default: controller.local }\n    - { key: token, label: Token, secure: true }\n",
             )
             .unwrap();
             std::fs::write(
@@ -1080,7 +1080,7 @@ mod tests {
             std::fs::create_dir_all(&plugin_dir).unwrap();
             std::fs::write(
                 plugin_dir.join("plugin.yaml"),
-                format!("id: probed\nversion: 1.0.0\napi: \"3.0\"\ntype: integration\ntransports:\n  tcp:\n    host_key: host\n    port_key: port\nsetup:\n  modes: [automatic, manual]\n  discovery:\n    tcp: [\"{endpoint}\"]\n  auth: {{ kind: none }}\nconfig:\n  fields:\n    - {{ key: host, label: Host, kind: host }}\n    - {{ key: port, label: Port, kind: port }}\n"),
+                format!("id: probed\nversion: 1.0.0\napi: \"1.0\"\ntype: integration\ntransports:\n  tcp:\n    host_key: host\n    port_key: port\nsetup:\n  modes: [automatic, manual]\n  discovery:\n    tcp: [\"{endpoint}\"]\n  auth: {{ kind: none }}\nconfig:\n  fields:\n    - {{ key: host, label: Host, kind: host }}\n    - {{ key: port, label: Port, kind: port }}\n"),
             )
             .unwrap();
             std::fs::write(

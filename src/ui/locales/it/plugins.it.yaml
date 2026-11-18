@@ -152,6 +152,8 @@ plugins:
   uses_commands: "Esegue programmi"
   not_installed_version: "Non installato · %{version}"
   requires_newer_daemon: "Richiede una versione più recente di HaloDaemon"
+  unsupported_platform: "Non disponibile su questa piattaforma"
+  all_platforms: "Tutte le piattaforme"
   api_incompatible: "Questo plugin richiede l’API plugin %{required}, ma questo HaloDaemon supporta %{supported}. Aggiorna HaloDaemon per usarlo."
   provenance_signed: "Repository firmato"
   repo_commit: "Commit"

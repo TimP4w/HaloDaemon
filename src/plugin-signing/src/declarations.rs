@@ -361,7 +361,7 @@ mod tests {
     use super::*;
 
     fn declarations(extra: &str) -> PackageDeclarations {
-        read_declarations(format!("id: demo\nversion: 1.0.0\napi: '3.0'\n{extra}").as_bytes())
+        read_declarations(format!("id: demo\nversion: 1.0.0\napi: '1.0'\n{extra}").as_bytes())
             .unwrap()
     }
 

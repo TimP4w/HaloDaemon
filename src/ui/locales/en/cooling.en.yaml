@@ -8,6 +8,7 @@ cooling:
   curve_sensor: Curve sensor
   sensor: Sensor
   no_sensor: No sensor
+  sensor_unavailable: Unavailable
   open_device: Open device
   fan_curve: Fan curve
   celsius_now: "°C now"

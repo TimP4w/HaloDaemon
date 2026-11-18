@@ -496,6 +496,7 @@ fn wants_own_row(d: &EffectParamDescriptor) -> bool {
         | ParamKind::Boolean
         | ParamKind::Sensor
         | ParamKind::Steps
+        | ParamKind::Gradient
         | ParamKind::Enum { .. } => true,
         ParamKind::Color => d.id != "color",
         ParamKind::Text | ParamKind::Image => false,
@@ -679,10 +680,11 @@ fn param_control(
             changed = next != on;
             st.param_values.insert(key, next as i32 as f32);
         }
-        ParamKind::Steps => {
+        ParamKind::Steps | ParamKind::Gradient => {
             let default = widgets::steps_default(d);
             let steps = st.param_steps.entry(key).or_insert(default);
-            changed |= widgets::steps_editor(ui, &d.label, steps);
+            let fill = widgets::StopFill::of(&d.kind);
+            changed |= widgets::steps_editor(ui, &d.label, steps, fill);
         }
         ParamKind::Sensor => {
             let current = st.param_strs.get(&key).cloned().unwrap_or_default();
@@ -1146,7 +1148,7 @@ fn direct_params(
                     };
                     EffectParamValue::Str(param_strs.get(&key).cloned().unwrap_or(default))
                 }
-                ParamKind::Steps => EffectParamValue::Steps(
+                ParamKind::Steps | ParamKind::Gradient => EffectParamValue::Steps(
                     param_steps
                         .get(&key)
                         .cloned()

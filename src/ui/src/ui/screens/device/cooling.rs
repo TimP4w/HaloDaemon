@@ -13,7 +13,7 @@ use super::{editing, DeviceUi, TabCtx};
 use crate::domain::tour;
 use crate::domain::tour::AnchorId;
 use crate::runtime::ipc;
-use crate::ui::screens::cooling::preset_display_name;
+use crate::ui::screens::cooling::{self, preset_display_name};
 use crate::ui::theme;
 use halod_shared::ids::DeviceId;
 
@@ -180,19 +180,16 @@ fn top_row(
             let sensor_combo_rect =
                 Rect::from_min_size(ui.cursor().min, Vec2::new(ui.available_width(), 28.0));
             tour::anchor(ui.ctx(), AnchorId::CoolingSensor, sensor_combo_rect);
-            let options: Vec<(String, String)> = sensors
-                .iter()
-                .map(|(d, s)| (s.id.clone(), format!("{d} · {} ({:.0}°C)", s.name, s.value)))
-                .collect();
-            let current_id = st.cooling.curve_sensor.clone().unwrap_or_default();
-            if let Some(id) = widgets::combo_picker_full(
+            let current = st.cooling.curve_sensor.as_deref();
+            let width = ui.available_width();
+            if let Some(id) = widgets::grouped_select(
                 ui,
                 "curve_sensor",
-                &options,
-                &current_id,
-                Some(&t!("cooling.no_sensor")),
+                &cooling::sensor_select_text(sensors, current),
+                width,
+                &cooling::sensor_select_rows(sensors, current),
             ) {
-                pick = Some((!id.is_empty()).then_some(id));
+                pick = Some(cooling::picked_sensor(id));
             }
             if let Some(sel) = pick {
                 st.cooling.curve_sensor = sel;

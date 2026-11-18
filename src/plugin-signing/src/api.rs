@@ -10,7 +10,7 @@ pub struct PluginApi {
     pub minor: u32,
 }
 
-pub const HOST_PLUGIN_API: PluginApi = PluginApi { major: 3, minor: 0 };
+pub const HOST_PLUGIN_API: PluginApi = PluginApi { major: 1, minor: 0 };
 
 impl PluginApi {
     pub fn is_compatible_with(self, host: PluginApi) -> bool {
@@ -67,17 +67,17 @@ mod tests {
 
     #[test]
     fn compatible_means_same_major_and_no_newer_minor() {
-        let host = api(3, 2);
-        assert!(api(3, 0).is_compatible_with(host));
-        assert!(api(3, 2).is_compatible_with(host));
-        assert!(!api(3, 3).is_compatible_with(host));
+        let host = api(1, 2);
+        assert!(api(1, 0).is_compatible_with(host));
+        assert!(api(1, 2).is_compatible_with(host));
+        assert!(!api(1, 3).is_compatible_with(host));
         assert!(!api(2, 0).is_compatible_with(host));
         assert!(!api(4, 0).is_compatible_with(host));
     }
 
     #[test]
     fn parse_and_display_round_trip() {
-        for value in ["0.0", "3.0", "3.12", "10.4"] {
+        for value in ["0.0", "1.0", "1.12", "10.4"] {
             assert_eq!(value.parse::<PluginApi>().unwrap().to_string(), value);
         }
     }
@@ -91,11 +91,11 @@ mod tests {
 
     #[test]
     fn serializes_as_a_quoted_string() {
-        let yaml = serde_yaml::to_string(&api(3, 1)).unwrap();
-        assert_eq!(yaml.trim(), "'3.1'");
+        let yaml = serde_yaml::to_string(&api(1, 1)).unwrap();
+        assert_eq!(yaml.trim(), "'1.1'");
         assert_eq!(
-            serde_yaml::from_str::<PluginApi>("'3.1'").unwrap(),
-            api(3, 1)
+            serde_yaml::from_str::<PluginApi>("'1.1'").unwrap(),
+            api(1, 1)
         );
     }
 }

@@ -84,14 +84,14 @@ The `screen_sampler` effect captures the screen via XDG Desktop Portal (Linux, W
 
 `sensor_gradient` and its sibling `sensor_steps` are direct effects (no pixmap) shipped in the official `halo_effects` package (not built-in Rust). They color a zone from a live sensor reading, delivered each tick as the 5th argument to the effect's `led_colors_<id>` callback (`nil` when the sensor is unset or unavailable): the plugin-effect equivalent of the built-in `DirectLedEffect::sensor_id`/`set_sensor_value` pair used by the `designer` effect below.
 
-`sensor_gradient` picks any sensor via a `Sensor`-kind param (including the synthesized fan readings below), normalizes the reading against a configurable `[min, max]` range, smooths it (0–5 s time constant), and blends along a two-stop `color_a`→`color_b` gradient:
+`sensor_gradient` picks any sensor via a `Sensor`-kind param (including the synthesized fan readings below), smooths the reading (0–5 s time constant), and blends along an editable list of `value → color` stops (`ParamKind::Gradient` on the wire). Stop values are raw sensor units, and readings outside the stops take the nearest stop's color:
 
 | Mode | Behavior |
 |------|----------|
 | `gradient` | The whole zone shows one blended color at the current level |
-| `meter` | LEDs fill up to the current level by chain position, each colored by its own position on the gradient; unlit LEDs are dark |
+| `meter` | LEDs fill up to the current level by chain position, with the chain spanning the first to the last stop and each LED colored by its own position on the gradient; unlit LEDs are dark |
 
-`sensor_steps` is its sibling for discrete thresholds: an editable list of `value → color` steps (add/remove rows in the GUI, `ParamKind::Steps` on the wire). The zone snaps to the color of the highest step the smoothed reading has reached; readings below every threshold take the first step's color. Thresholds are in raw sensor units: no `[min, max]` normalization.
+`sensor_steps` is its sibling for discrete thresholds: the same list of `value → color` stops (`ParamKind::Steps` on the wire), edited in the GUI with the same stop bar, drawn as hard bands instead of one blend. The zone snaps to the color of the highest step the smoothed reading has reached; readings below every threshold take the first step's color.
 
 When the sensor is unset or its reading is unavailable, both effects fade to black rather than freezing on their last color. Like the other direct effects, they apply to one device or many via the same `RgbApply` command and lighting UI; see [Audio capture & media](#audio-capture--media) below for how the engine feeds a live sensor value each tick.
 

@@ -16,6 +16,7 @@ mod lighting;
 mod macro_editor;
 mod onboard;
 mod performance;
+mod sensors;
 
 use std::collections::{HashMap, HashSet};
 
@@ -311,7 +312,7 @@ impl DeviceUi {
             TabKind::Controls => Some(TourKey::TabControls),
             TabKind::Onboard => Some(TourKey::TabOnboard),
             TabKind::Pairing => Some(TourKey::TabPairing),
-            TabKind::Info => None,
+            TabKind::Sensors | TabKind::Info => None,
         }
     }
 
@@ -372,6 +373,7 @@ pub struct FrameCtx<'a> {
     pub led_colors: &'a LedColorMap,
     pub write_rate_history: &'a HashMap<DeviceId, std::collections::VecDeque<f32>>,
     pub plugin_assets: &'a HashMap<String, Vec<u8>>,
+    pub sensor_history: &'a HashMap<String, std::collections::VecDeque<f32>>,
 }
 
 /// Shared per-tab context to keep tab signatures small.
@@ -400,6 +402,7 @@ pub struct TabCtx<'a> {
     /// (bytes/sec). `None` until the first sample lands.
     pub write_rate_history: Option<&'a std::collections::VecDeque<f32>>,
     pub plugin_assets: &'a std::collections::HashMap<String, Vec<u8>>,
+    pub sensor_history: &'a HashMap<String, std::collections::VecDeque<f32>>,
 }
 
 /// Whether `terminal` is a one-shot upload result (`Done`/`Failed`) for
@@ -419,6 +422,13 @@ pub(super) fn is_terminal_upload_for(
 #[cfg(test)]
 pub(crate) fn empty_plugin_assets() -> &'static std::collections::HashMap<String, Vec<u8>> {
     static EMPTY: std::sync::OnceLock<std::collections::HashMap<String, Vec<u8>>> =
+        std::sync::OnceLock::new();
+    EMPTY.get_or_init(Default::default)
+}
+
+#[cfg(test)]
+pub(crate) fn empty_sensor_history() -> &'static HashMap<String, std::collections::VecDeque<f32>> {
+    static EMPTY: std::sync::OnceLock<HashMap<String, std::collections::VecDeque<f32>>> =
         std::sync::OnceLock::new();
     EMPTY.get_or_init(Default::default)
 }
@@ -509,6 +519,7 @@ pub fn show(
                     led_colors: frame.led_colors,
                     write_rate_history: frame.write_rate_history.get(id),
                     plugin_assets: frame.plugin_assets,
+                    sensor_history: frame.sensor_history,
                 };
                 if let Some(tab) = tabs.get(ui_state.tab) {
                     match tab.kind {
@@ -523,6 +534,7 @@ pub fn show(
                         TabKind::Pairing => children::pairing(ui, &ctx, ui_state),
                         TabKind::Chains => chains::show(ui, &ctx),
                         TabKind::Devices => children::show(ui, &ctx, page),
+                        TabKind::Sensors => sensors::show(ui, &ctx),
                         TabKind::Info => info::show(ui, &ctx, ui_state),
                     }
                 }
@@ -663,6 +675,7 @@ mod tests {
                     led_colors: empty_led_colors(),
                     write_rate_history: &write_rate_history,
                     plugin_assets: empty_plugin_assets(),
+                    sensor_history: empty_sensor_history(),
                 },
                 &id,
                 &mut ui_state,

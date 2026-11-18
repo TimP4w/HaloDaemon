@@ -653,6 +653,7 @@ mod tests {
             write_rate: Default::default(),
             control_layout: Vec::new(),
             integration_id: None,
+            parent_id: None,
             conflict: None,
         }
     }
@@ -706,6 +707,7 @@ mod tests {
                             led_colors: crate::ui::screens::device::empty_led_colors(),
                             write_rate_history: None,
                             plugin_assets: crate::ui::screens::device::empty_plugin_assets(),
+                            sensor_history: crate::ui::screens::device::empty_sensor_history(),
                         };
                         show(ui, &tab);
                     });
@@ -783,6 +785,7 @@ mod tests {
                         led_colors: crate::ui::screens::device::empty_led_colors(),
                         write_rate_history: None,
                         plugin_assets: crate::ui::screens::device::empty_plugin_assets(),
+                        sensor_history: crate::ui::screens::device::empty_sensor_history(),
                     };
                     height = ui.vertical(|ui| show(ui, &tab)).response.rect.height();
                 });

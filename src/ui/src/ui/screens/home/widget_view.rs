@@ -462,6 +462,7 @@ mod tests {
             device: String::new(),
             value,
             unit: "°C",
+            sensor_type: Default::default(),
         }
     }
 

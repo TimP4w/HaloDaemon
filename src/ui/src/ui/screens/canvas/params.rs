@@ -250,7 +250,8 @@ pub(super) fn instance_params(
             | ParamKind::Sensor
             | ParamKind::Image
             | ParamKind::Number { .. }
-            | ParamKind::Steps => {}
+            | ParamKind::Steps
+            | ParamKind::Gradient => {}
         }
     }
     changed |= color_slots(ui, edits, &mut canvas_ui.color_slot, def, eff);

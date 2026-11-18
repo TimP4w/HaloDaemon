@@ -239,7 +239,7 @@ mod tests {
         std::fs::create_dir(&dir).unwrap();
         std::fs::write(
             dir.join("plugin.yaml"),
-            format!("id: {id}\nversion: 1.0.0\napi: \"3.0\"\n{manifest}"),
+            format!("id: {id}\nversion: 1.0.0\napi: \"1.0\"\n{manifest}"),
         )
         .unwrap();
         std::fs::write(dir.join("main.lua"), "return {}").unwrap();

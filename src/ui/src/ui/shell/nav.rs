@@ -310,7 +310,7 @@ mod tests {
             id: "outdated".parse().unwrap(),
             name: "Outdated".into(),
             version: "1.1.0".into(),
-            api: "3.0".into(),
+            api: "1.0".into(),
             compatible: true,
             uses: Default::default(),
         }];

@@ -546,7 +546,7 @@ mod tests {
             .join("fixtures")
             .join(slug)
             .join(version);
-        crate::test_support::write_plugin_package(&fixtures, id, version, "3.0")
+        crate::test_support::write_plugin_package(&fixtures, id, version, "1.0")
     }
 
     #[tokio::test]
@@ -736,9 +736,9 @@ mod tests {
             published: 1,
             signing_key: None,
             packages: vec![
-                package("newer", "1.1.0", "3.0"),
-                package("same", "1.0.0", "3.0"),
-                package("older", "0.9.0", "3.0"),
+                package("newer", "1.1.0", "1.0"),
+                package("same", "1.0.0", "1.0"),
+                package("older", "0.9.0", "1.0"),
                 package("future", "2.0.0", "9.0"),
             ],
         };
@@ -794,7 +794,7 @@ mod tests {
         let package = staged(slug, "demo", version);
         std::fs::write(
             package.join("plugin.yaml"),
-            format!("id: demo\nversion: {version}\napi: \"3.0\"\ntype: integration\ntransports:\n  command:\n    commands: [nvidia-smi]\n{transports}"),
+            format!("id: demo\nversion: {version}\napi: \"1.0\"\ntype: integration\ntransports:\n  command:\n    commands: [nvidia-smi]\n{transports}"),
         )
         .unwrap();
         package

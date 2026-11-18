@@ -6,9 +6,9 @@ use std::collections::{HashMap, HashSet};
 use crate::domain::topic_store::TopicStore;
 use egui::Vec2;
 use halod_shared::{
-    commands::{DaemonCommand, EngineKind},
+    commands::{DaemonCommand, DeviceOp, EngineKind},
     effect_designer::DESIGNER_PIXMAP_EFFECT_ID,
-    types::{DeviceCapability, EffectParamValue, PlacedZone},
+    types::{DeviceCapability, EffectParamValue, PlacedZone, ZoneTopology},
 };
 
 use crate::runtime::ipc::CommandTx;
@@ -96,31 +96,46 @@ pub(super) fn zones_assign_modal(
     canvas_ui: &mut CanvasUi,
     cmd: &CommandTx,
 ) {
-    let Some(inst_id) = canvas_ui.zones_modal.clone() else {
-        return;
-    };
-    if !state.lighting.canvas.effects.contains_key(&inst_id) {
-        canvas_ui.zones_modal = None;
-        canvas_ui.zones_draft = None;
+    let layer = canvas_ui.zones_modal.clone();
+    if layer.is_none() && !canvas_ui.place_modal {
         return;
     }
-    let is_default = state.lighting.canvas.default_effect.as_deref() == Some(inst_id.as_str());
     let effects = &state.lighting.canvas.effects;
-    let draft = canvas_ui
-        .zones_draft
-        .get_or_insert_with(|| owned_zones(state, &inst_id, is_default));
+    if layer.as_ref().is_some_and(|id| !effects.contains_key(id)) {
+        close_zones_modal(canvas_ui);
+        return;
+    }
+    let layer = layer.map(|id| {
+        let is_default = state.lighting.canvas.default_effect.as_deref() == Some(id.as_str());
+        (id, is_default)
+    });
+    let draft = canvas_ui.zones_draft.get_or_insert_with(|| match &layer {
+        Some((id, is_default)) => owned_zones(state, id, *is_default),
+        None => placed_keys(state),
+    });
     let n = draft.len();
-    let title = t!(
-        "canvas.assign_zones_title",
-        name = instance_name(effects, &inst_id)
-    );
+    let (title, subtitle, confirm) = match &layer {
+        Some((id, _)) => (
+            t!(
+                "canvas.assign_zones_title",
+                name = instance_name(effects, id)
+            ),
+            t!("canvas.assign_zones_sub"),
+            t!("canvas.assign_n", n = n),
+        ),
+        None => (
+            t!("canvas.place_zones_title"),
+            t!("canvas.place_zones_sub"),
+            t!("canvas.place_n", n = n),
+        ),
+    };
 
     let (mut assign, mut cancel) = (false, false);
     let closed = widgets::dialog_with_subtitle(
         ctx,
         "canvas_assign_zones",
         &title,
-        &t!("canvas.assign_zones_sub"),
+        &subtitle,
         600.0,
         |ui| {
             for (dev_id, dev_name, zones) in rgb_zone_groups(state) {
@@ -154,8 +169,13 @@ pub(super) fn zones_assign_modal(
                 for z in zones {
                     let key = (dev_id.clone(), z.id.clone());
                     let checked = draft.contains(&key);
-                    let used_by = placed_of(state, dev_id, &z.id)
-                        .filter(|p| !checked && modal_zone_state(Some(p), &inst_id, is_default).1)
+                    let used_by = layer
+                        .as_ref()
+                        .and_then(|(id, is_default)| {
+                            placed_of(state, dev_id, &z.id).filter(|p| {
+                                !checked && modal_zone_state(Some(p), id, *is_default).1
+                            })
+                        })
                         .and_then(|p| {
                             p.effect
                                 .as_deref()
@@ -184,7 +204,7 @@ pub(super) fn zones_assign_modal(
         |ui| {
             assign = widgets::button(
                 ui,
-                &t!("canvas.assign_n", n = n),
+                &confirm,
                 widgets::ButtonKind::Primary,
                 Vec2::new(0.0, 36.0),
             )
@@ -207,15 +227,107 @@ pub(super) fn zones_assign_modal(
     );
     if assign {
         if let Some(draft) = &canvas_ui.zones_draft {
-            for c in draft_commands(state, &inst_id, is_default, draft) {
+            let cmds = match &layer {
+                Some((id, is_default)) => draft_commands(state, id, *is_default, draft),
+                None => placement_commands(state, draft),
+            };
+            for c in cmds {
                 crate::runtime::ipc::send(cmd, c);
             }
         }
     }
     if assign || cancel || closed {
-        canvas_ui.zones_modal = None;
-        canvas_ui.zones_draft = None;
+        close_zones_modal(canvas_ui);
     }
+}
+
+fn close_zones_modal(canvas_ui: &mut CanvasUi) {
+    canvas_ui.zones_modal = None;
+    canvas_ui.place_modal = false;
+    canvas_ui.zones_draft = None;
+}
+
+fn placed_keys(state: &TopicStore) -> HashSet<ZoneKey> {
+    state
+        .lighting
+        .canvas
+        .placed_zones
+        .iter()
+        .map(|p| (p.device_id.clone(), p.channel_id.clone()))
+        .collect()
+}
+
+pub(super) fn all_zone_keys(state: &TopicStore) -> HashSet<ZoneKey> {
+    rgb_zone_groups(state)
+        .into_iter()
+        .flat_map(|(dev, _, zones)| zones.iter().map(|z| (dev.clone(), z.id.clone())))
+        .collect()
+}
+
+pub(super) fn placement_commands(
+    state: &TopicStore,
+    draft: &HashSet<ZoneKey>,
+) -> Vec<DaemonCommand> {
+    let placed = placed_keys(state);
+    let mut removed: Vec<&ZoneKey> = placed.difference(draft).collect();
+    removed.sort();
+    let added: Vec<(&DeviceId, &halod_shared::types::LightingChannel)> = rgb_zone_groups(state)
+        .into_iter()
+        .flat_map(|(dev, _, zones)| zones.iter().map(move |z| (dev, z)))
+        .filter(|(dev, z)| {
+            let key = ((*dev).clone(), z.id.clone());
+            draft.contains(&key) && !placed.contains(&key)
+        })
+        .collect();
+    let removes = removed
+        .into_iter()
+        .map(|(dev, zone)| DaemonCommand::Device {
+            device_id: dev.clone(),
+            op: DeviceOp::CanvasRemoveZone {
+                channel_id: zone.clone(),
+            },
+        });
+    let places = added.iter().enumerate().map(|(i, (dev, z))| {
+        let (x, y, w, h) = grid_slot(i, added.len(), matches!(z.topology, ZoneTopology::Linear));
+        DaemonCommand::Device {
+            device_id: (*dev).clone(),
+            op: DeviceOp::CanvasPlaceZone {
+                channel_id: z.id.clone(),
+                x: Some(x),
+                y: Some(y),
+                w: Some(w),
+                h: Some(h),
+                rotation: None,
+                effect: None,
+                sampling_mode: None,
+            },
+        }
+    });
+    removes.chain(places).collect()
+}
+
+const GRID_FILL: f64 = 0.7;
+const GRID_MAX_SIDE: f64 = 0.3;
+const LINEAR_MAX_H: f64 = 0.05;
+
+fn grid_slot(i: usize, n: usize, linear: bool) -> (f64, f64, f64, f64) {
+    let cols = (n.max(1) as f64).sqrt().ceil();
+    let rows = (n.max(1) as f64 / cols).ceil();
+    let (cell_w, cell_h) = (1.0 / cols, 1.0 / rows);
+    let w = (cell_w * GRID_FILL).min(GRID_MAX_SIDE);
+    let side_h = (cell_h * GRID_FILL).min(GRID_MAX_SIDE);
+    let h = if linear {
+        side_h.min(LINEAR_MAX_H)
+    } else {
+        side_h
+    };
+    let (col, row) = ((i as f64) % cols, (i as f64 / cols).floor());
+    (
+        col * cell_w + (cell_w - w) / 2.0,
+        row * cell_h + (cell_h - h) / 2.0,
+        w,
+        h,
+    )
 }
 
 /// Grid picker for creating a new effect instance — blank effects or from saved presets.
@@ -485,6 +597,110 @@ mod tests {
                 if channel_id == "b" && e == "effect-1"));
         assert!(matches!(&cmds[1],
             DaemonCommand::Device { op: DeviceOp::CanvasRemoveZone { channel_id, .. }, .. } if channel_id == "c"));
+    }
+
+    fn lit_state(zones: &[(&str, ZoneTopology)]) -> TopicStore {
+        use halod_shared::types::{
+            LightingChannel, LightingDescriptor, LightingDivision, LightingStatus,
+        };
+        let channels = zones
+            .iter()
+            .map(|(id, topology)| LightingChannel {
+                id: (*id).into(),
+                name: (*id).into(),
+                topology: topology.clone(),
+                leds: vec![],
+                color_order: Default::default(),
+                division: LightingDivision::Indivisible,
+                visibility: Default::default(),
+            })
+            .collect();
+        let mut state = TopicStore::default();
+        state.devices = vec![halod_shared::types::WireDevice {
+            id: "d".parse().unwrap(),
+            capabilities: vec![DeviceCapability::Lighting(LightingStatus {
+                descriptor: LightingDescriptor {
+                    channels,
+                    native_effects: vec![],
+                },
+                state: None,
+                channel_transforms: Default::default(),
+            })],
+            ..Default::default()
+        }];
+        state
+    }
+
+    fn placed_zone(cmd: &DaemonCommand) -> Option<(String, f64, f64, f64, f64)> {
+        match cmd {
+            DaemonCommand::Device {
+                op:
+                    DeviceOp::CanvasPlaceZone {
+                        channel_id,
+                        x: Some(x),
+                        y: Some(y),
+                        w: Some(w),
+                        h: Some(h),
+                        effect: None,
+                        ..
+                    },
+                ..
+            } => Some((channel_id.clone(), *x, *y, *w, *h)),
+            _ => None,
+        }
+    }
+
+    #[test]
+    fn placing_every_zone_lays_out_only_the_unplaced_ones() {
+        let mut state = lit_state(&[
+            ("a", ZoneTopology::Ring),
+            ("b", ZoneTopology::Linear),
+            ("c", ZoneTopology::Grid),
+        ]);
+        state.lighting.canvas.placed_zones = vec![zone_with("b", None)];
+        let all = all_zone_keys(&state);
+        assert_eq!(all.len(), 3);
+        let placed: Vec<String> = placement_commands(&state, &all)
+            .iter()
+            .map(|c| placed_zone(c).expect("only placements").0)
+            .collect();
+        assert_eq!(placed, ["a", "c"]);
+    }
+
+    #[test]
+    fn choosing_zones_removes_the_deselected_and_places_the_new() {
+        let mut state = lit_state(&[("a", ZoneTopology::Ring), ("b", ZoneTopology::Ring)]);
+        state.lighting.canvas.placed_zones = vec![zone_with("a", Some("effect-1"))];
+        let draft: HashSet<_> = [("d".parse::<DeviceId>().unwrap(), "b".to_string())].into();
+        let cmds = placement_commands(&state, &draft);
+        assert_eq!(cmds.len(), 2);
+        assert!(matches!(&cmds[0],
+            DaemonCommand::Device { op: DeviceOp::CanvasRemoveZone { channel_id }, .. } if channel_id == "a"));
+        assert_eq!(placed_zone(&cmds[1]).map(|p| p.0).as_deref(), Some("b"));
+        assert!(placement_commands(&state, &placed_keys(&state)).is_empty());
+    }
+
+    #[test]
+    fn linear_zones_are_placed_as_thin_strips() {
+        let (_, _, w, h) = grid_slot(0, 1, true);
+        assert!(h <= LINEAR_MAX_H && h < w);
+    }
+
+    proptest::proptest! {
+        #[test]
+        fn grid_slots_stay_on_canvas_and_never_overlap(n in 1usize..40, linear: bool) {
+            let slots: Vec<_> = (0..n).map(|i| grid_slot(i, n, linear)).collect();
+            for &(x, y, w, h) in &slots {
+                proptest::prop_assert!(w > 0.0 && h > 0.0);
+                proptest::prop_assert!(x >= 0.0 && y >= 0.0 && x + w <= 1.0 + 1e-9 && y + h <= 1.0 + 1e-9);
+            }
+            for (i, a) in slots.iter().enumerate() {
+                for b in &slots[i + 1..] {
+                    let apart = a.0 + a.2 <= b.0 || b.0 + b.2 <= a.0 || a.1 + a.3 <= b.1 || b.1 + b.3 <= a.1;
+                    proptest::prop_assert!(apart);
+                }
+            }
+        }
     }
 
     #[test]

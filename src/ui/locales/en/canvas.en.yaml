@@ -26,6 +26,13 @@ canvas:
   led_count: "%{n} LEDs"
   assign_n: "Assign %{n} zones"
   n_selected: "%{n} zones selected"
+  empty_title: Nothing on the canvas yet
+  empty_hint: "Place your devices’ LED zones on the canvas, then add effect layers to light them."
+  place_all: Place all devices
+  choose_zones: Choose zones
+  place_zones_title: Place zones
+  place_zones_sub: "Choose which zones appear on the canvas. New zones are laid out in a grid."
+  place_n: "Place %{n} zones"
   roll_zone: Roll zone
   unroll_zone: Unroll zone
   effect_instances: Effect layers

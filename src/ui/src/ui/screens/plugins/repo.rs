@@ -551,11 +551,16 @@ pub(super) struct RepoEntry<'a> {
     pub(super) name: &'a str,
     pub(super) installed: Option<&'a str>,
     pub(super) available: Option<&'a AvailablePlugin>,
+    pub(super) platforms: &'a [String],
+    pub(super) supported: bool,
 }
 
 impl RepoEntry<'_> {
     pub(super) fn action(&self) -> Option<EntryAction> {
         let available = self.available?;
+        if !self.supported {
+            return Some(EntryAction::Unsupported);
+        }
         if !available.compatible {
             return Some(EntryAction::NeedsNewerDaemon);
         }
@@ -572,6 +577,7 @@ pub(super) enum EntryAction {
     Install,
     Update,
     NeedsNewerDaemon,
+    Unsupported,
 }
 
 pub(super) fn repo_entries<'a>(slug: &str, state: &'a PluginsState) -> Vec<RepoEntry<'a>> {
@@ -585,6 +591,8 @@ pub(super) fn repo_entries<'a>(slug: &str, state: &'a PluginsState) -> Vec<RepoE
                 .available
                 .iter()
                 .find(|a| a.repo == slug && a.id == p.id),
+            platforms: &p.platforms,
+            supported: p.platform_supported,
         })
         .collect();
     for available in state.available.iter().filter(|a| a.repo == slug) {
@@ -594,6 +602,8 @@ pub(super) fn repo_entries<'a>(slug: &str, state: &'a PluginsState) -> Vec<RepoE
                 name: &available.name,
                 installed: None,
                 available: Some(available),
+                platforms: &available.matches.platforms,
+                supported: available.matches.supports_platform(std::env::consts::OS),
             });
         }
     }
@@ -709,7 +719,11 @@ pub(super) fn repo_detail_body(
             Align2::LEFT_TOP,
             entry.name,
             theme::subhead(),
-            theme::TEXT,
+            if entry.supported {
+                theme::TEXT
+            } else {
+                theme::TEXT_FAINT
+            },
         );
         ui.painter().text(
             Pos2::new(text_x, rect.top() + 22.0),
@@ -726,6 +740,15 @@ pub(super) fn repo_detail_body(
         let installing = view.installing.contains_key(entry.id);
         let mut clicked = None;
         match entry.action() {
+            Some(EntryAction::Unsupported) => {
+                widgets::button_disabled(
+                    &mut right,
+                    &t!("plugins.install"),
+                    ButtonKind::Secondary,
+                    Vec2::new(90.0, 28.0),
+                )
+                .on_hover_text(t!("plugins.unsupported_platform"));
+            }
             Some(EntryAction::NeedsNewerDaemon) => {
                 right.label(
                     egui::RichText::new(t!("plugins.requires_newer_daemon"))
@@ -780,7 +803,7 @@ pub(super) fn repo_detail_body(
 }
 
 fn entry_subtitle(entry: &RepoEntry) -> String {
-    match (entry.installed, entry.available) {
+    let version = match (entry.installed, entry.available) {
         (Some(installed), Some(available)) if is_newer(&available.version, installed) => {
             format!("{installed} → {}", available.version)
         }
@@ -789,6 +812,12 @@ fn entry_subtitle(entry: &RepoEntry) -> String {
             t!("plugins.not_installed_version", version = available.version).into_owned()
         }
         (None, None) => String::new(),
+    };
+    let platforms = super::platforms_label(entry.platforms);
+    if version.is_empty() {
+        platforms
+    } else {
+        format!("{version} · {platforms}")
     }
 }
 
@@ -888,6 +917,9 @@ mod tests {
             available("official", "future", "1.0.0", false),
             available("other", "kraken", "9.0.0", true),
         ];
+        let mut foreign = available("official", "elsewhere_only", "1.0.0", true);
+        foreign.matches.platforms = vec!["no-such-os".into()];
+        state.available.push(foreign);
 
         let entries = repo_entries("official", &state);
         let summary: Vec<_> = entries
@@ -898,6 +930,7 @@ mod tests {
             summary,
             [
                 ("aura", Some(EntryAction::Install)),
+                ("elsewhere_only", Some(EntryAction::Unsupported)),
                 ("future", Some(EntryAction::NeedsNewerDaemon)),
                 ("kraken", Some(EntryAction::Update)),
             ]

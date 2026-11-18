@@ -19,6 +19,7 @@ devtabs:
   tab_controls: Controls
   tab_onboard: Onboard
   tab_pairing: Pairing
+  tab_sensors: Sensors
   tab_info: Info
 
   back_all_devices: All devices
@@ -105,3 +106,17 @@ devtabs:
   dpi_help: Drag a stage along the axis or enter an exact value. The mouse uses the current stage.
   stage_current: Current
   stage_n: "Stage %{n}"
+
+  sensors_title: Sensors
+  sensors_summary: "%{n} sensors · min and max over the last %{secs} s"
+  sensors_empty: No readings yet
+  sensors_empty_desc: This device reports sensors, but none have a value right now.
+  sensor_min: "Min %{v}"
+  sensor_max: "Max %{v}"
+  sensor_kind_temperature: Temperature
+  sensor_kind_load: Load
+  sensor_kind_memory: Memory
+  sensor_kind_frequency: Frequency
+  sensor_kind_uptime: Uptime
+  sensor_kind_fan_speed: Fan speed
+  sensor_kind_fan_duty: Fan duty

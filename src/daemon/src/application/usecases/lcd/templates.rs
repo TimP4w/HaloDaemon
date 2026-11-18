@@ -194,7 +194,7 @@ fn validate_param(
                 "widget '{widget_id}' parameter '{param_id}' must be text"
             );
         }
-        ParamKind::Steps => {
+        ParamKind::Steps | ParamKind::Gradient => {
             anyhow::ensure!(
                 matches!(value, EffectParamValue::Steps(_)),
                 "widget '{widget_id}' parameter '{param_id}' must be a step list"

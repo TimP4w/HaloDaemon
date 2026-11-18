@@ -33,6 +33,9 @@ pub async fn set_enabled(id: PluginId, enabled: bool, app: Arc<AppState>) -> Res
         app.registry.replace_policy(&cfg.plugins);
     }
     app.request_config_save();
+    if !enabled {
+        app.registry.clear_integration_setup_status(&id);
+    }
     let device_ids = {
         let devices = app.device_registry.read().await;
         devices
@@ -391,6 +394,18 @@ mod tests {
     }
 
     #[tokio::test]
+    async fn disabling_a_plugin_cancels_its_setup() {
+        crate::test_support::with_tmp_config(|app| async move {
+            let id: PluginId = "some_plugin".parse().unwrap();
+            app.registry
+                .set_integration_setup_status(id.clone(), Default::default());
+            set_enabled(id.clone(), false, app.clone()).await.unwrap();
+            assert!(app.registry.integration_setup_status(&id).is_none());
+        })
+        .await;
+    }
+
+    #[tokio::test]
     async fn scoped_teardown_prunes_hid_tracking_so_reprobe_can_readd() {
         // Regression: the scoped teardown must drop the torn-down device's HID
         // key, or the HID rescan skips the still-tracked key and the device never
@@ -538,7 +553,7 @@ mod tests {
 
     /// Every declaration lives in YAML; the Lua entry contains callbacks only.
     const CONFIG_TEST_PLUGIN_YAML: &str =
-        "id: cfgtest\nversion: 1.0.0\napi: \"3.0\"\ncapabilities: [lighting]\ndevices:\n  - vendor: x\n    model: y\n    type: led_strip\n    match:\n      hid: { vid: 1, pid: 2 }\nconfig:\n  fields:\n    - key: host\n      label: Host\n    - key: token\n      label: Token\n      secure: true\n";
+        "id: cfgtest\nversion: 1.0.0\napi: \"1.0\"\ncapabilities: [lighting]\ndevices:\n  - vendor: x\n    model: y\n    type: led_strip\n    match:\n      hid: { vid: 1, pid: 2 }\nconfig:\n  fields:\n    - key: host\n      label: Host\n    - key: token\n      label: Token\n      secure: true\n";
 
     fn write_config_test_plugin(root: &std::path::Path) {
         let dir = root.join("cfgtest");
@@ -616,7 +631,7 @@ mod tests {
             };
             std::fs::write(
                 dir.join("winonly").join("plugin.yaml"),
-                format!("id: winonly\nversion: 1.0.0\napi: \"3.0\"\nplatforms: [{foreign}]\ncapabilities: [lighting]\ndevices:\n  - vendor: x\n    model: y\n    type: led_strip\n    match:\n      hid: {{ vid: 1, pid: 2 }}\n"),
+                format!("id: winonly\nversion: 1.0.0\napi: \"1.0\"\nplatforms: [{foreign}]\ncapabilities: [lighting]\ndevices:\n  - vendor: x\n    model: y\n    type: led_strip\n    match:\n      hid: {{ vid: 1, pid: 2 }}\n"),
             )
             .unwrap();
             std::fs::write(dir.join("winonly").join("main.lua"), CONFIG_TEST_PLUGIN).unwrap();
@@ -662,7 +677,7 @@ mod tests {
         std::fs::create_dir_all(plugin_dir.join("assets")).unwrap();
         std::fs::write(
             plugin_dir.join("plugin.yaml"),
-            "id: assetplug\nversion: 1.0.0\napi: \"3.0\"\ncapabilities: [lighting]\ndevices:\n  - vendor: x\n    model: y\n    type: led_strip\n    match:\n      hid: { vid: 1, pid: 2 }\n\
+            "id: assetplug\nversion: 1.0.0\napi: \"1.0\"\ncapabilities: [lighting]\ndevices:\n  - vendor: x\n    model: y\n    type: led_strip\n    match:\n      hid: { vid: 1, pid: 2 }\n\
              logo: logo.png\n",
         )
         .unwrap();
@@ -792,7 +807,7 @@ mod tests {
             std::fs::create_dir_all(&pdir).unwrap();
             std::fs::write(
                 pdir.join("plugin.yaml"),
-                "id: numcfg\nversion: 1.0.0\napi: \"3.0\"\ncapabilities: [lighting]\ndevices:\n  - vendor: x\n    model: y\n    type: led_strip\n    match:\n      hid: { vid: 1, pid: 2 }\nconfig:\n  fields:\n    - { key: hz, label: Hz, kind: number, default: 50, min: 1, max: 100 }\n    - { key: enabled, label: Enabled, kind: boolean, default: true }\n    - { key: mode, label: Mode, kind: enum, default: auto, options: [auto, manual] }\n    - { key: host, label: Host, kind: host, default: localhost }\n    - { key: port, label: Port, kind: port, default: 8080 }\n    - { key: endpoint, label: Endpoint, kind: url, default: 'https://example.com' }\n    - { key: timeout, label: Timeout, kind: duration_ms, default: 1000, min: 10, max: 5000 }\n",
+                "id: numcfg\nversion: 1.0.0\napi: \"1.0\"\ncapabilities: [lighting]\ndevices:\n  - vendor: x\n    model: y\n    type: led_strip\n    match:\n      hid: { vid: 1, pid: 2 }\nconfig:\n  fields:\n    - { key: hz, label: Hz, kind: number, default: 50, min: 1, max: 100 }\n    - { key: enabled, label: Enabled, kind: boolean, default: true }\n    - { key: mode, label: Mode, kind: enum, default: auto, options: [auto, manual] }\n    - { key: host, label: Host, kind: host, default: localhost }\n    - { key: port, label: Port, kind: port, default: 8080 }\n    - { key: endpoint, label: Endpoint, kind: url, default: 'https://example.com' }\n    - { key: timeout, label: Timeout, kind: duration_ms, default: 1000, min: 10, max: 5000 }\n",
             )
             .unwrap();
             std::fs::write(

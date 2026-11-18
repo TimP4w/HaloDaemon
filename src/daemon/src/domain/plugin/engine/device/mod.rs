@@ -2641,7 +2641,7 @@ mod tests {
         std::fs::write(
             dir.join("plugin.yaml"),
             format!(
-                "id: {id}\nversion: 1.0.0\napi: \"3.0\"\ncapabilities: [{capabilities}]\ntransports:\n  hid:\n    report_size: 8\ndevices:\n  - vendor: Test\n    model: Device\n    match:\n      hid: {{ vid: 1, pid: 2 }}\n"
+                "id: {id}\nversion: 1.0.0\napi: \"1.0\"\ncapabilities: [{capabilities}]\ntransports:\n  hid:\n    report_size: 8\ndevices:\n  - vendor: Test\n    model: Device\n    match:\n      hid: {{ vid: 1, pid: 2 }}\n"
             ),
         )
         .unwrap();
@@ -2686,7 +2686,7 @@ mod tests {
         std::fs::create_dir_all(&dir).unwrap();
         std::fs::write(
             dir.join("plugin.yaml"),
-            "id: layout_plug\nversion: 1.0.0\napi: \"3.0\"\ncapabilities: [controls]\ntransports:\n  hid:\n    report_size: 8\ndevices:\n  - vendor: Test\n    model: Device\n    match:\n      hid: { vid: 1, pid: 2 }\n    control_layout:\n      - { category: Microphone, order: 0, column: 0 }\n      - { category: Noise Cancelling, order: 1, column: 1 }\n",
+            "id: layout_plug\nversion: 1.0.0\napi: \"1.0\"\ncapabilities: [controls]\ntransports:\n  hid:\n    report_size: 8\ndevices:\n  - vendor: Test\n    model: Device\n    match:\n      hid: { vid: 1, pid: 2 }\n    control_layout:\n      - { category: Microphone, order: 0, column: 0 }\n      - { category: Noise Cancelling, order: 1, column: 1 }\n",
         )
         .unwrap();
         std::fs::write(dir.join("main.lua"), "return {}").unwrap();
@@ -2758,7 +2758,7 @@ mod tests {
         std::fs::create_dir_all(&dir).unwrap();
         std::fs::write(
             dir.join("plugin.yaml"),
-            "id: scoped_caps\nversion: 1.0.0\napi: \"3.0\"\ncapabilities: [lighting, pairing]\ntransports:\n  hid:\n    report_size: 8\ndevices:\n  - vendor: Test\n    model: Receiver\n    capabilities: [pairing]\n    match:\n      hid: { vid: 1, pid: 2 }\n  - vendor: Test\n    model: Mouse\n    match:\n      hid: { vid: 1, pid: 3 }\n",
+            "id: scoped_caps\nversion: 1.0.0\napi: \"1.0\"\ncapabilities: [lighting, pairing]\ntransports:\n  hid:\n    report_size: 8\ndevices:\n  - vendor: Test\n    model: Receiver\n    capabilities: [pairing]\n    match:\n      hid: { vid: 1, pid: 2 }\n  - vendor: Test\n    model: Mouse\n    match:\n      hid: { vid: 1, pid: 3 }\n",
         )
         .unwrap();
         std::fs::write(dir.join("main.lua"), "return {}").unwrap();

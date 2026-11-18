@@ -152,6 +152,8 @@ pub struct WireDevice {
     /// Set when this device is an integration's root, not real hardware; shown only on the Integrations page.
     #[serde(default, skip_serializing_if = "Option::is_none")]
     pub integration_id: Option<crate::ids::PluginId>,
+    #[serde(default, skip_serializing_if = "Option::is_none")]
+    pub parent_id: Option<crate::ids::DeviceId>,
     /// Computed per snapshot, never persisted.
     #[serde(default, skip_serializing_if = "Option::is_none")]
     pub conflict: Option<DeviceConflictSummary>,

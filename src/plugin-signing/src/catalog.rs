@@ -467,25 +467,25 @@ mod tests {
     #[test]
     fn select_prefers_the_newest_compatible_version_and_falls_back() {
         let catalog = catalog(vec![
-            entry("demo", "1.2.0", "3.1"),
-            entry("demo", "1.1.0", "3.0"),
-            entry("demo", "1.0.0", "3.0"),
+            entry("demo", "1.2.0", "1.1"),
+            entry("demo", "1.1.0", "1.0"),
+            entry("demo", "1.0.0", "1.0"),
             entry("future", "2.0.0", "4.0"),
         ]);
-        let host = api("3.0");
+        let host = api("1.0");
         let selected = catalog.select(host);
         assert_eq!(selected["demo"].version.to_string(), "1.1.0");
         assert_eq!(selected["future"].version.to_string(), "2.0.0");
         assert!(!selected["future"].api.is_compatible_with(host));
         assert_eq!(
-            catalog.select(api("3.1"))["demo"].version.to_string(),
+            catalog.select(api("1.1"))["demo"].version.to_string(),
             "1.2.0"
         );
     }
 
     #[test]
     fn signed_catalog_round_trips_and_rejects_tampering() {
-        let (bytes, public) = signed(catalog(vec![entry("demo", "1.0.0", "3.0")]));
+        let (bytes, public) = signed(catalog(vec![entry("demo", "1.0.0", "1.0")]));
         let keys = [("test-key", public.as_str())];
         let opened = open_catalog(&bytes, Some(&keys)).unwrap();
         assert_eq!(opened.packages.len(), 1);
@@ -501,7 +501,7 @@ mod tests {
 
     #[test]
     fn matches_and_uses_round_trip_through_a_signed_catalog() {
-        let mut demo = entry("demo", "1.0.0", "3.0");
+        let mut demo = entry("demo", "1.0.0", "1.0");
         demo.matches = PackageMatches {
             platforms: vec!["linux".into()],
             hid_any: false,
@@ -540,7 +540,7 @@ mod tests {
     #[test]
     fn a_package_without_name_matches_or_uses_is_malformed() {
         let full: serde_yaml::Value =
-            serde_yaml::from_slice(&catalog(vec![entry("demo", "1.0.0", "3.0")]).to_bytes())
+            serde_yaml::from_slice(&catalog(vec![entry("demo", "1.0.0", "1.0")]).to_bytes())
                 .unwrap();
         for field in ["name", "matches", "uses"] {
             let mut stripped = full.clone();
@@ -588,20 +588,20 @@ mod tests {
             "https://evil/x.tar.gz",
             "a/./b.tar.gz",
         ] {
-            let mut bad = entry("demo", "1.0.0", "3.0");
+            let mut bad = entry("demo", "1.0.0", "1.0");
             bad.path = path.into();
             assert!(catalog(vec![bad]).validate().is_err(), "{path}");
         }
         let duplicate = catalog(vec![
-            entry("demo", "1.0.0", "3.0"),
-            entry("demo", "1.0.0", "3.1"),
+            entry("demo", "1.0.0", "1.0"),
+            entry("demo", "1.0.0", "1.1"),
         ]);
         assert!(duplicate.validate().is_err());
     }
 
     #[test]
     fn verify_rejects_a_mismatched_archive() {
-        let mut package = entry("demo", "1.0.0", "3.0");
+        let mut package = entry("demo", "1.0.0", "1.0");
         package.sha256 = sha256_hex(b"archive");
         package.size = 7;
         assert!(package.verify(b"archive").is_ok());
@@ -630,7 +630,7 @@ mod tests {
     #[test]
     fn content_change_without_version_bump_fails() {
         let repo = tempfile::tempdir().unwrap();
-        let dir = package(repo.path(), "demo", "1.0.0", "3.0");
+        let dir = package(repo.path(), "demo", "1.0.0", "1.0");
         let first = build(repo.path(), None).unwrap();
         let (unchanged, _) = build(repo.path(), Some(&first)).unwrap();
         assert_eq!(unchanged.packages, first.0.packages);
@@ -642,10 +642,10 @@ mod tests {
     #[test]
     fn older_api_entries_are_carried_forward() {
         let repo = tempfile::tempdir().unwrap();
-        package(repo.path(), "demo", "1.0.0", "3.0");
+        package(repo.path(), "demo", "1.0.0", "1.0");
         let first = build(repo.path(), None).unwrap();
         fs::remove_dir_all(repo.path().join("demo")).unwrap();
-        package(repo.path(), "demo", "1.1.0", "3.1");
+        package(repo.path(), "demo", "1.1.0", "1.1");
 
         let (second, out) = build(repo.path(), Some(&first)).unwrap();
         let versions: Vec<String> = second
@@ -664,10 +664,10 @@ mod tests {
     #[test]
     fn a_version_older_than_published_fails() {
         let repo = tempfile::tempdir().unwrap();
-        package(repo.path(), "demo", "2.0.0", "3.0");
+        package(repo.path(), "demo", "2.0.0", "1.0");
         let first = build(repo.path(), None).unwrap();
         fs::remove_dir_all(repo.path().join("demo")).unwrap();
-        package(repo.path(), "demo", "1.0.0", "3.0");
+        package(repo.path(), "demo", "1.0.0", "1.0");
         let error = build(repo.path(), Some(&first)).unwrap_err();
         assert!(
             error

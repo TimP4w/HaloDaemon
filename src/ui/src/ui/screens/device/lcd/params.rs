@@ -166,7 +166,7 @@ pub(super) fn render_param(
 
         ParamKind::Image => {} // handled by the image grid
         // No LCD template declares threshold/color steps.
-        ParamKind::Steps => {}
+        ParamKind::Steps | ParamKind::Gradient => {}
     }
     false
 }

@@ -269,7 +269,7 @@ pub(crate) mod tests {
     #[test]
     fn package_hash_changes_for_name_and_contents() {
         let root = tempfile::tempdir().unwrap();
-        let dir = package(root.path(), "demo", "1.0.0", "3.0");
+        let dir = package(root.path(), "demo", "1.0.0", "1.0");
         let original = package_hash(&dir).unwrap();
         fs::write(dir.join("main.lua"), "return {x=1}\n").unwrap();
         let edited = package_hash(&dir).unwrap();
@@ -289,7 +289,7 @@ pub(crate) mod tests {
     #[test]
     fn archives_are_deterministic_and_round_trip() {
         let root = tempfile::tempdir().unwrap();
-        let dir = package(root.path(), "demo", "1.0.0", "3.0");
+        let dir = package(root.path(), "demo", "1.0.0", "1.0");
         let archive = write_archive(&dir).unwrap();
         assert_eq!(archive, write_archive(&dir).unwrap());
 
@@ -301,7 +301,7 @@ pub(crate) mod tests {
     #[test]
     fn extraction_refuses_an_existing_target() {
         let root = tempfile::tempdir().unwrap();
-        let dir = package(root.path(), "demo", "1.0.0", "3.0");
+        let dir = package(root.path(), "demo", "1.0.0", "1.0");
         let archive = write_archive(&dir).unwrap();
         assert!(extract_archive(&archive, &dir).is_err());
     }
@@ -361,7 +361,7 @@ pub(crate) mod tests {
     #[test]
     fn an_archive_over_the_byte_cap_is_refused() {
         let root = tempfile::tempdir().unwrap();
-        let dir = package(root.path(), "demo", "1.0.0", "3.0");
+        let dir = package(root.path(), "demo", "1.0.0", "1.0");
         let error = write_archive_within(&dir, 16).unwrap_err();
         assert!(error.to_string().contains("exceeds 16 bytes"), "{error}");
         assert!(write_archive_within(&dir, MAX_ARCHIVE_BYTES).is_ok());
@@ -371,7 +371,7 @@ pub(crate) mod tests {
     #[test]
     fn a_package_directory_with_a_symlink_is_refused() {
         let root = tempfile::tempdir().unwrap();
-        let dir = package(root.path(), "demo", "1.0.0", "3.0");
+        let dir = package(root.path(), "demo", "1.0.0", "1.0");
         assert!(reject_symlinks(&dir).is_ok());
         std::os::unix::fs::symlink(dir.join("plugin.yaml"), dir.join("alias.yaml")).unwrap();
         assert!(reject_symlinks(&dir).is_err());
@@ -414,7 +414,7 @@ pub(crate) mod tests {
     #[test]
     fn discovery_requires_directory_to_match_id() {
         let root = tempfile::tempdir().unwrap();
-        package(root.path(), "demo", "1.0.0", "3.0");
+        package(root.path(), "demo", "1.0.0", "1.0");
         assert_eq!(discover_packages(root.path()).unwrap()[0].1.id, "demo");
         fs::rename(root.path().join("demo"), root.path().join("other")).unwrap();
         assert!(discover_packages(root.path()).is_err());

@@ -242,7 +242,7 @@ mod tests {
 
     #[test]
     fn a_catalog_only_package_is_recommended_with_its_repo() {
-        let entry = catalog_entry("acme_cooler", "3.0", vec![cooler_identity()]);
+        let entry = catalog_entry("acme_cooler", "1.0", vec![cooler_identity()]);
         let found = super::recommendations(
             &candidates(&[], &|_| false, [("official", &entry)]),
             &[hid_entry(0x1e71, 0x2007)],
@@ -258,7 +258,7 @@ mod tests {
     #[test]
     fn an_installed_or_incompatible_package_is_not_recommended_from_the_catalog() {
         let installed = manifest("acme_cooler", COOLER);
-        let entry = catalog_entry("acme_cooler", "3.0", vec![cooler_identity()]);
+        let entry = catalog_entry("acme_cooler", "1.0", vec![cooler_identity()]);
         let future = catalog_entry("future_cooler", "9.0", vec![cooler_identity()]);
         let listed = candidates(
             std::slice::from_ref(&installed),
@@ -286,7 +286,7 @@ mod tests {
         std::fs::create_dir_all(&dir).unwrap();
         std::fs::write(
             dir.join("plugin.yaml"),
-            format!("id: {id}\nversion: 1.0.0\napi: \"3.0\"\n{yaml_extra}"),
+            format!("id: {id}\nversion: 1.0.0\napi: \"1.0\"\n{yaml_extra}"),
         )
         .unwrap();
         std::fs::write(dir.join("main.lua"), "return {}").unwrap();

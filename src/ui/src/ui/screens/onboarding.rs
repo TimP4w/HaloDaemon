@@ -749,7 +749,7 @@ mod tests {
                     id: (*id).parse().unwrap(),
                     name: id.to_uppercase(),
                     version: "1.0.0".into(),
-                    api: "3.0".into(),
+                    api: "1.0".into(),
                     compatible: true,
                     uses: Default::default(),
                 })
@@ -806,7 +806,7 @@ mod tests {
             id: "fan".parse().unwrap(),
             name: "Fan".into(),
             version: "1.0.0".into(),
-            api: "3.0".into(),
+            api: "1.0".into(),
             compatible: true,
             uses: Default::default(),
         });

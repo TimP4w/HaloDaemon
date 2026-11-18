@@ -148,6 +148,7 @@ pub trait Device: Send + Sync {
             write_rate: None,
             control_layout: self.control_layout(),
             integration_id: self.integration_id(),
+            parent_id: None,
             conflict: None,
         }
     }

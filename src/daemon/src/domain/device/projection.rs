@@ -212,8 +212,21 @@ impl AppState {
             .zip(all_conflicts)
             .map(|(entry, conflict)| (entry.id.clone(), conflict))
             .collect();
+        let parents: HashMap<DeviceId, DeviceId> = self
+            .device_registry
+            .children
+            .lock()
+            .await
+            .iter()
+            .flat_map(|(parent, children)| {
+                children
+                    .iter()
+                    .map(move |child| (child.clone(), parent.clone()))
+            })
+            .collect();
         for wire in &mut devices {
             wire.conflict = conflicts_by_id.get(wire.id.as_str()).cloned().flatten();
+            wire.parent_id = parents.get(&wire.id).cloned();
         }
 
         DevicesSnapshot {
@@ -243,6 +256,33 @@ mod tests {
     use crate::application::state::AppState;
     use crate::config::Config;
     use crate::test_support::{app_with, MockDevice};
+
+    #[tokio::test]
+    async fn snapshot_links_registered_children_to_their_parent() {
+        let app = Arc::new(AppState::new(Config::default()));
+        app.device_registry.write().await.extend([
+            Arc::new(MockDevice::new("root")) as Arc<dyn Device>,
+            Arc::new(MockDevice::new("explicit_child")) as Arc<dyn Device>,
+            Arc::new(MockDevice::new("loose")) as Arc<dyn Device>,
+        ]);
+        app.device_registry.children.lock().await.insert(
+            "root".parse().unwrap(),
+            ["explicit_child".parse().unwrap()].into_iter().collect(),
+        );
+        let snapshot = app.snapshot_devices(&Config::default()).await;
+        let parent = |id: &str| {
+            snapshot
+                .devices
+                .iter()
+                .find(|d| d.id.as_str() == id)
+                .unwrap()
+                .parent_id
+                .clone()
+        };
+        assert_eq!(parent("explicit_child"), Some("root".parse().unwrap()));
+        assert_eq!(parent("root"), None);
+        assert_eq!(parent("loose"), None);
+    }
 
     #[tokio::test]
     async fn snapshot_marks_matching_serials_as_a_confirmed_conflict() {

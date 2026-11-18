@@ -607,7 +607,7 @@ mod tests {
         std::fs::write(
             dir.join("plugin.yaml"),
             format!(
-                "id: {id}\nversion: 1.0.0\napi: \"3.0\"\ntype: integration\ntransports:\n  tcp:\n    host_key: host\n    port_key: port\nconfig:\n  fields:\n    - key: host\n      label: Host\n      kind: host\n    - key: port\n      label: Port\n      kind: port\n"
+                "id: {id}\nversion: 1.0.0\napi: \"1.0\"\ntype: integration\ntransports:\n  tcp:\n    host_key: host\n    port_key: port\nconfig:\n  fields:\n    - key: host\n      label: Host\n      kind: host\n    - key: port\n      label: Port\n      kind: port\n"
             ),
         )
         .unwrap();

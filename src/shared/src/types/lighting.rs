@@ -258,6 +258,7 @@ pub enum ParamKind {
     Sensor,
     /// Value is an `EffectParamValue::Steps`.
     Steps,
+    Gradient,
     /// Value is an `EffectParamValue::Str` filename relative to the LCD images dir.
     Image,
 }

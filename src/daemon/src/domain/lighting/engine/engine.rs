@@ -1758,7 +1758,7 @@ mod tests {
         std::fs::create_dir_all(&plugin_dir).unwrap();
         std::fs::write(
             plugin_dir.join("plugin.yaml"),
-            "id: engine_sensor_fx\nversion: 1.0.0\napi: \"3.0\"\ntype: effect\nconsumes: [host.sensors.*]\neffects:\n  - kind: direct\n    id: probe\n    name: Probe\n",
+            "id: engine_sensor_fx\nversion: 1.0.0\napi: \"1.0\"\ntype: effect\nconsumes: [host.sensors.*]\neffects:\n  - kind: direct\n    id: probe\n    name: Probe\n",
         )
         .unwrap();
         std::fs::write(
@@ -2280,7 +2280,7 @@ mod tests {
         std::fs::create_dir_all(&plugin_dir).unwrap();
         std::fs::write(
             plugin_dir.join("plugin.yaml"),
-            "id: engine_test_fx\nversion: 1.0.0\napi: \"3.0\"\ntype: effect\neffects:\n  - kind: pixmap\n    id: solid\n    name: Solid\n  - kind: direct\n    id: ramp\n    name: Ramp\n",
+            "id: engine_test_fx\nversion: 1.0.0\napi: \"1.0\"\ntype: effect\neffects:\n  - kind: pixmap\n    id: solid\n    name: Solid\n  - kind: direct\n    id: ramp\n    name: Ramp\n",
         )
         .unwrap();
         std::fs::write(

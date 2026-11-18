@@ -4,7 +4,9 @@
 use std::collections::HashMap;
 
 use egui::{Pos2, Rect, Sense, Stroke, Vec2};
-use halod_shared::types::{ColorStep, EffectParamDescriptor, EffectParamValue, RgbColor};
+use halod_shared::types::{
+    ColorStep, EffectParamDescriptor, EffectParamValue, ParamKind, RgbColor,
+};
 
 use super::button::{button, ButtonKind};
 use super::color_picker::rgb_to_color32;
@@ -95,6 +97,49 @@ fn bands(steps: &[ColorStep], domain: (f64, f64)) -> Vec<(f32, f32, RgbColor)> {
         .collect()
 }
 
+#[derive(Debug, Clone, Copy, PartialEq, Eq)]
+pub enum StopFill {
+    Bands,
+    Blend,
+}
+
+impl StopFill {
+    pub fn of(kind: &ParamKind) -> Self {
+        match kind {
+            ParamKind::Gradient => Self::Blend,
+            _ => Self::Bands,
+        }
+    }
+}
+
+fn end_caps(steps: &[ColorStep], domain: (f64, f64)) -> Vec<(f32, f32, RgbColor)> {
+    match (steps.first(), steps.last()) {
+        (Some(first), Some(last)) => vec![
+            (0.0, value_to_t(first.value, domain), first.color),
+            (value_to_t(last.value, domain), 1.0, last.color),
+        ],
+        _ => Vec::new(),
+    }
+}
+
+fn paint_blend(painter: &egui::Painter, steps: &[ColorStep], bar: Rect, x_at: impl Fn(f64) -> f32) {
+    let mut mesh = egui::Mesh::default();
+    for pair in steps.windows(2) {
+        let base = mesh.vertices.len() as u32;
+        for (step, y) in [
+            (pair[0], bar.top()),
+            (pair[1], bar.top()),
+            (pair[1], bar.bottom()),
+            (pair[0], bar.bottom()),
+        ] {
+            mesh.colored_vertex(Pos2::new(x_at(step.value), y), rgb_to_color32(step.color));
+        }
+        mesh.add_triangle(base, base + 1, base + 2);
+        mesh.add_triangle(base, base + 2, base + 3);
+    }
+    painter.add(egui::Shape::mesh(mesh));
+}
+
 /// `v` rounded and kept strictly between step `i`'s neighbours, so dragging
 /// never reorders the thresholds.
 fn clamp_stop(steps: &[ColorStep], i: usize, v: f64) -> f64 {
@@ -111,7 +156,12 @@ fn clamp_stop(steps: &[ColorStep], i: usize, v: f64) -> f64 {
 /// a banded bar with one draggable marker per threshold, add/remove for the
 /// selected stop, and its colour and exact value below. Returns `true` when an
 /// edit should apply.
-pub fn steps_editor(ui: &mut egui::Ui, label: &str, steps: &mut Vec<ColorStep>) -> bool {
+pub fn steps_editor(
+    ui: &mut egui::Ui,
+    label: &str,
+    steps: &mut Vec<ColorStep>,
+    fill: StopFill,
+) -> bool {
     let sel_id = ui.make_persistent_id(("steps_sel", label));
     let mut sel: usize = ui.data(|d| d.get_temp(sel_id)).unwrap_or(0);
     sel = sel.min(steps.len().saturating_sub(1));
@@ -137,7 +187,11 @@ pub fn steps_editor(ui: &mut egui::Ui, label: &str, steps: &mut Vec<ColorStep>) 
     let p = ui.painter();
     p.rect_filled(bar, theme::RADIUS_SM, theme::BORDER);
     let x_at = |t: f32| inner.left() + t * inner.width();
-    for (from, to, c) in bands(steps, domain) {
+    let fills = match fill {
+        StopFill::Bands => bands(steps, domain),
+        StopFill::Blend => end_caps(steps, domain),
+    };
+    for (from, to, c) in fills {
         let left = if from <= 0.0 { bar.left() } else { x_at(from) };
         let right = if to >= 1.0 { bar.right() } else { x_at(to) };
         let band = Rect::from_x_y_ranges(left..=right, bar.y_range());
@@ -156,6 +210,9 @@ pub fn steps_editor(ui: &mut egui::Ui, label: &str, steps: &mut Vec<ColorStep>) 
             se: if to >= 1.0 { theme::RADIUS_SM as u8 } else { 0 },
         };
         p.rect_filled(band, corners, rgb_to_color32(c));
+    }
+    if fill == StopFill::Blend {
+        paint_blend(p, steps, bar, |v| x_at(value_to_t(v, domain)));
     }
 
     for i in 0..steps.len() {
@@ -185,7 +242,7 @@ pub fn steps_editor(ui: &mut egui::Ui, label: &str, steps: &mut Vec<ColorStep>) 
             ui.ctx().set_cursor_icon(egui::CursorIcon::Grab);
         }
         let p = ui.painter();
-        if i > 0 {
+        if i > 0 && fill == StopFill::Bands {
             p.line_segment(
                 [Pos2::new(x, bar.top()), Pos2::new(x, bar.bottom())],
                 Stroke::new(1.0, theme::CARD_BG),
@@ -282,6 +339,18 @@ mod tests {
         assert_eq!(next_step(&steps).value, 90.0);
     }
 
+    #[test]
+    fn only_gradient_params_blend() {
+        assert_eq!(StopFill::of(&ParamKind::Gradient), StopFill::Blend);
+        assert_eq!(StopFill::of(&ParamKind::Steps), StopFill::Bands);
+        assert_eq!(StopFill::of(&ParamKind::Color), StopFill::Bands);
+    }
+
+    #[test]
+    fn end_caps_are_empty_without_stops() {
+        assert!(end_caps(&[], (0.0, 100.0)).is_empty());
+    }
+
     fn arb_steps() -> impl proptest::strategy::Strategy<Value = Vec<ColorStep>> {
         proptest::collection::btree_set(-200i32..400, 1..6).prop_map(|vals| {
             vals.into_iter()
@@ -308,6 +377,20 @@ mod tests {
             for (from, to, _) in b {
                 prop_assert!(from <= to);
             }
+        }
+
+        #[test]
+        fn end_caps_meet_the_outer_stops_and_the_bar_edges(steps in arb_steps()) {
+            let domain = stop_domain(&steps);
+            let caps = end_caps(&steps, domain);
+            prop_assert_eq!(caps.len(), 2);
+            prop_assert_eq!(caps[0].0, 0.0);
+            prop_assert_eq!(caps[0].1, value_to_t(steps[0].value, domain));
+            prop_assert_eq!(caps[1].0, value_to_t(steps[steps.len() - 1].value, domain));
+            prop_assert_eq!(caps[1].1, 1.0);
+            prop_assert!(caps[0].1 <= caps[1].0);
+            prop_assert_eq!(caps[0].2, steps[0].color);
+            prop_assert_eq!(caps[1].2, steps[steps.len() - 1].color);
         }
 
         #[test]

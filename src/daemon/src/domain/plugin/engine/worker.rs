@@ -2085,7 +2085,7 @@ mod tests {
     #[tokio::test]
     async fn undeclared_transports_leave_their_globals_nil() {
         let source = tempfile::tempdir().unwrap();
-        let dir = crate::test_support::write_plugin_package(source.path(), "plain", "1.0.0", "3.0");
+        let dir = crate::test_support::write_plugin_package(source.path(), "plain", "1.0.0", "1.0");
         let manifest = crate::domain::plugin::parse_manifest_from_dir(&dir).unwrap();
         let granted = manifest.declarations.uses.permissions.clone();
         let config = HashMap::new();

@@ -179,7 +179,7 @@ mod tests {
         let _config = crate::test_support::tmp_config_dir();
         let source = tempfile::tempdir().unwrap();
         let package =
-            crate::test_support::write_plugin_package(source.path(), "demo", "1.0.0", "3.0");
+            crate::test_support::write_plugin_package(source.path(), "demo", "1.0.0", "1.0");
         let archive = halod_plugin_signing::package::write_archive(&package).unwrap();
         let declared =
             read_declarations(&std::fs::read(package.join("plugin.yaml")).unwrap()).unwrap();
@@ -194,13 +194,13 @@ mod tests {
             matches: declared.matches.clone(),
             uses: declared.uses.clone(),
         };
-        for mismatched in [entry("2.0.0", "3.0"), entry("1.0.0", "3.1")] {
+        for mismatched in [entry("2.0.0", "1.0"), entry("1.0.0", "1.1")] {
             let error = stage_bytes("official", &mismatched, &archive).unwrap_err();
             assert!(error
                 .to_string()
                 .contains("does not match its catalog entry"));
         }
-        let mut understated = entry("1.0.0", "3.0");
+        let mut understated = entry("1.0.0", "1.0");
         understated.uses = Default::default();
         let error = stage_bytes("official", &understated, &archive).unwrap_err();
         assert!(error
@@ -210,7 +210,7 @@ mod tests {
             .map(|entries| entries.count())
             .unwrap_or(0);
         assert_eq!(leftovers, 0);
-        assert!(stage_bytes("official", &entry("1.0.0", "3.0"), &archive)
+        assert!(stage_bytes("official", &entry("1.0.0", "1.0"), &archive)
             .unwrap()
             .join("plugin.yaml")
             .is_file());
@@ -272,7 +272,7 @@ mod tests {
             std::fs::write(dir.join("main.lua"), "return {}\n").unwrap();
             std::fs::write(
                 dir.join("plugin.yaml"),
-                format!("id: gen\nversion: 1.0.0\napi: '3.0'\n{yaml}"),
+                format!("id: gen\nversion: 1.0.0\napi: '1.0'\n{yaml}"),
             )
             .unwrap();
 

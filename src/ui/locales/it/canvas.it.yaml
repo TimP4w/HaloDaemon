@@ -26,6 +26,13 @@ canvas:
   led_count: "%{n} LED"
   assign_n: "Assegna %{n} zone"
   n_selected: "%{n} zone selezionate"
+  empty_title: Ancora niente sul canvas
+  empty_hint: "Posiziona le zone LED dei tuoi dispositivi sul canvas, poi aggiungi livelli effetti per illuminarle."
+  place_all: Posiziona tutti i dispositivi
+  choose_zones: Scegli le zone
+  place_zones_title: Posiziona zone
+  place_zones_sub: "Scegli quali zone compaiono sul canvas. Le nuove zone vengono disposte a griglia."
+  place_n: "Posiziona %{n} zone"
   roll_zone: Avvolgi zona
   unroll_zone: Svolgi zona
   effect_instances: Livelli effetti

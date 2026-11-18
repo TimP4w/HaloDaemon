@@ -28,13 +28,13 @@ mod tests {
             detail: "raw backend text".into(),
             context: Some(PluginIssueContext::ApiIncompatible {
                 required: "4.0".into(),
-                supported: "3.0".into(),
+                supported: "1.0".into(),
             }),
             timestamp_ms: 0,
         };
 
         let detail = plugin_issue_detail(&issue);
-        assert!(detail.contains("4.0") && detail.contains("3.0"));
+        assert!(detail.contains("4.0") && detail.contains("1.0"));
         assert!(!detail.contains("raw backend text"));
     }
 }

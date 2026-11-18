@@ -1078,12 +1078,13 @@ fn param_sliders(
                     changed = true;
                 }
             }
-            ParamKind::Steps => {
+            ParamKind::Steps | ParamKind::Gradient => {
                 let live = current_param_steps(rgb, kind, effect_id, &d.id)
                     .unwrap_or_else(|| widgets::steps_default(d));
                 let steps = st.lighting.param_steps.entry(key).or_insert(live);
                 ui.add_space(theme::SPACE_7);
-                changed |= widgets::steps_editor(ui, &d.label, steps);
+                let fill = widgets::StopFill::of(&d.kind);
+                changed |= widgets::steps_editor(ui, &d.label, steps, fill);
             }
             ParamKind::Sensor => {
                 let sensors = crate::ui::screens::lighting::sensor_options(ctx.state);
@@ -1335,7 +1336,7 @@ fn collect_effect_params(
                     });
                 EffectParamValue::Str(st.lighting.param_strs.get(&key).cloned().unwrap_or(live))
             }
-            ParamKind::Steps => {
+            ParamKind::Steps | ParamKind::Gradient => {
                 let key = format!("fx:{}:{effect_id}:{}", kind.tag(), d.id);
                 let live = current_param_steps(rgb, kind, effect_id, &d.id)
                     .unwrap_or_else(|| widgets::steps_default(d));
@@ -1572,6 +1573,7 @@ mod tests {
             led_colors: crate::ui::screens::device::empty_led_colors(),
             write_rate_history: None,
             plugin_assets: crate::ui::screens::device::empty_plugin_assets(),
+            sensor_history: crate::ui::screens::device::empty_sensor_history(),
         };
         let mut st = DeviceUi::new("dev1".parse().unwrap());
         st.lighting.paint_color = Some(violet);

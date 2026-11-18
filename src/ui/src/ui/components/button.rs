@@ -215,7 +215,7 @@ fn button_radius(h: f32) -> f32 {
 
 /// The rendered size of a flow-laid button: the requested `size`, widened when
 /// the label (measured in its own font) plus padding needs more room.
-fn fit_size(ui: &egui::Ui, label: &str, kind: ButtonKind, size: Vec2) -> Vec2 {
+pub fn fit_size(ui: &egui::Ui, label: &str, kind: ButtonKind, size: Vec2) -> Vec2 {
     fit_width(label_width(ui, label, kind, size.y), size)
 }
 

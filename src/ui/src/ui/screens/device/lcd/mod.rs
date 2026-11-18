@@ -510,6 +510,7 @@ mod tests {
                         led_colors: crate::ui::screens::device::empty_led_colors(),
                         write_rate_history: None,
                         plugin_assets: crate::ui::screens::device::empty_plugin_assets(),
+                        sensor_history: crate::ui::screens::device::empty_sensor_history(),
                     };
                     show(ui, &tab, st);
                 });
@@ -905,6 +906,7 @@ mod tests {
             led_colors: crate::ui::screens::device::empty_led_colors(),
             write_rate_history: None,
             plugin_assets: crate::ui::screens::device::empty_plugin_assets(),
+            sensor_history: crate::ui::screens::device::empty_sensor_history(),
         };
         super::select_image(&ctx, &mut st, &"lcd".parse().unwrap(), "bg.png", None);
         assert_eq!(st.lcd.preview_pending.as_deref(), Some("bg.png"));
@@ -938,6 +940,7 @@ mod tests {
             led_colors: crate::ui::screens::device::empty_led_colors(),
             write_rate_history: None,
             plugin_assets: crate::ui::screens::device::empty_plugin_assets(),
+            sensor_history: crate::ui::screens::device::empty_sensor_history(),
         };
         super::select_image(
             &ctx,

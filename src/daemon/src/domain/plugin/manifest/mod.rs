@@ -2779,7 +2779,7 @@ fn validate_effect_params(params: &[EffectParamDescriptor], owner: &str) -> Resu
                     bail!("parameter '{}' default text is invalid", param.id);
                 }
             }
-            (ParamKind::Steps, EffectParamValue::Steps(steps)) => {
+            (ParamKind::Steps | ParamKind::Gradient, EffectParamValue::Steps(steps)) => {
                 check_count("effect parameter steps", steps.len(), MAX_CONTROL_DEFS)?;
                 if steps.iter().any(|step| !step.value.is_finite()) {
                     bail!(
@@ -3401,7 +3401,7 @@ mod tests {
         std::fs::create_dir_all(&dir).unwrap();
         std::fs::write(
             dir.join("plugin.yaml"),
-            format!("id: {id}\nversion: 1.0.0\napi: \"3.0\"\n{yaml_extra}"),
+            format!("id: {id}\nversion: 1.0.0\napi: \"1.0\"\n{yaml_extra}"),
         )
         .unwrap();
         std::fs::write(dir.join("main.lua"), lua).unwrap();
@@ -3988,7 +3988,7 @@ mod tests {
         std::fs::create_dir_all(&dir).unwrap();
         std::fs::write(
             dir.join("plugin.yaml"),
-            "id: missing_compatibility\nversion: 1.0.0\napi: \"3.0\"\ncompatibility:\n  halod: '>=0.2.0'\n  plugin_api: 1\ntype: integration\n",
+            "id: missing_compatibility\nversion: 1.0.0\napi: \"1.0\"\ncompatibility:\n  halod: '>=0.2.0'\n  plugin_api: 1\ntype: integration\n",
         )
         .unwrap();
         std::fs::write(dir.join("main.lua"), "return { type = 'integration' }").unwrap();
@@ -4007,7 +4007,7 @@ mod tests {
         std::fs::create_dir_all(&dir).unwrap();
         std::fs::write(
             dir.join("plugin.yaml"),
-            "id: dirplug2\nversion: 1.0.0\napi: \"3.0\"\nentry: driver.lua\nlicense: GPL-3.0-or-later\ncapabilities: [lighting]\ndevices:\n  - vendor: Acme\n    model: K1\n    type: led_strip\n    match:\n      hid: { vid: 1, pid: 2 }\n",
+            "id: dirplug2\nversion: 1.0.0\napi: \"1.0\"\nentry: driver.lua\nlicense: GPL-3.0-or-later\ncapabilities: [lighting]\ndevices:\n  - vendor: Acme\n    model: K1\n    type: led_strip\n    match:\n      hid: { vid: 1, pid: 2 }\n",
         )
         .unwrap();
         std::fs::write(dir.join("driver.lua"), ENTRY_LUA).unwrap();
@@ -4398,7 +4398,7 @@ mod tests {
 
     #[test]
     fn plugin_meta_devices_round_trip_through_yaml() {
-        let yaml = "id: rt\nversion: 1.0.0\napi: \"3.0\"\ndevices:\n  - vendor: Acme\n    model: K1\n    type: led_strip\n    match:\n      hid: { vid: 1 }\n  - vendor: Acme\n    model: K2\n    type: led_strip\n    match:\n      hid: { vid: 2 }\n";
+        let yaml = "id: rt\nversion: 1.0.0\napi: \"1.0\"\ndevices:\n  - vendor: Acme\n    model: K1\n    type: led_strip\n    match:\n      hid: { vid: 1 }\n  - vendor: Acme\n    model: K2\n    type: led_strip\n    match:\n      hid: { vid: 2 }\n";
         let parsed: PluginMeta = serde_yaml::from_str(yaml).unwrap();
         assert_eq!(parsed.devices.len(), 2);
         assert_eq!(parsed.devices[0].vendor, "Acme");
@@ -4464,7 +4464,7 @@ mod tests {
         std::fs::create_dir_all(&dir).unwrap();
         std::fs::write(
             dir.join("plugin.yaml"),
-            "id: nested_match\nversion: 1.0.0\napi: \"3.0\"\nname: Nested Match\ncapabilities: [lighting]\ndevices:\n  - vendor: Acme\n    model: K1\n    type: mouse\n    match:\n      hid:\n        vid: 0x1234\n        pid: 0x5678\n",
+            "id: nested_match\nversion: 1.0.0\napi: \"1.0\"\nname: Nested Match\ncapabilities: [lighting]\ndevices:\n  - vendor: Acme\n    model: K1\n    type: mouse\n    match:\n      hid:\n        vid: 0x1234\n        pid: 0x5678\n",
         )
         .unwrap();
         std::fs::write(dir.join("main.lua"), ENTRY_LUA).unwrap();
@@ -4484,7 +4484,7 @@ mod tests {
         std::fs::create_dir_all(&dir).unwrap();
         std::fs::write(
             dir.join("plugin.yaml"),
-            "id: nested_smbus\nversion: 1.0.0\napi: \"3.0\"\ncapabilities: [lighting]\ndevices:\n  - vendor: Acme\n    model: DRAM\n    type: ram\n    match:\n      smbus:\n        bus: chipset\n        addresses: [0x50]\n",
+            "id: nested_smbus\nversion: 1.0.0\napi: \"1.0\"\ncapabilities: [lighting]\ndevices:\n  - vendor: Acme\n    model: DRAM\n    type: ram\n    match:\n      smbus:\n        bus: chipset\n        addresses: [0x50]\n",
         )
         .unwrap();
         std::fs::write(dir.join("main.lua"), ENTRY_LUA).unwrap();
@@ -4503,7 +4503,7 @@ mod tests {
         std::fs::create_dir_all(&dir).unwrap();
         std::fs::write(
             dir.join("plugin.yaml"),
-            "id: nested_usb\nversion: 1.0.0\napi: \"3.0\"\ncapabilities: [controls]\ndevices:\n  - vendor: Acme\n    model: Panel\n    type: monitor\n    match:\n      usb: { vid: 0x1234, pid: 0x5678, interface: 0 }\ntransports:\n  usb:\n    devices:\n      - id: primary\n        interface: 0\n        control: { max_transfer_size: 64, max_timeout_ms: 1000 }\n",
+            "id: nested_usb\nversion: 1.0.0\napi: \"1.0\"\ncapabilities: [controls]\ndevices:\n  - vendor: Acme\n    model: Panel\n    type: monitor\n    match:\n      usb: { vid: 0x1234, pid: 0x5678, interface: 0 }\ntransports:\n  usb:\n    devices:\n      - id: primary\n        interface: 0\n        control: { max_transfer_size: 64, max_timeout_ms: 1000 }\n",
         )
         .unwrap();
         std::fs::write(dir.join("main.lua"), ENTRY_LUA).unwrap();
@@ -4641,7 +4641,7 @@ mod tests {
     #[test]
     fn widget_name_uses_plugin_catalog_with_fallbacks() {
         let meta: PluginMeta = serde_yaml::from_str(
-            "id: demo\nversion: 1.0.0\napi: \"3.0\"\ntype: lcd\ntranslations:\n  it:\n    widgets.date.name: Data\nwidgets:\n  - id: date\n    name: Date\n    name_key: widgets.date.name\n    icon: date.svg\n",
+            "id: demo\nversion: 1.0.0\napi: \"1.0\"\ntype: lcd\ntranslations:\n  it:\n    widgets.date.name: Data\nwidgets:\n  - id: date\n    name: Date\n    name_key: widgets.date.name\n    icon: date.svg\n",
         )
         .unwrap();
         let descriptor = meta.widgets[0].descriptor(&"demo".parse().unwrap(), &meta.translations);
@@ -4776,5 +4776,23 @@ mod tests {
         assert!(build_manifest_from_dir(&high).is_err());
         let ok = write_plugin_dir(tmp.path(), "poll_ok", "poll_interval_ms: 500\n", ENTRY_LUA);
         assert!(build_manifest_from_dir(&ok).is_ok());
+    }
+
+    #[test]
+    fn gradient_params_take_a_stop_list_default() {
+        let param = |default: &str| -> Vec<EffectParamDescriptor> {
+            serde_yaml::from_str(&format!(
+                "- id: stops\n  label: Stops\n  kind:\n    kind: gradient\n  default: {default}\n"
+            ))
+            .unwrap()
+        };
+        let stops = "[{value: 20, color: {r: 0, g: 128, b: 255}}, {value: 90, color: {r: 255, g: 0, b: 0}}]";
+        assert!(validate_effect_params(&param(stops), "effect 'demo'").is_ok());
+        assert!(validate_effect_params(&param("{r: 1, g: 2, b: 3}"), "effect 'demo'").is_err());
+        assert!(validate_effect_params(
+            &param("[{value: .nan, color: {r: 0, g: 0, b: 0}}]"),
+            "effect 'demo'"
+        )
+        .is_err());
     }
 }

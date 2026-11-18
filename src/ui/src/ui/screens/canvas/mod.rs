@@ -179,6 +179,7 @@ pub struct CanvasUi {
     pub(crate) zones_modal: Option<String>,
     /// The zones modal's staged selection, applied on confirm.
     zones_draft: Option<HashSet<(DeviceId, String)>>,
+    place_modal: bool,
     /// Whether the "new instance" picker modal is open.
     new_instance_modal: bool,
     canvas_size: (u32, u32),
@@ -219,6 +220,7 @@ impl Default for CanvasUi {
             rename_just_started: false,
             zones_modal: None,
             zones_draft: None,
+            place_modal: false,
             new_instance_modal: false,
             canvas_size: (0, 0),
             color_slot: 0,
@@ -366,7 +368,7 @@ pub(crate) fn body(
             right_panel(ui, state, canvas_ui, cmd, time, designer_ui, page);
         });
 
-    if canvas_ui.zones_modal.is_some() {
+    if canvas_ui.zones_modal.is_some() || canvas_ui.place_modal {
         zones_assign_modal(&ui.ctx().clone(), state, canvas_ui, cmd);
     }
     if canvas_ui.new_instance_modal {

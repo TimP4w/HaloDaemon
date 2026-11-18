@@ -17,6 +17,7 @@ pub enum TabKind {
     Controls,
     Onboard,
     Pairing,
+    Sensors,
     Info,
 }
 
@@ -93,6 +94,9 @@ pub fn tabs_for(dev: &WireDevice) -> Vec<Tab> {
     if has(dev, |c| matches!(c, DeviceCapability::Pairing(_))) {
         push(TabKind::Pairing);
     }
+    if has(dev, |c| matches!(c, DeviceCapability::Sensors(_))) {
+        push(TabKind::Sensors);
+    }
     push(TabKind::Info);
     tabs
 }
@@ -113,6 +117,7 @@ pub fn tab_label(kind: TabKind, dev: &WireDevice) -> std::borrow::Cow<'static, s
         TabKind::Controls => t!("devtabs.tab_controls"),
         TabKind::Onboard => t!("devtabs.tab_onboard"),
         TabKind::Pairing => t!("devtabs.tab_pairing"),
+        TabKind::Sensors => t!("devtabs.tab_sensors"),
         TabKind::Info => t!("devtabs.tab_info"),
     }
 }
@@ -233,6 +238,24 @@ mod tests {
             kinds(&dev(DeviceType::Mouse, vec![batt])),
             vec![TabKind::Info]
         );
+    }
+
+    #[test]
+    fn sensors_tab_sits_just_before_info() {
+        let d = dev(
+            DeviceType::Other,
+            vec![rgb_cap(), DeviceCapability::Sensors(vec![])],
+        );
+        assert_eq!(
+            kinds(&d),
+            vec![TabKind::Lighting, TabKind::Sensors, TabKind::Info]
+        );
+        assert_eq!(tab_label(TabKind::Sensors, &d), "Sensors");
+    }
+
+    #[test]
+    fn no_sensors_capability_means_no_sensors_tab() {
+        assert!(!kinds(&dev(DeviceType::Mouse, vec![rgb_cap()])).contains(&TabKind::Sensors));
     }
 
     #[test]

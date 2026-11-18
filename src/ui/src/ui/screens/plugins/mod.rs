@@ -279,6 +279,9 @@ impl PluginsUi {
             self.enable_prompt.request(&p.id);
             return;
         }
+        if p.integration_setup.is_some() {
+            self.integration.cancel_setup(cmd, &p.id);
+        }
         ipc::send(
             cmd,
             DaemonCommand::SetPluginEnabled {
@@ -1218,10 +1221,27 @@ fn detail_meta(p: &PluginInfo) -> String {
     if !p.license.is_empty() {
         parts.push(p.license.clone());
     }
+    parts.push(platforms_label(&p.platforms));
     if repo::trust_badges(p.provenance).is_empty() {
         parts.push(provenance_label(p.provenance).into_owned());
     }
     parts.join(" · ")
+}
+
+fn platforms_label(platforms: &[String]) -> String {
+    if platforms.is_empty() {
+        return t!("plugins.all_platforms").into_owned();
+    }
+    platforms
+        .iter()
+        .map(|platform| match platform.as_str() {
+            "linux" => "Linux",
+            "windows" => "Windows",
+            "macos" => "macOS",
+            other => other,
+        })
+        .collect::<Vec<_>>()
+        .join(", ")
 }
 
 fn plugin_type_label(kind: halod_shared::types::PluginKind) -> std::borrow::Cow<'static, str> {
@@ -1388,7 +1408,7 @@ mod tests {
             id: id.parse().unwrap(),
             name: format!("{id} name"),
             version: version.into(),
-            api: "3.0".into(),
+            api: "1.0".into(),
             compatible,
             uses: Default::default(),
         }

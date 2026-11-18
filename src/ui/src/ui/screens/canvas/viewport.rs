@@ -292,6 +292,10 @@ pub(super) fn canvas_view(
 
     mode_toggle(ui, outer, canvas_ui);
 
+    if state.lighting.canvas.placed_zones.is_empty() {
+        empty_canvas_card(ui, state, canvas_ui, cmd, outer);
+    }
+
     if let Some(mq) = &canvas_ui.marquee {
         let r = Rect::from_two_pos(
             norm_to_screen(mq.start_norm, canvas_rect),
@@ -336,6 +340,121 @@ fn mode_toggle(ui: &mut egui::Ui, outer: Rect, canvas_ui: &mut CanvasUi) {
     if widgets::segmented_styled(&mut child, &refs, &mut selected, false, raised) {
         canvas_ui.led_mode = modes[selected];
     }
+}
+
+const EMPTY_CARD_W: f32 = 420.0;
+const EMPTY_CARD_PAD: f32 = 28.0;
+const EMPTY_ICON: f32 = 40.0;
+const EMPTY_BUTTON: Vec2 = Vec2::new(0.0, 36.0);
+
+fn empty_canvas_card(
+    ui: &mut egui::Ui,
+    state: &TopicStore,
+    canvas_ui: &mut CanvasUi,
+    cmd: &CommandTx,
+    outer: Rect,
+) {
+    let zones = super::modals::all_zone_keys(state);
+    let inner_w =
+        (EMPTY_CARD_W.min(outer.width() - 2.0 * theme::SPACE_10) - 2.0 * EMPTY_CARD_PAD).max(0.0);
+    let (mut place_all, mut choose) = (false, false);
+    let shown = egui::Area::new(egui::Id::unique("canvas_empty_card"))
+        .order(egui::Order::Middle)
+        .fixed_pos(outer.center())
+        .pivot(Align2::CENTER_CENTER)
+        .constrain_to(outer)
+        .show(ui.ctx(), |ui| {
+            egui::Frame::new()
+                .fill(a(theme::CARD_BG, 0.92))
+                .corner_radius(theme::RADIUS_LG)
+                .inner_margin(EMPTY_CARD_PAD)
+                .show(ui, |ui| {
+                    ui.set_width(inner_w);
+                    ui.vertical_centered(|ui| {
+                        ui.spacing_mut().item_spacing.y = theme::SPACE_6;
+                        let (icon, _) =
+                            ui.allocate_exact_size(Vec2::splat(EMPTY_ICON), Sense::hover());
+                        paint_place_icon(ui.painter(), icon);
+                        ui.label(
+                            egui::RichText::new(t!("canvas.empty_title"))
+                                .font(theme::heading())
+                                .color(theme::TEXT),
+                        );
+                        ui.add(
+                            egui::Label::new(
+                                egui::RichText::new(t!("canvas.empty_hint"))
+                                    .font(theme::body_lg())
+                                    .color(theme::TEXT_DIM),
+                            )
+                            .wrap(),
+                        );
+                        ui.add_space(theme::SPACE_2);
+                        let primary = t!("canvas.place_all");
+                        let secondary = t!("canvas.choose_zones");
+                        let row_w = widgets::fit_size(
+                            ui,
+                            &primary,
+                            widgets::ButtonKind::Primary,
+                            EMPTY_BUTTON,
+                        )
+                        .x + widgets::fit_size(
+                            ui,
+                            &secondary,
+                            widgets::ButtonKind::Secondary,
+                            EMPTY_BUTTON,
+                        )
+                        .x + theme::SPACE_4;
+                        ui.allocate_ui_with_layout(
+                            Vec2::new(row_w, EMPTY_BUTTON.y),
+                            egui::Layout::left_to_right(egui::Align::Center),
+                            |ui| {
+                                ui.spacing_mut().item_spacing.x = theme::SPACE_4;
+                                ui.add_enabled_ui(!zones.is_empty(), |ui| {
+                                    place_all = widgets::button(
+                                        ui,
+                                        &primary,
+                                        widgets::ButtonKind::Primary,
+                                        EMPTY_BUTTON,
+                                    )
+                                    .clicked();
+                                    choose = widgets::button(
+                                        ui,
+                                        &secondary,
+                                        widgets::ButtonKind::Secondary,
+                                        EMPTY_BUTTON,
+                                    )
+                                    .clicked();
+                                });
+                            },
+                        );
+                    });
+                });
+        });
+    ui.ctx()
+        .layer_painter(shown.response.layer_id)
+        .extend(egui::Shape::dashed_line(
+            &widgets::rounded_outline(shown.response.rect.shrink(0.5), theme::RADIUS_LG),
+            Stroke::new(1.0, theme::BORDER_STRONG),
+            4.0,
+            3.0,
+        ));
+    if place_all {
+        for c in super::modals::placement_commands(state, &zones) {
+            crate::runtime::ipc::send(cmd, c);
+        }
+    }
+    if choose {
+        canvas_ui.place_modal = true;
+    }
+}
+
+fn paint_place_icon(p: &egui::Painter, rect: Rect) {
+    let stroke = Stroke::new(2.0, theme::CYAN);
+    let frame = Rect::from_center_size(rect.center(), Vec2::new(30.0, 22.0));
+    p.rect_stroke(frame, 3.0, stroke, egui::StrokeKind::Middle);
+    let c = rect.center();
+    p.line_segment([c - Vec2::new(0.0, 5.0), c + Vec2::new(0.0, 5.0)], stroke);
+    p.line_segment([c - Vec2::new(5.0, 0.0), c + Vec2::new(5.0, 0.0)], stroke);
 }
 
 // ── Zone drawing ──────────────────────────────────────────────────────────────

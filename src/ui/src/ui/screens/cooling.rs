@@ -544,6 +544,68 @@ pub fn temp_sensors(state: &TopicStore) -> Vec<(String, Sensor)> {
         .collect()
 }
 
+pub fn sensor_select_text(sensors: &[(String, Sensor)], current: Option<&str>) -> String {
+    match current {
+        None => t!("cooling.no_sensor").to_string(),
+        Some(id) => sensors
+            .iter()
+            .find(|(_, s)| s.id == id)
+            .map(|(d, s)| format!("{d} · {}", s.name))
+            .unwrap_or_else(|| id.to_owned()),
+    }
+}
+
+pub fn sensor_select_rows(
+    sensors: &[(String, Sensor)],
+    current: Option<&str>,
+) -> Vec<widgets::SelectRow> {
+    use widgets::{SelectItem, SelectRow};
+    let mut rows = Vec::new();
+    if let Some(id) = current.filter(|id| !sensors.iter().any(|(_, s)| s.id == *id)) {
+        rows.push(SelectRow::Item(SelectItem {
+            id: id.to_owned(),
+            label: id.to_owned(),
+            meta: t!("cooling.sensor_unavailable").to_string(),
+            selected: true,
+            enabled: false,
+        }));
+        rows.push(SelectRow::Divider);
+    }
+    let mut groups: Vec<&str> = Vec::new();
+    for (device, _) in sensors {
+        if !groups.contains(&device.as_str()) {
+            groups.push(device);
+        }
+    }
+    for group in groups {
+        rows.push(SelectRow::Header(group.to_owned()));
+        rows.extend(sensors.iter().filter(|(d, _)| d == group).map(|(_, s)| {
+            SelectRow::Item(SelectItem {
+                id: s.id.clone(),
+                label: s.name.clone(),
+                meta: format!("{:.0} °C", s.value),
+                selected: current == Some(s.id.as_str()),
+                enabled: true,
+            })
+        }));
+    }
+    if !sensors.is_empty() {
+        rows.push(SelectRow::Divider);
+    }
+    rows.push(SelectRow::Item(SelectItem {
+        id: String::new(),
+        label: t!("cooling.no_sensor").to_string(),
+        meta: String::new(),
+        selected: current.is_none(),
+        enabled: true,
+    }));
+    rows
+}
+
+pub fn picked_sensor(id: String) -> Option<String> {
+    (!id.is_empty()).then_some(id)
+}
+
 /// Default temp→duty curve, shared by both cooling pages.
 pub fn default_curve() -> Vec<[f32; 2]> {
     vec![[20.0, 20.0], [40.0, 35.0], [60.0, 60.0], [80.0, 100.0]]
@@ -706,5 +768,84 @@ mod tests {
         let generic = curve_status_text(&FanCurveStatus::WriteError("boom".into())).unwrap();
         assert!(denied.contains("udevadm"));
         assert_ne!(denied, generic);
+    }
+
+    fn temp(device: &str, id: &str, name: &str, value: f64) -> (String, Sensor) {
+        (
+            device.into(),
+            Sensor {
+                id: id.into(),
+                name: name.into(),
+                value,
+                unit: Default::default(),
+                sensor_type: SensorType::Temperature,
+            },
+        )
+    }
+
+    fn items(rows: &[widgets::SelectRow]) -> Vec<&widgets::SelectItem> {
+        rows.iter()
+            .filter_map(|r| match r {
+                widgets::SelectRow::Item(i) => Some(i),
+                _ => None,
+            })
+            .collect()
+    }
+
+    #[test]
+    fn sensor_rows_group_by_device_in_first_seen_order() {
+        use widgets::SelectRow::{Divider, Header};
+        let sensors = [
+            temp("Hub", "a", "Liquid", 34.4),
+            temp("Board", "b", "CPU", 46.0),
+            temp("Hub", "c", "Pump", 30.0),
+        ];
+        let rows = sensor_select_rows(&sensors, Some("b"));
+        let shape: Vec<String> = rows
+            .iter()
+            .map(|r| match r {
+                Header(h) => format!("#{h}"),
+                Divider => "-".into(),
+                widgets::SelectRow::Item(i) => i.id.clone(),
+            })
+            .collect();
+        assert_eq!(shape, ["#Hub", "a", "c", "#Board", "b", "-", ""]);
+        let selected: Vec<&str> = items(&rows)
+            .iter()
+            .filter(|i| i.selected)
+            .map(|i| i.id.as_str())
+            .collect();
+        assert_eq!(selected, ["b"]);
+        assert_eq!(items(&rows)[0].meta, "34 °C");
+        assert!(items(&rows).iter().all(|i| i.enabled));
+    }
+
+    #[test]
+    fn missing_bound_sensor_is_listed_selected_and_disabled() {
+        let sensors = [temp("Hub", "a", "Liquid", 34.0)];
+        let rows = sensor_select_rows(&sensors, Some("gone"));
+        let first = items(&rows)[0];
+        assert_eq!(first.id, "gone");
+        assert!(first.selected && !first.enabled);
+        assert_eq!(first.meta, t!("cooling.sensor_unavailable"));
+        assert_eq!(items(&rows).iter().filter(|i| i.selected).count(), 1);
+        assert_eq!(sensor_select_text(&sensors, Some("gone")), "gone");
+    }
+
+    #[test]
+    fn no_sensor_entry_is_selected_when_unbound_and_maps_to_none() {
+        let rows = sensor_select_rows(&[], None);
+        assert_eq!(rows.len(), 1);
+        let only = items(&rows)[0];
+        assert!(only.selected);
+        assert_eq!(picked_sensor(only.id.clone()), None);
+        assert_eq!(picked_sensor("a".into()), Some("a".into()));
+        assert_eq!(sensor_select_text(&[], None), t!("cooling.no_sensor"));
+    }
+
+    #[test]
+    fn sensor_text_names_device_and_sensor() {
+        let sensors = [temp("Hub", "a", "Liquid", 34.0)];
+        assert_eq!(sensor_select_text(&sensors, Some("a")), "Hub · Liquid");
     }
 }
