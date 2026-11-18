@@ -557,10 +557,8 @@ jobs:
           | \`$(basename "$RPM")\` | \`${RPM_HASH}\` |
           EOF
 
-      - name: Generate SHA256SUMS and detached signatures
+      - name: Generate and sign SHA256SUMS
         env:
-          GPG_PRIVATE_KEY: ${{ secrets.GPG_PRIVATE_KEY }}
-          GPG_PASSPHRASE: ${{ secrets.GPG_PASSPHRASE }}
           HALOD_PLUGIN_SIGNING_KEY_B64: ${{ secrets.RELEASE_SIGNING_KEY }}
           SIGNING_KEY_ID: halodaemon-official-2026
         run: |
@@ -580,17 +578,6 @@ jobs:
           "$signer" sign-release release/SHA256SUMS \
             --version "${{ needs.prepare.outputs.new_version }}" \
             --key-id "$SIGNING_KEY_ID"
-          if [ -n "${GPG_PRIVATE_KEY}" ]; then
-            echo "$GPG_PRIVATE_KEY" | gpg --batch --import
-            KEYID=$(gpg --list-secret-keys --with-colons | awk -F: '/^sec:/{print $5; exit}')
-            gpg --batch --yes --pinentry-mode loopback \
-              ${GPG_PASSPHRASE:+--passphrase "$GPG_PASSPHRASE"} \
-              --local-user "$KEYID" --detach-sign --armor \
-              --output release/SHA256SUMS.asc release/SHA256SUMS
-            echo "Wrote detached signature release/SHA256SUMS.asc"
-          else
-            echo "GPG_PRIVATE_KEY not set — skipping detached signature"
-          fi
 
       - name: Publish release
         uses: softprops/action-gh-release@718ea10b132b3b2eba29c1007bb80653f286566b #v3.0.1
@@ -598,9 +585,6 @@ jobs:
           tag_name: v${{ needs.prepare.outputs.new_version }}
           name: HaloDaemon ${{ needs.prepare.outputs.new_version }}
           body_path: release-notes.md
-          # SHA256SUMS.asc is only present when GPG_PRIVATE_KEY is configured;
-          # softprops/action-gh-release defaults to fail_on_unmatched_files: false,
-          # so its absence is a warning, not a failure.
           files: |
             artifacts/halod-setup-x64/halod-setup-x64.exe
             artifacts/halod-linux-x64/halod-linux-x64.tar.gz
@@ -612,7 +596,6 @@ jobs:
             udev/60-halod.rules
             release/SHA256SUMS
             release/SHA256SUMS.sig
-            release/SHA256SUMS.asc
 
       # Lands after the tag: a release commit cannot contain the hash of its
       # own artifact.
