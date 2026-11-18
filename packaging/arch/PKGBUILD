@@ -14,7 +14,7 @@ optdepends=('ffmpeg: LCD video playback'
             'i2c-tools: SMBus/DRAM + GPU RGB diagnostics')
 install="$pkgname.install"
 # The daemon source is pinned to its immutable release commit.
-source=("$pkgname-$pkgver::git+https://github.com/TimP4w/HaloDaemon.git#commit=761c45c79ec4ef552da60669c152fac8847a908e")
+source=("$pkgname-$pkgver::git+https://github.com/TimP4w/HaloDaemon.git#commit=ebda1f9950c9a21d689cc9d2e580a821fb2a2931")
 sha256sums=('SKIP')
 
 prepare() {
