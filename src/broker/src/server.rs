@@ -1,80 +1,76 @@
 // SPDX-License-Identifier: GPL-3.0-or-later
-//! Authenticated, capability-scoped broker RPC server.
+//! Identity-gated, capability-scoped broker RPC server.
 
 use std::collections::HashMap;
+use std::path::PathBuf;
+use std::sync::atomic::{AtomicUsize, Ordering};
 use std::sync::{mpsc, Mutex, MutexGuard, OnceLock};
 use std::time::{Duration, Instant};
 
-use anyhow::{anyhow, bail, Context, Result};
+use anyhow::{anyhow, bail, Result};
 use halod_hwaccess::pawnio::PawnioModule;
 use halod_hwaccess::proto::{
-    self, BrokerError, CapabilityScope, Request, Response, CAPABILITY_TTL_MS,
-    MAX_OPERATIONS_PER_CAPABILITY, MAX_OPERATIONS_PER_SECOND, MAX_SCOPE_ADDRESSES, PIPE_NAME,
+    self, BrokerError, CapabilityScope, Request, Response, MAX_OPERATIONS_PER_SECOND,
+    MAX_SCOPE_ADDRESSES, PIPE_NAME,
 };
 use halod_hwaccess::smbus::{self, SmBusSyncOps, SMBUS_BLOCK_MAX};
 use halod_hwaccess::winsec;
-use windows::Win32::Security::Cryptography::{BCryptGenRandom, BCRYPT_USE_SYSTEM_PREFERRED_RNG};
 
-use crate::clientauth::{self, Admission, ClientIdentity, Gate};
+use crate::clientauth::{self, Admission, Gate};
 use crate::pipe::{
     create_instance, disconnect_handle_value, wait_for_client, PipeSecurity, PipeStream,
 };
 
 const MAX_CLIENTS: usize = 32;
 const MAX_HANDLES_PER_KIND: usize = 64;
-const AUTHENTICATION_TIMEOUT: Duration = Duration::from_secs(5);
+const HELLO_TIMEOUT: Duration = Duration::from_secs(5);
 const CLIENT_IDLE_TIMEOUT: Duration = Duration::from_secs(60 * 60);
+const MAX_PENDING_REFUSALS: usize = 4;
+const REFUSAL_LINGER: Duration = Duration::from_secs(2);
 
-#[derive(Clone)]
-pub struct AuthConfig {
-    pub coordinator: ClientIdentity,
-    pub bootstrap_token: String,
+static PENDING_REFUSALS: AtomicUsize = AtomicUsize::new(0);
+
+#[derive(Clone, Debug, PartialEq, Eq)]
+pub struct BrokerConfig {
+    pub coordinators: Vec<String>,
+    /// Require clients to be `halod.exe` next to this broker (installed mode).
+    pub pin_client_image: bool,
 }
 
-pub fn auth_config_from_args(args: &[String]) -> Result<AuthConfig> {
-    fn value(args: &[String], name: &str) -> Result<String> {
-        let prefix = format!("--{name}=");
-        args.iter()
-            .find_map(|arg| arg.strip_prefix(&prefix))
-            .filter(|value| !value.is_empty())
-            .map(str::to_owned)
-            .ok_or_else(|| anyhow!("missing required broker argument --{name}"))
-    }
-
-    let session = value(args, "coordinator-session")?
-        .parse::<u32>()
-        .context("invalid --coordinator-session")?;
-    Ok(AuthConfig {
-        coordinator: ClientIdentity {
-            sid: value(args, "coordinator-sid")?,
-            session,
-        },
-        bootstrap_token: value(args, "bootstrap-token")?,
+/// Foreground (dev/UAC) mode: the coordinator is the SID on the command line
+/// the user just approved. No image pinning: a dev tree is user-writable.
+pub fn foreground_config_from_args(args: &[String]) -> Result<BrokerConfig> {
+    let sid = args
+        .iter()
+        .find_map(|arg| arg.strip_prefix("--coordinator-sid="))
+        .filter(|sid| !sid.is_empty())
+        .ok_or_else(|| anyhow!("missing required broker argument --coordinator-sid"))?;
+    Ok(BrokerConfig {
+        coordinators: vec![sid.to_owned()],
+        pin_client_image: false,
     })
 }
 
-static CONFIG: OnceLock<AuthConfig> = OnceLock::new();
+static CONFIG: OnceLock<BrokerConfig> = OnceLock::new();
 static GATE: Mutex<Gate> = Mutex::new(Gate::new());
 
-pub fn configure(config: AuthConfig) -> Result<()> {
-    winsec::validate_sid_string(&config.coordinator.sid)?;
-    if config.bootstrap_token.len() != 64
-        || !config
-            .bootstrap_token
-            .bytes()
-            .all(|b| b.is_ascii_hexdigit())
-    {
-        bail!("broker bootstrap token must be 32 random bytes encoded as hex");
-    }
+/// Coordinators are stored canonically: token SIDs never arrive as aliases.
+pub fn configure(mut config: BrokerConfig) -> Result<()> {
+    config.coordinators = config
+        .coordinators
+        .iter()
+        .map(|sid| winsec::canonical_sid(sid))
+        .collect::<Result<_>>()?;
+    winsec::coordinator_dacl_sddl(&config.coordinators)?;
     CONFIG
         .set(config)
-        .map_err(|_| anyhow!("broker authentication already configured"))
+        .map_err(|_| anyhow!("broker already configured"))
 }
 
-fn config() -> Result<&'static AuthConfig> {
+fn config() -> Result<&'static BrokerConfig> {
     CONFIG
         .get()
-        .ok_or_else(|| anyhow!("broker authentication was not configured"))
+        .ok_or_else(|| anyhow!("broker was not configured"))
 }
 
 fn gate() -> MutexGuard<'static, Gate> {
@@ -83,12 +79,13 @@ fn gate() -> MutexGuard<'static, Gate> {
 
 pub fn serve_forever() -> Result<()> {
     let config = config()?.clone();
-    let sec = PipeSecurity::from_sddl(&winsec::coordinator_dacl_sddl(&config.coordinator.sid)?)?;
-    log::info!(
-        "pipe secured to coordinator SID {} session {}",
-        config.coordinator.sid,
-        config.coordinator.session
-    );
+    let sec = PipeSecurity::from_sddl(&winsec::coordinator_dacl_sddl(&config.coordinators)?)?;
+    let expected_client: Option<PathBuf> = if config.pin_client_image {
+        Some(winsec::installed_sibling("halod.exe")?)
+    } else {
+        None
+    };
+    log::info!("pipe secured to coordinators {:?}", config.coordinators);
 
     // Retain every worker JoinHandle and reap completed threads before the next
     // accept. The active cap bounds this vector even while accept is blocked.
@@ -114,89 +111,115 @@ pub fn serve_forever() -> Result<()> {
             continue;
         }
 
-        let handle = match create_instance(PIPE_NAME, &sec) {
+        // Workers and refusals close their instance before releasing their
+        // count, so with neither active no instance of ours exists and any
+        // other owner of the name is a squatter.
+        let first = gate().active() == 0 && PENDING_REFUSALS.load(Ordering::SeqCst) == 0;
+        let handle = match create_instance(PIPE_NAME, &sec, first) {
             Ok(handle) => handle,
+            Err(e) if first => {
+                return Err(e.context(format!("{PIPE_NAME} is already owned by another process")))
+            }
             Err(e) => {
                 log::warn!("create pipe instance failed, retrying: {e}");
                 std::thread::sleep(Duration::from_millis(500));
                 continue;
             }
         };
-        let mut stream = PipeStream::new(handle);
+        let stream = PipeStream::new(handle);
         if let Err(e) = wait_for_client(handle) {
             log::warn!("wait_for_client failed: {e}");
-            drop(stream);
             continue;
         }
 
-        // Windows requires the server to consume data from a named-pipe client
-        // before ImpersonateNamedPipeClient can derive that client's token.
-        // Read exactly the mandatory first authentication frame here, then hand
-        // it to the admitted worker so it is processed only once.
-        match stream.wait_readable(AUTHENTICATION_TIMEOUT) {
-            Ok(true) => {}
-            Ok(false) => {
-                log::warn!("client did not authenticate within the timeout; refusing");
-                drop(stream);
-                continue;
-            }
-            Err(e) => {
-                log::debug!("authentication wait failed: {e}");
-                drop(stream);
-                continue;
-            }
-        }
-        let first_request: Request = match proto::read_frame(&mut stream) {
-            Ok(request @ Request::Authenticate { .. }) => request,
-            Ok(_) => {
-                log::warn!("first client frame was not Authenticate; refusing");
-                drop(stream);
-                continue;
-            }
-            Err(e) => {
-                log::debug!("could not read authentication frame: {e}");
-                drop(stream);
-                continue;
-            }
-        };
-
-        let identity = match clientauth::pipe_client_identity(handle) {
+        let identity = match clientauth::client_identity(handle) {
             Ok(id) => id,
             Err(e) => {
-                log::warn!("could not identify pipe client ({e}); refusing");
-                drop(stream);
+                refuse(stream, format!("could not identify pipe client: {e}"));
                 continue;
             }
         };
-        match clientauth::decide(&mut gate(), &identity, &config.coordinator, MAX_CLIENTS) {
+        let image = match &expected_client {
+            Some(expected) => match clientauth::client_image_matches(identity.pid, expected) {
+                Ok(image) => image,
+                Err(actual) => {
+                    refuse(
+                        stream,
+                        format!(
+                            "client pid {} image {} is not {}",
+                            identity.pid,
+                            actual.display(),
+                            expected.display()
+                        ),
+                    );
+                    continue;
+                }
+            },
+            None => winsec::process_image_path(identity.pid).unwrap_or_default(),
+        };
+        match clientauth::decide(
+            &mut gate(),
+            &identity.sid,
+            &config.coordinators,
+            MAX_CLIENTS,
+        ) {
             Admission::Ok => {
+                log::info!(
+                    "accepted coordinator {} session {} image {}",
+                    identity.sid,
+                    identity.session,
+                    image.display()
+                );
                 next_worker = next_worker.checked_add(1).unwrap_or(1);
                 let id = next_worker;
                 let done = done_tx.clone();
                 let worker = std::thread::Builder::new()
                     .name(format!("halod-broker-{id}"))
                     .spawn(move || {
-                        serve(stream, first_request);
+                        serve(stream);
                         clientauth::release(&mut gate());
                         let _ = done.send(id);
                     })?;
                 workers.insert(id, worker);
             }
-            Admission::WrongUser => {
-                log::warn!(
-                    "refusing client SID {} session {}: expected SID {} session {}",
-                    identity.sid,
-                    identity.session,
-                    config.coordinator.sid,
-                    config.coordinator.session
-                );
-                drop(stream);
-            }
-            Admission::TooMany => {
-                log::warn!("refusing client: {MAX_CLIENTS} connections already active");
-                drop(stream);
-            }
+            Admission::WrongUser => refuse(
+                stream,
+                format!(
+                    "client SID {} session {} is not a configured coordinator",
+                    identity.sid, identity.session
+                ),
+            ),
+            Admission::TooMany => refuse(
+                stream,
+                format!("{MAX_CLIENTS} broker connections already active"),
+            ),
         }
+    }
+}
+
+/// Tell a refused client why, so it fails fast instead of retrying. Closing
+/// the instance discards unread data, so it lingers until the client hangs up,
+/// bounded in time and in concurrent refusals; past the bound the reply is
+/// best-effort.
+fn refuse(mut stream: PipeStream, reason: String) {
+    log::warn!("refusing client: {reason}");
+    let reply = Response::Error(BrokerError::Failed(format!("broker refused: {reason}")));
+    if PENDING_REFUSALS.fetch_add(1, Ordering::SeqCst) >= MAX_PENDING_REFUSALS {
+        PENDING_REFUSALS.fetch_sub(1, Ordering::SeqCst);
+        let _ = proto::write_frame(&mut stream, &reply);
+        return;
+    }
+    let spawned = std::thread::Builder::new()
+        .name("halod-broker-refusal".into())
+        .spawn(move || {
+            if proto::write_frame(&mut stream, &reply).is_ok() {
+                stream.wait_closed(REFUSAL_LINGER);
+            }
+            drop(stream);
+            PENDING_REFUSALS.fetch_sub(1, Ordering::SeqCst);
+        });
+    if spawned.is_err() {
+        PENDING_REFUSALS.fetch_sub(1, Ordering::SeqCst);
     }
 }
 
@@ -215,22 +238,14 @@ pub fn wait_until_idle(grace: Duration) {
     }
 }
 
-struct Capability {
-    id: String,
-    scope: CapabilityScope,
-    expires: Instant,
-    remaining: u32,
-    window_started: Instant,
-    window_operations: u32,
-}
-
-#[derive(Default)]
 struct Conn {
     buses: HashMap<u32, Box<dyn SmBusSyncOps + Send>>,
     next_bus: u32,
     register_io: HashMap<u32, RegisterIoHandle>,
     next_pawnio: u32,
-    capability: Option<Capability>,
+    scope: CapabilityScope,
+    window_started: Instant,
+    window_operations: u32,
 }
 
 enum RegisterIoHandle {
@@ -258,77 +273,29 @@ fn handle_kind_allows(actual: RegisterIoKind, expected: RegisterIoKind) -> bool 
 }
 
 impl Conn {
-    fn authenticate(&mut self, bootstrap_token: &str, scope: CapabilityScope) -> Result<Response> {
-        if !constant_time_eq(
-            bootstrap_token.as_bytes(),
-            config()?.bootstrap_token.as_bytes(),
-        ) {
-            bail!(BrokerError::InvalidBootstrapToken);
-        }
-        let scope = validate_scope(scope)?;
-        let id = random_token()?;
-        let remaining = scope_limits(&scope).1;
-        self.buses.clear();
-        self.register_io.clear();
-        self.capability = Some(Capability {
-            id: id.clone(),
+    fn new(scope: CapabilityScope) -> Self {
+        Self {
+            buses: HashMap::new(),
+            next_bus: 0,
+            register_io: HashMap::new(),
+            next_pawnio: 0,
             scope,
-            expires: Instant::now() + Duration::from_millis(CAPABILITY_TTL_MS),
-            remaining,
             window_started: Instant::now(),
             window_operations: 0,
-        });
-        Ok(Response::Authorized {
-            capability: id,
-            expires_in_ms: CAPABILITY_TTL_MS,
-        })
-    }
-
-    fn renew(&mut self, capability: &str) -> Result<Response> {
-        let cap = self
-            .capability
-            .as_mut()
-            .ok_or_else(|| anyhow!("connection is not authenticated"))?;
-        if !constant_time_eq(capability.as_bytes(), cap.id.as_bytes()) {
-            bail!("invalid capability");
         }
-        if Instant::now() >= cap.expires {
-            bail!(BrokerError::CapabilityExpired);
-        }
-        cap.id = random_token()?;
-        cap.expires = Instant::now() + Duration::from_millis(CAPABILITY_TTL_MS);
-        cap.remaining = scope_limits(&cap.scope).1;
-        cap.window_started = Instant::now();
-        cap.window_operations = 0;
-        Ok(Response::Authorized {
-            capability: cap.id.clone(),
-            expires_in_ms: CAPABILITY_TTL_MS,
-        })
     }
 
     fn authorize(&mut self, req: &Request) -> Result<CapabilityScope> {
-        let cap = self
-            .capability
-            .as_mut()
-            .ok_or_else(|| anyhow!("authenticate before requesting broker operations"))?;
-        if Instant::now() >= cap.expires {
-            bail!(BrokerError::CapabilityExpired);
+        request_allowed(&self.scope, req)?;
+        if self.window_started.elapsed() >= Duration::from_secs(1) {
+            self.window_started = Instant::now();
+            self.window_operations = 0;
         }
-        request_allowed(&cap.scope, req)?;
-        if cap.remaining == 0 {
-            bail!("capability operation limit exhausted");
-        }
-        let (per_second, _) = scope_limits(&cap.scope);
-        if cap.window_started.elapsed() >= Duration::from_secs(1) {
-            cap.window_started = Instant::now();
-            cap.window_operations = 0;
-        }
-        if cap.window_operations >= per_second {
+        if self.window_operations >= operations_per_second(&self.scope) {
             bail!("broker request-rate limit exceeded");
         }
-        cap.window_operations += 1;
-        cap.remaining -= 1;
-        Ok(cap.scope.clone())
+        self.window_operations += 1;
+        Ok(self.scope.clone())
     }
 }
 
@@ -353,9 +320,49 @@ fn is_expected_disconnect(e: &std::io::Error) -> bool {
     )
 }
 
-fn serve(mut stream: PipeStream, first_request: Request) {
-    let mut conn = Conn::default();
-    let mut pending = Some(first_request);
+fn hello_scope(req: Request) -> Result<CapabilityScope> {
+    match req {
+        Request::Hello { scope } => validate_scope(scope),
+        _ => bail!("first frame must be Hello"),
+    }
+}
+
+/// Read the mandatory `Hello`, reply `Ready` or an error, and return the
+/// connection bound to its scope.
+fn handshake(stream: &mut PipeStream) -> Option<Conn> {
+    match stream.wait_readable(HELLO_TIMEOUT) {
+        Ok(true) => {}
+        Ok(false) => {
+            log::warn!("client sent no Hello within the timeout; disconnecting");
+            return None;
+        }
+        Err(e) => {
+            log::debug!("Hello wait failed: {e}");
+            return None;
+        }
+    }
+    let scope = match proto::read_frame(stream).map_err(anyhow::Error::from) {
+        Ok(req) => hello_scope(req),
+        Err(e) => Err(e),
+    };
+    let (reply, conn) = match scope {
+        Ok(scope) => (Response::Ready, Some(Conn::new(scope))),
+        Err(e) => {
+            log::warn!("refusing handshake: {e:#}");
+            (Response::Error(broker_error(e)), None)
+        }
+    };
+    if let Err(e) = proto::write_frame(stream, &reply) {
+        log::debug!("handshake reply failed: {e}");
+        return None;
+    }
+    conn
+}
+
+fn serve(mut stream: PipeStream) {
+    let Some(mut conn) = handshake(&mut stream) else {
+        return;
+    };
     enum Activity {
         Request,
         Closed,
@@ -376,34 +383,21 @@ fn serve(mut stream: PipeStream, first_request: Request) {
             }
         });
     loop {
-        let req = match pending.take() {
-            Some(request) => request,
-            None => match proto::read_frame(&mut stream) {
-                Ok(request) => request,
-                Err(e) => {
-                    if is_expected_disconnect(&e) {
-                        // A client dropping its pipe handle is the normal
-                        // teardown for a discovery probe or a released device;
-                        // keep it out of the (Debug-capped) op log.
-                        log::trace!("connection closed: {e}");
-                    } else {
-                        log::debug!("connection closed unexpectedly: {e}");
-                    }
-                    break;
+        let req = match proto::read_frame(&mut stream) {
+            Ok(request) => request,
+            Err(e) => {
+                if is_expected_disconnect(&e) {
+                    log::trace!("connection closed: {e}");
+                } else {
+                    log::debug!("connection closed unexpectedly: {e}");
                 }
-            },
+                break;
+            }
         };
         let _ = activity_tx.send(Activity::Request);
-        let resp = match req {
-            Request::Authenticate {
-                bootstrap_token,
-                scope,
-            } => ok_or_err(conn.authenticate(&bootstrap_token, scope)),
-            Request::Renew { capability } => ok_or_err(conn.renew(&capability)),
-            operation => match conn.authorize(&operation) {
-                Ok(scope) => dispatch(&mut conn, &scope, operation),
-                Err(e) => Response::Error(broker_error(e)),
-            },
+        let resp = match conn.authorize(&req) {
+            Ok(scope) => dispatch(&mut conn, &scope, req),
+            Err(e) => Response::Error(broker_error(e)),
         };
         if let Err(e) = proto::write_frame(&mut stream, &resp) {
             log::debug!("reply write failed: {e}");
@@ -534,9 +528,9 @@ fn dispatch(conn: &mut Conn, scope: &CapabilityScope, req: Request) -> Response 
             )?;
             Ok(Response::Unit)
         }),
-        Request::Authenticate { .. } | Request::Renew { .. } => Response::Error(
-            BrokerError::Failed("operation not available in this state".into()),
-        ),
+        Request::Hello { .. } => Response::Error(BrokerError::Failed(
+            "Hello is only valid as the first frame".into(),
+        )),
     }
 }
 
@@ -618,7 +612,6 @@ fn validate_scope(mut scope: CapabilityScope) -> Result<CapabilityScope> {
             bus,
             addresses,
             max_operations_per_second,
-            max_operations,
         } => {
             addresses.sort_unstable();
             addresses.dedup();
@@ -632,7 +625,7 @@ fn validate_scope(mut scope: CapabilityScope) -> Result<CapabilityScope> {
             if !exists {
                 bail!("requested bus was not enumerated by the broker");
             }
-            clamp_limits(max_operations_per_second, max_operations);
+            clamp_rate(max_operations_per_second);
         }
         // AMD SMN offsets and LPC ports/registers are intentionally NOT bounded
         // to a numeric range the way SMBus addresses are: a granted raw-register
@@ -641,38 +634,32 @@ fn validate_scope(mut scope: CapabilityScope) -> Result<CapabilityScope> {
         // clamped. Deliberate — do not "fix" without adding chipset-aware ranges.
         CapabilityScope::AmdSmn {
             max_operations_per_second,
-            max_operations,
         }
         | CapabilityScope::LpcIo {
             max_operations_per_second,
-            max_operations,
         } => {
-            clamp_limits(max_operations_per_second, max_operations);
+            clamp_rate(max_operations_per_second);
         }
     }
     Ok(scope)
 }
 
-fn clamp_limits(per_second: &mut u32, total: &mut u32) {
+fn clamp_rate(per_second: &mut u32) {
     *per_second = (*per_second).clamp(1, MAX_OPERATIONS_PER_SECOND);
-    *total = (*total).clamp(1, MAX_OPERATIONS_PER_CAPABILITY);
 }
 
-fn scope_limits(scope: &CapabilityScope) -> (u32, u32) {
+fn operations_per_second(scope: &CapabilityScope) -> u32 {
     match scope {
         CapabilityScope::Smbus {
             max_operations_per_second,
-            max_operations,
             ..
         }
         | CapabilityScope::AmdSmn {
             max_operations_per_second,
-            max_operations,
         }
         | CapabilityScope::LpcIo {
             max_operations_per_second,
-            max_operations,
-        } => (*max_operations_per_second, *max_operations),
+        } => *max_operations_per_second,
     }
 }
 
@@ -720,21 +707,6 @@ fn request_allowed(scope: &CapabilityScope, req: &Request) -> Result<()> {
     }
 }
 
-fn random_token() -> Result<String> {
-    let mut bytes = [0u8; 32];
-    unsafe { BCryptGenRandom(None, &mut bytes, BCRYPT_USE_SYSTEM_PREFERRED_RNG) }
-        .ok()
-        .map_err(|e| anyhow!("BCryptGenRandom: {e}"))?;
-    Ok(bytes.iter().map(|b| format!("{b:02x}")).collect())
-}
-
-fn constant_time_eq(a: &[u8], b: &[u8]) -> bool {
-    if a.len() != b.len() {
-        return false;
-    }
-    a.iter().zip(b).fold(0u8, |diff, (x, y)| diff | (x ^ y)) == 0
-}
-
 #[cfg(test)]
 mod tests {
     use super::*;
@@ -752,7 +724,6 @@ mod tests {
             },
             addresses: vec![0x50, 0x51],
             max_operations_per_second: 10,
-            max_operations: 100,
         }
     }
 
@@ -805,11 +776,9 @@ mod tests {
     fn typed_scopes_reject_cross_use_and_invalid_lpc_slots() {
         let amd = CapabilityScope::AmdSmn {
             max_operations_per_second: 10,
-            max_operations: 10,
         };
         let lpc = CapabilityScope::LpcIo {
             max_operations_per_second: 10,
-            max_operations: 10,
         };
         assert!(request_allowed(&amd, &Request::OpenAmdSmn).is_ok());
         assert!(request_allowed(
@@ -853,72 +822,123 @@ mod tests {
     }
 
     #[test]
-    fn token_comparison_checks_every_byte() {
-        assert!(constant_time_eq(b"abc", b"abc"));
-        assert!(!constant_time_eq(b"abc", b"abd"));
-        assert!(!constant_time_eq(b"abc", b"ab"));
-    }
-
-    #[test]
-    fn capability_enforces_rate_and_total_limits() {
-        let mut conn = Conn {
-            capability: Some(Capability {
-                id: "cap".into(),
-                scope: smbus_scope(),
-                expires: Instant::now() + Duration::from_secs(1),
-                remaining: 2,
-                window_started: Instant::now(),
-                window_operations: 0,
-            }),
-            ..Conn::default()
-        };
+    fn connection_enforces_the_per_second_rate() {
+        let mut conn = Conn::new(smbus_scope());
         let request = Request::ReadByte { bus: 1, addr: 0x50 };
-        assert!(conn.authorize(&request).is_ok());
-        assert!(conn.authorize(&request).is_ok());
+        for _ in 0..10 {
+            assert!(conn.authorize(&request).is_ok());
+        }
         assert!(conn.authorize(&request).is_err());
-
-        let cap = conn.capability.as_mut().unwrap();
-        cap.remaining = 100;
-        cap.window_operations = 10;
-        assert!(conn.authorize(&request).is_err());
+        conn.window_started = Instant::now() - Duration::from_secs(1);
+        assert!(conn.authorize(&request).is_ok());
     }
 
     #[test]
-    fn expired_capability_is_rejected() {
-        let mut conn = Conn {
-            capability: Some(Capability {
-                id: "cap".into(),
-                scope: smbus_scope(),
-                expires: Instant::now() - Duration::from_millis(1),
-                remaining: 1,
-                window_started: Instant::now(),
-                window_operations: 0,
-            }),
-            ..Conn::default()
-        };
+    fn out_of_scope_requests_do_not_consume_the_rate() {
+        let mut conn = Conn::new(smbus_scope());
         assert!(conn
-            .authorize(&Request::ReadByte { bus: 1, addr: 0x50 })
+            .authorize(&Request::ReadByte { bus: 1, addr: 0x52 })
             .is_err());
-        assert!(conn.renew("cap").is_err());
+        assert_eq!(conn.window_operations, 0);
     }
 
     #[test]
-    fn renewal_rotates_the_connection_capability() {
-        let mut conn = Conn {
-            capability: Some(Capability {
-                id: "cap".into(),
-                scope: smbus_scope(),
-                expires: Instant::now() + Duration::from_secs(1),
-                remaining: 0,
-                window_started: Instant::now(),
-                window_operations: 10,
-            }),
-            ..Conn::default()
+    fn hello_is_only_accepted_as_first_frame() {
+        let lpc = CapabilityScope::LpcIo {
+            max_operations_per_second: 10,
         };
-        let Response::Authorized { capability, .. } = conn.renew("cap").unwrap() else {
-            panic!("renewal did not return a capability");
-        };
-        assert_ne!(capability, "cap");
-        assert_eq!(conn.capability.as_ref().unwrap().window_operations, 0);
+        assert_eq!(
+            hello_scope(Request::Hello { scope: lpc.clone() }).unwrap(),
+            lpc
+        );
+        assert!(hello_scope(Request::OpenLpcIo).is_err());
+        let mut conn = Conn::new(lpc.clone());
+        assert!(conn.authorize(&Request::Hello { scope: lpc }).is_err());
+        assert!(Conn::new(smbus_scope())
+            .authorize(&Request::Hello {
+                scope: smbus_scope()
+            })
+            .is_err());
+    }
+
+    #[test]
+    fn scope_without_total_limit_round_trips() {
+        let scope = validate_scope(CapabilityScope::AmdSmn {
+            max_operations_per_second: u32::MAX,
+        })
+        .unwrap();
+        assert_eq!(
+            scope,
+            CapabilityScope::AmdSmn {
+                max_operations_per_second: MAX_OPERATIONS_PER_SECOND
+            }
+        );
+        assert_eq!(
+            validate_scope(CapabilityScope::LpcIo {
+                max_operations_per_second: 0
+            })
+            .unwrap(),
+            CapabilityScope::LpcIo {
+                max_operations_per_second: 1
+            }
+        );
+        let mut buf = Vec::new();
+        proto::write_frame(
+            &mut buf,
+            &Request::Hello {
+                scope: scope.clone(),
+            },
+        )
+        .unwrap();
+        assert!(!String::from_utf8_lossy(&buf).contains("max_operations\""));
+        let decoded: Request = proto::read_frame(&mut std::io::Cursor::new(buf)).unwrap();
+        assert_eq!(decoded, Request::Hello { scope });
+    }
+
+    #[test]
+    fn a_refused_client_reads_the_reason_before_the_pipe_closes() {
+        use crate::pipe::{create_instance, wait_for_client, PipeSecurity};
+
+        let name = format!(r"\\.\pipe\halod-refuse-test-{}", std::process::id());
+        let sec = PipeSecurity::from_sddl("D:P(A;;GA;;;WD)").unwrap();
+        let handle = create_instance(&name, &sec, true).unwrap();
+        let client_name = name.clone();
+        let client = std::thread::spawn(move || {
+            let mut pipe = std::fs::OpenOptions::new()
+                .read(true)
+                .write(true)
+                .open(client_name)
+                .unwrap();
+            proto::write_frame(
+                &mut pipe,
+                &Request::Hello {
+                    scope: smbus_scope(),
+                },
+            )
+            .unwrap();
+            // Give the server time to close; the reply must survive it.
+            std::thread::sleep(Duration::from_millis(100));
+            proto::read_frame::<_, Response>(&mut pipe).unwrap()
+        });
+        wait_for_client(handle).unwrap();
+        refuse(PipeStream::new(handle), "test reason".into());
+        assert_eq!(
+            client.join().unwrap(),
+            Response::Error(BrokerError::Failed("broker refused: test reason".into()))
+        );
+    }
+
+    #[test]
+    fn foreground_config_takes_only_the_coordinator_sid() {
+        let args = vec!["--coordinator-sid=S-1-5-21-1".to_owned()];
+        assert_eq!(
+            foreground_config_from_args(&args).unwrap(),
+            BrokerConfig {
+                coordinators: vec!["S-1-5-21-1".into()],
+                pin_client_image: false,
+            }
+        );
+        assert!(foreground_config_from_args(&[]).is_err());
+        assert!(foreground_config_from_args(&["--coordinator-sid=".into()]).is_err());
     }
 }

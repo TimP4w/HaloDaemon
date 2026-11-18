@@ -101,17 +101,16 @@ pub fn install() -> Result<()> {
 /// The grant is deliberately **start + query only** (no SERVICE_STOP): the
 /// broker self-stops once idle, so no unprivileged caller needs to stop it, and
 /// withholding STOP keeps one interactive user from stopping another user's
-/// in-use broker (a cross-user denial of service). Which user is served is
-/// enforced at the pipe, not here: even a user who starts the service cannot
-/// connect unless they are the bound coordinator (see `clientauth`).
+/// in-use broker (a cross-user denial of service). This ACE is also the
+/// broker's coordinator identity: at start it admits exactly the accounts
+/// granted SERVICE_START here (see `allowed_coordinators_from_service_sd`).
 fn grant_coordinator_service_control(coordinator_sid: &str) -> Result<()> {
     halod_hwaccess::winsec::validate_sid_string(coordinator_sid)?;
     // SERVICE_START (RP) + query status/config (LC). No SERVICE_STOP (WP).
     let ace = format!("(A;;RPLC;;;{coordinator_sid})");
 
-    let shown = Command::new("sc.exe")
-        .args(["sdshow", SERVICE_NAME])
-        .output();
+    let sc = sc_exe()?;
+    let shown = Command::new(&sc).args(["sdshow", SERVICE_NAME]).output();
     let current = match shown {
         Ok(o) if o.status.success() => String::from_utf8_lossy(&o.stdout).into_owned(),
         Ok(o) => bail!(
@@ -124,7 +123,7 @@ fn grant_coordinator_service_control(coordinator_sid: &str) -> Result<()> {
 
     let updated = replace_coordinator_ace(&current, coordinator_sid, &ace)
         .ok_or_else(|| anyhow!("service security descriptor has no DACL"))?;
-    match Command::new("sc.exe")
+    match Command::new(&sc)
         .args(["sdset", SERVICE_NAME, &updated])
         .status()
     {
@@ -137,8 +136,22 @@ fn grant_coordinator_service_control(coordinator_sid: &str) -> Result<()> {
     }
 }
 
+/// `sc.exe` by full System32 path, never by a search-path lookup from the
+/// elevated installer.
+fn sc_exe() -> Result<std::path::PathBuf> {
+    use windows::Win32::System::SystemInformation::GetSystemDirectoryW;
+    let mut buf = [0u16; 260];
+    let len = unsafe { GetSystemDirectoryW(Some(&mut buf)) } as usize;
+    if len == 0 || len >= buf.len() {
+        bail!("GetSystemDirectoryW failed");
+    }
+    Ok(std::path::PathBuf::from(String::from_utf16_lossy(&buf[..len])).join("sc.exe"))
+}
+
 /// Replace every old Interactive Users or coordinator ACE in the DACL with one
-/// exact start/query ACE. Owner/group fields and the SACL are preserved.
+/// exact start/query ACE. Trustees are compared in canonical form, so an `LA`
+/// rendering of the coordinator is replaced too. Owner/group fields and the
+/// SACL are preserved.
 fn replace_coordinator_ace(sddl: &str, coordinator_sid: &str, ace: &str) -> Option<String> {
     let sddl = sddl.trim();
     let d_pos = sddl.find("D:")?;
@@ -159,9 +172,13 @@ fn replace_coordinator_ace(sddl: &str, coordinator_sid: &str, ace: &str) -> Opti
             break;
         };
         let candidate = &candidate[..=close];
-        let is_interactive = candidate.ends_with(";;;IU)") || candidate.ends_with(";;;S-1-5-4)");
-        let is_coordinator = candidate.ends_with(&format!(";;;{coordinator_sid})"));
-        if !is_interactive && !is_coordinator {
+        let trustee = candidate[1..candidate.len() - 1]
+            .rsplit(';')
+            .next()
+            .unwrap_or_default();
+        let trustee =
+            halod_hwaccess::winsec::canonical_sid(trustee).unwrap_or_else(|_| trustee.to_owned());
+        if trustee != "S-1-5-4" && trustee != coordinator_sid {
             kept.push_str(candidate);
         }
         rest = &rest[open + close + 1..];
@@ -227,17 +244,88 @@ pub fn run() -> Result<()> {
 
 windows_service::define_windows_service!(ffi_service_main, service_main);
 
-fn service_main(arguments: Vec<OsString>) {
-    let arguments: Vec<String> = arguments
-        .iter()
-        .map(|arg| arg.to_string_lossy().into_owned())
-        .collect();
-    let result = server::auth_config_from_args(&arguments)
-        .and_then(server::configure)
+/// Start arguments are ignored: the coordinators are exactly the accounts the
+/// installer granted SERVICE_START, read back from the service's own DACL.
+fn service_main(_arguments: Vec<OsString>) {
+    let result = allowed_coordinators_from_service_sd()
+        .and_then(|coordinators| {
+            server::configure(server::BrokerConfig {
+                coordinators,
+                pin_client_image: true,
+            })
+        })
         .and_then(|()| run_service());
     if let Err(e) = result {
         log::error!("service fatal: {e:#}");
     }
+}
+
+fn allowed_coordinators_from_service_sd() -> Result<Vec<String>> {
+    use windows::core::{HSTRING, PCWSTR, PWSTR};
+    use windows::Win32::Foundation::{LocalFree, HLOCAL};
+    use windows::Win32::Security::Authorization::ConvertSecurityDescriptorToStringSecurityDescriptorW;
+    use windows::Win32::Security::{DACL_SECURITY_INFORMATION, PSECURITY_DESCRIPTOR};
+    use windows::Win32::System::Services::{
+        CloseServiceHandle, OpenSCManagerW, OpenServiceW, QueryServiceObjectSecurity, SC_HANDLE,
+        SC_MANAGER_CONNECT,
+    };
+    const READ_CONTROL: u32 = 0x0002_0000;
+
+    struct Sc(SC_HANDLE);
+    impl Drop for Sc {
+        fn drop(&mut self) {
+            unsafe {
+                let _ = CloseServiceHandle(self.0);
+            }
+        }
+    }
+
+    let manager = Sc(
+        unsafe { OpenSCManagerW(PCWSTR::null(), PCWSTR::null(), SC_MANAGER_CONNECT) }
+            .context("OpenSCManagerW")?,
+    );
+    let service =
+        Sc(
+            unsafe { OpenServiceW(manager.0, &HSTRING::from(SERVICE_NAME), READ_CONTROL) }
+                .context("OpenServiceW(READ_CONTROL)")?,
+        );
+    let mut needed = 0u32;
+    let _ = unsafe {
+        QueryServiceObjectSecurity(service.0, DACL_SECURITY_INFORMATION.0, None, 0, &mut needed)
+    };
+    let mut buf = vec![0u64; (needed as usize).div_ceil(8)];
+    let sd = PSECURITY_DESCRIPTOR(buf.as_mut_ptr() as *mut _);
+    unsafe {
+        QueryServiceObjectSecurity(
+            service.0,
+            DACL_SECURITY_INFORMATION.0,
+            Some(sd),
+            needed,
+            &mut needed,
+        )
+    }
+    .context("QueryServiceObjectSecurity")?;
+    let mut sddl = PWSTR::null();
+    unsafe {
+        ConvertSecurityDescriptorToStringSecurityDescriptorW(
+            sd,
+            1, // SDDL_REVISION_1
+            DACL_SECURITY_INFORMATION,
+            &mut sddl,
+            None,
+        )
+    }
+    .context("ConvertSecurityDescriptorToStringSecurityDescriptorW")?;
+    let text = unsafe { sddl.to_string() };
+    unsafe {
+        let _ = LocalFree(Some(HLOCAL(sddl.0 as *mut _)));
+    }
+    let text = text.context("service SDDL is not UTF-16")?;
+    let coordinators = halod_hwaccess::winsec::coordinator_sids_from_sddl(&text);
+    if coordinators.is_empty() {
+        bail!("{SERVICE_NAME} grants SERVICE_START to no concrete account ({text}); reinstall");
+    }
+    Ok(coordinators)
 }
 
 fn run_service() -> Result<()> {
@@ -333,6 +421,21 @@ mod tests {
     #[test]
     fn coordinator_ace_rejects_a_descriptor_without_a_dacl() {
         assert!(replace_coordinator_ace("S:(AU;FA;CCDCLC;;;WD)", SID, ACE).is_none());
+    }
+
+    #[test]
+    fn coordinator_ace_replaces_an_aliased_rendering_of_the_same_account() {
+        let admin = halod_hwaccess::winsec::canonical_sid("LA").unwrap();
+        let ace = format!("(A;;RPLC;;;{admin})");
+        let out = replace_coordinator_ace("D:(A;;RPLC;;;LA)(A;;CC;;;SY)", &admin, &ace).unwrap();
+        assert_eq!(out, format!("D:{ace}(A;;CC;;;SY)"));
+    }
+
+    #[test]
+    fn sc_is_resolved_from_system32() {
+        let sc = super::sc_exe().unwrap();
+        assert!(sc.is_absolute() && sc.ends_with("sc.exe"));
+        assert!(sc.exists());
     }
 
     #[test]

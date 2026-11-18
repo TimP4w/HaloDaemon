@@ -7,13 +7,17 @@ use std::time::{Duration, Instant};
 
 use anyhow::{anyhow, Result};
 use windows::core::PCWSTR;
-use windows::Win32::Foundation::{CloseHandle, LocalFree, HANDLE, HLOCAL, INVALID_HANDLE_VALUE};
+use windows::Win32::Foundation::{
+    CloseHandle, LocalFree, ERROR_PIPE_CONNECTED, HANDLE, HLOCAL, INVALID_HANDLE_VALUE,
+};
 use windows::Win32::Security::Authorization::ConvertStringSecurityDescriptorToSecurityDescriptorW;
 use windows::Win32::Security::{PSECURITY_DESCRIPTOR, SECURITY_ATTRIBUTES};
-use windows::Win32::Storage::FileSystem::{ReadFile, WriteFile, PIPE_ACCESS_DUPLEX};
+use windows::Win32::Storage::FileSystem::{
+    ReadFile, WriteFile, FILE_FLAG_FIRST_PIPE_INSTANCE, PIPE_ACCESS_DUPLEX,
+};
 use windows::Win32::System::Pipes::{
     ConnectNamedPipe, CreateNamedPipeW, DisconnectNamedPipe, PeekNamedPipe, PIPE_READMODE_BYTE,
-    PIPE_TYPE_BYTE, PIPE_WAIT,
+    PIPE_REJECT_REMOTE_CLIENTS, PIPE_TYPE_BYTE, PIPE_WAIT,
 };
 
 const PIPE_BUFFER: u32 = 64 * 1024;
@@ -67,15 +71,21 @@ impl Drop for PipeSecurity {
 }
 
 /// Create one instance of the named pipe with the given security. Byte-mode,
-/// blocking, with an explicit instance cap matching the server admission cap.
-pub fn create_instance(name: &str, sec: &PipeSecurity) -> Result<HANDLE> {
+/// blocking, local-only, with an explicit instance cap matching the server
+/// admission cap. `first` fails if anyone else already owns the name.
+pub fn create_instance(name: &str, sec: &PipeSecurity, first: bool) -> Result<HANDLE> {
     let sa = sec.attributes();
+    let open_mode = if first {
+        PIPE_ACCESS_DUPLEX | FILE_FLAG_FIRST_PIPE_INSTANCE
+    } else {
+        PIPE_ACCESS_DUPLEX
+    };
     // SAFETY: `name_w` and `sa` outlive the call.
     let handle = unsafe {
         CreateNamedPipeW(
             PCWSTR(wide(name).as_ptr()),
-            PIPE_ACCESS_DUPLEX,
-            PIPE_TYPE_BYTE | PIPE_READMODE_BYTE | PIPE_WAIT,
+            open_mode,
+            PIPE_TYPE_BYTE | PIPE_READMODE_BYTE | PIPE_WAIT | PIPE_REJECT_REMOTE_CLIENTS,
             MAX_PIPE_INSTANCES,
             PIPE_BUFFER,
             PIPE_BUFFER,
@@ -92,14 +102,14 @@ pub fn create_instance(name: &str, sec: &PipeSecurity) -> Result<HANDLE> {
     Ok(handle)
 }
 
-/// Block until a client connects to `pipe`. `ERROR_PIPE_CONNECTED` (232) means
-/// a client connected between create and this call — also success.
+/// Block until a client connects to `pipe`. `ERROR_PIPE_CONNECTED` means a
+/// client connected between create and this call, which is also success.
 pub fn wait_for_client(pipe: HANDLE) -> Result<()> {
     // SAFETY: `pipe` is a valid pipe instance handle.
     let ok = unsafe { ConnectNamedPipe(pipe, None) };
     match ok {
         Ok(()) => Ok(()),
-        Err(e) if e.code().0 as u32 & 0xFFFF == 232 => Ok(()),
+        Err(e) if e.code() == ERROR_PIPE_CONNECTED.to_hresult() => Ok(()),
         Err(e) => Err(anyhow!("ConnectNamedPipe: {e}")),
     }
 }
@@ -125,7 +135,7 @@ impl PipeStream {
     }
 
     /// Wait until at least one request byte is available without letting an
-    /// authenticated but silent client retain broker resources forever.
+    /// admitted but silent client retain broker resources forever.
     pub fn wait_readable(&self, timeout: Duration) -> io::Result<bool> {
         let started = Instant::now();
         loop {
@@ -140,14 +150,26 @@ impl PipeStream {
             if started.elapsed() >= timeout {
                 return Ok(false);
             }
-            // Used only for the initial authentication frame. Keep the poll
+            // Used only for the initial Hello frame. Keep the poll
             // responsive without putting a sleep in the per-operation path.
+            std::thread::sleep(Duration::from_millis(5));
+        }
+    }
+
+    /// Wait up to `timeout` for the client to close its end.
+    pub fn wait_closed(&self, timeout: Duration) {
+        let started = Instant::now();
+        while started.elapsed() < timeout {
+            // SAFETY: as in `wait_readable`; only the error is inspected.
+            if unsafe { PeekNamedPipe(self.0, None, 0, None, None, None) }.is_err() {
+                return;
+            }
             std::thread::sleep(Duration::from_millis(5));
         }
     }
 }
 
-/// Break a worker's blocking read when its authenticated connection has been
+/// Break a worker's blocking read when its admitted connection has been
 /// idle for too long. The worker still owns and ultimately closes the handle.
 pub fn disconnect_handle_value(handle: usize) {
     unsafe {
@@ -203,6 +225,16 @@ mod tests {
         let sa = sec.attributes();
         assert_eq!(sa.lpSecurityDescriptor, sec.sd.0);
         assert!(!sa.bInheritHandle.as_bool());
+    }
+
+    #[test]
+    fn first_instance_refuses_a_squatted_name() {
+        let sec = PipeSecurity::from_sddl("D:P(A;;GA;;;WD)").unwrap();
+        let name = format!(r"\\.\pipe\halod-squat-test-{}", std::process::id());
+        let squatter = PipeStream::new(create_instance(&name, &sec, false).unwrap());
+        assert!(create_instance(&name, &sec, true).is_err());
+        drop(squatter);
+        drop(PipeStream::new(create_instance(&name, &sec, true).unwrap()));
     }
 
     #[test]

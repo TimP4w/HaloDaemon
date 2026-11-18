@@ -33,7 +33,7 @@ brings the broker up:
   the SCM (no UAC prompt), and self-stops once idle. See
   [broker/src/service.rs](../src/broker/src/service.rs).
 - **Dev run (no service):** the daemon `ShellExecuteExW("runas")`-launches
-  `halod-broker.exe`, producing **one** UAC prompt.
+  `halod-broker.exe --coordinator-sid=<SID>`, producing **one** UAC prompt.
 
 The broker links only `halod-hwaccess` + `windows`
 ([broker/Cargo.toml](../src/broker/Cargo.toml)): no Lua runtime, no network
@@ -43,112 +43,107 @@ reach register buses and nothing else.
 ## The RPC surface
 
 The daemon↔broker protocol ([hwaccess/src/proto.rs](../src/hwaccess/src/proto.rs))
-is deliberately just the register-bus primitives:
+is just the register-bus primitives:
 
-- SMBus: open an enumerated controller and use the byte/word/block
-  read/write ops, each addressed by a broker-side **handle** returned at open.
-- AMD SMN: open a typed AMD handle and read a 32-bit SMN offset.
-- LPC I/O: open a typed LPC handle, select one of the two SuperIO slots, find
-  BARs, and perform the fixed port/config-register byte operations.
+- SMBus: open an enumerated controller, then byte/word/block reads and writes
+  on the returned **handle**.
+- AMD SMN: open a typed handle and read a 32-bit SMN offset.
+- LPC I/O: open a typed handle, select a SuperIO slot, find BARs, and perform
+  fixed port/config-register byte operations.
 
-There is **no** filesystem op, process-spawn, or generic "run this" verb. Frames
-are a `u32` length prefix + JSON, capped at `MAX_FRAME_LEN` (64 KiB) so a hostile
-length prefix cannot force a huge allocation. Before any operation, a connection
-must exchange the per-process bootstrap secret for a short-lived,
-connection-bound capability. An SMBus capability names one exact enumerated bus
-and address set. Separate AMD SMN and LPC capabilities expose only their typed
-operations; module names, function names, and argument vectors are not part of
-the wire protocol. Every scope carries request-rate and total-operation ceilings.
+There is **no** filesystem, process-spawn, or generic "run this" verb. Frames
+are a `u32` length prefix + JSON, capped at 64 KiB. The first frame must be
+`Hello { scope }`; the broker replies `Ready` and binds the connection to that
+scope for its lifetime. An SMBus scope names one enumerated bus and address
+set; every scope carries a request-rate ceiling.
 
 ## Trust boundaries
 
 | Principal | Trusted? | Enforced how |
 |---|---|---|
 | `halod.exe` daemon | **Yes** | - |
+| Other code running as the coordinator user | **Same as the daemon** | not distinguishable |
 | `halod-broker.exe` | **Yes** | - |
 | Lua plugins (run inside the daemon) | **No** | declared address scope plus daemon-layer activation and permission gates |
-| Other interactive users on the box | **No** | **the broker pipe (this document)** |
+| Other users on the box | **No** | **the broker pipe and service DACLs** |
 
-Two consequences follow, and they are the crux of the model:
+1. **A compromised daemon remains trusted.** It can request any scope within
+   the protocol. The split limits elevated code; it does not sandbox the daemon.
+2. **Same-user code is the daemon.** Any process of the coordinator user can
+   inject into `halod.exe` or start the service itself. Windows has no boundary
+   between one user's processes in one session, so the broker does not try to
+   authenticate the daemon with a secret.
+3. **Plugins are untrusted.** SMBus use requires the `smbus` permission and
+   exact addresses, checked at activation and again in `pre_scan`. The daemon
+   turns them into the connection scope, so the broker rejects anything else.
 
-1. **A fully compromised daemon remains trusted.** It owns the bootstrap secret
-   and can request new capabilities within the broker's hard protocol surface.
-   The split limits elevated code and prevents unrelated processes/users from
-   reaching it; it is not a sandbox for the daemon itself.
-
-2. **Plugins are untrusted.** A package using SMBus must declare the `smbus`
-   permission and exact addresses. The daemon contributes its scan entries only
-   after the plugin is activation-ready, and `pre_scan` checks the effective
-   `smbus` grant again before injecting a transport. The daemon turns a scan
-   job's addresses and pre-scan scope into the broker capability, so the broker
-   rejects requests outside that scope. Scope/rate/PCI/VM limits also apply. A
-   daemon compromise can request a different capability as described in (1).
-
-The boundary the **broker** actually enforces is the last row: keeping a
-*different* interactive user off the elevated pipe.
+The boundary the **broker** enforces is the last row: keeping a *different*
+user off the elevated pipe.
 
 ## Pipe security
 
-The broker's named pipe is protected two ways, in depth.
+### 1. DACL and pipe flags
 
-### 1. Exact-principal DACL
+The pipe DACL is `D:P(A;;GA;;;<coordinator SID>)…(A;;GA;;;SY)`
+([hwaccess/src/winsec.rs](../src/hwaccess/src/winsec.rs)), with no `IU`, `AU`,
+or world ACE. Instances reject remote clients. When no instance of ours exists,
+the next is created with `FILE_FLAG_FIRST_PIPE_INSTANCE`; if the name is taken,
+the broker exits rather than serve beside a squatter.
 
-The daemon resolves its concrete user SID before starting the broker. The pipe
-uses the protected DACL `D:P(A;;GA;;;<coordinator SID>)(A;;GA;;;SY)`
-([hwaccess/src/winsec.rs](../src/hwaccess/src/winsec.rs)). There is no `IU`,
-`AU`, or world ACE, so another interactive account cannot open the pipe at all.
+### 2. Coordinator identity
 
-### 2. Coordinator identity and capability authentication
+Coordinator SIDs are fixed at broker start, never taken from the client:
 
-The daemon supplies its SID, Windows session id, and a cryptographically random
-32-byte bootstrap secret as transient service-start arguments (or as arguments
-to the UAC foreground broker). The broker authenticates every connection
-([broker/src/clientauth.rs](../src/broker/src/clientauth.rs),
-[broker/src/server.rs](../src/broker/src/server.rs)):
+- **Installed service:** every account granted `SERVICE_START` in the service's
+  own DACL (the installer's ACE, section 4). Aliases are resolved to numeric
+  SIDs, so `LA` counts; broad principals (SYSTEM and other NT AUTHORITY
+  well-knowns, Everyone, BUILTIN groups, Guest, well-known domain groups) never
+  do. With none left the service fails closed. It is started with no arguments.
+- **Dev run:** `--coordinator-sid=<SID>` from the UAC-approved command line.
 
-1. On accept, it `ImpersonateNamedPipeClient`s the caller, reads the token's
-   **user SID** and **logon-session id**, then `RevertToSelf`.
-2. The identity must match the startup SID **and** session; a first-client race
-   can never claim an unbound broker.
-3. The first RPC frame must carry the startup secret and an exact operation
-   scope. The secret comparison is constant-time. Authentication returns a
-   random, short-lived capability bound to that connection.
-4. Every later operation must be inside the scope and its rate/operation limits,
-   or it is refused. Renewal requires the current capability id.
-5. A wrong identity disconnects. A wrong secret, expired capability, or
-   out-of-scope operation is rejected without executing privileged work.
+Each client's SID is read from its process token
+([broker/src/clientauth.rs](../src/broker/src/clientauth.rs)), without
+impersonation, and must be a coordinator. The session is logged, not pinned.
 
-The impersonate→read→revert FFI is kept small; the admission decision itself is a
-pure function so its coordinator/cap invariants are unit-tested without a live
-pipe.
+### 3. Image-path pinning (a bar-raiser, not a boundary)
 
-### 3. Service-control grant
+- The installed service requires the client to be `halod.exe` in its own
+  directory. Dev runs skip this; a build tree is user-writable.
+- The daemon opens the pipe at `SECURITY_IDENTIFICATION` and requires the server
+  to be `halod-broker.exe` next to itself before sending `Hello`.
 
-So the non-elevated daemon can start the on-demand service without a UAC prompt,
-the installer grants only the installing user's concrete SID
-**SERVICE_START + query only** (`(A;;RPLC;;;<SID>)`,
-[broker/src/service.rs](../src/broker/src/service.rs)), not `SERVICE_STOP`.
-Installation and upgrades remove every legacy `IU` ACE before adding the exact
-principal. The broker self-stops when idle, so no unprivileged caller needs to
-stop it.
+Both directories are admin-only when installed. This stops a renamed copy or a
+casual squatter, not same-user code. Either refusal fails the open at once; the
+broker sends its reason as an error frame first.
+
+### 4. Service-control grant
+
+The installer grants only the installing user's SID **SERVICE_START + query**
+(`(A;;RPLC;;;<SID>)`, [broker/src/service.rs](../src/broker/src/service.rs)),
+not `SERVICE_STOP`, and removes legacy `IU` ACEs. The broker self-stops when
+idle. This ACE is also the coordinator identity of section 2.
+
+## Broker self-hardening
+
+In service mode ([broker/src/hardening.rs](../src/broker/src/hardening.rs)) the
+broker restricts DLL search to System32 and its own directory, disables
+extension points, prohibits dynamic code, refuses remote images, and removes
+every privilege except `SeChangeNotifyPrivilege` (PawnIO access is a DACL
+check). No signature policy: `PawnIOLib.dll` is not Microsoft-signed.
+
+Only the installed service writes `halod-broker.log` (admin-only directory); a
+dev-run broker logs to its console. Accepts, refusals, and failures are logged,
+not individual register operations.
 
 ## Resource bounds
 
-A LocalSystem service must not let a peer exhaust it
-([broker/src/server.rs](../src/broker/src/server.rs)):
+([broker/src/server.rs](../src/broker/src/server.rs))
 
-- **Connections** are capped (`MAX_CLIENTS`); excess accepts are refused.
-- **Named-pipe instances** use the same finite cap; no unlimited-instance pipe
-  is created.
-- **Worker threads** are retained and joined after completion rather than
-  detached and forgotten.
-- **Per-connection handles** (open buses / typed AMD and LPC modules) are capped
-  (`MAX_HANDLES_PER_KIND`), so one connection cannot grow its handle maps without
-  bound.
-- **Handle-id allocation** is checked (`checked_add`), never wrapping.
-- **Operations** are limited per second and per capability; scope values are
-  clamped to hard protocol ceilings.
-- **Idle clients** are disconnected after `CLIENT_IDLE_TIMEOUT`, releasing all
-  connection-owned bus/module handles.
-- **Idle self-stop:** with no live connection for a grace period the service
-  stops, so the elevated helper never lingers after its worker is gone.
+- Connections and pipe instances are capped (`MAX_CLIENTS`); worker threads are
+  joined, not detached.
+- A client must send `Hello` within five seconds.
+- Per-connection handles are capped (`MAX_HANDLES_PER_KIND`); handle ids never
+  wrap.
+- Operations are rate-limited per connection, clamped to the protocol ceiling.
+- Idle clients are disconnected after `CLIENT_IDLE_TIMEOUT`; with no client for
+  a grace period the service stops.

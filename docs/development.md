@@ -68,7 +68,9 @@ cargo test --workspace
 
 On Windows, the GUI starts the daemon as a normal user process. Privileged
 SMBus, AMD SMN, and Super I/O operations are delegated to `halod-broker.exe`.
-A development run may show one UAC prompt when that access is first needed.
+A development run may show one UAC prompt when that access is first needed;
+it launches the broker with only `--coordinator-sid=<your SID>`, and that broker
+logs to its own console window rather than to a file.
 See [Windows privilege separation](windows-privilege-separation.md) for the
 process model and security boundary.
 

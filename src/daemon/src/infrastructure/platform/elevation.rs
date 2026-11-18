@@ -66,11 +66,7 @@ pub(crate) fn is_elevated() -> bool {
 /// prompt is surfaced as an error by the caller (register-bus devices become
 /// unavailable, HID/network keep working).
 #[cfg(windows)]
-pub(crate) fn spawn_broker_elevated(
-    bootstrap_token: &str,
-    coordinator_sid: &str,
-    coordinator_session: u32,
-) -> anyhow::Result<()> {
+pub(crate) fn spawn_broker_elevated(coordinator_sid: &str) -> anyhow::Result<()> {
     use anyhow::{anyhow, Context};
     use windows::core::PCWSTR;
     use windows::Win32::UI::Shell::{ShellExecuteExW, SEE_MASK_NOASYNC, SHELLEXECUTEINFOW};
@@ -91,16 +87,7 @@ pub(crate) fn spawn_broker_elevated(
     let verb = wide("runas");
     let file = wide_path(&broker);
     let dir_w = wide_path(dir);
-    let parameters = [
-        format!("--bootstrap-token={bootstrap_token}"),
-        format!("--coordinator-sid={coordinator_sid}"),
-        format!("--coordinator-session={coordinator_session}"),
-    ]
-    .iter()
-    .map(|argument| quote_arg(argument))
-    .collect::<Vec<_>>()
-    .join(" ");
-    let parameters = wide(&parameters);
+    let parameters = wide(&quote_arg(&format!("--coordinator-sid={coordinator_sid}")));
 
     let mut info = SHELLEXECUTEINFOW {
         cbSize: std::mem::size_of::<SHELLEXECUTEINFOW>() as u32,

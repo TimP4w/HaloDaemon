@@ -1,49 +1,33 @@
 // SPDX-License-Identifier: GPL-3.0-or-later
-//! Identify the user behind a connected named-pipe client and bind the broker to
-//! exactly one interactive session.
+//! Identify the user behind a connected named-pipe client and admit only the
+//! configured coordinator SIDs.
 //!
-//! The pipe DACL already restricts access to the concrete coordinator SID (plus
-//! SYSTEM), but a single user can hold several logon sessions at once
-//! (fast-user-switching, RDP, `runas`), so the SID alone does not pin one
-//! session. To close that, the broker impersonates each connecting client, reads
-//! its token's SID + logon-session id, and admits only the concrete identity
-//! supplied through the authenticated broker bootstrap. No caller can claim an
-//! unbound broker by winning a connection race.
-//!
-//! The FFI (impersonate → read token → revert) is kept small; the admission
-//! decision itself is a pure function ([`decide`]) so it can be unit-tested
-//! without a live pipe.
+//! Identity is read from the client *process* token, not by impersonation, so
+//! it is known before the client has sent anything and the broker needs no
+//! SeImpersonatePrivilege. The admission decision is a pure function
+//! ([`decide`]) so it can be unit-tested without a live pipe.
 
-use anyhow::{anyhow, bail, Result};
-use windows::core::PWSTR;
-use windows::Win32::Foundation::{CloseHandle, LocalFree, HANDLE, HLOCAL};
-use windows::Win32::Security::Authorization::ConvertSidToStringSidW;
-use windows::Win32::Security::{
-    GetTokenInformation, RevertToSelf, TokenSessionId, TokenUser, TOKEN_QUERY, TOKEN_USER,
-};
-use windows::Win32::System::Pipes::ImpersonateNamedPipeClient;
-use windows::Win32::System::Threading::{GetCurrentThread, OpenThreadToken};
+use std::path::{Path, PathBuf};
 
-/// The user identity behind a pipe connection: a string SID plus the logon
-/// session id. Two connections are "the same user" only if both match.
+use anyhow::{anyhow, Result};
+use windows::Win32::Foundation::HANDLE;
+use windows::Win32::System::Pipes::GetNamedPipeClientProcessId;
+
 #[derive(Debug, Clone, PartialEq, Eq)]
 pub struct ClientIdentity {
+    pub pid: u32,
     pub sid: String,
+    /// Logged only; the same SID in another session is the same principal.
     pub session: u32,
 }
 
-/// Outcome of testing a fresh connection against the current binding.
 #[derive(Debug, Clone, Copy, PartialEq, Eq)]
 pub enum Admission {
-    /// Serve it: it is the coordinator (or the first client, now bound).
     Ok,
-    /// Refuse: the broker is bound to a different user/session.
     WrongUser,
-    /// Refuse: too many clients are already connected.
     TooMany,
 }
 
-/// Broker-side gate state: the bound coordinator (if any) and the live count.
 #[derive(Debug, Default)]
 pub struct Gate {
     active: usize,
@@ -59,165 +43,73 @@ impl Gate {
     }
 }
 
-/// Admit only the exact coordinator identity configured at broker startup.
-pub fn decide(
-    gate: &mut Gate,
-    id: &ClientIdentity,
-    expected: &ClientIdentity,
-    max_clients: usize,
-) -> Admission {
+pub fn decide(gate: &mut Gate, sid: &str, allowed: &[String], max_clients: usize) -> Admission {
     if gate.active >= max_clients {
         return Admission::TooMany;
     }
-    if id != expected {
+    if !allowed.iter().any(|a| a == sid) {
         return Admission::WrongUser;
     }
     gate.active += 1;
     Admission::Ok
 }
 
-/// Record a served connection ending. The configured coordinator remains fixed
-/// for the whole broker process lifetime.
 pub fn release(gate: &mut Gate) {
     gate.active = gate.active.saturating_sub(1);
 }
 
-/// Impersonate the client connected on `pipe`, read its token, and return its
-/// SID + logon-session id. Reverts impersonation before returning on every path.
-pub fn pipe_client_identity(pipe: HANDLE) -> Result<ClientIdentity> {
-    // SAFETY: `pipe` is a connected pipe-server handle; the matching
-    // RevertToSelf below runs on every return path.
-    unsafe { ImpersonateNamedPipeClient(pipe) }
-        .map_err(|e| anyhow!("ImpersonateNamedPipeClient: {e}"))?;
-    let result = read_impersonated_identity();
-    // SAFETY: paired with the impersonation above; failure here would leave the
-    // thread impersonating, so it is logged rather than ignored.
-    unsafe { RevertToSelf() }.map_err(|e| anyhow!("RevertToSelf after client auth: {e}"))?;
-    result
+pub fn client_identity(pipe: HANDLE) -> Result<ClientIdentity> {
+    let mut pid = 0u32;
+    unsafe { GetNamedPipeClientProcessId(pipe, &mut pid) }
+        .map_err(|e| anyhow!("GetNamedPipeClientProcessId: {e}"))?;
+    let (sid, session) = halod_hwaccess::winsec::process_identity(pid)?;
+    Ok(ClientIdentity { pid, sid, session })
 }
 
-/// Read the impersonated thread token's user SID and session id. Must run only
-/// while impersonating (between Impersonate/Revert).
-fn read_impersonated_identity() -> Result<ClientIdentity> {
-    let mut token = HANDLE::default();
-    // SAFETY: reads the current thread's impersonation token; `token` is closed
-    // by the guard below.
-    unsafe { OpenThreadToken(GetCurrentThread(), TOKEN_QUERY, true, &mut token) }
-        .map_err(|e| anyhow!("OpenThreadToken: {e}"))?;
-    let _guard = TokenHandle(token);
-    let sid = token_user_sid(token)?;
-    let session = token_session_id(token)?;
-    Ok(ClientIdentity { sid, session })
-}
-
-/// Closes a token handle on drop.
-struct TokenHandle(HANDLE);
-impl Drop for TokenHandle {
-    fn drop(&mut self) {
-        // SAFETY: `self.0` is a token handle from OpenThreadToken, owned here.
-        unsafe {
-            let _ = CloseHandle(self.0);
-        }
+/// The client's image path when it is `expected`, else the mismatching path.
+pub fn client_image_matches(pid: u32, expected: &Path) -> Result<PathBuf, PathBuf> {
+    let actual = halod_hwaccess::winsec::process_image_path(pid)
+        .map_err(|e| PathBuf::from(format!("<unknown: {e}>")))?;
+    if halod_hwaccess::winsec::same_installed_binary(expected, &actual) {
+        Ok(actual)
+    } else {
+        Err(actual)
     }
-}
-
-fn token_user_sid(token: HANDLE) -> Result<String> {
-    // Size query, then fetch into a right-sized buffer.
-    let mut len = 0u32;
-    // SAFETY: a NULL buffer with length 0 is the documented size-probe form; it
-    // sets `len` and returns an error we ignore.
-    let _ = unsafe { GetTokenInformation(token, TokenUser, None, 0, &mut len) };
-    if len == 0 {
-        bail!("GetTokenInformation(TokenUser) size query returned 0");
-    }
-    let mut buf = vec![0u8; len as usize];
-    // SAFETY: `buf` is `len` bytes; the call fills it with a TOKEN_USER.
-    unsafe {
-        GetTokenInformation(
-            token,
-            TokenUser,
-            Some(buf.as_mut_ptr() as *mut _),
-            len,
-            &mut len,
-        )
-    }
-    .map_err(|e| anyhow!("GetTokenInformation(TokenUser): {e}"))?;
-
-    // SAFETY: the buffer was populated with a TOKEN_USER whose `User.Sid` points
-    // into it and is valid for the duration of the conversion below.
-    let sid = unsafe { (*(buf.as_ptr() as *const TOKEN_USER)).User.Sid };
-    let mut pstr = PWSTR::null();
-    // SAFETY: `sid` is valid; `pstr` receives a LocalAlloc'd string freed below.
-    unsafe { ConvertSidToStringSidW(sid, &mut pstr) }
-        .map_err(|e| anyhow!("ConvertSidToStringSidW: {e}"))?;
-    // SAFETY: `pstr` is a valid, NUL-terminated wide string on success.
-    let s = unsafe { pstr.to_string() }.map_err(|e| anyhow!("SID to string: {e}"));
-    // SAFETY: free the LocalAlloc'd SID string regardless of `s`.
-    unsafe {
-        let _ = LocalFree(Some(HLOCAL(pstr.0 as *mut _)));
-    }
-    s
-}
-
-fn token_session_id(token: HANDLE) -> Result<u32> {
-    let mut session = 0u32;
-    let mut len = 0u32;
-    // SAFETY: TokenSessionId writes a single u32 into `session`.
-    unsafe {
-        GetTokenInformation(
-            token,
-            TokenSessionId,
-            Some(&mut session as *mut u32 as *mut _),
-            std::mem::size_of::<u32>() as u32,
-            &mut len,
-        )
-    }
-    .map_err(|e| anyhow!("GetTokenInformation(TokenSessionId): {e}"))?;
-    Ok(session)
 }
 
 #[cfg(test)]
 mod tests {
     use super::*;
 
-    fn id(sid: &str, session: u32) -> ClientIdentity {
-        ClientIdentity {
-            sid: sid.to_string(),
-            session,
-        }
+    fn allowed(sids: &[&str]) -> Vec<String> {
+        sids.iter().map(|s| s.to_string()).collect()
     }
 
     #[test]
-    fn configured_coordinator_is_admitted() {
+    fn configured_coordinators_are_admitted() {
         let mut gate = Gate::new();
-        let a = id("S-1-5-21-1", 1);
-        assert_eq!(decide(&mut gate, &a, &a, 4), Admission::Ok);
-        assert_eq!(gate.active(), 1);
-        assert_eq!(decide(&mut gate, &a, &a, 4), Admission::Ok);
+        let sids = allowed(&["S-1-5-21-1", "S-1-5-21-2"]);
+        assert_eq!(decide(&mut gate, "S-1-5-21-1", &sids, 4), Admission::Ok);
+        assert_eq!(decide(&mut gate, "S-1-5-21-2", &sids, 4), Admission::Ok);
         assert_eq!(gate.active(), 2);
     }
 
     #[test]
-    fn a_different_user_is_refused_while_bound() {
+    fn a_different_user_is_refused_without_consuming_a_slot() {
         let mut gate = Gate::new();
-        let owner = id("S-1-5-21-1", 1);
-        let intruder = id("S-1-5-21-2", 2);
-        assert_eq!(decide(&mut gate, &owner, &owner, 4), Admission::Ok);
+        let sids = allowed(&["S-1-5-21-1"]);
+        assert_eq!(decide(&mut gate, "S-1-5-21-1", &sids, 4), Admission::Ok);
         assert_eq!(
-            decide(&mut gate, &intruder, &owner, 4),
+            decide(&mut gate, "S-1-5-21-2", &sids, 4),
             Admission::WrongUser
         );
-        // A refusal does not count against the connection cap.
         assert_eq!(gate.active(), 1);
     }
 
     #[test]
-    fn same_user_different_session_is_refused() {
-        let mut gate = Gate::new();
-        let expected = id("S-1-5-21-1", 1);
-        assert_eq!(decide(&mut gate, &expected, &expected, 4), Admission::Ok);
+    fn no_configured_coordinator_admits_nobody() {
         assert_eq!(
-            decide(&mut gate, &id("S-1-5-21-1", 2), &expected, 4),
+            decide(&mut Gate::new(), "S-1-5-21-1", &[], 4),
             Admission::WrongUser
         );
     }
@@ -225,21 +117,15 @@ mod tests {
     #[test]
     fn connection_cap_refuses_excess_clients() {
         let mut gate = Gate::new();
-        let a = id("S-1-5-21-1", 1);
-        assert_eq!(decide(&mut gate, &a, &a, 2), Admission::Ok);
-        assert_eq!(decide(&mut gate, &a, &a, 2), Admission::Ok);
-        assert_eq!(decide(&mut gate, &a, &a, 2), Admission::TooMany);
-    }
-
-    #[test]
-    fn release_does_not_allow_a_different_identity() {
-        let mut gate = Gate::new();
-        let a = id("S-1-5-21-1", 1);
-        assert_eq!(decide(&mut gate, &a, &a, 4), Admission::Ok);
+        let sids = allowed(&["S-1-5-21-1"]);
+        assert_eq!(decide(&mut gate, "S-1-5-21-1", &sids, 2), Admission::Ok);
+        assert_eq!(decide(&mut gate, "S-1-5-21-1", &sids, 2), Admission::Ok);
+        assert_eq!(
+            decide(&mut gate, "S-1-5-21-1", &sids, 2),
+            Admission::TooMany
+        );
         release(&mut gate);
-        assert_eq!(gate.active(), 0);
-        let b = id("S-1-5-21-2", 2);
-        assert_eq!(decide(&mut gate, &b, &a, 4), Admission::WrongUser);
+        assert_eq!(decide(&mut gate, "S-1-5-21-1", &sids, 2), Admission::Ok);
     }
 
     #[test]
@@ -250,35 +136,46 @@ mod tests {
     }
 
     #[test]
-    fn pipe_identity_succeeds_after_server_consumes_client_data() {
-        use std::io::{Read as _, Write as _};
-
-        use crate::pipe::{create_instance, wait_for_client, PipeSecurity, PipeStream};
+    fn client_is_identified_before_it_sends_data() {
+        use crate::pipe::{create_instance, wait_for_client, PipeSecurity};
 
         let (sid, session) = halod_hwaccess::winsec::current_process_identity().unwrap();
         let name = format!(r"\\.\pipe\halod-auth-test-{}", std::process::id());
-        let security =
-            PipeSecurity::from_sddl(&halod_hwaccess::winsec::coordinator_dacl_sddl(&sid).unwrap())
-                .unwrap();
-        let handle = create_instance(&name, &security).unwrap();
-        let mut server = PipeStream::new(handle);
+        let security = PipeSecurity::from_sddl(
+            &halod_hwaccess::winsec::coordinator_dacl_sddl(std::slice::from_ref(&sid)).unwrap(),
+        )
+        .unwrap();
+        let handle = create_instance(&name, &security, true).unwrap();
+        let _server = crate::pipe::PipeStream::new(handle);
+        let (opened_tx, opened_rx) = std::sync::mpsc::channel();
+        let (done_tx, done_rx) = std::sync::mpsc::channel::<()>();
         let client = std::thread::spawn(move || {
-            let mut client = std::fs::OpenOptions::new()
+            let pipe = std::fs::OpenOptions::new()
                 .read(true)
                 .write(true)
                 .open(name)
                 .unwrap();
-            client.write_all(&[0x42]).unwrap();
+            opened_tx.send(()).unwrap();
+            let _ = done_rx.recv();
+            drop(pipe);
         });
 
         wait_for_client(handle).unwrap();
-        let mut byte = [0u8; 1];
-        server.read_exact(&mut byte).unwrap();
-        assert_eq!(byte, [0x42]);
+        opened_rx.recv().unwrap();
         assert_eq!(
-            pipe_client_identity(handle).unwrap(),
-            ClientIdentity { sid, session }
+            client_identity(handle).unwrap(),
+            ClientIdentity {
+                pid: std::process::id(),
+                sid,
+                session
+            }
         );
+        let exe = std::env::current_exe().unwrap();
+        assert!(client_image_matches(std::process::id(), &exe).is_ok());
+        assert!(
+            client_image_matches(std::process::id(), &exe.with_file_name("halod.exe")).is_err()
+        );
+        done_tx.send(()).unwrap();
         client.join().unwrap();
     }
 }

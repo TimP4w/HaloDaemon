@@ -9,19 +9,25 @@
 
 use parking_lot::Mutex;
 use std::fs::{File, OpenOptions};
+use std::io::{Read, Write};
+use std::os::windows::fs::OpenOptionsExt;
+use std::os::windows::io::AsRawHandle;
 use std::sync::atomic::{AtomicBool, Ordering};
 use std::sync::OnceLock;
 use std::time::Duration;
-use tokio::time::Instant;
 
 use anyhow::{anyhow, bail, Context, Result};
+use windows::Win32::Foundation::HANDLE;
+use windows::Win32::Storage::FileSystem::{SECURITY_IDENTIFICATION, SECURITY_SQOS_PRESENT};
+use windows::Win32::System::Pipes::GetNamedPipeServerProcessId;
 
 use crate::infrastructure::platform::elevation;
 use halod_hwaccess::proto::{
-    self, BrokerError, CapabilityScope, Request, Response, BROKER_IDLE_GRACE_MS,
-    BROKER_SERVICE_NAME, MAX_OPERATIONS_PER_CAPABILITY, MAX_OPERATIONS_PER_SECOND, PIPE_NAME,
+    self, BrokerError, CapabilityScope, Request, Response, BROKER_SERVICE_NAME,
+    MAX_OPERATIONS_PER_SECOND, PIPE_NAME,
 };
 use halod_hwaccess::smbus::{BusInfo, SmBusSyncOps};
+use halod_hwaccess::winsec;
 
 /// How many connect attempts before giving up, and how long to wait between
 /// them — enough to cover the SCM starting the on-demand broker, or a dev-run
@@ -33,57 +39,83 @@ const CONNECT_BACKOFF: Duration = Duration::from_millis(250);
 /// opens don't each re-prompt after a decline.
 static BROKER_SPAWN_REQUESTED: AtomicBool = AtomicBool::new(false);
 
-#[derive(Clone)]
-struct BrokerAuth {
-    token: String,
-    sid: String,
-    session: u32,
-}
+static COORDINATOR_SID: OnceLock<std::result::Result<String, String>> = OnceLock::new();
 
-static BROKER_AUTH: OnceLock<std::result::Result<BrokerAuth, String>> = OnceLock::new();
-
-fn broker_auth() -> Result<&'static BrokerAuth> {
-    let result = BROKER_AUTH.get_or_init(|| {
-        let (sid, session) = halod_hwaccess::winsec::current_process_identity()
-            .map_err(|e| format!("query coordinator identity: {e:#}"))?;
-        let mut bytes = [0u8; 32];
-        // SAFETY: BCrypt writes exactly the supplied mutable byte slice and
-        // uses the OS system-preferred CSPRNG (no algorithm handle required).
-        unsafe {
-            windows::Win32::Security::Cryptography::BCryptGenRandom(
-                None,
-                &mut bytes,
-                windows::Win32::Security::Cryptography::BCRYPT_USE_SYSTEM_PREFERRED_RNG,
-            )
-        }
-        .ok()
-        .map_err(|e| format!("generate broker bootstrap secret: {e}"))?;
-        let token = bytes.iter().map(|byte| format!("{byte:02x}")).collect();
-        Ok(BrokerAuth {
-            token,
-            sid,
-            session,
+fn coordinator_sid() -> Result<&'static str> {
+    COORDINATOR_SID
+        .get_or_init(|| {
+            winsec::current_process_identity()
+                .map(|(sid, _)| sid)
+                .map_err(|e| format!("query coordinator identity: {e:#}"))
         })
-    });
-    result.as_ref().map_err(|e| anyhow!(e.clone()))
+        .as_deref()
+        .map_err(|e| anyhow!(e.clone()))
 }
 
-fn broker_arguments(auth: &BrokerAuth) -> Vec<std::ffi::OsString> {
-    vec![
-        format!("--bootstrap-token={}", auth.token).into(),
-        format!("--coordinator-sid={}", auth.sid).into(),
-        format!("--coordinator-session={}", auth.session).into(),
-    ]
+/// Open the broker pipe at identification level only, so a server that is not
+/// the broker cannot act as this user, then require the server process to be
+/// `halod-broker.exe` next to this daemon. The image check raises the bar
+/// against a squatter; it is not a boundary against same-user code.
+fn open_broker_pipe() -> std::io::Result<File> {
+    OpenOptions::new()
+        .read(true)
+        .write(true)
+        .security_qos_flags(SECURITY_SQOS_PRESENT.0 | SECURITY_IDENTIFICATION.0)
+        .open(PIPE_NAME)
 }
 
-fn connect() -> std::io::Result<File> {
-    OpenOptions::new().read(true).write(true).open(PIPE_NAME)
+fn verify_broker_server(pipe: &File) -> Result<()> {
+    let mut pid = 0u32;
+    unsafe { GetNamedPipeServerProcessId(HANDLE(pipe.as_raw_handle()), &mut pid) }
+        .map_err(|e| anyhow!("GetNamedPipeServerProcessId: {e}"))?;
+    let actual = winsec::process_image_path(pid)?;
+    let expected = winsec::installed_sibling("halod-broker.exe")?;
+    if !winsec::same_installed_binary(&expected, &actual) {
+        return Err(WrongBrokerServer(format!(
+            "broker pipe is served by {} (pid {pid}), not {}",
+            actual.display(),
+            expected.display()
+        ))
+        .into());
+    }
+    Ok(())
+}
+
+/// The pipe is served by something other than the installed broker. Retrying
+/// cannot change that, so the open fails at once.
+#[derive(Debug)]
+struct WrongBrokerServer(String);
+
+impl std::fmt::Display for WrongBrokerServer {
+    fn fmt(&self, f: &mut std::fmt::Formatter<'_>) -> std::fmt::Result {
+        f.write_str(&self.0)
+    }
+}
+
+impl std::error::Error for WrongBrokerServer {}
+
+/// Bind a fresh connection to `scope`. A broker refusal is returned as a
+/// [`BrokerError`] so the caller can tell it from a transport failure.
+fn hello<S: Read + Write>(pipe: &mut S, scope: &CapabilityScope) -> Result<()> {
+    proto::write_frame(
+        pipe,
+        &Request::Hello {
+            scope: scope.clone(),
+        },
+    )
+    .context("broker Hello send")?;
+    match proto::read_frame(pipe).context("broker Hello receive")? {
+        Response::Ready => Ok(()),
+        Response::Error(e) => Err(e.into()),
+        other => bail!("unexpected broker Hello reply: {other:?}"),
+    }
 }
 
 /// Start the installed on-demand `HalodBroker` service via the SCM. Returns
 /// `Ok` if it started or was already running; `Err` if the service isn't
-/// installed (dev run) or we lack rights.
-fn try_start_broker_service(auth: &BrokerAuth) -> Result<()> {
+/// installed (dev run) or we lack rights. The service takes no arguments: it
+/// derives its coordinators from its own DACL.
+fn try_start_broker_service() -> Result<()> {
     use windows_service::service::{ServiceAccess, ServiceState};
     use windows_service::service_manager::{ServiceManager, ServiceManagerAccess};
 
@@ -101,22 +133,20 @@ fn try_start_broker_service(auth: &BrokerAuth) -> Result<()> {
     ) {
         return Ok(());
     }
-    let arguments = broker_arguments(auth);
-    let arguments: Vec<&std::ffi::OsStr> = arguments.iter().map(|arg| arg.as_os_str()).collect();
     service
-        .start(&arguments)
+        .start::<&std::ffi::OsStr>(&[])
         .map_err(|e| anyhow!("start service: {e}"))
 }
 
 /// Bring the broker up: prefer the installed on-demand service (no UAC); if it
 /// isn't installed, this is a dev run — spawn it via one UAC prompt.
-fn ensure_broker_running(auth: &BrokerAuth) {
-    match try_start_broker_service(auth) {
+fn ensure_broker_running(sid: &str) {
+    match try_start_broker_service() {
         Ok(()) => log::info!("started the {BROKER_SERVICE_NAME} service"),
         Err(e) => {
             log::debug!("broker service unavailable ({e}); trying dev-run UAC spawn");
             if !BROKER_SPAWN_REQUESTED.swap(true, Ordering::SeqCst) {
-                match elevation::spawn_broker_elevated(&auth.token, &auth.sid, auth.session) {
+                match elevation::spawn_broker_elevated(sid) {
                     Ok(()) => log::info!("requested elevated halod-broker (dev)"),
                     Err(se) => log::warn!(
                         "could not launch halod-broker ({se}); \
@@ -128,103 +158,31 @@ fn ensure_broker_running(auth: &BrokerAuth) {
     }
 }
 
-/// A demand-start service that is already running ignores new start arguments,
-/// including this daemon's bootstrap token. After a fast daemon restart, wait
-/// without touching the old pipe so the broker can complete its idle shutdown,
-/// then start a fresh instance with the current token.
-fn wait_for_stale_broker_exit() -> Result<()> {
-    use windows_service::service::{ServiceAccess, ServiceState};
-    use windows_service::service_manager::{ServiceManager, ServiceManagerAccess};
-
-    let fallback = Duration::from_millis(BROKER_IDLE_GRACE_MS + 1_000);
-    let manager = match ServiceManager::local_computer(None::<&str>, ServiceManagerAccess::CONNECT)
-    {
-        Ok(manager) => manager,
-        Err(error) => {
-            log::debug!(
-                "cannot query stale broker service ({error}); waiting for dev broker idle exit"
-            );
-            std::thread::sleep(fallback);
-            return Ok(());
-        }
-    };
-    let service = match manager.open_service(BROKER_SERVICE_NAME, ServiceAccess::QUERY_STATUS) {
-        Ok(service) => service,
-        Err(error) => {
-            log::debug!(
-                "cannot query stale broker service ({error}); waiting for dev broker idle exit"
-            );
-            std::thread::sleep(fallback);
-            return Ok(());
-        }
-    };
-
-    let deadline = Instant::now() + fallback;
-    loop {
-        if matches!(
-            service.query_status().map(|status| status.current_state),
-            Ok(ServiceState::Stopped)
-        ) {
-            return Ok(());
-        }
-        if Instant::now() >= deadline {
-            bail!("stale {BROKER_SERVICE_NAME} service did not stop after its idle grace period");
-        }
-        std::thread::sleep(CONNECT_BACKOFF);
-    }
-}
-
 /// Connect to the broker, bringing it up on first attempt if it isn't there yet.
-fn connect_or_spawn(scope: &CapabilityScope) -> Result<AuthorizedPipe> {
-    let auth = broker_auth()?;
+fn connect_or_spawn(scope: &CapabilityScope) -> Result<BrokerPipe> {
+    let sid = coordinator_sid()?;
+    let mut ensured = false;
     for attempt in 0..CONNECT_ATTEMPTS {
-        match connect() {
+        match open_broker_pipe() {
             Ok(mut pipe) => {
-                let request = Request::Authenticate {
-                    bootstrap_token: auth.token.clone(),
-                    scope: scope.clone(),
-                };
-                if let Err(e) = proto::write_frame(&mut pipe, &request) {
-                    log::debug!("broker authentication send failed: {e}");
-                } else {
-                    match proto::read_frame(&mut pipe) {
-                        Ok(Response::Authorized {
-                            capability,
-                            expires_in_ms,
-                        }) => {
-                            // A later broker exit may legitimately require a
-                            // fresh dev-run UAC launch. Only suppress repeated
-                            // prompts until one authenticated connection has
-                            // actually succeeded.
-                            BROKER_SPAWN_REQUESTED.store(false, Ordering::SeqCst);
-                            return Ok(AuthorizedPipe {
-                                pipe,
-                                capability,
-                                renew_at: Instant::now() + Duration::from_millis(expires_in_ms / 2),
-                            });
-                        }
-                        Ok(Response::Error(BrokerError::InvalidBootstrapToken)) => {
-                            drop(pipe);
-                            log::info!(
-                                "found a broker from the previous daemon; waiting for it to exit"
-                            );
-                            wait_for_stale_broker_exit()?;
-                            ensure_broker_running(auth);
-                            continue;
-                        }
-                        Ok(Response::Error(error)) => {
-                            bail!("halod-broker rejected this daemon's bootstrap token: {error}");
-                        }
-                        Ok(other) => {
-                            log::debug!("broker authentication attempt {attempt} failed: {other:?}")
-                        }
-                        Err(e) => log::debug!("broker authentication receive failed: {e}"),
+                match verify_broker_server(&pipe).and_then(|()| hello(&mut pipe, scope)) {
+                    Ok(()) => {
+                        // A later broker exit may legitimately require a fresh
+                        // dev-run UAC launch.
+                        BROKER_SPAWN_REQUESTED.store(false, Ordering::SeqCst);
+                        return Ok(BrokerPipe { pipe });
                     }
+                    Err(e) if e.is::<BrokerError>() || e.is::<WrongBrokerServer>() => {
+                        log::warn!("halod-broker connection refused: {e}");
+                        return Err(e.context("halod-broker connection refused"));
+                    }
+                    Err(e) => log::debug!("broker connect attempt {attempt} failed: {e:#}"),
                 }
             }
             Err(e) => {
-                if attempt == 0 {
-                    ensure_broker_running(auth);
+                if !ensured {
+                    ensured = true;
+                    ensure_broker_running(sid);
                 }
                 log::debug!("broker connect attempt {attempt} failed: {e}");
             }
@@ -234,12 +192,11 @@ fn connect_or_spawn(scope: &CapabilityScope) -> Result<AuthorizedPipe> {
     bail!("could not reach halod-broker on {PIPE_NAME}")
 }
 
-struct AuthorizedPipe {
+struct BrokerPipe {
     pipe: File,
-    capability: String,
-    renew_at: Instant,
 }
 
+/// The request never reached the broker, so it is safe to reconnect and retry.
 #[derive(Debug)]
 struct BrokerSessionLost(String);
 
@@ -251,67 +208,10 @@ impl std::fmt::Display for BrokerSessionLost {
 
 impl std::error::Error for BrokerSessionLost {}
 
-impl AuthorizedPipe {
-    fn reauthenticate(&mut self, scope: &CapabilityScope) -> Result<()> {
-        let auth = broker_auth()?;
-        proto::write_frame(
-            &mut self.pipe,
-            &Request::Authenticate {
-                bootstrap_token: auth.token.clone(),
-                scope: scope.clone(),
-            },
-        )
-        .map_err(|e| anyhow!("broker reauthentication send: {e}"))?;
-        match proto::read_frame(&mut self.pipe)
-            .map_err(|e| anyhow!("broker reauthentication receive: {e}"))?
-        {
-            Response::Authorized {
-                capability,
-                expires_in_ms,
-            } => {
-                self.capability = capability;
-                self.renew_at = Instant::now() + Duration::from_millis(expires_in_ms / 2);
-                Ok(())
-            }
-            Response::Error(error) => bail!("broker reauthentication failed: {error}"),
-            other => bail!("unexpected broker reauthentication reply: {other:?}"),
-        }
-    }
-
+impl BrokerPipe {
     fn request(&mut self, req: &Request) -> Result<Response> {
-        if Instant::now() >= self.renew_at {
-            proto::write_frame(
-                &mut self.pipe,
-                &Request::Renew {
-                    capability: self.capability.clone(),
-                },
-            )
-            .map_err(|e| BrokerSessionLost(format!("broker capability renewal send: {e}")))?;
-            match proto::read_frame(&mut self.pipe)
-                .map_err(|e| BrokerSessionLost(format!("broker capability renewal receive: {e}")))?
-            {
-                Response::Authorized {
-                    capability,
-                    expires_in_ms,
-                } => {
-                    self.capability = capability;
-                    self.renew_at = Instant::now() + Duration::from_millis(expires_in_ms / 2);
-                }
-                Response::Error(e) => {
-                    return Err(BrokerSessionLost(format!(
-                        "broker capability renewal failed: {e}"
-                    ))
-                    .into());
-                }
-                other => {
-                    return Err(BrokerSessionLost(format!(
-                        "unexpected broker capability renewal reply: {other:?}"
-                    ))
-                    .into());
-                }
-            }
-        }
-        proto::write_frame(&mut self.pipe, req).map_err(|e| anyhow!("broker send: {e}"))?;
+        proto::write_frame(&mut self.pipe, req)
+            .map_err(|e| BrokerSessionLost(format!("broker send: {e}")))?;
         proto::read_frame(&mut self.pipe).map_err(|e| anyhow!("broker recv: {e}"))
     }
 }
@@ -327,7 +227,7 @@ fn expect_opened(resp: Response, what: &str) -> Result<u32> {
 // ── SMBus over RPC ─────────────────────────────────────────────────────────
 
 struct BrokerBus {
-    pipe: AuthorizedPipe,
+    pipe: BrokerPipe,
     bus_id: u32,
     scope: CapabilityScope,
     info: BusInfo,
@@ -337,43 +237,25 @@ struct BrokerBus {
 
 impl BrokerBus {
     fn reconnect(&mut self) -> Result<()> {
-        match self.pipe.reauthenticate(&self.scope) {
-            Ok(()) => {
-                let (bus_id, supports_block) = open_bus_on_pipe(&mut self.pipe, &self.info)?;
-                self.bus_id = bus_id;
-                self.supports_block = supports_block;
-                Ok(())
-            }
-            Err(error) => {
-                log::debug!(
-                    "broker pipe could not be reauthenticated ({error:#}); \
-                     opening a new connection"
-                );
-                let (pipe, bus_id, supports_block) = connect_broker_bus(&self.scope, &self.info)?;
-                self.pipe = pipe;
-                self.bus_id = bus_id;
-                self.supports_block = supports_block;
-                Ok(())
-            }
-        }
+        let (pipe, bus_id, supports_block) = connect_broker_bus(&self.scope, &self.info)?;
+        self.pipe = pipe;
+        self.bus_id = bus_id;
+        self.supports_block = supports_block;
+        Ok(())
     }
 
     fn request(&mut self, make_request: impl Fn(u32) -> Request) -> Result<Response> {
-        let first = self.pipe.request(&make_request(self.bus_id));
-        let reason = match first {
-            Ok(Response::Error(BrokerError::CapabilityExpired)) => {
-                "broker capability expired".to_owned()
+        match self.pipe.request(&make_request(self.bus_id)) {
+            Err(error) if error.is::<BrokerSessionLost>() => {
+                log::info!("SMBus broker session lost; reconnecting ({error:#})");
+                self.reconnect()
+                    .with_context(|| format!("recover SMBus broker session after {error:#}"))?;
+                self.pipe
+                    .request(&make_request(self.bus_id))
+                    .context("retry SMBus request after broker session recovery")
             }
-            Err(ref error) if error.is::<BrokerSessionLost>() => format!("{error:#}"),
-            _ => return first,
-        };
-
-        log::info!("SMBus broker session lost; reconnecting ({reason})");
-        self.reconnect()
-            .with_context(|| format!("recover SMBus broker session after {reason}"))?;
-        self.pipe
-            .request(&make_request(self.bus_id))
-            .context("retry SMBus request after broker session recovery")
+            other => other,
+        }
     }
 
     fn byte(&mut self, make_request: impl Fn(u32) -> Request) -> Result<u8> {
@@ -441,7 +323,6 @@ pub fn open_bus(info: &BusInfo, addresses: &[u8]) -> Result<Box<dyn SmBusSyncOps
         bus: info.clone(),
         addresses: addresses.to_vec(),
         max_operations_per_second: MAX_OPERATIONS_PER_SECOND,
-        max_operations: MAX_OPERATIONS_PER_CAPABILITY,
     };
     let (pipe, bus_id, supports_block) = connect_broker_bus(&scope, info)?;
 
@@ -454,16 +335,13 @@ pub fn open_bus(info: &BusInfo, addresses: &[u8]) -> Result<Box<dyn SmBusSyncOps
     }))
 }
 
-fn connect_broker_bus(
-    scope: &CapabilityScope,
-    info: &BusInfo,
-) -> Result<(AuthorizedPipe, u32, bool)> {
+fn connect_broker_bus(scope: &CapabilityScope, info: &BusInfo) -> Result<(BrokerPipe, u32, bool)> {
     let mut pipe = connect_or_spawn(scope)?;
     let (bus_id, supports_block) = open_bus_on_pipe(&mut pipe, info)?;
     Ok((pipe, bus_id, supports_block))
 }
 
-fn open_bus_on_pipe(pipe: &mut AuthorizedPipe, info: &BusInfo) -> Result<(u32, bool)> {
+fn open_bus_on_pipe(pipe: &mut BrokerPipe, info: &BusInfo) -> Result<(u32, bool)> {
     let bus_id = expect_opened(
         pipe.request(&Request::OpenBus { info: info.clone() })?,
         "smbus",
@@ -484,7 +362,7 @@ fn open_bus_on_pipe(pipe: &mut AuthorizedPipe, info: &BusInfo) -> Result<(u32, b
 // ── Typed AMD SMN and LPC RPC clients ──────────────────────────────────────
 
 pub struct AmdSmnBrokerClient {
-    pipe: Mutex<AuthorizedPipe>,
+    pipe: Mutex<BrokerPipe>,
     handle: u32,
 }
 
@@ -505,7 +383,6 @@ impl AmdSmnBrokerClient {
 pub fn open_amd_smn() -> Result<AmdSmnBrokerClient> {
     let scope = CapabilityScope::AmdSmn {
         max_operations_per_second: MAX_OPERATIONS_PER_SECOND,
-        max_operations: MAX_OPERATIONS_PER_CAPABILITY,
     };
     let mut pipe = connect_or_spawn(&scope)?;
     let handle = expect_opened(pipe.request(&Request::OpenAmdSmn)?, "AMD SMN")?;
@@ -516,7 +393,7 @@ pub fn open_amd_smn() -> Result<AmdSmnBrokerClient> {
 }
 
 pub struct LpcIoBrokerClient {
-    pipe: Mutex<AuthorizedPipe>,
+    pipe: Mutex<BrokerPipe>,
     handle: u32,
 }
 
@@ -591,7 +468,6 @@ impl LpcIoBrokerClient {
 pub fn open_lpc_io() -> Result<LpcIoBrokerClient> {
     let scope = CapabilityScope::LpcIo {
         max_operations_per_second: MAX_OPERATIONS_PER_SECOND,
-        max_operations: MAX_OPERATIONS_PER_CAPABILITY,
     };
     let mut pipe = connect_or_spawn(&scope)?;
     let handle = expect_opened(pipe.request(&Request::OpenLpcIo)?, "LPC I/O")?;
@@ -599,4 +475,108 @@ pub fn open_lpc_io() -> Result<LpcIoBrokerClient> {
         pipe: Mutex::new(pipe),
         handle,
     })
+}
+
+#[cfg(test)]
+mod tests {
+    use super::*;
+    use std::io::Cursor;
+
+    /// Duplex test stream: reads scripted broker replies, records requests.
+    struct Duplex {
+        replies: Cursor<Vec<u8>>,
+        sent: Vec<u8>,
+    }
+
+    impl Duplex {
+        fn replying(reply: &Response) -> Self {
+            let mut replies = Vec::new();
+            proto::write_frame(&mut replies, reply).unwrap();
+            Self {
+                replies: Cursor::new(replies),
+                sent: Vec::new(),
+            }
+        }
+    }
+
+    impl Read for Duplex {
+        fn read(&mut self, buf: &mut [u8]) -> std::io::Result<usize> {
+            self.replies.read(buf)
+        }
+    }
+
+    impl Write for Duplex {
+        fn write(&mut self, buf: &[u8]) -> std::io::Result<usize> {
+            self.sent.write(buf)
+        }
+        fn flush(&mut self) -> std::io::Result<()> {
+            Ok(())
+        }
+    }
+
+    fn lpc() -> CapabilityScope {
+        CapabilityScope::LpcIo {
+            max_operations_per_second: MAX_OPERATIONS_PER_SECOND,
+        }
+    }
+
+    #[test]
+    fn hello_sends_the_scope_and_accepts_ready() {
+        let mut pipe = Duplex::replying(&Response::Ready);
+        hello(&mut pipe, &lpc()).unwrap();
+        let sent: Request = proto::read_frame(&mut Cursor::new(pipe.sent)).unwrap();
+        assert_eq!(sent, Request::Hello { scope: lpc() });
+    }
+
+    #[test]
+    fn hello_refusal_is_a_broker_error_not_a_transport_failure() {
+        let mut pipe = Duplex::replying(&Response::Error(BrokerError::Failed("no".into())));
+        assert!(hello(&mut pipe, &lpc()).unwrap_err().is::<BrokerError>());
+
+        let mut pipe = Duplex::replying(&Response::Opened(1));
+        assert!(!hello(&mut pipe, &lpc()).unwrap_err().is::<BrokerError>());
+
+        let mut silent = Duplex {
+            replies: Cursor::new(Vec::new()),
+            sent: Vec::new(),
+        };
+        assert!(!hello(&mut silent, &lpc()).unwrap_err().is::<BrokerError>());
+    }
+
+    #[test]
+    fn a_server_that_is_not_the_installed_broker_is_refused() {
+        // This test binary serves the pipe; it is not halod-broker.exe.
+        use windows::core::PCWSTR;
+        use windows::Win32::Foundation::CloseHandle;
+        use windows::Win32::Storage::FileSystem::PIPE_ACCESS_DUPLEX;
+        use windows::Win32::System::Pipes::{CreateNamedPipeW, PIPE_TYPE_BYTE, PIPE_WAIT};
+
+        let name = format!(r"\\.\pipe\halod-client-test-{}", std::process::id());
+        let wide: Vec<u16> = name.encode_utf16().chain([0]).collect();
+        let server = unsafe {
+            CreateNamedPipeW(
+                PCWSTR(wide.as_ptr()),
+                PIPE_ACCESS_DUPLEX,
+                PIPE_TYPE_BYTE | PIPE_WAIT,
+                1,
+                0,
+                0,
+                0,
+                None,
+            )
+        };
+        assert!(!server.is_invalid());
+        let client = OpenOptions::new()
+            .read(true)
+            .write(true)
+            .security_qos_flags(SECURITY_SQOS_PRESENT.0 | SECURITY_IDENTIFICATION.0)
+            .open(&name)
+            .unwrap();
+        let error = verify_broker_server(&client).unwrap_err();
+        assert!(error.is::<WrongBrokerServer>(), "{error:#}");
+        drop(client);
+        unsafe {
+            let _ = CloseHandle(server);
+        }
+    }
 }

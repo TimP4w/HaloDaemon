@@ -28,14 +28,8 @@ pub const PIPE_NAME: &str = r"\\.\pipe\halod-broker";
 /// (register) and the daemon (start) agree on one string.
 pub const BROKER_SERVICE_NAME: &str = "HalodBroker";
 
-/// How long an unowned broker remains alive after its last client disconnects.
-/// Shared with the client so a replacement daemon can wait out a broker that
-/// still carries the previous daemon's process-local bootstrap token.
+/// How long the broker stays alive after its last client disconnects.
 pub const BROKER_IDLE_GRACE_MS: u64 = 30_000;
-
-/// Lifetime of one connection-bound authorization. Clients renew before it
-/// expires; the bootstrap secret itself exists only for one broker process.
-pub const CAPABILITY_TTL_MS: u64 = 60_000;
 
 /// Hard protocol bounds. The broker may clamp a requested scope further, but
 /// never permits a caller to raise these ceilings.
@@ -48,10 +42,6 @@ pub const MAX_SCOPE_ADDRESSES: usize = 256;
 // small register RPCs per second, so this DoS ceiling must sit above that
 // aggregate. Hardware-specific byte-rate safety remains enforced in the daemon.
 pub const MAX_OPERATIONS_PER_SECOND: u32 = 20_000;
-// Clients renew halfway through the 60-second TTL. Keep the total above one
-// full half-life at the maximum request rate so a legitimate stream cannot
-// exhaust its capability before it is eligible for renewal.
-pub const MAX_OPERATIONS_PER_CAPABILITY: u32 = 1_000_000;
 
 /// Exact elevated surface requested for one named-pipe connection.
 #[derive(Debug, Clone, PartialEq, Eq, Serialize, Deserialize)]
@@ -60,15 +50,12 @@ pub enum CapabilityScope {
         bus: BusInfo,
         addresses: Vec<u8>,
         max_operations_per_second: u32,
-        max_operations: u32,
     },
     AmdSmn {
         max_operations_per_second: u32,
-        max_operations: u32,
     },
     LpcIo {
         max_operations_per_second: u32,
-        max_operations: u32,
     },
 }
 
@@ -76,17 +63,9 @@ pub enum CapabilityScope {
 /// bus handle id previously returned by [`Response::Opened`].
 #[derive(Debug, Clone, PartialEq, Eq, Serialize, Deserialize)]
 pub enum Request {
-    /// First frame on a connection. The bootstrap secret is delivered through
-    /// the SCM start arguments (or the dev-run UAC command line), never over a
-    /// shared persistent channel. The returned capability is bound to this
-    /// connection, identity, scope, and a short expiry.
-    Authenticate {
-        bootstrap_token: String,
+    /// Mandatory first frame; binds this connection to `scope` for its lifetime.
+    Hello {
         scope: CapabilityScope,
-    },
-    /// Extend an authenticated connection's short-lived capability.
-    Renew {
-        capability: String,
     },
     /// Open the register bus described by `info`; replies [`Response::Opened`].
     OpenBus {
@@ -162,16 +141,12 @@ pub enum Request {
 /// Why the broker refused a request.
 #[derive(Debug, Clone, PartialEq, Eq, Serialize, Deserialize)]
 pub enum BrokerError {
-    InvalidBootstrapToken,
-    CapabilityExpired,
     Failed(String),
 }
 
 impl std::fmt::Display for BrokerError {
     fn fmt(&self, f: &mut std::fmt::Formatter<'_>) -> std::fmt::Result {
         match self {
-            Self::InvalidBootstrapToken => f.write_str("invalid broker bootstrap token"),
-            Self::CapabilityExpired => f.write_str("capability expired"),
             Self::Failed(message) => f.write_str(message),
         }
     }
@@ -183,10 +158,7 @@ impl std::error::Error for BrokerError {}
 /// [`Response::Error`].
 #[derive(Debug, Clone, PartialEq, Eq, Serialize, Deserialize)]
 pub enum Response {
-    Authorized {
-        capability: String,
-        expires_in_ms: u64,
-    },
+    Ready,
     Opened(u32),
     Dword(u32),
     Byte(u8),
@@ -267,34 +239,29 @@ mod tests {
     fn arb_request() -> impl Strategy<Value = Request> {
         prop_oneof![
             (
-                ".*",
                 arb_bus_info(),
-                prop::collection::vec(any::<u8>(), 0..8)
+                prop::collection::vec(any::<u8>(), 0..8),
+                any::<u32>()
             )
-                .prop_map(|(bootstrap_token, bus, addresses)| Request::Authenticate {
-                    bootstrap_token,
-                    scope: CapabilityScope::Smbus {
-                        bus,
-                        addresses,
-                        max_operations_per_second: 100,
-                        max_operations: 1_000,
-                    },
+                .prop_map(|(bus, addresses, max_operations_per_second)| {
+                    Request::Hello {
+                        scope: CapabilityScope::Smbus {
+                            bus,
+                            addresses,
+                            max_operations_per_second,
+                        },
+                    }
                 }),
-            ".*".prop_map(|bootstrap_token| Request::Authenticate {
-                bootstrap_token,
+            any::<u32>().prop_map(|max_operations_per_second| Request::Hello {
                 scope: CapabilityScope::AmdSmn {
-                    max_operations_per_second: 100,
-                    max_operations: 1_000,
+                    max_operations_per_second
                 },
             }),
-            ".*".prop_map(|bootstrap_token| Request::Authenticate {
-                bootstrap_token,
+            any::<u32>().prop_map(|max_operations_per_second| Request::Hello {
                 scope: CapabilityScope::LpcIo {
-                    max_operations_per_second: 100,
-                    max_operations: 1_000,
+                    max_operations_per_second
                 },
             }),
-            ".*".prop_map(|capability| Request::Renew { capability }),
             arb_bus_info().prop_map(|info| Request::OpenBus { info }),
             (any::<u32>(), any::<u8>()).prop_map(|(bus, addr)| Request::ReadByte { bus, addr }),
             (any::<u32>(), any::<u8>(), any::<u8>())
@@ -359,17 +326,12 @@ mod tests {
 
     fn arb_response() -> impl Strategy<Value = Response> {
         prop_oneof![
-            ".*".prop_map(|capability| Response::Authorized {
-                capability,
-                expires_in_ms: CAPABILITY_TTL_MS,
-            }),
+            Just(Response::Ready),
             any::<u32>().prop_map(Response::Opened),
             any::<u32>().prop_map(Response::Dword),
             any::<u8>().prop_map(Response::Byte),
             any::<bool>().prop_map(Response::Bool),
             Just(Response::Unit),
-            Just(Response::Error(BrokerError::InvalidBootstrapToken)),
-            Just(Response::Error(BrokerError::CapabilityExpired)),
             ".*".prop_map(|message| Response::Error(BrokerError::Failed(message))),
         ]
     }
