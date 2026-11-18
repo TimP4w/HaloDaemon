@@ -117,10 +117,13 @@ fn amd_signature() -> Option<(u8, u8)> {
 /// restoration all belong to the owning Lua package.
 #[cfg(target_os = "windows")]
 fn lpcio_chips() -> Vec<(u8, u16, u8, u16)> {
-    use crate::infrastructure::drivers::transports::lpcio::LpcIoBus;
+    use crate::infrastructure::drivers::transports::lpcio::{lock_isa_bus, LpcIoBus};
     let mut found = Vec::new();
     for (slot, port) in [(0_u8, 0x2e_u16), (1_u8, 0x4e_u16)] {
         let Ok(bus) = LpcIoBus::open(None) else { break };
+        let Ok(_bus_lock) = lock_isa_bus() else {
+            continue;
+        };
         if bus.select_slot(slot).is_err() {
             continue;
         }

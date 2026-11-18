@@ -9,9 +9,43 @@
 
 use crate::infrastructure::drivers::transports::register_ops;
 use crate::infrastructure::drivers::Metered;
-use anyhow::Result;
+use anyhow::{anyhow, bail, Result};
+use halod_hwaccess::named_mutex::{self, NamedMutex};
 use halod_shared::types::{WriteRateLimit, WriteRateStatus};
 use parking_lot::Mutex;
+use std::sync::OnceLock;
+
+const ISA_BUS_TIMEOUT_MS: u32 = 2000;
+
+/// Serializes Super-I/O config sequences and HWM index/data transactions with
+/// other monitoring software and with this process's other LPC handles.
+pub struct IsaBusGuard {
+    _local: parking_lot::MutexGuard<'static, ()>,
+    _named: Option<named_mutex::MutexGuard<'static>>,
+}
+
+pub fn lock_isa_bus() -> Result<IsaBusGuard> {
+    static LOCAL: Mutex<()> = Mutex::new(());
+    static NAMED: OnceLock<Option<NamedMutex>> = OnceLock::new();
+    let local = LOCAL.lock();
+    let named = NAMED.get_or_init(|| match NamedMutex::open(named_mutex::ISA_BUS) {
+        Ok(mutex) => Some(mutex),
+        Err(error) => {
+            log::warn!(
+                "ISA bus mutex unavailable, Super-I/O access is only serialized within this process: {error:#}"
+            );
+            None
+        }
+    });
+    let named = named
+        .as_ref()
+        .map(|mutex| mutex.lock(ISA_BUS_TIMEOUT_MS))
+        .transpose()?;
+    Ok(IsaBusGuard {
+        _local: local,
+        _named: named,
+    })
+}
 
 pub struct LpcIoBus {
     io: Metered<register_ops::LpcIoBrokerClient>,
@@ -79,6 +113,15 @@ struct RestoreRegister {
 struct LpcIoState {
     bus: LpcIoBus,
     originals: Vec<RestoreRegister>,
+    hwm_base: Option<u16>,
+}
+
+fn check_window(prepared: Option<u16>, base: u16) -> Result<()> {
+    match prepared {
+        Some(window) if window == base => Ok(()),
+        Some(window) => bail!("HWM base {base:#06x} is not the prepared window {window:#06x}"),
+        None => bail!("no HWM window prepared; call lpcio_prepare_hwm first"),
+    }
 }
 
 /// Plugin-facing LPCIO service. Every HWM register changed through Lua is
@@ -94,6 +137,7 @@ impl LpcIoTransport {
             state: Mutex::new(LpcIoState {
                 bus: LpcIoBus::open(limit)?,
                 originals: Vec::new(),
+                hwm_base: None,
             }),
         })
     }
@@ -106,27 +150,44 @@ impl LpcIoTransport {
         self.state.lock().bus.find_bars()
     }
 
+    /// Runs the Super-I/O config sequence under the ISA bus mutex and verifies
+    /// that `find_bars` registered the HWM window; the PawnIO module silently
+    /// drops a BAR whose two probe passes disagree.
     pub fn prepare_hwm(&self, slot: u8, unlock: bool) -> Result<()> {
-        let state = self.state.lock();
+        let mut state = self.state.lock();
+        let state = &mut *state;
+        let _bus_lock = lock_isa_bus()?;
+        state.hwm_base = None;
         let bus = &state.bus;
         bus.select_slot(slot)?;
         let config_port = if slot == 0 { 0x2e } else { 0x4e };
         bus.write_port(config_port, 0x87)?;
         bus.write_port(config_port, 0x87)?;
-        let result: Result<()> = (|| {
+        let result: Result<u16> = (|| {
             bus.find_bars()?;
             bus.superio_outb(0x07, 0x0b)?;
+            let base = u16::from_be_bytes([bus.superio_inb(0x60)?, bus.superio_inb(0x61)?]);
             if unlock {
                 let options = bus.superio_inb(0x28)?;
                 if options & 0x10 != 0 {
                     bus.superio_outb(0x28, options & !0x10)?;
                 }
             }
-            Ok(())
+            Ok(base)
         })();
         let exit = bus.write_port(config_port, 0xaa);
-        result?;
-        exit
+        let base = result?;
+        exit?;
+        if base == 0 || base.checked_add(6).is_none() {
+            bail!("Super-I/O slot {slot} reports no usable HWM window ({base:#06x})");
+        }
+        bus.read_port(base + 5).map_err(|error| {
+            anyhow!(
+                "HWM window {base:#06x} was not registered by find_bars (concurrent Super-I/O access?): {error:#}"
+            )
+        })?;
+        state.hwm_base = Some(base);
+        Ok(())
     }
 
     pub fn read_port(&self, port: u16) -> Result<u8> {
@@ -165,11 +226,15 @@ impl LpcIoTransport {
 
     pub fn hwm_read(&self, base: u16, register: u16) -> Result<u8> {
         let state = self.state.lock();
+        check_window(state.hwm_base, base)?;
+        let _bus_lock = lock_isa_bus()?;
         Self::hwm_read_raw(&state.bus, base, register)
     }
 
     pub fn hwm_write(&self, base: u16, register: u16, value: u8) -> Result<()> {
         let mut state = self.state.lock();
+        check_window(state.hwm_base, base)?;
+        let _bus_lock = lock_isa_bus()?;
         if !state
             .originals
             .iter()
@@ -187,6 +252,7 @@ impl LpcIoTransport {
 
     pub fn restore(&self) -> Result<()> {
         let mut state = self.state.lock();
+        let _bus_lock = lock_isa_bus()?;
         let originals = std::mem::take(&mut state.originals);
         let mut first_error = None;
         for entry in originals.into_iter().rev() {
@@ -218,5 +284,22 @@ impl Drop for LpcIoTransport {
         if let Err(error) = self.restore() {
             log::error!("restoring LPCIO state during transport drop: {error:#}");
         }
+    }
+}
+
+#[cfg(test)]
+mod tests {
+    use super::check_window;
+
+    #[test]
+    fn hwm_access_requires_the_prepared_window() {
+        assert!(check_window(Some(0x290), 0x290).is_ok());
+        let unprepared = check_window(None, 0x290).unwrap_err().to_string();
+        assert!(unprepared.contains("lpcio_prepare_hwm"), "{unprepared}");
+        let mismatch = check_window(Some(0x290), 0xa30).unwrap_err().to_string();
+        assert!(
+            mismatch.contains("0x0a30") && mismatch.contains("0x0290"),
+            "{mismatch}"
+        );
     }
 }

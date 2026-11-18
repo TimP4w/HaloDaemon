@@ -17,6 +17,8 @@ pub mod proto;
 pub mod smbus;
 
 #[cfg(target_os = "windows")]
+pub mod named_mutex;
+#[cfg(target_os = "windows")]
 pub mod pawnio;
 
 #[cfg(target_os = "windows")]

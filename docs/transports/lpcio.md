@@ -22,7 +22,7 @@ or unrestricted system I/O interface.
 |---|---|
 | `lpcio_select_slot(slot)` | Select a candidate Super I/O configuration slot. |
 | `lpcio_find_bars()` | Locate the selected chip's monitoring interface. |
-| `lpcio_prepare_hwm(slot, unlock)` | Prepare the monitoring interface for access. |
+| `lpcio_prepare_hwm(slot, unlock)` | Discover and verify the monitoring window; required before `lpcio_hwm_read`/`lpcio_hwm_write`. |
 | `lpcio_read_port(port)` | Read one byte from an allowed I/O port. |
 | `lpcio_write_port(port, data)` | Write one byte to an allowed I/O port. |
 | `lpcio_hwm_read(base, offset)` | Read one byte from the monitoring interface. |
@@ -38,6 +38,15 @@ fan channels. Vendor-specific chip interpretation belongs in the plugin.
 PawnIO and HaloDaemon's LPCIO module must be installed. Only the broker is
 elevated, and access is serialized so operations from different plugin calls do
 not interleave on the stateful interface.
+
+Super I/O configuration sequences and monitoring-window transactions also hold
+the `Global\Access_ISABUS.HTP.Method` mutex shared with LibreHardwareMonitor,
+HWiNFO and similar tools, so concurrent monitors cannot corrupt each other's
+index/data accesses or make `lpcio_prepare_hwm` miss the window. The PawnIO
+module only authorizes ports inside a window it discovered itself, so
+`lpcio_prepare_hwm` fails with a clear error when discovery lost the window, and
+`lpcio_hwm_read`/`lpcio_hwm_write` reject a `base` that was not prepared on the
+same transport.
 
 ## Limitations
 

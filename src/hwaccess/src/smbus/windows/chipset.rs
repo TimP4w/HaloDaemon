@@ -7,32 +7,7 @@
 
 use anyhow::{anyhow, Result};
 
-use windows::core::PCWSTR;
-use windows::Win32::Foundation::{CloseHandle, HANDLE, WAIT_ABANDONED, WAIT_OBJECT_0};
-use windows::Win32::System::Threading::{CreateMutexW, ReleaseMutex, WaitForSingleObject};
-
-/// Scope guard that releases a Win32 mutex on drop, including panics/unwinds.
-struct MutexGuard(HANDLE);
-
-impl MutexGuard {
-    fn acquire(mutex: HANDLE, timeout_ms: u32) -> Result<Self> {
-        let wait = unsafe { WaitForSingleObject(mutex, timeout_ms) };
-        // WAIT_ABANDONED: a previous owner died holding the mutex; treat as success.
-        if wait != WAIT_OBJECT_0 && wait != WAIT_ABANDONED {
-            return Err(anyhow!("SMBus mutex acquire failed/timed out"));
-        }
-        Ok(Self(mutex))
-    }
-}
-
-impl Drop for MutexGuard {
-    fn drop(&mut self) {
-        unsafe {
-            let _ = ReleaseMutex(self.0);
-        };
-    }
-}
-
+use crate::named_mutex::{self, NamedMutex};
 use crate::pawnio::PawnioModule;
 use crate::smbus::BusInfo;
 
@@ -137,17 +112,12 @@ mod tests {
 
 pub(crate) struct ChipsetBus {
     module: PawnioModule,
-    mutex: HANDLE,
+    mutex: NamedMutex,
     // PIIX4 port to select before each transfer; `None` for single-port controllers like Intel i801.
     port: Option<u64>,
     // Latched once a block transfer is rejected, so callers fall back to byte-at-a-time thereafter.
     block_unsupported: std::sync::atomic::AtomicBool,
 }
-
-// SAFETY: the Win32 mutex handle is only touched while the owning
-// `Mutex<SmBusInner>` is held; `PawnioModule` already declares the equivalent
-// for its own handle.
-unsafe impl Send for ChipsetBus {}
 
 impl ChipsetBus {
     pub(super) fn open(bus_number: u8, pci_vendor: u16) -> Result<Self> {
@@ -167,9 +137,7 @@ impl ChipsetBus {
         })?;
         log::info!("loaded PawnIO module {}", module.blob_name());
 
-        let name: Vec<u16> = "Global\\Access_SMBUS.HTP.Method\0".encode_utf16().collect();
-        let mutex = unsafe { CreateMutexW(None, false, PCWSTR(name.as_ptr())) }
-            .map_err(|e| anyhow!("CreateMutexW failed: {e}"))?;
+        let mutex = NamedMutex::open(named_mutex::SMBUS)?;
 
         // AMD FCH is multi-port and needs the port re-selected before every transfer; Intel i801 is single-port.
         let port = (pci_vendor == VENDOR_AMD).then_some(bus_number as u64);
@@ -187,7 +155,7 @@ impl ChipsetBus {
     /// the result byte/word on reads); the input layout is caller-supplied
     /// — 9 words for scalar ops, `5 + block_len` for block transfers.
     fn run_xfer(&self, input: &[u64]) -> Result<[u64; 5]> {
-        let _guard = MutexGuard::acquire(self.mutex, 2000)?;
+        let _guard = self.mutex.lock(2000)?;
 
         // Select the PIIX4 port (AMD multi-port) under the same mutex so it
         // cannot race a transfer targeting the other port. A failed port
@@ -252,14 +220,6 @@ impl ChipsetBus {
                 log::warn!("block write rejected, disabling fast path: {e}");
                 Err(e)
             }
-        }
-    }
-}
-
-impl Drop for ChipsetBus {
-    fn drop(&mut self) {
-        unsafe {
-            let _ = CloseHandle(self.mutex);
         }
     }
 }
