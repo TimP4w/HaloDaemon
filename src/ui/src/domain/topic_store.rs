@@ -6,7 +6,7 @@ use std::collections::HashMap;
 use halod_shared::bus::{BusRecord, BusSnapshot, BusTransaction, BusValue};
 use halod_shared::types::{
     CoolingState, DiscoveryStatus, GuiConfig, HealthCheckState, LcdState, LightingOverviewState,
-    PluginsState, ProfileState, WireDevice,
+    PluginsState, ProfileState, UpdateStatus, WireDevice,
 };
 
 #[derive(Clone, Default)]
@@ -28,6 +28,7 @@ pub struct TopicStore {
     pub health: HealthCheckState,
     pub process_icons: HashMap<String, String>,
     pub plugins: PluginsState,
+    pub update: UpdateStatus,
 }
 
 impl TopicStore {
@@ -79,6 +80,7 @@ impl TopicStore {
             BusValue::ProcessIcons(value) => self.process_icons = value,
             BusValue::Plugins(value) => self.plugins = value,
             BusValue::ConfigDir(value) => self.config_dir = value,
+            BusValue::Update(value) => self.update = value,
         }
     }
 

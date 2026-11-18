@@ -54,13 +54,22 @@ New-Item -ItemType Directory -Force -Path $StagingDir | Out-Null
 # separation design): the installed on-demand HalodBroker LocalSystem service
 # that halod.exe starts via the SCM the first time it needs a register bus,
 # while halod.exe itself runs at medium integrity. It must be code-signed
-# alongside the other two exes wherever CI signs the staged binaries.
-$exes = "halod.exe", "halod-gui.exe", "halod-broker.exe"
+# alongside the other exes wherever CI signs the staged binaries.
+$exes = "halod.exe", "halod-gui.exe", "halod-broker.exe", "halod-updater.exe"
 foreach ($exe in $exes) {
     $src = Join-Path $TargetDir $exe
     if (-not (Test-Path $src)) { Fail "missing built executable: $src (run cargo build --release first)" }
     Copy-Item $src -Destination $StagingDir
     Write-Host "  exe   $exe"
+}
+
+# The GUI runs a copy of halod-updater.exe from %LOCALAPPDATA%, away from any
+# neighbouring DLL, so it must not need one from UCRT64.
+$updaterDeps = & $ntldd -R (Join-Path $StagingDir "halod-updater.exe") 2>$null
+foreach ($line in $updaterDeps) {
+    if ($line -match '^\s*(\S+\.dll)\s*=>' -and (Test-Path (Join-Path $ucrtBin $Matches[1]))) {
+        Fail "halod-updater.exe depends on $($Matches[1]) from UCRT64; it must be self-contained"
+    }
 }
 
 # --- 1b. ffmpeg (bundled for LCD video mode) ----------------------------------

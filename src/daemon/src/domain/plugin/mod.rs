@@ -312,7 +312,7 @@ pub fn udev_rules_from_catalog(url: &str) -> anyhow::Result<String> {
 
     let bytes = https_get(&https_url(url)?, MAX_CATALOG_BYTES)?;
     let trust = (url == crate::constants::OFFICIAL_PLUGIN_CATALOG_URL)
-        .then_some(crate::constants::OFFICIAL_PLUGIN_REPO_PUBLIC_KEYS);
+        .then_some(halod_shared::app::OFFICIAL_PUBLIC_KEYS);
     let catalog = halod_plugin_signing::open_catalog(&bytes, trust)?;
     let root = tempfile::tempdir()?;
     for entry in catalog

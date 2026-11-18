@@ -7,7 +7,7 @@ use serde::{Deserialize, Serialize};
 
 use crate::types::{
     CoolingState, DiscoveryStatus, GuiConfig, HealthCheckState, LcdState, LightingOverviewState,
-    Notification, PluginsState, ProfileState, WireDevice,
+    Notification, PluginsState, ProfileState, UpdateStatus, WireDevice,
 };
 
 pub const EVENT_RING_CAPACITY: usize = 256;
@@ -23,6 +23,7 @@ pub mod topic {
     pub const PROCESS_ICONS: &str = "runtime.process_icons";
     pub const PLUGINS: &str = "runtime.plugins";
     pub const CONFIG_DIR: &str = "runtime.config_dir";
+    pub const UPDATE: &str = "runtime.update";
     pub const DEVICE_PREFIX: &str = "runtime.devices.";
 
     pub fn device(id: &str) -> String {
@@ -44,6 +45,7 @@ pub enum BusValue {
     ProcessIcons(HashMap<String, String>),
     Plugins(PluginsState),
     ConfigDir(String),
+    Update(UpdateStatus),
 }
 
 #[derive(Debug, Clone, Copy, PartialEq, Eq, Serialize, Deserialize)]

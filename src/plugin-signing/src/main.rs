@@ -17,6 +17,7 @@ const DEFAULT_KEY_ENV: &str = "HALOD_PLUGIN_SIGNING_KEY_B64";
 const USAGE: &str = "usage:
   halod-plugin-signing catalog <repo> --out <dir> --name <name> (--previous <url> [--trusted-key <id=base64>]... | --bootstrap)
   halod-plugin-signing sign <dir> --key-id <id> [--key-env <name>]
+  halod-plugin-signing sign-release <SHA256SUMS> --version <v> --key-id <id> [--key-env <name>]
   halod-plugin-signing verify <dir> --trusted-key <id=base64>...
   halod-plugin-signing keygen [key-id]";
 
@@ -32,6 +33,7 @@ fn run(args: Vec<String>) -> Result<()> {
     match args.first().map(String::as_str) {
         Some("catalog") => catalog(rest),
         Some("sign") => sign(rest),
+        Some("sign-release") => sign_release(rest),
         Some("verify") => verify(rest),
         Some("keygen") => keygen(rest.first().map(String::as_str)),
         _ => bail!("{USAGE}"),
@@ -84,6 +86,31 @@ fn catalog(args: &[String]) -> Result<()> {
 fn sign(args: &[String]) -> Result<()> {
     let dir = positional(args)?;
     let key_id = required(args, "--key-id")?;
+    let key = signing_key(args)?;
+    let path = dir.join(CATALOG_FILE);
+    let mut catalog = open_catalog(&std::fs::read(&path)?, None)?;
+    std::fs::write(&path, sign_catalog(&mut catalog, key_id, &key))?;
+    println!("signed {}", path.display());
+    Ok(())
+}
+
+fn sign_release(args: &[String]) -> Result<()> {
+    let sums_path = positional(args)?;
+    let version = required(args, "--version")?;
+    let key_id = required(args, "--key-id")?;
+    let key = signing_key(args)?;
+    let sums = std::fs::read(&sums_path)?;
+    let mut out = sums_path.into_os_string();
+    out.push(".sig");
+    std::fs::write(
+        &out,
+        halod_plugin_signing::release::sign(version, &sums, key_id, &key),
+    )?;
+    println!("wrote {}", Path::new(&out).display());
+    Ok(())
+}
+
+fn signing_key(args: &[String]) -> Result<SigningKey> {
     let key_env = option(args, "--key-env")?.unwrap_or(DEFAULT_KEY_ENV);
     let encoded = Zeroizing::new(
         std::env::var(key_env).with_context(|| format!("reading signing key from {key_env}"))?,
@@ -93,12 +120,7 @@ fn sign(args: &[String]) -> Result<()> {
         .as_slice()
         .try_into()
         .map_err(|_| anyhow!("signing key seed is not 32 bytes"))?;
-    let key = SigningKey::from_bytes(&seed);
-    let path = dir.join(CATALOG_FILE);
-    let mut catalog = open_catalog(&std::fs::read(&path)?, None)?;
-    std::fs::write(&path, sign_catalog(&mut catalog, key_id, &key))?;
-    println!("signed {}", path.display());
-    Ok(())
+    Ok(SigningKey::from_bytes(&seed))
 }
 
 fn verify(args: &[String]) -> Result<()> {

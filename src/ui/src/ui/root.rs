@@ -46,7 +46,16 @@ impl App {
     pub(crate) fn draw_background(&mut self, ctx: &egui::Context) {
         ctx.request_repaint_after(std::time::Duration::from_millis(250));
         self.sync_state();
+        self.quit_when_installing(ctx);
         self.tray.sync(ctx, self.ui.state.get());
+    }
+
+    fn quit_when_installing(&self, ctx: &egui::Context) {
+        if self.updater.phase() == domain::update::UpdaterPhase::Installing
+            && !self.force_quit.load(std::sync::atomic::Ordering::SeqCst)
+        {
+            domain::tray::quit(ctx, &self.cmd, &self.force_quit, &self.hide_state);
+        }
     }
 
     // Single render path shared by eframe (Windows/macOS) and winit+glow (Linux).
@@ -305,6 +314,17 @@ impl App {
         // resumes on the frame after onboarding is explicitly completed.
         let tour_active = !onboarding_active && domain::tour::is_active(&self.tour);
 
+        if !onboarding_active && !tour_active {
+            update_banner(
+                ui,
+                &state.update,
+                &mut self.updater,
+                &mut self.update_dismissed,
+                self.update_action,
+            );
+        }
+        self.quit_when_installing(ctx);
+
         egui::CentralPanel::default()
             .frame(egui::Frame::NONE)
             .show(ui, |ui| {
@@ -530,6 +550,52 @@ impl App {
         if !domain::tour::is_active(&self.tour) && !onboarding_active {
             components::issue_modal_slot(ctx, "issue_details", &mut self.issue_details_modal);
         }
+    }
+}
+
+fn update_banner(
+    ui: &mut egui::Ui,
+    status: &halod_shared::types::UpdateStatus,
+    updater: &mut domain::update::Updater,
+    dismissed: &mut Option<String>,
+    action: domain::update::UpdateAction,
+) {
+    use domain::update::BannerEvent;
+    let model =
+        domain::update::banner_model(status, &updater.phase(), dismissed.as_deref(), action);
+    let Some(version) = model.version().map(str::to_owned) else {
+        return;
+    };
+    let event = egui::Panel::top("update_banner")
+        .frame(egui::Frame::NONE.fill(MAIN_BG).inner_margin(egui::Margin {
+            top: theme::SPACE_6 as i8,
+            ..Default::default()
+        }))
+        .show(ui, |ui| {
+            let rect = components::centered_column(ui.max_rect(), components::PAGE_MAX_W)
+                .shrink2(egui::vec2(components::PAGE_PAD_X, 0.0));
+            ui.scope_builder(egui::UiBuilder::new().max_rect(rect), |ui| {
+                shell::update_banner(ui, &model)
+            })
+            .inner
+        })
+        .inner;
+    let open_release = || {
+        let _ = webbrowser::open(&halod_shared::app::release_page_url(&version));
+    };
+    match event {
+        Some(BannerEvent::Primary) => match action {
+            #[cfg(windows)]
+            domain::update::UpdateAction::RunUpdater => updater.start(&version, ui.ctx()),
+            _ => open_release(),
+        },
+        Some(BannerEvent::ReleaseNotes) => open_release(),
+        Some(BannerEvent::Cancel) => updater.cancel(),
+        Some(BannerEvent::Dismiss) => {
+            updater.cancel();
+            *dismissed = Some(version);
+        }
+        None => {}
     }
 }
 

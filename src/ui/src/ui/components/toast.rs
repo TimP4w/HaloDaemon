@@ -3,7 +3,7 @@
 //! corner. Info/warning toasts auto-dismiss after a timeout; errors stay until
 //! the user dismisses them (matching the GTK frontend's toast priorities).
 
-use egui::{Align2, Color32, Pos2, Rect, Stroke, Vec2};
+use egui::{Color32, Pos2, Rect, Stroke, Vec2};
 use halod_shared::types::{Notification, NotificationCode, NotificationSeverity};
 
 use crate::domain::models::notifications::notification_text;
@@ -23,18 +23,30 @@ fn toast_timeout(code: &NotificationCode) -> Option<f64> {
     }
 }
 
-/// A toast shows a "Details" button when its code carries modal detail text.
-fn shows_details(code: &NotificationCode) -> bool {
-    code.detail().is_some()
+#[derive(Debug, Clone, Copy, PartialEq, Eq)]
+enum ToastButton {
+    /// Opens the Details modal for codes that carry detail text.
+    Details,
+    /// Opens the notification's target page.
+    Open,
+}
+
+fn toast_button(code: &NotificationCode) -> Option<ToastButton> {
+    if code.detail().is_some() {
+        Some(ToastButton::Details)
+    } else if matches!(code, NotificationCode::UpdateAvailable { .. }) {
+        Some(ToastButton::Open)
+    } else {
+        None
+    }
 }
 
 /// Height of the optional action-button row.
-const DETAILS_ROW_H: f32 = 38.0;
+const ACTION_ROW_H: f32 = 38.0;
 
-/// Extra card height for the Details row (0 when the code has no detail).
-fn details_extra_height(note: &Notification) -> f32 {
-    if shows_details(&note.code) {
-        DETAILS_ROW_H
+fn action_row_height(note: &Notification) -> f32 {
+    if toast_button(&note.code).is_some() {
+        ACTION_ROW_H
     } else {
         0.0
     }
@@ -200,20 +212,26 @@ const PAD: f32 = 14.0;
 const ICON: f32 = 28.0;
 const TEXT_X: f32 = PAD + ICON + 12.0;
 
-/// Lay out the message body once to size the card to its wrapped text.
+fn text_width(w: f32) -> f32 {
+    w - TEXT_X - 36.0
+}
+
+fn title_galley(ui: &egui::Ui, note: &Notification, w: f32) -> std::sync::Arc<egui::Galley> {
+    let (title, _) = notification_text(&note.code);
+    ui.painter()
+        .layout(title, theme::semibold(14.0), theme::TEXT, text_width(w))
+}
+
 fn message_galley(ui: &egui::Ui, note: &Notification, w: f32) -> std::sync::Arc<egui::Galley> {
     let (_, message) = notification_text(&note.code);
-    ui.painter().layout(
-        message,
-        theme::body_md(),
-        theme::TEXT_DIM,
-        w - TEXT_X - 36.0,
-    )
+    ui.painter()
+        .layout(message, theme::body_md(), theme::TEXT_DIM, text_width(w))
 }
 
 fn toast_height(ui: &egui::Ui, note: &Notification, w: f32) -> f32 {
+    let title_h = title_galley(ui, note, w).size().y;
     let msg_h = message_galley(ui, note, w).size().y;
-    PAD + 18.0 + 3.0 + msg_h + PAD + details_extra_height(note)
+    PAD + title_h + 3.0 + msg_h + PAD + action_row_height(note)
 }
 
 /// What a rendered toast card's controls were clicked this frame.
@@ -266,7 +284,6 @@ fn toast_card(
     idx: usize,
     left: Option<f32>,
 ) -> ToastAction {
-    let (title, _) = notification_text(&note.code);
     let severity = note.code.severity();
     let body = ui.interact(
         rect,
@@ -287,16 +304,16 @@ fn toast_card(
         Rect::from_min_size(rect.min + Vec2::splat(PAD), Vec2::splat(ICON)),
         severity,
     );
-    p.text(
+    let title = title_galley(ui, note, rect.width());
+    let title_h = title.size().y;
+    p.galley(
         Pos2::new(rect.left() + TEXT_X, rect.top() + PAD),
-        Align2::LEFT_TOP,
-        &title,
-        theme::semibold(14.0),
+        title,
         theme::TEXT,
     );
     let galley = message_galley(ui, note, rect.width());
     ui.painter().galley(
-        Pos2::new(rect.left() + TEXT_X, rect.top() + PAD + 21.0),
+        Pos2::new(rect.left() + TEXT_X, rect.top() + PAD + title_h + 3.0),
         galley,
         theme::TEXT_DIM,
     );
@@ -325,8 +342,11 @@ fn toast_card(
         open: body.clicked() && !resp.clicked(),
         ..Default::default()
     };
-    if shows_details(&note.code) {
-        let label = t!("plugins.issue_details");
+    if let Some(button) = toast_button(&note.code) {
+        let label = match button {
+            ToastButton::Details => t!("plugins.issue_details"),
+            ToastButton::Open => t!("shell.update_open_settings"),
+        };
         let w = ui
             .painter()
             .layout_no_wrap(label.to_string(), theme::body_sm(), theme::TEXT)
@@ -345,7 +365,10 @@ fn toast_card(
             super::ButtonKind::Secondary,
         )
         .clicked();
-        action.details = clicked;
+        match button {
+            ToastButton::Details => action.details = clicked,
+            ToastButton::Open => action.open |= clicked,
+        }
     }
     action
 }
@@ -408,19 +431,28 @@ mod tests {
     #[test]
     fn detail_codes_are_sticky_and_show_details() {
         for n in [plugin_error(), device_write_error()] {
-            assert!(shows_details(&n.code));
+            assert_eq!(toast_button(&n.code), Some(ToastButton::Details));
             assert_eq!(
                 toast_timeout(&n.code),
                 None,
                 "detail toasts stay until dismissed"
             );
-            assert_eq!(details_extra_height(&n), DETAILS_ROW_H);
+            assert_eq!(action_row_height(&n), ACTION_ROW_H);
         }
         // A no-detail warning is neither sticky nor gets a Details row.
         let w = note(NotificationSeverity::Warning);
-        assert!(!shows_details(&w.code));
+        assert_eq!(toast_button(&w.code), None);
         assert!(toast_timeout(&w.code).is_some());
-        assert_eq!(details_extra_height(&w), 0.0);
+        assert_eq!(action_row_height(&w), 0.0);
+    }
+
+    #[test]
+    fn update_toast_offers_open_settings_and_times_out() {
+        let code = NotificationCode::UpdateAvailable {
+            version: "0.14.0".into(),
+        };
+        assert_eq!(toast_button(&code), Some(ToastButton::Open));
+        assert!(toast_timeout(&code).is_some());
     }
 
     #[test]
@@ -517,6 +549,25 @@ mod tests {
         assert_eq!(toasts.unread(), 0);
         toasts.clear_history();
         assert_eq!(toasts.history().count(), 0);
+    }
+
+    #[test]
+    fn long_titles_wrap_inside_the_card() {
+        const W: f32 = 380.0;
+        let ctx = egui::Context::default();
+        let long = Notification {
+            code: NotificationCode::PluginUpdateNeedsPermissions {
+                plugin: "nuvoton_lpcio".parse().unwrap(),
+                name: "Nuvoton Super I/O Hardware Monitor".into(),
+            },
+            show_native: false,
+            timestamp_ms: 0,
+        };
+        let short = note(NotificationSeverity::Info);
+        crate::ui::run_headless(&ctx, egui::RawInput::default(), |ui| {
+            assert!(title_galley(ui, &long, W).size().x <= text_width(W));
+            assert!(title_galley(ui, &long, W).size().y > title_galley(ui, &short, W).size().y);
+        });
     }
 
     #[test]

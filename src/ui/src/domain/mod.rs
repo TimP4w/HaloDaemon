@@ -13,3 +13,4 @@ pub mod state;
 pub mod topic_store;
 pub mod tour;
 pub mod tray;
+pub mod update;

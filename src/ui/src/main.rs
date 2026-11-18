@@ -57,6 +57,12 @@ impl eframe::App for App {
         }
         #[cfg(windows)]
         if self.hidden.load(Ordering::SeqCst) {
+            // eframe force-shows the window after its first paint, ignoring
+            // `with_visible(false)`; re-hide it for `--background` starts.
+            if ui.ctx().cumulative_frame_nr() == 0 {
+                ui.ctx()
+                    .send_viewport_cmd(egui::ViewportCommand::Visible(false));
+            }
             self.draw_background(ui.ctx());
         } else {
             self.draw(ui);
@@ -105,13 +111,16 @@ fn main() -> eframe::Result<()> {
     ui::screens::settings::apply_startup_locale();
     #[cfg(windows)]
     domain::lifecycle::autostart::repair_enabled_command();
-
     let primary = match runtime::single_instance::acquire() {
         runtime::single_instance::Instance::Secondary => return Ok(()),
         runtime::single_instance::Instance::Primary(p) => p,
     };
+    #[cfg(windows)]
+    domain::update::remove_leftover_installer();
 
     let background = domain::lifecycle::start_in_background(std::env::args());
+    #[cfg(windows)]
+    let update_failed = domain::update::update_failed_requested(std::env::args());
 
     let options = eframe::NativeOptions {
         renderer: eframe::Renderer::Glow,
@@ -147,9 +156,20 @@ fn main() -> eframe::Result<()> {
                 force_quit.clone(),
                 hide_state.clone(),
             );
-            Ok(Box::new(App::new(
-                ui, sinks, cmd_tx, tray, force_quit, hidden, hide_state,
-            )))
+            #[cfg(windows)]
+            if update_failed {
+                runtime::ipc::send(
+                    &cmd_tx,
+                    halod_shared::commands::DaemonCommand::CheckForUpdates,
+                );
+            }
+            let app = App::new(ui, sinks, cmd_tx, tray, force_quit, hidden, hide_state);
+            #[cfg(windows)]
+            if update_failed {
+                app.updater
+                    .fail(halod_shared::update::UpdateError::Installer);
+            }
+            Ok(Box::new(app))
         }),
     )
 }

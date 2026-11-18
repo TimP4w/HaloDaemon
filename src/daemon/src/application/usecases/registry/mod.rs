@@ -5,3 +5,4 @@ pub mod receiver;
 pub mod registration;
 pub mod runtime;
 pub mod settings;
+pub mod update;

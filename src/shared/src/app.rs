@@ -35,6 +35,40 @@ pub const APP_ID: &str = "dev.timp4w.Halod";
 /// `daemon::constants::OFFICIAL_PLUGIN_REPO_URL`).
 pub const REPO_URL: &str = "https://github.com/TimP4w/HaloDaemon";
 
+/// Signs plugin catalogs and application releases; indexed by key id so a
+/// release can overlap old and rotated keys.
+pub const OFFICIAL_PUBLIC_KEYS: &[(&str, &str)] = &[(
+    "halodaemon-official-2026",
+    "tjbwm5X4f70e+soVNV1AfRyb/TtnEsNNl+93YMO6IhQ=",
+)];
+
+pub const INSTALLER_ASSET: &str = "halod-setup-x64.exe";
+pub const SUMS_ASSET: &str = "SHA256SUMS";
+pub const SUMS_SIG_ASSET: &str = "SHA256SUMS.sig";
+
+/// `HALOD_REPO_URL` points the update check at a fork; releases must still be
+/// signed with [`OFFICIAL_PUBLIC_KEYS`].
+fn release_repo_url() -> std::borrow::Cow<'static, str> {
+    match std::env::var("HALOD_REPO_URL") {
+        Ok(url) if !url.is_empty() => url.into(),
+        _ => REPO_URL.into(),
+    }
+}
+
+pub fn latest_release_api_url() -> String {
+    let repo = release_repo_url();
+    let path = repo.strip_prefix("https://github.com/").unwrap_or(&repo);
+    format!("https://api.github.com/repos/{path}/releases/latest")
+}
+
+pub fn release_page_url(version: &str) -> String {
+    format!("{}/releases/tag/v{version}", release_repo_url())
+}
+
+pub fn release_asset_url(version: &str, file: &str) -> String {
+    format!("{}/releases/download/v{version}/{file}", release_repo_url())
+}
+
 /// Author/developer credit shown in the GUI about/credits.
 pub const AUTHOR: &str = "TimP4w";
 
@@ -48,4 +82,25 @@ pub fn config_dir() -> std::path::PathBuf {
     let base = std::path::PathBuf::from(std::env::var("HOME").unwrap_or_else(|_| ".".into()))
         .join(".config");
     base.join(APP_NAME)
+}
+
+#[cfg(test)]
+mod tests {
+    use super::*;
+
+    #[test]
+    fn release_urls_derive_from_the_repository() {
+        assert_eq!(
+            latest_release_api_url(),
+            "https://api.github.com/repos/TimP4w/HaloDaemon/releases/latest"
+        );
+        assert_eq!(
+            release_page_url("0.14.0"),
+            format!("{REPO_URL}/releases/tag/v0.14.0")
+        );
+        assert_eq!(
+            release_asset_url("0.14.0", SUMS_SIG_ASSET),
+            format!("{REPO_URL}/releases/download/v0.14.0/SHA256SUMS.sig")
+        );
+    }
 }

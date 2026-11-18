@@ -10,6 +10,7 @@ pub mod lighting;
 pub mod plugin;
 pub mod profiles;
 pub mod registry;
+pub mod update;
 
 #[cfg(test)]
 mod layering_tests {

@@ -318,30 +318,16 @@ fn cooler_card(
                         .font(theme::body_md())
                         .color(theme::TEXT_DIM),
                 );
-                let current = live
-                    .map(|(d, s)| format!("{d} · {}", s.name))
-                    .unwrap_or_else(|| t!("cooling.no_sensor").to_string());
-                let mut pick: Option<Option<String>> = None;
+                let current = sensor_id.as_deref();
                 // Channel in the salt so a device's selectors don't alias.
-                egui::ComboBox::from_id_salt(format!("cool_sensor_{}_{}", dev.id, channel_id))
-                    .selected_text(current)
-                    .icon(widgets::select_chevron)
-                    .width(210.0)
-                    .show_ui(ui, |ui| {
-                        if ui
-                            .selectable_label(sensor_id.is_none(), t!("cooling.no_sensor"))
-                            .clicked()
-                        {
-                            pick = Some(None);
-                        }
-                        for (d, s) in sensors {
-                            let on = sensor_id.as_deref() == Some(s.id.as_str());
-                            let label = format!("{d} · {} ({:.0}°C)", s.name, s.value);
-                            if ui.selectable_label(on, label).clicked() {
-                                pick = Some(Some(s.id.clone()));
-                            }
-                        }
-                    });
+                let pick = widgets::grouped_select(
+                    ui,
+                    format!("cool_sensor_{}_{}", dev.id, channel_id),
+                    &sensor_select_text(sensors, current),
+                    210.0,
+                    &sensor_select_rows(sensors, current),
+                )
+                .map(picked_sensor);
                 if let Some(sel) = pick {
                     crate::runtime::ipc::send(
                         cmd,

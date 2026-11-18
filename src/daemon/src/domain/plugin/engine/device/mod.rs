@@ -469,6 +469,9 @@ pub struct LuaDevice {
     /// path silence polling during a bulk transfer without tearing it down.
     poll_task: Option<tokio::task::JoinHandle<()>>,
     poll_paused: Arc<AtomicBool>,
+    /// Set once `initialize` succeeds. Before that `caps` is the manifest's
+    /// full set and the plugin's per-device state does not exist yet.
+    initialized: AtomicBool,
     /// Event-driven transports wake this task when their bounded host queue
     /// receives input. The task only enqueues work on the root Lua worker.
     event_task: Option<tokio::task::JoinHandle<()>>,
@@ -1057,6 +1060,7 @@ impl LuaDevice {
             cooling_slot: CoolingStateSlot::default(),
             poll_task: None,
             poll_paused: Arc::new(AtomicBool::new(false)),
+            initialized: AtomicBool::new(false),
             event_task: None,
             event_paused: Arc::new(AtomicBool::new(false)),
             event_resume: Arc::new(tokio::sync::Notify::new()),
@@ -1449,6 +1453,7 @@ impl Device for LuaDevice {
                     );
                 }
             }
+            self.initialized.store(true, Ordering::Release);
             self.poll_paused.store(false, Ordering::Relaxed);
             self.event_paused.store(false, Ordering::Relaxed);
             self.event_resume.notify_one();
@@ -1462,6 +1467,7 @@ impl Device for LuaDevice {
         if self.health.close() {
             return;
         }
+        self.initialized.store(false, Ordering::Release);
         self.event_resume.notify_one();
         let owns_root_resources = self.worker.as_ref().is_none_or(|worker| !worker.is_child());
         if owns_root_resources {
@@ -1715,7 +1721,11 @@ impl SensorCapability for LuaDevice {
         // See `get_cooling_status`: integration controller children skip the
         // root's background-task construction path, so telemetry is their poll
         // driver. Run read_status first because some plugins derive sensors
-        // from the status table it updates.
+        // from the status table it updates. A device that never initialized
+        // (registered disabled, or init failed) has no plugin state to read.
+        if !self.initialized.load(Ordering::Acquire) {
+            return Ok(self.status.sensors.lock().clone());
+        }
         if self.poll_task.is_none() {
             let worker = self.worker()?;
             let polled = worker.poll().await;
@@ -3367,6 +3377,47 @@ mod tests {
             children[0].as_controller().is_none(),
             "only the root enumerates controllers"
         );
+        dev.close().await;
+    }
+
+    /// A child registered disabled never runs `initialize`, so it still
+    /// carries the manifest's `sensors` cap. Serializing it must not call into
+    /// a plugin whose per-device state was never built.
+    #[tokio::test(flavor = "multi_thread", worker_threads = 2)]
+    async fn an_uninitialized_child_never_reaches_lua_get_sensors() {
+        let script = r#"
+            return {
+              initialize = function(dev)
+                dev.info = {}
+                if dev.match.key then return { ok = true, capabilities = { "cooling" } } end
+                return { ok = true }
+              end,
+              enumerate_controllers = function(dev)
+                if dev.match.key then return {} end
+                return { { index = 0, key = "0", id = "superio_fan1", name = "Fan 1" } }
+              end,
+              get_sensors = function(dev)
+                if not dev.info then error("get_sensors on an uninitialized dev") end
+                return {}
+              end,
+            }
+        "#;
+        let (_tmp, mut manifest) = test_manifest("superio_uninit", &["sensors", "cooling"], script);
+        manifest.dynamic_children = true;
+        let dev = hid_device(
+            "superio_uninit-0",
+            &manifest,
+            Arc::new(MockTransport::empty()),
+        );
+        assert!(dev.initialize().await.unwrap());
+
+        let children = Controller::discover_children(&dev).await;
+        let child = children[0]
+            .as_sensor_capability()
+            .expect("manifest cap before init");
+        assert!(child.get_sensors().await.unwrap().is_empty());
+        children[0].serialize().await;
+        assert!(children[0].is_live(), "no call failure was recorded");
         dev.close().await;
     }
 

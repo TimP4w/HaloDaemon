@@ -39,6 +39,9 @@ notify:
   plugin_update_needs_permissions:
     title: "%{plugin} was updated and needs more permissions"
     message: It stays off until you turn it on again in Plugins, where you can review its permissions.
+  update_available:
+    title: "HaloDaemon %{version} is available"
+    message: "You have %{current}. Open Settings to update."
 
 tray:
   open: Open HaloDaemon

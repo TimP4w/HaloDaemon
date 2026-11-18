@@ -66,7 +66,7 @@ egui_kittest = { version = "0.37.0", default-features = false, features = [
 [target.'cfg(windows)'.dependencies]
 tray-icon = "0.26.1"
 # HKCU Run-key autostart entry (ui/src/lifecycle/autostart/windows.rs).
-windows = { version = "0.62.2", features = [
+windows = { workspace = true, features = [
     "Data_Xml_Dom",
     "UI_Notifications",
     "Win32_Foundation",

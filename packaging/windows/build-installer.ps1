@@ -7,7 +7,7 @@
 .DESCRIPTION
     Runs the three stages the CI "windows-installer" job does, end to end:
 
-      1. cargo build --release -p halod -p halod-gui -p halod-broker
+      1. cargo build --release -p halod -p halod-gui -p halod-broker -p halod-updater
       2. packaging\windows\stage-release.ps1   (exes + ffmpeg + DLLs + PawnIO blobs)
       3. ISCC.exe halod.iss                     -> packaging\windows\Output\halod-setup-x64.exe
 
@@ -78,7 +78,7 @@ if ($InstallDeps) {
 if ($SkipBuild) {
     Stage "Skipping build (-SkipBuild)"
 } else {
-    Stage "Building release binaries (halod, halod-gui, halod-broker)"
+    Stage "Building release binaries (halod, halod-gui, halod-broker, halod-updater)"
     if (-not (Test-Path (Join-Path $Ucrt64 "bin"))) {
         Fail "UCRT64 prefix not found: $Ucrt64 (install MSYS2 UCRT64)"
     }
@@ -87,7 +87,7 @@ if ($SkipBuild) {
     $env:PATH = "$(Join-Path $Ucrt64 'bin');$env:PATH"
     Push-Location $srcDir
     try {
-        cargo build --release -p halod -p halod-gui -p halod-broker
+        cargo build --release -p halod -p halod-gui -p halod-broker -p halod-updater
         if ($LASTEXITCODE -ne 0) { Fail "cargo build failed" }
     } finally { Pop-Location }
 }

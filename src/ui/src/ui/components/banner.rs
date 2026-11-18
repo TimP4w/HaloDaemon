@@ -215,14 +215,23 @@ pub fn banner_frame<R>(
     kind: &BannerKind,
     body: impl FnOnce(&mut egui::Ui) -> R,
 ) -> R {
+    banner_frame_with(ui, kind, theme::PAD_BANNER, body).inner
+}
+
+/// [`banner_frame`] with its own padding, returning the frame's rect too.
+pub fn banner_frame_with<R>(
+    ui: &mut egui::Ui,
+    kind: &BannerKind,
+    padding: egui::Margin,
+    body: impl FnOnce(&mut egui::Ui) -> R,
+) -> egui::InnerResponse<R> {
     let (_, fill, stroke) = banner_palette(kind);
     egui::Frame::NONE
         .fill(fill)
         .stroke(Stroke::new(1.0, stroke))
         .corner_radius(theme::RADIUS_MD)
-        .inner_margin(theme::PAD_BANNER)
+        .inner_margin(padding)
         .show(ui, body)
-        .inner
 }
 
 #[cfg(test)]

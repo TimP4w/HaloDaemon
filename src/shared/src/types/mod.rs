@@ -591,6 +591,8 @@ mod default_tests {
         let c: GuiConfig = serde_json::from_str(r#"{"language":"en","log_level":"info"}"#).unwrap();
         assert!(c.close_to_tray, "default_close_to_tray");
         assert!(c.low_battery_notifications);
+        assert!(c.check_for_updates);
+        assert!(c.update_notified.is_empty());
         assert!(
             !c.suppress_dependency_warning,
             "default_suppress_dependency_warning"

@@ -64,8 +64,8 @@ Name: "english"; MessagesFile: "compiler:Default.isl"
 Name: "desktopicon"; Description: "Create a desktop shortcut for HaloDaemon"; GroupDescription: "Shortcuts:"; Flags: unchecked
 
 [Files]
-; packaging\windows\staging\ is produced by stage-release.ps1 — the three exes
-; (halod, halod-gui, halod-broker), bundled ffmpeg (+ its DLLs and license), and
+; packaging\windows\staging\ is produced by stage-release.ps1 — the four exes
+; (halod, halod-gui, halod-broker, halod-updater), bundled ffmpeg (+ its DLLs and license), and
 ; the PawnIO blobs.
 Source: "staging\*"; DestDir: "{app}"; Flags: ignoreversion recursesubdirs createallsubdirs
 
@@ -124,6 +124,9 @@ begin
   Exec(ExpandConstant('{sys}\sc.exe'), 'stop HalodDaemon', '',
        SW_HIDE, ewWaitUntilTerminated, ResultCode);
   Exec(ExpandConstant('{sys}\sc.exe'), 'delete HalodDaemon', '',
+       SW_HIDE, ewWaitUntilTerminated, ResultCode);
+  { The GUI goes first: while alive it respawns halod.exe. }
+  Exec(ExpandConstant('{sys}\taskkill.exe'), '/f /im halod-gui.exe', '',
        SW_HIDE, ewWaitUntilTerminated, ResultCode);
   { The user-level daemon/broker processes may still hold their exes. }
   Exec(ExpandConstant('{sys}\taskkill.exe'), '/f /im halod.exe', '',

@@ -16,4 +16,6 @@ pub mod messages;
 pub mod socket;
 pub mod system_fonts;
 pub mod types;
+pub mod update;
+pub mod win32;
 pub mod zone_transform;

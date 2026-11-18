@@ -45,6 +45,9 @@ fn split_widths(avail: f32, gap: f32, left_w: f32) -> (f32, f32) {
 /// Widest a page body grows before it centres in the window.
 pub const PAGE_MAX_W: f32 = 1360.0;
 
+/// Horizontal padding of [`page_frame`].
+pub const PAGE_PAD_X: f32 = 28.0;
+
 /// The standard page body: `24/28 px` padding, capped at [`PAGE_MAX_W`] and
 /// centred. Every top-level page wraps its body in this.
 pub fn page_frame<R>(ui: &mut egui::Ui, body: impl FnOnce(&mut egui::Ui) -> R) -> R {
@@ -53,8 +56,8 @@ pub fn page_frame<R>(ui: &mut egui::Ui, body: impl FnOnce(&mut egui::Ui) -> R) -
     ui.scope_builder(egui::UiBuilder::new().max_rect(rect), |ui| {
         egui::Frame::NONE
             .inner_margin(egui::Margin {
-                left: 28,
-                right: 28,
+                left: PAGE_PAD_X as i8,
+                right: PAGE_PAD_X as i8,
                 top: 24,
                 bottom: 32,
             })
@@ -65,7 +68,7 @@ pub fn page_frame<R>(ui: &mut egui::Ui, body: impl FnOnce(&mut egui::Ui) -> R) -
 }
 
 /// `avail` narrowed to at most `max_w`, centred horizontally.
-fn centered_column(avail: egui::Rect, max_w: f32) -> egui::Rect {
+pub fn centered_column(avail: egui::Rect, max_w: f32) -> egui::Rect {
     let w = avail.width().min(max_w);
     egui::Rect::from_min_size(
         egui::pos2(avail.center().x - w / 2.0, avail.top()),

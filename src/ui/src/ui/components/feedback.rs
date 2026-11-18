@@ -74,7 +74,7 @@ pub fn progress_bar(
 /// Visible sub-segment `(x0, x1)` in `0..=1` of an indeterminate bar at loop
 /// phase `t` (`0..1`) for a segment of relative width `seg`: it enters from the
 /// left and exits at the right, so both edges stay clamped to `0..=1`.
-fn indeterminate_window(t: f32, seg: f32) -> (f32, f32) {
+pub fn indeterminate_window(t: f32, seg: f32) -> (f32, f32) {
     let travel = 1.0 + seg;
     let start = t.rem_euclid(1.0) * travel - seg;
     (start.clamp(0.0, 1.0), (start + seg).clamp(0.0, 1.0))

@@ -116,3 +116,11 @@ settings:
   diag_offline: offline
   diag_hid: "HID Interfaces (%{n})"
   diag_smbus: "SMBus Buses (%{n})"
+  update_title: Updates
+  update_available_sub: "HaloDaemon %{version} is available"
+  update_current_sub: You have the latest version
+  update_failed_sub: The last check failed
+  update_check_button: Check now
+  update_checking_button: Checking…
+  update_auto_title: Check for updates automatically
+  update_auto_sub: Look for a new version once a day and notify you when one is out

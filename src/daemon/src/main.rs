@@ -329,6 +329,21 @@ async fn run_daemon(headless: bool, cfg: crate::config::Config) -> Result<()> {
         || {},
     );
 
+    let update_app = Arc::clone(&app);
+    supervisor.register(
+        "Update watcher",
+        "",
+        move || {
+            let app = Arc::clone(&update_app);
+            Box::pin(async move {
+                TaskHandle(tokio::spawn(
+                    application::usecases::registry::update::watcher(app),
+                ))
+            })
+        },
+        || {},
+    );
+
     let fan_curve = cooling::engine::fan_curve::FanCurveEngine::new(app.clone());
     let rgb = lighting::engine::RgbEngine::new(app.clone()).await;
     let lcd = lcd::engine::LcdEngine::new(app.clone());

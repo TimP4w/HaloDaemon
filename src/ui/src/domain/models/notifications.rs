@@ -71,6 +71,14 @@ pub fn notification_text(code: &NotificationCode) -> (String, String) {
             .to_string(),
             t!("notify.plugin_update_needs_permissions.message").to_string(),
         ),
+        UpdateAvailable { version } => (
+            t!("notify.update_available.title", version = version).to_string(),
+            t!(
+                "notify.update_available.message",
+                current = env!("CARGO_PKG_VERSION")
+            )
+            .to_string(),
+        ),
         Generic { message } => (t!("notify.error_title").to_string(), message.clone()),
     }
 }
@@ -98,6 +106,7 @@ pub fn notification_target(
         | DeviceInitFailed { device_id, .. }
         | DeviceWriteFailed { device_id, .. } => known_device(device_id),
         FanStalled { .. } => Some(NotificationTarget::Page(Page::Cooling)),
+        UpdateAvailable { .. } => Some(NotificationTarget::Page(Page::Settings)),
         ProfileSwitched { profile } => {
             Some(NotificationTarget::Page(Page::Profile(profile.clone())))
         }
@@ -155,6 +164,12 @@ mod tests {
             Some(NotificationTarget::Page(Page::Cooling))
         );
         assert_eq!(
+            target(NotificationCode::UpdateAvailable {
+                version: "0.14.0".into()
+            }),
+            Some(NotificationTarget::Page(Page::Settings))
+        );
+        assert_eq!(
             target(NotificationCode::DeviceInitFailed {
                 device_id: "gone-1".parse().unwrap(),
                 device: "Gone".into(),
@@ -210,6 +225,9 @@ mod tests {
                 plugin: "nzxt_kraken".parse().unwrap(),
                 name: "NZXT Kraken".into(),
             },
+            UpdateAvailable {
+                version: "0.14.0".into(),
+            },
             Generic {
                 message: "boom".into(),
             },
@@ -230,6 +248,11 @@ mod tests {
             profile: "Gaming".into(),
         });
         assert!(msg.contains("Gaming"), "param not interpolated: {msg}");
+        let (title, msg) = notification_text(&UpdateAvailable {
+            version: "0.14.0".into(),
+        });
+        assert!(title.contains("0.14.0"), "{title}");
+        assert!(msg.contains(env!("CARGO_PKG_VERSION")), "{msg}");
 
         let (title, message) = notification_text(&PluginRuntimeError {
             plugin: "xyz".parse().unwrap(),

@@ -175,6 +175,10 @@ pub enum DaemonCommand {
     SetLanguage {
         lang: String,
     },
+    CheckForUpdates,
+    SetUpdateCheck {
+        enabled: bool,
+    },
     /// Replace the Home dashboard's widget row. Adds, removals and reorders
     /// are all whole-list mutations, so one command covers them.
     SetHomeWidgets {
@@ -662,6 +666,14 @@ mod tests {
             (
                 DaemonCommand::SetLanguage { lang: "it".into() },
                 json!({"type": "set_language", "lang": "it"}),
+            ),
+            (
+                DaemonCommand::CheckForUpdates,
+                json!({"type": "check_for_updates"}),
+            ),
+            (
+                DaemonCommand::SetUpdateCheck { enabled: false },
+                json!({"type": "set_update_check", "enabled": false}),
             ),
             (
                 DaemonCommand::SetHomeWidgets {

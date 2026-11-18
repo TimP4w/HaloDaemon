@@ -459,6 +459,8 @@ mod tests {
         let cfg: GuiConfig = serde_yaml::from_str(yaml).unwrap();
         assert!(cfg.close_to_tray);
         assert!(cfg.low_battery_notifications);
+        assert!(cfg.check_for_updates);
+        assert!(cfg.update_notified.is_empty());
     }
 
     #[test]

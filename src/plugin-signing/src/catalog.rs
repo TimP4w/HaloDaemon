@@ -291,7 +291,7 @@ fn split_signature(bytes: &[u8]) -> Result<(Option<(&str, [u8; 64])>, &[u8]), Ca
     Ok((Some((key_id, signature)), &rest[end + 1..]))
 }
 
-fn decode_array<const N: usize>(value: &str) -> Result<[u8; N]> {
+pub(crate) fn decode_array<const N: usize>(value: &str) -> Result<[u8; N]> {
     B64.decode(value.trim())
         .context("decoding base64")?
         .try_into()

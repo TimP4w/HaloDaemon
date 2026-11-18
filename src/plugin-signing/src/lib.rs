@@ -4,6 +4,7 @@ pub mod catalog;
 pub mod declarations;
 pub mod fetch;
 pub mod package;
+pub mod release;
 
 pub use api::{PluginApi, HOST_PLUGIN_API};
 pub use catalog::{
@@ -16,7 +17,7 @@ pub fn sha256_hex(bytes: impl AsRef<[u8]>) -> String {
     hex_lower(Sha256::digest(bytes))
 }
 
-fn hex_lower(bytes: impl AsRef<[u8]>) -> String {
+pub fn hex_lower(bytes: impl AsRef<[u8]>) -> String {
     bytes
         .as_ref()
         .iter()

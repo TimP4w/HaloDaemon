@@ -17,3 +17,29 @@ shell:
   age_min: "%{n} min"
   age_hour: "%{n} h"
   age_day: "%{n} d"
+  update_available_title: "HaloDaemon %{version} is available"
+  update_current: "You have %{current}."
+  update_current_package: "You have %{current}. Update through your package manager."
+  update_release_notes: Release notes
+  update_now: Update now
+  update_view_release: View release
+  update_downloading_title: "Downloading HaloDaemon %{version}"
+  update_bytes: "%{done} of %{total} MB"
+  update_bytes_unknown: "%{done} MB"
+  update_cancel: Cancel
+  update_verifying_title: Verifying the download
+  update_verifying_sub: Checking the installer against the signed release checksums.
+  update_consent_title: Waiting for permission to install
+  update_consent_sub: Approve the Windows prompt to continue. HaloDaemon restarts when the update finishes.
+  update_failed_title: "Update to %{version} failed"
+  update_retry: Try again
+  update_dismiss: Dismiss until next launch
+  update_error_network: The download could not be completed. Check your connection and try again.
+  update_error_signature: The release signature could not be verified. Nothing was installed.
+  update_error_hash: The download could not be verified. Nothing was installed.
+  update_error_too_large: The download was larger than expected. Nothing was installed.
+  update_error_io: The installer could not be saved. Nothing was installed.
+  update_error_stale: This version is not newer than the one installed.
+  update_error_declined: Permission to install was declined. Nothing was installed.
+  update_error_installer: The installer did not finish. Your previous version is still installed.
+  update_open_settings: Open settings

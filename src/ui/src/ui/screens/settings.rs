@@ -9,7 +9,7 @@ use crate::ui::components as widgets;
 use egui::{Align2, Color32, Pos2, Stroke, Vec2};
 use halod_shared::commands::{DaemonCommand, EngineKind};
 use halod_shared::debug_info::{DebugInfo, DependencyStatus};
-use halod_shared::types::{CoolingConfig, DiscoveryPhase, GuiConfig};
+use halod_shared::types::{CoolingConfig, DiscoveryPhase, GuiConfig, UpdateStatus};
 
 use crate::domain::state::Debouncer;
 use crate::domain::tour;
@@ -380,6 +380,7 @@ fn page_body(
             ),
             |ui| value_text(ui, env!("CARGO_PKG_VERSION")),
         );
+        update_rows(ui, state, cmd);
         if button_row(
             ui,
             &t!("settings.repository_title"),
@@ -405,6 +406,50 @@ fn page_body(
             st.modal = Some(Modal::Licenses);
         }
     });
+}
+
+fn update_status_sub(status: &UpdateStatus) -> Cow<'static, str> {
+    match (&status.available, status.failed) {
+        (_, true) => t!("settings.update_failed_sub"),
+        (Some(version), false) => t!("settings.update_available_sub", version = version),
+        (None, false) => t!("settings.update_current_sub"),
+    }
+}
+
+fn update_rows(ui: &mut egui::Ui, state: &TopicStore, cmd: &CommandTx) {
+    widgets::list_row(
+        ui,
+        &t!("settings.update_title"),
+        &update_status_sub(&state.update),
+        |ui| {
+            if state.update.checking {
+                widgets::button_loading(
+                    ui,
+                    &t!("settings.update_checking_button"),
+                    widgets::ButtonKind::Secondary,
+                    ROW_BUTTON,
+                );
+            } else if widgets::button(
+                ui,
+                &t!("settings.update_check_button"),
+                widgets::ButtonKind::Secondary,
+                ROW_BUTTON,
+            )
+            .clicked()
+            {
+                ipc::send(cmd, DaemonCommand::CheckForUpdates);
+            }
+        },
+    );
+    let on = state.gui.check_for_updates;
+    if widgets::list_row(
+        ui,
+        &t!("settings.update_auto_title"),
+        &t!("settings.update_auto_sub"),
+        |ui| widgets::toggle(ui, on) != on,
+    ) {
+        ipc::send(cmd, DaemonCommand::SetUpdateCheck { enabled: !on });
+    }
 }
 
 const ROW_BUTTON: Vec2 = Vec2::new(0.0, 30.0);
@@ -1297,6 +1342,24 @@ fn export_diagnostics(json: String) {
 #[cfg(test)]
 mod tests {
     use super::*;
+
+    #[test]
+    fn update_status_reports_failure_then_availability_then_current() {
+        let available = UpdateStatus {
+            available: Some("0.14.0".into()),
+            ..Default::default()
+        };
+        assert!(update_status_sub(&available).contains("0.14.0"));
+        let failed = UpdateStatus {
+            failed: true,
+            ..available
+        };
+        assert_eq!(update_status_sub(&failed), "The last check failed");
+        assert_eq!(
+            update_status_sub(&UpdateStatus::default()),
+            "You have the latest version"
+        );
+    }
 
     #[test]
     fn the_recheck_spinner_stops_when_a_snapshot_arrives() {

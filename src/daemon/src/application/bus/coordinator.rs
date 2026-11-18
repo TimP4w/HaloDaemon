@@ -62,6 +62,7 @@ fn topics(change: &Change) -> Vec<Topic> {
         Change::PluginTopology => vec![Topic::Plugins, Topic::Devices],
         Change::PluginData => vec![Topic::Plugins],
         Change::PluginDeviceStatus(id) => vec![Topic::Plugins, Topic::Device(id.clone())],
+        Change::Update => vec![Topic::Update],
     }
 }
 
@@ -143,6 +144,7 @@ mod tests {
             vec![Topic::Profiles, Topic::ProcessIcons]
         );
         assert_eq!(topics(&Change::Gui), vec![Topic::Gui]);
+        assert_eq!(topics(&Change::Update), vec![Topic::Update]);
         assert_eq!(topics(&Change::LightingCatalog), vec![Topic::Lighting]);
         assert_eq!(topics(&Change::LcdCatalog), vec![Topic::Lcd]);
         assert_eq!(

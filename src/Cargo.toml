@@ -1,12 +1,12 @@
 [workspace]
-members = ["shared", "hwaccess", "broker", "daemon", "ui", "plugin-signing"]
+members = ["shared", "hwaccess", "broker", "daemon", "ui", "plugin-signing", "updater"]
 resolver = "2"
 
 [workspace.package]
 version = "0.13.1"
 edition = "2021"
 license = "GPL-3.0-or-later"
-repository = "https://github.com/TimP4w/Halod"
+repository = "https://github.com/TimP4w/HaloDaemon"
 
 [workspace.dependencies]
 tokio      = { version = "1.53.1" }
@@ -17,6 +17,7 @@ anyhow     = "1.0.104"
 log        = "0.4.33"
 async-trait = "0.1.91"
 parking_lot = "0.12.5"
+windows    = "0.62.2"
 
 [workspace.lints.clippy]
 # Opinionated style/formatting lints kept off so the gate stays focused on

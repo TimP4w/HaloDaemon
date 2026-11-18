@@ -93,6 +93,27 @@ cargo run --manifest-path src/Cargo.toml -p halod-plugin-signing -- \
 entries forward, and fails if a package changed without a version bump. Use
 `--bootstrap` instead for the first publish. Upload the whole `site` directory.
 
+### Release signing
+
+Application releases are signed with the same official key. The release
+workflow runs `sign-release` on `SHA256SUMS` with the `RELEASE_SIGNING_KEY`
+repository secret (the official key's seed) under the key id
+`halodaemon-official-2026`, and the Windows
+updater only installs a release whose `SHA256SUMS.sig` verifies against
+`OFFICIAL_PUBLIC_KEYS` in `halod-shared`. The signed message starts with
+`halod-release v<version>`, so a catalog signature cannot stand in for it and
+an old manifest cannot be replayed under a newer tag.
+
+```sh
+HALOD_PLUGIN_SIGNING_KEY_B64='<private_seed_b64>' \
+  cargo run --manifest-path src/Cargo.toml -p halod-plugin-signing -- \
+  sign-release SHA256SUMS --version 0.14.0 --key-id halodaemon-official-2026
+```
+
+`HALOD_REPO_URL` (for example a fork's `https://github.com/<owner>/HaloDaemon`)
+points the update check and the updater at that repository's releases, which
+still have to carry a valid signature.
+
 ## Plugin development
 
 The [HaloDaemon plugins repository](https://github.com/TimP4w/HaloDaemon-plugins)

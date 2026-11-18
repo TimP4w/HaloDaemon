@@ -83,7 +83,8 @@ The Rust workspace is under `src/`:
 | `halod-shared` | Shared IPC, device, capability, engine, and rendering types |
 | `halod-hwaccess` | Low-level privileged hardware-access primitives and broker protocol |
 | `halod-broker` | Windows-only privileged hardware-access helper |
-| `halod-plugin-signing` | Plugin catalog building, signing, and verification |
+| `halod-plugin-signing` | Plugin catalog and release-manifest signing and verification |
+| `halod-updater` | Windows-only in-app updater: verified installer download and elevated run |
 
 The daemon and GUI communicate over a Unix socket on Linux and a named pipe on
 Windows. For a deeper overview, see [Architecture](architecture.md).

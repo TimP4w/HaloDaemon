@@ -146,6 +146,9 @@ pub struct GuiConfig {
     pub home_widgets: Vec<HomeWidget>,
     /// In display order; separate from `home_widgets` so each page keeps its own sensors.
     pub cooling_widgets: Vec<HomeWidget>,
+    pub check_for_updates: bool,
+    /// Last version an update notification was sent for.
+    pub update_notified: String,
 }
 
 impl Default for GuiConfig {
@@ -160,6 +163,8 @@ impl Default for GuiConfig {
             log_level: "info".to_string(),
             home_widgets: Vec::new(),
             cooling_widgets: Vec::new(),
+            check_for_updates: true,
+            update_notified: String::new(),
         }
     }
 }
@@ -225,6 +230,9 @@ pub enum NotificationCode {
         plugin: crate::ids::PluginId,
         name: String,
     },
+    UpdateAvailable {
+        version: String,
+    },
     /// The GUI translates only the title and shows `message` verbatim.
     Generic {
         message: String,
@@ -246,7 +254,8 @@ impl NotificationCode {
             ProfileSwitched { .. }
             | LowBattery { .. }
             | PluginRecommended { .. }
-            | PluginUpdateNeedsPermissions { .. } => NotificationSeverity::Info,
+            | PluginUpdateNeedsPermissions { .. }
+            | UpdateAvailable { .. } => NotificationSeverity::Info,
         }
     }
 
@@ -259,6 +268,13 @@ impl NotificationCode {
             _ => None,
         }
     }
+}
+
+#[derive(Debug, Clone, Default, PartialEq, Eq, Serialize, Deserialize)]
+pub struct UpdateStatus {
+    pub checking: bool,
+    pub available: Option<String>,
+    pub failed: bool,
 }
 
 #[derive(Debug, Clone, Serialize, Deserialize)]

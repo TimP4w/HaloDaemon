@@ -86,7 +86,12 @@ pub(crate) fn present(ctx: &egui::Context, hide_state: &HideState) {
 ///
 /// Sets `force_quit` so the backend lets the close through even when "close to
 /// tray" is enabled (which otherwise hides the window instead).
-fn quit(ctx: &egui::Context, cmd: &CommandTx, force_quit: &AtomicBool, hide_state: &HideState) {
+pub(crate) fn quit(
+    ctx: &egui::Context,
+    cmd: &CommandTx,
+    force_quit: &AtomicBool,
+    hide_state: &HideState,
+) {
     force_quit.store(true, Ordering::SeqCst);
     crate::runtime::ipc::send(cmd, halod_shared::commands::DaemonCommand::Shutdown);
     ctx.send_viewport_cmd(egui::ViewportCommand::Close);

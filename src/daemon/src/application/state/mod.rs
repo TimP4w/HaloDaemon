@@ -89,6 +89,7 @@ pub struct AppState {
     /// still waking (wireless link not up, firmware not answering) drops the
     /// writes it is sent, so a one-shot restore silently loses the user's state.
     pub restore_retry: Arc<RetryQueue>,
+    pub update: Mutex<halod_shared::types::UpdateStatus>,
 }
 
 impl AppState {
@@ -113,6 +114,7 @@ impl AppState {
             rediscovery_runner: Mutex::new(()),
             plugin_catalogs: Mutex::default(),
             plugin_store: Mutex::default(),
+            update: Mutex::default(),
             repo_refresh_retry: Arc::default(),
             registry: Registry::default(),
             data_bus: Arc::new(DataBus::default()),

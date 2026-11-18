@@ -29,19 +29,24 @@ pub fn package_url(catalog_url: &str, path: &str) -> Result<url::Url> {
     Ok(url)
 }
 
-pub fn https_get(url: &url::Url, limit: u64) -> Result<Vec<u8>> {
-    if url.scheme() != "https" {
-        bail!("refusing non-https download {url}");
-    }
-    let agent: ureq::Agent = ureq::Agent::config_builder()
-        .max_redirects(0)
+pub fn agent(max_redirects: u32) -> ureq::Agent {
+    ureq::Agent::config_builder()
+        .https_only(true)
+        .max_redirects(max_redirects)
         .http_status_as_error(true)
         .timeout_connect(Some(CONNECT_TIMEOUT))
         .timeout_send_request(Some(RESPONSE_TIMEOUT))
         .timeout_recv_response(Some(RESPONSE_TIMEOUT))
         .timeout_recv_body(Some(BODY_TIMEOUT))
         .build()
-        .into();
+        .into()
+}
+
+pub fn https_get(url: &url::Url, limit: u64) -> Result<Vec<u8>> {
+    if url.scheme() != "https" {
+        bail!("refusing non-https download {url}");
+    }
+    let agent = agent(0);
     let mut response = ureq::http::Request::builder()
         .method("GET")
         .uri(url.as_str())

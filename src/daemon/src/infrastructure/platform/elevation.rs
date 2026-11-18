@@ -72,9 +72,7 @@ pub(crate) fn spawn_broker_elevated(
     coordinator_session: u32,
 ) -> anyhow::Result<()> {
     use anyhow::{anyhow, Context};
-    use windows::core::PCWSTR;
-    use windows::Win32::UI::Shell::{ShellExecuteExW, SEE_MASK_NOASYNC, SHELLEXECUTEINFOW};
-    use windows::Win32::UI::WindowsAndMessaging::SW_SHOWNORMAL;
+    use halod_shared::win32::{quote_arg, run_elevated};
 
     let exe = std::env::current_exe().context("locating halod.exe")?;
     let dir = exe
@@ -87,10 +85,6 @@ pub(crate) fn spawn_broker_elevated(
             exe.display()
         ));
     }
-
-    let verb = wide("runas");
-    let file = wide_path(&broker);
-    let dir_w = wide_path(dir);
     let parameters = [
         format!("--bootstrap-token={bootstrap_token}"),
         format!("--coordinator-sid={coordinator_sid}"),
@@ -100,106 +94,8 @@ pub(crate) fn spawn_broker_elevated(
     .map(|argument| quote_arg(argument))
     .collect::<Vec<_>>()
     .join(" ");
-    let parameters = wide(&parameters);
-
-    let mut info = SHELLEXECUTEINFOW {
-        cbSize: std::mem::size_of::<SHELLEXECUTEINFOW>() as u32,
-        fMask: SEE_MASK_NOASYNC,
-        lpVerb: PCWSTR(verb.as_ptr()),
-        lpFile: PCWSTR(file.as_ptr()),
-        lpParameters: PCWSTR(parameters.as_ptr()),
-        lpDirectory: PCWSTR(dir_w.as_ptr()),
-        nShow: SW_SHOWNORMAL.0,
-        ..Default::default()
-    };
-
-    // SAFETY: `info` and every string buffer it points at outlive the call.
-    unsafe { ShellExecuteExW(&mut info) }
+    run_elevated(&broker, &parameters, dir)
         .map_err(|e| anyhow!("ShellExecuteExW(runas) for halod-broker: {e}"))?;
     log::info!("launched halod-broker with a UAC prompt");
     Ok(())
-}
-
-#[cfg(windows)]
-use crate::infrastructure::platform::win32::{wide, wide_path};
-
-/// Quote a single argument for `CreateProcess`/`ShellExecuteExW` `lpParameters`
-/// using the CommandLineToArgvW escaping rules:
-/// - Wrap in double quotes if the argument is empty or contains spaces/tabs/quotes.
-/// - Backslashes before a `"` (or the closing quote) are doubled.
-///
-#[cfg(windows)]
-pub(crate) fn quote_arg(arg: &str) -> String {
-    let needs_quoting = arg.is_empty() || arg.chars().any(|c| c == ' ' || c == '\t' || c == '"');
-    if !needs_quoting {
-        return arg.to_string();
-    }
-    let mut out = String::from('"');
-    let mut backslashes: usize = 0;
-    for c in arg.chars() {
-        match c {
-            '\\' => backslashes += 1,
-            '"' => {
-                // 2N backslashes + escaped quote
-                for _ in 0..backslashes * 2 {
-                    out.push('\\');
-                }
-                out.push_str("\\\"");
-                backslashes = 0;
-            }
-            _ => {
-                for _ in 0..backslashes {
-                    out.push('\\');
-                }
-                out.push(c);
-                backslashes = 0;
-            }
-        }
-    }
-    // Backslashes before the closing quote must be doubled.
-    for _ in 0..backslashes * 2 {
-        out.push('\\');
-    }
-    out.push('"');
-    out
-}
-
-#[cfg(all(windows, test))]
-mod tests {
-    use super::quote_arg;
-
-    #[test]
-    fn plain_arg_no_quoting_needed() {
-        assert_eq!(quote_arg("hello"), "hello");
-    }
-
-    #[test]
-    fn empty_arg_wraps_in_quotes() {
-        assert_eq!(quote_arg(""), "\"\"");
-    }
-
-    #[test]
-    fn arg_with_space_wraps_in_quotes() {
-        assert_eq!(quote_arg("two words"), "\"two words\"");
-    }
-
-    #[test]
-    fn arg_with_double_quote_escapes() {
-        assert_eq!(quote_arg(r#"a"b"#), "\"a\\\"b\"");
-    }
-
-    #[test]
-    fn arg_with_backslashes_before_quote() {
-        assert_eq!(quote_arg(r"a\"), "a\\");
-    }
-
-    #[test]
-    fn arg_with_multiple_backslashes_before_quote() {
-        assert_eq!(quote_arg(r##"a\\\"b"##), r#""a\\\\\\\"b""#);
-    }
-
-    #[test]
-    fn arg_with_tab_requires_quoting() {
-        assert_eq!(quote_arg("a\tb"), "\"a\tb\"");
-    }
 }

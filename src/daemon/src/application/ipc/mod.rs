@@ -274,7 +274,7 @@ impl PipeSecurity {
         use windows::Win32::Security::{PSECURITY_DESCRIPTOR, SECURITY_ATTRIBUTES};
 
         let user_sid = current_user_sid()?;
-        let sddl = crate::infrastructure::platform::win32::wide(&pipe_security_sddl(&user_sid));
+        let sddl = halod_shared::win32::wide(&pipe_security_sddl(&user_sid));
 
         let mut descriptor = PSECURITY_DESCRIPTOR::default();
         // SAFETY: `sddl` is NUL-terminated; `descriptor` receives a freshly
@@ -355,7 +355,7 @@ pub fn ensure_single_instance() -> Result<()> {
     use windows::Win32::Foundation::{CloseHandle, GetLastError, ERROR_ALREADY_EXISTS};
     use windows::Win32::System::Threading::CreateMutexW;
 
-    let name = crate::infrastructure::platform::win32::wide(r"Global\HalodDaemonSingleInstance");
+    let name = halod_shared::win32::wide(r"Global\HalodDaemonSingleInstance");
     // SAFETY: `name` is NUL-terminated. On success the handle is intentionally
     // never closed so the mutex stays held for the process lifetime (the OS
     // releases it on exit); on the already-exists path it is closed before bailing.

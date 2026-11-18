@@ -32,24 +32,3 @@ pub const OFFICIAL_PLUGIN_CATALOG_URL: &str =
 
 /// Fixed so a URL change can never orphan the non-removable official record.
 pub const OFFICIAL_PLUGIN_REPO_SLUG: &str = "official";
-
-/// Indexed by key id so a daemon release can overlap old and rotated keys.
-pub const OFFICIAL_PLUGIN_REPO_PUBLIC_KEYS: &[(&str, &str)] = &[(
-    "halodaemon-official-2026",
-    "tjbwm5X4f70e+soVNV1AfRyb/TtnEsNNl+93YMO6IhQ=",
-)];
-
-#[cfg(test)]
-mod tests {
-    use super::OFFICIAL_PLUGIN_REPO_PUBLIC_KEYS;
-    use halod_plugin_signing::catalog::verifying_key;
-
-    #[test]
-    fn official_pinned_keys_are_valid_ed25519_keys() {
-        assert!(!OFFICIAL_PLUGIN_REPO_PUBLIC_KEYS.is_empty());
-        for (id, key) in OFFICIAL_PLUGIN_REPO_PUBLIC_KEYS {
-            assert!(halod_shared::ids::is_identifier(id), "{id}");
-            verifying_key(key).unwrap();
-        }
-    }
-}

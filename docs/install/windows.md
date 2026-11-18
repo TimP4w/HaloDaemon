@@ -12,6 +12,12 @@ The UI can be launched in the background (without showing a window) via `halod-g
 
 No separate runtime dependencies need to be installed; the required libraries and `ffmpeg` ship inside the installer.
 
+## Updating
+
+HaloDaemon checks for a new release once a day (turn this off under Settings → About) and shows a banner when one is out. **Update now** downloads the installer, checks it against the release's signed checksums, and asks for permission through the Windows prompt. HaloDaemon closes while the installer runs and reopens on the new version. If the prompt is declined or the download cannot be verified, nothing is installed and the banner offers to try again.
+
+The installer is not Authenticode-signed, so the Windows prompt shows an unknown publisher; the signed checksums are what the updater checks.
+
 ## PawnIO (required for DRAM RGB and motherboard fan control)
 
 Chipset SMBus access (ASUS/ENE DRAM RGB, Corsair DRAM RGB) and SuperIO fan control (NCT677x temperature sensors and PWM headers) require the [PawnIO](https://pawnio.eu/) signed kernel driver. PawnIO provides safe, signed port I/O from user space without needing full kernel patches. The driver modules are bundled with the installer.

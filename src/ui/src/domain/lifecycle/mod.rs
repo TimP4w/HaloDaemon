@@ -33,7 +33,7 @@ pub fn start_in_background<I: IntoIterator<Item = String>>(args: I) -> bool {
     args.into_iter().any(|a| a == BACKGROUND_ARG)
 }
 
-fn sibling_path(current_exe: Option<&Path>, name: &str) -> Option<PathBuf> {
+pub(crate) fn sibling_path(current_exe: Option<&Path>, name: &str) -> Option<PathBuf> {
     let path = current_exe?.parent()?.join(name);
     path.exists().then_some(path)
 }

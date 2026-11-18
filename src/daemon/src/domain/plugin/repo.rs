@@ -2,7 +2,8 @@
 use halod_plugin_signing::RepositorySigningKey;
 
 use crate::config::PluginRepoRecord;
-use crate::constants::{OFFICIAL_PLUGIN_REPO_PUBLIC_KEYS, OFFICIAL_PLUGIN_REPO_SLUG};
+use crate::constants::OFFICIAL_PLUGIN_REPO_SLUG;
+use halod_shared::app::OFFICIAL_PUBLIC_KEYS;
 
 #[derive(Debug, Clone)]
 pub enum RepositoryTrust {
@@ -24,7 +25,7 @@ impl RepositoryTrust {
 
     pub fn pinned_keys(&self) -> Option<Vec<(&str, &str)>> {
         match self {
-            Self::Official => Some(OFFICIAL_PLUGIN_REPO_PUBLIC_KEYS.to_vec()),
+            Self::Official => Some(OFFICIAL_PUBLIC_KEYS.to_vec()),
             Self::Pinned(key) => Some(vec![(key.id.as_str(), key.public_key.as_str())]),
             Self::FirstUse => None,
         }
@@ -54,7 +55,7 @@ mod tests {
         };
         assert_eq!(
             RepositoryTrust::for_record(&record(OFFICIAL_PLUGIN_REPO_SLUG, None)).pinned_keys(),
-            Some(OFFICIAL_PLUGIN_REPO_PUBLIC_KEYS.to_vec())
+            Some(OFFICIAL_PUBLIC_KEYS.to_vec())
         );
         assert_eq!(
             RepositoryTrust::for_record(&record("acme", Some(key))).pinned_keys(),

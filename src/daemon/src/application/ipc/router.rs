@@ -36,6 +36,7 @@ use crate::application::usecases::registry::chain;
 use crate::application::usecases::registry::debug;
 use crate::application::usecases::registry::receiver;
 use crate::application::usecases::registry::settings;
+use crate::application::usecases::registry::update;
 use crate::domain::plugin::SurfacedPluginError;
 use halod_shared::ids::DeviceId;
 
@@ -315,6 +316,11 @@ async fn dispatch(
         DaemonCommand::UpdateAllPlugins => repos::update_all_plugins(app).await,
         DaemonCommand::SetLogLevel { level } => settings::set_log_level(level, app).await,
         DaemonCommand::SetLanguage { lang } => settings::set_language(lang, app).await,
+        DaemonCommand::CheckForUpdates => {
+            update::check_in_background(app);
+            Ok(())
+        }
+        DaemonCommand::SetUpdateCheck { enabled } => update::set_update_check(enabled, app).await,
         DaemonCommand::SetHomeWidgets { widgets } => settings::set_home_widgets(widgets, app).await,
         DaemonCommand::SetCoolingWidgets { widgets } => {
             settings::set_cooling_widgets(widgets, app).await

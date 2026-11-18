@@ -10,7 +10,7 @@ package in the [plugins repository](https://github.com/TimP4w/HaloDaemon-plugins
 
 ## The crates
 
-The workspace (`src/Cargo.toml`) has six members:
+The workspace (`src/Cargo.toml`) has seven members:
 
 | Crate | Directory | Role |
 |-------|-----------|------|
@@ -19,7 +19,8 @@ The workspace (`src/Cargo.toml`) has six members:
 | `halod-broker` | [src/broker/](../src/broker/) | **Windows-only** privileged helper: runs as LocalSystem and performs the hardware access the per-user daemon can't. |
 | `halod` | [src/daemon/](../src/daemon/) | The **daemon**: device I/O, discovery, engine loops, config persistence, IPC server. Runs **per-user** (not elevated); on Windows privileged hardware access is delegated to the `halod-broker` process. |
 | `halod-gui` | [src/ui/](../src/ui/) | **GUI** (eframe/egui on a glow/OpenGL renderer) with a system tray. Talks to the daemon over IPC; holds no device logic. |
-| `halod-plugin-signing` | [src/plugin-signing/](../src/plugin-signing/) | Plugin API versions, catalog signing and verification, package archives, and HTTPS fetching, shared by the daemon and the `catalog`/`sign`/`verify` CLI. |
+| `halod-plugin-signing` | [src/plugin-signing/](../src/plugin-signing/) | Plugin API versions, catalog and release-manifest signing and verification, package archives, and HTTPS fetching, shared by the daemon, the updater and the `catalog`/`sign`/`sign-release`/`verify` CLI. |
+| `halod-updater` | [src/updater/](../src/updater/) | **Windows-only** helper the GUI starts for an in-app update: downloads the installer, checks it against the signed `SHA256SUMS`, runs it through a UAC prompt and relaunches the GUI. Never elevates itself. |
 
 The cardinal rule (`AGENTS.md` → *Keep layers separate*): protocol (wire
 encode/decode) ↔ device (`Device` trait + capabilities) ↔ transport (byte

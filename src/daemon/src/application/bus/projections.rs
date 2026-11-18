@@ -22,6 +22,7 @@ pub enum Topic {
     ProcessIcons,
     Plugins,
     ConfigDir,
+    Update,
 }
 
 pub(super) const ALL_TOPICS: &[Topic] = &[
@@ -36,6 +37,7 @@ pub(super) const ALL_TOPICS: &[Topic] = &[
     Topic::ProcessIcons,
     Topic::Plugins,
     Topic::ConfigDir,
+    Topic::Update,
 ];
 
 pub async fn produce(app: &AppState, cfg: &Config, requested: &[Topic]) -> Vec<(String, BusValue)> {
@@ -136,6 +138,10 @@ pub async fn produce(app: &AppState, cfg: &Config, requested: &[Topic]) -> Vec<(
             Topic::ConfigDir => records.push((
                 topic::CONFIG_DIR.into(),
                 BusValue::ConfigDir(crate::config::config_dir().display().to_string()),
+            )),
+            Topic::Update => records.push((
+                topic::UPDATE.into(),
+                BusValue::Update(app.update.lock().await.clone()),
             )),
         }
     }

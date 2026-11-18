@@ -27,7 +27,7 @@ libc = "0.2.186"
 [target.'cfg(target_os = "windows")'.dependencies]
 wmi        = { version = "0.18.4", default-features = false }
 libloading = "0.9.0"
-windows    = { version = "0.62.2", features = [
+windows    = { workspace = true, features = [
     "Win32_Foundation",
     "Win32_Security",
     "Win32_Security_Authorization",

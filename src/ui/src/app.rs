@@ -60,6 +60,10 @@ pub struct App {
     /// Set once we've requested the serial-port list, so we ask the daemon at
     /// most once per session instead of every frame a picker is visible.
     pub(crate) serial_ports_requested: bool,
+    pub(crate) updater: domain::update::Updater,
+    pub(crate) update_action: domain::update::UpdateAction,
+    /// Version whose banner was closed this session.
+    pub(crate) update_dismissed: Option<String>,
 }
 
 impl App {
@@ -130,6 +134,13 @@ impl App {
             pending_lcd_template: None,
             depcheck_grace: ui::screens::depcheck::GraceState::default(),
             serial_ports_requested: false,
+            updater: domain::update::Updater::default(),
+            update_action: domain::update::update_action(
+                cfg!(windows),
+                cfg!(not(debug_assertions)),
+                domain::update::updater_present(),
+            ),
+            update_dismissed: None,
         }
     }
 
@@ -137,10 +148,8 @@ impl App {
     #[cfg(target_os = "linux")]
     pub(crate) fn sync_tray_background(&mut self, ctx: &egui::Context) {
         self.sync_state();
-        // With the Wayland surface destroyed there are no egui frames, so the
-        // normal `update` ingestion path cannot deliver notifications. Drain
-        // them here, issue native notifications, and retain their in-app toast
-        // state for the next time the window is opened.
+        // With the Wayland surface destroyed there are no egui frames; IPC
+        // ingestion already delivered them natively, so only retain toast state.
         let incoming: Vec<_> = self
             .ui
             .notifications
@@ -148,7 +157,6 @@ impl App {
             .map(|mut queue| queue.drain(..).collect())
             .unwrap_or_default();
         if !incoming.is_empty() {
-            crate::ui::root::show_native_notifications(&incoming);
             crate::ui::screens::profile::observe_notifications(&mut self.profile_ui, &incoming);
             self.toasts.ingest(incoming, ctx.input(|input| input.time));
         }

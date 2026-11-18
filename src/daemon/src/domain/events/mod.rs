@@ -28,6 +28,7 @@ pub enum Change {
     PluginTopology,
     PluginData,
     PluginDeviceStatus(DeviceId),
+    Update,
 }
 
 #[async_trait::async_trait]

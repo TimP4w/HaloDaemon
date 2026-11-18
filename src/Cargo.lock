@@ -2717,6 +2717,22 @@ dependencies = [
  "serde",
  "serde_json",
  "sys-locale",
+ "windows 0.62.2",
+]
+
+[[package]]
+name = "halod-updater"
+version = "0.13.1"
+dependencies = [
+ "anyhow",
+ "halod-plugin-signing",
+ "halod-shared",
+ "log",
+ "semver",
+ "sha2",
+ "tempfile",
+ "ureq",
+ "windows 0.62.2",
 ]
 
 [[package]]
