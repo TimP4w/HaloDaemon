@@ -574,6 +574,8 @@ fn apply_update_event(
     ctx: &egui::Context,
 ) {
     use domain::update::BannerEvent;
+    #[cfg(not(windows))]
+    let _ = ctx;
     let Some(version) = model.version().map(str::to_owned) else {
         return;
     };
