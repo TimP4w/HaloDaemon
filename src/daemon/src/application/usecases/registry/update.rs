@@ -69,7 +69,22 @@ pub fn check_in_background(app: Arc<AppState>) {
     tokio::spawn(async move { check(&app, fetch_latest).await });
 }
 
+/// Re-publishes the release the user was last told about, so a restart shows
+/// the banner again without waiting for the first check.
+pub async fn restore_notified(app: &Arc<AppState>) {
+    let notified = app.config.read().await.gui.update_notified.clone();
+    let Some(version) = Version::parse(&notified)
+        .ok()
+        .and_then(|version| newer(&current_version(), version))
+    else {
+        return;
+    };
+    app.update.lock().await.available = Some(version.to_string());
+    app.record_change(Change::Update).await;
+}
+
 pub async fn watcher(app: Arc<AppState>) {
+    restore_notified(&app).await;
     tokio::time::sleep(FIRST_CHECK_DELAY).await;
     loop {
         if app.config.read().await.gui.check_for_updates {
@@ -186,6 +201,29 @@ mod tests {
             let status = app.update.lock().await.clone();
             assert!(status.checking);
             assert_eq!(status.available, None);
+        })
+        .await;
+    }
+
+    #[tokio::test]
+    async fn restore_notified_republishes_a_still_newer_release() {
+        with_tmp_config(|app| async move {
+            app.config.write().await.gui.update_notified = "99.0.0".into();
+            restore_notified(&app).await;
+            assert_eq!(app.update.lock().await.available.as_deref(), Some("99.0.0"));
+            assert!(update_notifications(&app).is_empty());
+        })
+        .await;
+    }
+
+    #[tokio::test]
+    async fn restore_notified_ignores_installed_or_garbage_versions() {
+        with_tmp_config(|app| async move {
+            for stale in ["0.0.1", env!("CARGO_PKG_VERSION"), "", "nope"] {
+                app.config.write().await.gui.update_notified = stale.into();
+                restore_notified(&app).await;
+                assert_eq!(app.update.lock().await.available, None, "{stale}");
+            }
         })
         .await;
     }

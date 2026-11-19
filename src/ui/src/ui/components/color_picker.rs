@@ -91,6 +91,8 @@ pub fn hex_label(c: RgbColor) -> String {
     format!("#{:02x}{:02x}{:02x}", c.r, c.g, c.b)
 }
 
+const SWATCH_RADIUS: f32 = theme::RADIUS_XS + 2.0;
+
 pub const SWATCHES: [u32; 12] = [
     0xef5f63, 0xfb7185, 0xf472b6, 0xa78bfa, 0x818cf8, 0x60a5fa, 0x38bdf8, 0x22d3ee, 0x2dd4bf,
     0x34d399, 0xfbbf24, 0xffffff,
@@ -111,6 +113,7 @@ pub fn color_swatch_row(
 
 fn color_swatch_row_inner(ui: &mut egui::Ui, current: RgbColor) -> Option<RgbColor> {
     const D: f32 = 22.0;
+    const POPUP_W: f32 = 240.0;
     let mut out: Option<RgbColor> = None;
     ui.horizontal_wrapped(|ui| {
         ui.spacing_mut().item_spacing = Vec2::new(9.0, 9.0);
@@ -127,17 +130,21 @@ fn color_swatch_row_inner(ui: &mut egui::Ui, current: RgbColor) -> Option<RgbCol
         let popup_id = ui.unique_id().with("mini_color");
         let (rect, resp) = ui.allocate_exact_size(Vec2::splat(D), Sense::click());
         let c32 = rgb_to_color32(current);
-        let center = rect.center();
         let p = ui.painter();
-        p.circle_filled(center, D / 2.0, c32);
+        p.rect_filled(rect, SWATCH_RADIUS, c32);
         let (ring_w, ring_c) = if matched_preset {
-            (1.5, theme::BORDER)
+            (1.0, theme::BORDER)
         } else {
-            (2.0, theme::CYAN)
+            (2.0, theme::TEXT)
         };
-        p.circle_stroke(center, D / 2.0, Stroke::new(ring_w, ring_c));
+        p.rect_stroke(
+            rect,
+            SWATCH_RADIUS,
+            Stroke::new(ring_w, ring_c),
+            egui::StrokeKind::Inside,
+        );
         p.text(
-            center,
+            rect.center(),
             egui::Align2::CENTER_CENTER,
             "+",
             theme::value_sm(),
@@ -146,20 +153,13 @@ fn color_swatch_row_inner(ui: &mut egui::Ui, current: RgbColor) -> Option<RgbCol
         if resp.hovered() {
             ui.ctx().set_cursor_icon(egui::CursorIcon::PointingHand);
         }
-        let mut c_pick = c32;
         egui::Popup::menu(&resp)
             .id(popup_id)
             .close_behavior(egui::PopupCloseBehavior::CloseOnClickOutside)
             .show(|ui| {
-                const W: f32 = 216.0;
-                ui.set_width(W);
-                ui.spacing_mut().slider_width = W - 8.0;
-                if egui::color_picker::color_picker_color32(
-                    ui,
-                    &mut c_pick,
-                    egui::color_picker::Alpha::Opaque,
-                ) {
-                    out = Some(color32_to_rgb(c_pick));
+                ui.set_width(POPUP_W);
+                if let Some(c) = color_picker(ui, current) {
+                    out = Some(c);
                 }
             });
     });
@@ -191,16 +191,13 @@ pub fn palette_swatch_row(
 
 fn mini_swatch(ui: &mut egui::Ui, d: f32, color: Color32, selected: bool) -> bool {
     let (rect, resp) = ui.allocate_exact_size(Vec2::splat(d), Sense::click());
-    let center = rect.center();
-    ui.painter().circle_filled(center, d / 2.0, color);
-    if selected {
-        ui.painter()
-            .circle_stroke(center, d / 2.0 + 1.5, Stroke::new(2.0, theme::CYAN));
-    } else if resp.hovered() {
-        ui.painter().circle_stroke(
-            center,
-            d / 2.0 + 1.5,
-            Stroke::new(2.0, theme::a(theme::CYAN, 0.4)),
+    ui.painter().rect_filled(rect, SWATCH_RADIUS, color);
+    if selected || resp.hovered() {
+        ui.painter().rect_stroke(
+            rect,
+            SWATCH_RADIUS,
+            Stroke::new(2.0, theme::TEXT),
+            egui::StrokeKind::Inside,
         );
     }
     if resp.hovered() {
@@ -341,11 +338,11 @@ fn picker_body(ui: &mut egui::Ui, current: RgbColor) -> Option<RgbColor> {
         );
         let resp = ui.interact(r, id.with(("swatch", i)), Sense::click());
         let sc = theme::hex(hexv);
-        ui.painter().rect_filled(r, theme::RADIUS_XS + 2.0, sc);
+        ui.painter().rect_filled(r, SWATCH_RADIUS, sc);
         if resp.hovered() || sc == rgb_to_color32(current) {
             ui.painter().rect_stroke(
                 r,
-                theme::RADIUS_XS + 2.0,
+                SWATCH_RADIUS,
                 Stroke::new(2.0, theme::TEXT),
                 egui::StrokeKind::Inside,
             );

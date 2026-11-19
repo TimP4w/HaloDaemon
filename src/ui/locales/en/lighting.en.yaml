@@ -5,6 +5,7 @@ lighting:
   tab_direct: Direct effects
   static: Static
   paint: Paint
+  native: Native
   edit: Edit
   export: Export
   delete: Delete

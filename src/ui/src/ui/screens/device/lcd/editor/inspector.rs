@@ -48,8 +48,13 @@ fn font_picker(
     default: &str,
     fonts: &[String],
 ) -> Option<String> {
-    let effective = current.unwrap_or(default);
     widgets::field_label(ui, &t!("lcd.font"));
+    let options = font_options(fonts);
+    let effective = effective_font(current, default, &options);
+    widgets::combo_picker_full(ui, id_salt, &options, effective, None)
+}
+
+fn font_options(fonts: &[String]) -> Vec<(String, String)> {
     let mut options = vec![
         (FONT_SANS.to_owned(), "Noto Sans".to_owned()),
         (FONT_MONO.to_owned(), "JetBrains Mono".to_owned()),
@@ -61,7 +66,20 @@ fn font_picker(
             .filter(|font| !matches!(font.as_str(), FONT_SANS | FONT_MONO | FONT_INTER))
             .map(|font| (font.clone(), font.clone())),
     );
-    widgets::combo_picker_full(ui, id_salt, &options, effective, None)
+    options
+}
+
+/// Layouts saved by older builds may name a font that is no longer offered;
+/// the daemon renders those with the bundled sans, so show that choice.
+fn effective_font<'a>(
+    current: Option<&'a str>,
+    default: &'a str,
+    options: &[(String, String)],
+) -> &'a str {
+    [current.unwrap_or(default), default]
+        .into_iter()
+        .find(|font| options.iter().any(|(id, _)| id == font))
+        .unwrap_or(FONT_SANS)
 }
 
 fn sync_system_fonts(ui: &egui::Ui, st: &mut DeviceUi) {
@@ -372,27 +390,7 @@ pub(super) fn screen_style_card(
     display_controls(ui, ctx, st, id, lcd);
 
     let mut changed = false;
-
-    widgets::field_label(ui, &t!("lcd.accent"));
-    if let Some(c) =
-        widgets::color_swatch_row(ui, "lcd_screen_accent", st.lcd.editor.def.style.accent)
-    {
-        st.lcd.editor.def.style.accent = c;
-        changed = true;
-    }
-
     sync_system_fonts(ui, st);
-    let current_font = st.lcd.editor.def.style.font.clone();
-    if let Some(font) = font_picker(
-        ui,
-        "lcd_screen_font",
-        Some(&current_font),
-        FONT_SANS,
-        halod_shared::system_fonts::families(),
-    ) {
-        st.lcd.editor.def.style.font = font;
-        changed = true;
-    }
 
     ui.label(
         egui::RichText::new(t!("lcd.background"))
@@ -418,8 +416,19 @@ pub(super) fn screen_style_card(
         }
     });
 
-    if let BgKind::Image { filename, dim } = st.lcd.editor.def.style.background.clone() {
-        background_image_picker(ui, ctx, st, id, &filename, dim, &mut changed);
+    match st.lcd.editor.def.style.background.clone() {
+        BgKind::Image { filename, dim } => {
+            background_image_picker(ui, ctx, st, id, &filename, dim, &mut changed);
+        }
+        _ => {
+            widgets::field_label(ui, &t!("lcd.accent"));
+            if let Some(c) =
+                widgets::color_swatch_row(ui, "lcd_screen_accent", st.lcd.editor.def.style.accent)
+            {
+                st.lcd.editor.def.style.accent = c;
+                changed = true;
+            }
+        }
     }
 
     if changed {
@@ -459,6 +468,24 @@ fn background_image_picker(
 #[cfg(test)]
 mod tests {
     use super::*;
+
+    #[test]
+    fn unknown_fonts_fall_back_to_the_default_then_sans() {
+        let options = font_options(&["Agency FB".to_owned()]);
+        assert_eq!(
+            effective_font(Some("Agency FB"), FONT_MONO, &options),
+            "Agency FB"
+        );
+        assert_eq!(effective_font(None, FONT_MONO, &options), FONT_MONO);
+        assert_eq!(
+            effective_font(Some("halod-core:sans"), FONT_MONO, &options),
+            FONT_MONO
+        );
+        assert_eq!(
+            effective_font(Some("halod-core:sans"), "halod-core:sans", &options),
+            FONT_SANS
+        );
+    }
 
     #[test]
     fn bg_kind_key_maps_every_variant() {

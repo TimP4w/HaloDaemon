@@ -257,7 +257,17 @@ impl App {
 
         resize_grips(ctx);
 
-        egui::Panel::top("title")
+        let update_model = if onboarding_active || domain::tour::is_active(&self.tour) {
+            domain::update::BannerModel::Hidden
+        } else {
+            domain::update::banner_model(
+                &state.update,
+                &self.updater.phase(),
+                self.update_dismissed.as_deref(),
+                self.update_action,
+            )
+        };
+        let update_event = egui::Panel::top("title")
             .exact_size(52.0)
             .frame(egui::Frame::NONE)
             .show(ui, |ui| {
@@ -279,8 +289,19 @@ impl App {
                     &mut self.page,
                     udev_rules,
                     &mut self.toasts,
-                );
-            });
+                    &update_model,
+                    &mut self.update_open,
+                )
+            })
+            .inner;
+        apply_update_event(
+            update_event,
+            &update_model,
+            &mut self.updater,
+            &mut self.update_dismissed,
+            self.update_action,
+            ctx,
+        );
 
         if let Page::Device(id) = &self.page {
             if !state.devices.iter().any(|d| d.id == id) {
@@ -314,15 +335,6 @@ impl App {
         // resumes on the frame after onboarding is explicitly completed.
         let tour_active = !onboarding_active && domain::tour::is_active(&self.tour);
 
-        if !onboarding_active && !tour_active {
-            update_banner(
-                ui,
-                &state.update,
-                &mut self.updater,
-                &mut self.update_dismissed,
-                self.update_action,
-            );
-        }
         self.quit_when_installing(ctx);
 
         egui::CentralPanel::default()
@@ -553,40 +565,25 @@ impl App {
     }
 }
 
-fn update_banner(
-    ui: &mut egui::Ui,
-    status: &halod_shared::types::UpdateStatus,
+fn apply_update_event(
+    event: Option<domain::update::BannerEvent>,
+    model: &domain::update::BannerModel,
     updater: &mut domain::update::Updater,
     dismissed: &mut Option<String>,
     action: domain::update::UpdateAction,
+    ctx: &egui::Context,
 ) {
     use domain::update::BannerEvent;
-    let model =
-        domain::update::banner_model(status, &updater.phase(), dismissed.as_deref(), action);
     let Some(version) = model.version().map(str::to_owned) else {
         return;
     };
-    let event = egui::Panel::top("update_banner")
-        .frame(egui::Frame::NONE.fill(MAIN_BG).inner_margin(egui::Margin {
-            top: theme::SPACE_6 as i8,
-            ..Default::default()
-        }))
-        .show(ui, |ui| {
-            let rect = components::centered_column(ui.max_rect(), components::PAGE_MAX_W)
-                .shrink2(egui::vec2(components::PAGE_PAD_X, 0.0));
-            ui.scope_builder(egui::UiBuilder::new().max_rect(rect), |ui| {
-                shell::update_banner(ui, &model)
-            })
-            .inner
-        })
-        .inner;
     let open_release = || {
         let _ = webbrowser::open(&halod_shared::app::release_page_url(&version));
     };
     match event {
         Some(BannerEvent::Primary) => match action {
             #[cfg(windows)]
-            domain::update::UpdateAction::RunUpdater => updater.start(&version, ui.ctx()),
+            domain::update::UpdateAction::RunUpdater => updater.start(&version, ctx),
             _ => open_release(),
         },
         Some(BannerEvent::ReleaseNotes) => open_release(),

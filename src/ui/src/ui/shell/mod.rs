@@ -10,4 +10,3 @@ pub use titlebar::{
     arm_pointer_release_workaround, daemon_overlay, take_pending_pointer_release, title_bar,
     title_bar_plain,
 };
-pub use update::update_banner;

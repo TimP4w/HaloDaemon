@@ -1,5 +1,6 @@
 // SPDX-License-Identifier: GPL-3.0-or-later
-//! The global application-update banner shown above every page.
+//! The application-update control in the title bar: an icon button next to
+//! the bell whose dropdown carries the update state and actions.
 
 use egui::{Color32, Pos2, Rect, Sense, Shape, Stroke, Vec2};
 use halod_shared::update::UpdateError;
@@ -9,6 +10,9 @@ use crate::ui::components::{self as widgets, BannerKind, ButtonKind};
 use crate::ui::theme;
 
 const ROW_H: f32 = 30.0;
+const PANEL_W: f32 = 580.0;
+const TEXT_GAP: f32 = 2.0;
+const BUTTON: Vec2 = Vec2::new(36.0, 32.0);
 const ICON: f32 = 16.0;
 const STRIP_H: f32 = 3.0;
 const PADDING: egui::Margin = egui::Margin {
@@ -137,7 +141,95 @@ fn content(model: &BannerModel, windows: bool) -> Option<Content> {
     })
 }
 
-pub fn update_banner(ui: &mut egui::Ui, model: &BannerModel) -> Option<BannerEvent> {
+fn open_id() -> egui::Id {
+    egui::Id::unique("update_open")
+}
+
+/// The update button with its right edge at `right`, absent while there is
+/// nothing to report. Returns its rect and any event from its dropdown.
+pub fn update_button(
+    ui: &mut egui::Ui,
+    right: f32,
+    cy: f32,
+    model: &BannerModel,
+    open: &mut bool,
+) -> (Option<Rect>, Option<BannerEvent>) {
+    let Some(c) = content(model, cfg!(windows)) else {
+        *open = false;
+        return (None, None);
+    };
+    let rect = Rect::from_min_size(Pos2::new(right - BUTTON.x, cy - BUTTON.y / 2.0), BUTTON);
+    let resp = ui.interact(rect, open_id().with("button"), Sense::click());
+    if *open || resp.hovered() {
+        theme::paint_surface(
+            ui.painter(),
+            rect,
+            theme::RADIUS_SM,
+            theme::ROW_ACTIVE,
+            theme::BORDER_INNER,
+        );
+    }
+    if resp.hovered() {
+        ui.ctx().set_cursor_icon(egui::CursorIcon::PointingHand);
+    }
+    let accent = if c.danger {
+        theme::TRAFFIC_RED
+    } else {
+        theme::TEXT_SOFT
+    };
+    let icon_rect = Rect::from_center_size(rect.center(), Vec2::splat(ICON));
+    ui.scope_builder(egui::UiBuilder::new().max_rect(icon_rect), |ui| {
+        paint_icon(ui, c.icon, accent)
+    });
+    if c.primary.is_some() {
+        let dot = rect.right_top() + Vec2::new(-9.5, 8.5);
+        ui.painter().circle_filled(dot, 5.5, theme::TITLE_BG);
+        ui.painter().circle_filled(
+            dot,
+            3.5,
+            if c.danger {
+                theme::TRAFFIC_RED
+            } else {
+                theme::CYAN
+            },
+        );
+    }
+    if resp.clicked() {
+        *open = !*open;
+    }
+    let mut event = None;
+    if *open {
+        let area = egui::Area::new(open_id().with("panel"))
+            .order(egui::Order::Foreground)
+            .fixed_pos(Pos2::new(rect.right() - PANEL_W, rect.bottom() + 6.0))
+            .show(ui.ctx(), |ui| {
+                egui::Frame::NONE
+                    .fill(theme::MODAL_BG)
+                    .stroke(Stroke::new(1.0, theme::BORDER_INNER))
+                    .corner_radius(theme::RADIUS_LG)
+                    .shadow(egui::epaint::Shadow {
+                        offset: [0, 16],
+                        blur: 40,
+                        spread: 0,
+                        color: theme::a(Color32::BLACK, 0.45),
+                    })
+                    .inner_margin(egui::Margin::same(8))
+                    .show(ui, |ui| {
+                        ui.set_width(PANEL_W - 16.0);
+                        event = update_banner(ui, model);
+                    });
+            });
+        if !resp.clicked() && area.response.clicked_elsewhere() {
+            *open = false;
+        }
+    }
+    if event == Some(BannerEvent::Dismiss) {
+        *open = false;
+    }
+    (Some(rect), event)
+}
+
+fn update_banner(ui: &mut egui::Ui, model: &BannerModel) -> Option<BannerEvent> {
     let c = content(model, cfg!(windows))?;
     let kind = if c.danger {
         BannerKind::Danger
@@ -148,66 +240,110 @@ pub fn update_banner(ui: &mut egui::Ui, model: &BannerModel) -> Option<BannerEve
     let mut event = None;
     let frame = widgets::banner_frame_with(ui, &kind, PADDING, |ui| {
         ui.set_width(ui.available_width());
-        egui::Sides::new()
-            .height(ROW_H)
-            .shrink_left()
-            .truncate()
-            .show(
-                ui,
-                |ui| {
-                    paint_icon(ui, c.icon, accent);
-                    ui.add_space(theme::SPACE_7);
+        let height = row_height(ui, &c);
+        egui::Sides::new().height(height).shrink_left().wrap().show(
+            ui,
+            |ui| {
+                paint_icon(ui, c.icon, accent);
+                ui.add_space(theme::SPACE_7);
+                ui.vertical(|ui| {
+                    ui.spacing_mut().item_spacing.y = TEXT_GAP;
                     ui.label(
                         egui::RichText::new(&c.title)
                             .font(theme::subhead())
                             .color(theme::TEXT),
                     );
                     if !c.sub.is_empty() {
-                        ui.add_space(theme::SPACE_6);
                         ui.label(
                             egui::RichText::new(&c.sub)
                                 .font(theme::body_sm())
                                 .color(theme::TEXT_DIM),
                         );
                     }
-                },
-                |ui| {
-                    if c.close {
-                        let (rect, _) = ui.allocate_exact_size(Vec2::splat(ROW_H), Sense::hover());
-                        let id = ui.scope_id().with("update_banner_close");
-                        if widgets::glyph_button_at(ui, rect, id, widgets::paint_close_glyph)
-                            .on_hover_text(t!("shell.update_dismiss"))
-                            .clicked()
-                        {
-                            event = Some(BannerEvent::Dismiss);
-                        }
+                });
+            },
+            |ui| {
+                if c.close {
+                    let (rect, _) = ui.allocate_exact_size(Vec2::splat(ROW_H), Sense::hover());
+                    let id = ui.scope_id().with("update_banner_close");
+                    if widgets::glyph_button_at(ui, rect, id, widgets::paint_close_glyph)
+                        .on_hover_text(t!("shell.update_dismiss"))
+                        .clicked()
+                    {
+                        event = Some(BannerEvent::Dismiss);
                     }
-                    if let Some((label, kind)) = &c.primary {
-                        if widgets::button(ui, label, *kind, Vec2::new(0.0, ROW_H)).clicked() {
-                            event = Some(BannerEvent::Primary);
-                        }
+                }
+                if let Some((label, kind)) = &c.primary {
+                    if widgets::button(ui, label, *kind, Vec2::new(0.0, ROW_H)).clicked() {
+                        event = Some(BannerEvent::Primary);
                     }
-                    if let Some((label, ghost_event)) = &c.ghost {
-                        let size =
-                            widgets::fit_size(ui, label, ButtonKind::Ghost, Vec2::new(0.0, ROW_H));
-                        if widgets::button(ui, label, ButtonKind::Ghost, size).clicked() {
-                            event = Some(*ghost_event);
-                        }
+                }
+                if let Some((label, ghost_event)) = &c.ghost {
+                    let size =
+                        widgets::fit_size(ui, label, ButtonKind::Ghost, Vec2::new(0.0, ROW_H));
+                    if widgets::button(ui, label, ButtonKind::Ghost, size).clicked() {
+                        event = Some(*ghost_event);
                     }
-                    if let Some(meter) = &c.meter {
-                        ui.label(
-                            egui::RichText::new(meter)
-                                .font(theme::body_sm())
-                                .color(theme::TEXT_DIM),
-                        );
-                    }
-                },
-            );
+                }
+                if let Some(meter) = &c.meter {
+                    ui.label(
+                        egui::RichText::new(meter)
+                            .font(theme::body_sm())
+                            .color(theme::TEXT_DIM),
+                    );
+                }
+            },
+        );
     });
     if let Some(progress) = c.progress {
         paint_strip(ui, frame.response.rect, progress);
     }
     event
+}
+
+/// Row height once the actions have taken their width and the text column
+/// wraps in what is left.
+fn row_height(ui: &egui::Ui, c: &Content) -> f32 {
+    let spacing = ui.spacing().item_spacing.x;
+    let mut actions_w = 0.0;
+    let mut actions = 0;
+    if c.close {
+        actions_w += ROW_H;
+        actions += 1;
+    }
+    if let Some((label, kind)) = &c.primary {
+        actions_w += widgets::fit_size(ui, label, *kind, Vec2::new(0.0, ROW_H)).x;
+        actions += 1;
+    }
+    if let Some((label, _)) = &c.ghost {
+        actions_w += widgets::fit_size(ui, label, ButtonKind::Ghost, Vec2::new(0.0, ROW_H)).x;
+        actions += 1;
+    }
+    if let Some(meter) = &c.meter {
+        actions_w += ui
+            .painter()
+            .layout_no_wrap(meter.clone(), theme::body_sm(), theme::TEXT_DIM)
+            .size()
+            .x;
+        actions += 1;
+    }
+    let text_w = (ui.available_width()
+        - ICON
+        - theme::SPACE_7
+        - actions_w
+        - spacing * (actions as f32 + 1.0))
+        .max(80.0);
+    let line = |text: &str, font: egui::FontId| {
+        ui.painter()
+            .layout(text.to_owned(), font, theme::TEXT, text_w)
+            .size()
+            .y
+    };
+    let mut height = line(&c.title, theme::subhead());
+    if !c.sub.is_empty() {
+        height += TEXT_GAP + line(&c.sub, theme::body_sm());
+    }
+    height.max(ROW_H)
 }
 
 fn paint_icon(ui: &mut egui::Ui, icon: Icon, color: Color32) {

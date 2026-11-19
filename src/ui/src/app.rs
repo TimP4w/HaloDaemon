@@ -64,6 +64,7 @@ pub struct App {
     pub(crate) update_action: domain::update::UpdateAction,
     /// Version whose banner was closed this session.
     pub(crate) update_dismissed: Option<String>,
+    pub(crate) update_open: bool,
 }
 
 impl App {
@@ -141,6 +142,7 @@ impl App {
                 domain::update::updater_present(),
             ),
             update_dismissed: None,
+            update_open: false,
         }
     }
 

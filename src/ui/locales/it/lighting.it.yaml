@@ -5,6 +5,7 @@ lighting:
   tab_direct: Effetti diretti
   static: Statico
   paint: Dipingi
+  native: Nativo
   edit: Modifica
   export: Esporta
   delete: Elimina

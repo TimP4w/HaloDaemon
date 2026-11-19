@@ -23,18 +23,25 @@ use halod_shared::ids::DeviceId;
 
 type ZoneKey = (DeviceId, String);
 
-/// Every listable RGB zone as `(device id, device name, zones)`.
+/// Every listable RGB zone as `(device id, device name, zones)`. Zones
+/// without LEDs cannot be placed and are left out.
 fn rgb_zone_groups(
     state: &TopicStore,
-) -> Vec<(&DeviceId, &str, &[halod_shared::types::LightingChannel])> {
+) -> Vec<(&DeviceId, &str, Vec<&halod_shared::types::LightingChannel>)> {
     state
         .devices
         .iter()
         .filter(|d| !device::is_hidden(d))
         .filter_map(|d| {
             d.capabilities.iter().find_map(|c| match c {
-                DeviceCapability::Lighting(r) if !r.descriptor.channels.is_empty() => {
-                    Some((&d.id, d.name.as_str(), r.descriptor.channels.as_slice()))
+                DeviceCapability::Lighting(r) => {
+                    let zones: Vec<_> = r
+                        .descriptor
+                        .channels
+                        .iter()
+                        .filter(|z| !z.leds.is_empty())
+                        .collect();
+                    (!zones.is_empty()).then_some((&d.id, d.name.as_str(), zones))
                 }
                 _ => None,
             })
@@ -260,7 +267,7 @@ fn placed_keys(state: &TopicStore) -> HashSet<ZoneKey> {
 pub(super) fn all_zone_keys(state: &TopicStore) -> HashSet<ZoneKey> {
     rgb_zone_groups(state)
         .into_iter()
-        .flat_map(|(dev, _, zones)| zones.iter().map(|z| (dev.clone(), z.id.clone())))
+        .flat_map(|(dev, _, zones)| zones.into_iter().map(move |z| (dev.clone(), z.id.clone())))
         .collect()
 }
 
@@ -273,7 +280,7 @@ pub(super) fn placement_commands(
     removed.sort();
     let added: Vec<(&DeviceId, &halod_shared::types::LightingChannel)> = rgb_zone_groups(state)
         .into_iter()
-        .flat_map(|(dev, _, zones)| zones.iter().map(move |z| (dev, z)))
+        .flat_map(|(dev, _, zones)| zones.into_iter().map(move |z| (dev, z)))
         .filter(|(dev, z)| {
             let key = ((*dev).clone(), z.id.clone());
             draft.contains(&key) && !placed.contains(&key)
@@ -609,7 +616,11 @@ mod tests {
                 id: (*id).into(),
                 name: (*id).into(),
                 topology: topology.clone(),
-                leds: vec![],
+                leds: vec![halod_shared::types::LedPosition {
+                    id: 0,
+                    x: 0.0,
+                    y: 0.0,
+                }],
                 color_order: Default::default(),
                 division: LightingDivision::Indivisible,
                 visibility: Default::default(),
@@ -665,6 +676,23 @@ mod tests {
             .map(|c| placed_zone(c).expect("only placements").0)
             .collect();
         assert_eq!(placed, ["a", "c"]);
+    }
+
+    #[test]
+    fn zones_without_leds_are_neither_listed_nor_placed() {
+        let mut state = lit_state(&[("a", ZoneTopology::Ring), ("b", ZoneTopology::Linear)]);
+        let DeviceCapability::Lighting(rgb) = &mut state.devices[0].capabilities[0] else {
+            unreachable!()
+        };
+        rgb.descriptor.channels[1].leds.clear();
+        let key = |z: &str| ("d".parse::<DeviceId>().unwrap(), z.to_string());
+        assert_eq!(all_zone_keys(&state), [key("a")].into());
+        let everything: HashSet<_> = [key("a"), key("b")].into();
+        let placed: Vec<String> = placement_commands(&state, &everything)
+            .iter()
+            .map(|c| placed_zone(c).expect("only placements").0)
+            .collect();
+        assert_eq!(placed, ["a"]);
     }
 
     #[test]

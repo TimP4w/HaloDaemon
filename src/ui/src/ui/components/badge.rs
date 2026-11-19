@@ -1,7 +1,7 @@
 // SPDX-License-Identifier: GPL-3.0-or-later
 //! Device/battery glyphs and the effect-picker cell.
 
-use egui::{Align2, Color32, Pos2, Rect, Sense, Vec2};
+use egui::{Align2, Color32, Pos2, Rect, Sense, Stroke, StrokeKind, Vec2};
 use halod_shared::types::DeviceType;
 
 use crate::ui::theme;
@@ -61,7 +61,7 @@ pub fn effect_cell(
     height: f32,
     strip_h: f32,
 ) -> bool {
-    effect_cell_noted(ui, label, None, active, preview, w, height, strip_h)
+    cell(ui, label, None, None, active, preview, w, height, strip_h)
 }
 
 /// [`effect_cell`] with a muted `note` (e.g. the effect's source) right of the label.
@@ -70,6 +70,46 @@ pub fn effect_cell_noted(
     ui: &mut egui::Ui,
     label: &str,
     note: Option<&str>,
+    active: bool,
+    preview: CellPreview,
+    w: f32,
+    height: f32,
+    strip_h: f32,
+) -> bool {
+    cell(ui, label, note, None, active, preview, w, height, strip_h)
+}
+
+/// [`effect_cell`] with a small `tag` chip (e.g. "Native") right of the label.
+#[allow(clippy::too_many_arguments)]
+pub fn effect_cell_tagged(
+    ui: &mut egui::Ui,
+    label: &str,
+    tag: &str,
+    active: bool,
+    preview: CellPreview,
+    w: f32,
+    height: f32,
+    strip_h: f32,
+) -> bool {
+    cell(
+        ui,
+        label,
+        None,
+        Some(tag),
+        active,
+        preview,
+        w,
+        height,
+        strip_h,
+    )
+}
+
+#[allow(clippy::too_many_arguments)]
+fn cell(
+    ui: &mut egui::Ui,
+    label: &str,
+    note: Option<&str>,
+    tag: Option<&str>,
     active: bool,
     preview: CellPreview,
     w: f32,
@@ -122,6 +162,25 @@ pub fn effect_cell_noted(
             theme::body_sm(),
             theme::TEXT_MUT,
         );
+    }
+    if let Some(tag) = tag {
+        let galley = p.layout_no_wrap(tag.to_uppercase(), theme::semibold(9.0), theme::TEXT_MUT);
+        let size = galley.size() + Vec2::new(10.0, 4.0);
+        let chip = Rect::from_min_size(
+            Pos2::new(
+                rect.right() - 10.0 - size.x,
+                rect.bottom() - 12.0 - size.y / 2.0,
+            ),
+            size,
+        );
+        p.rect_filled(chip, theme::RADIUS_XS, theme::a(theme::TEXT, 0.08));
+        p.rect_stroke(
+            chip,
+            theme::RADIUS_XS,
+            Stroke::new(1.0, theme::BORDER),
+            StrokeKind::Inside,
+        );
+        p.galley(chip.min + Vec2::new(5.0, 2.0), galley, theme::TEXT_MUT);
     }
     if resp.hovered() {
         ui.ctx().set_cursor_icon(egui::CursorIcon::PointingHand);

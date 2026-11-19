@@ -488,7 +488,9 @@ pub fn title_bar(
     page: &mut Page,
     udev_status: Option<&halod_shared::types::UdevRulesStatus>,
     toasts: &mut Toasts,
-) {
+    update: &crate::domain::update::BannerModel,
+    update_open: &mut bool,
+) -> Option<crate::domain::update::BannerEvent> {
     let rect = ui.max_rect();
     let cy = rect.center().y;
     let (cfg, ctl_span, logo_right) = title_bar_chrome(ui, state);
@@ -501,7 +503,9 @@ pub fn title_bar(
         _ => rect.right() - 12.0,
     };
     let btn_rect = profile::title_button(ui, state, profile_ui, profile_right, cy);
-    super::bell::bell(ui, btn_rect.left() - 20.0, cy, toasts);
+    let bell_rect = super::bell::bell(ui, btn_rect.left() - 20.0, cy, toasts);
+    let (_, update_event) =
+        super::update::update_button(ui, bell_rect.left() - 8.0, cy, update, update_open);
     tour::anchor(ui.ctx(), AnchorId::HomeProfile, btn_rect);
 
     // Dropdown rendered as a Foreground Area (must be called every frame)
@@ -509,6 +513,7 @@ pub fn title_bar(
 
     // Delete-profile confirm dialog (no-op until a delete is pending).
     profile::delete_confirm_modal(ui.ctx(), cmd, profile_ui);
+    update_event
 }
 
 /// Full-content scrim shown over the main panel while the daemon is unreachable:

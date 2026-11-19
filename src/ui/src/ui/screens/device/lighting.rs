@@ -549,8 +549,20 @@ fn right_panel(
                 ui.spacing_mut().item_spacing.x = gap;
                 for (label, pick, preview) in chunk {
                     let active = pick.is_active(mode);
-                    let clicked =
-                        widgets::effect_cell(ui, &label, active, preview, cell_w, cell_h, 18.0);
+                    let clicked = if pick.is_native() {
+                        widgets::effect_cell_tagged(
+                            ui,
+                            &label,
+                            &t!("lighting.native"),
+                            active,
+                            preview,
+                            cell_w,
+                            cell_h,
+                            18.0,
+                        )
+                    } else {
+                        widgets::effect_cell(ui, &label, active, preview, cell_w, cell_h, 18.0)
+                    };
                     let Some(cmd) = clicked.then(|| pick_cmd(ctx, st, rgb, &pick)).flatten() else {
                         continue;
                     };
@@ -664,6 +676,11 @@ enum EffectPick {
 }
 
 impl EffectPick {
+    /// Runs on the device itself rather than in the HaloDaemon engine.
+    fn is_native(&self) -> bool {
+        matches!(self, EffectPick::Effect(_))
+    }
+
     fn is_active(&self, mode: &Mode) -> bool {
         match (self, mode) {
             (EffectPick::Solid, Mode::Solid) => true,
