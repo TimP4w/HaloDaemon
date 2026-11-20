@@ -62,6 +62,10 @@ onboarding:
   done_sub: HaloDaemon è in esecuzione e i tuoi dispositivi sono pronti.
   skip: Salta per ora
   recommended: Consigliato
+  found_one: "1 dispositivo trovato"
+  found_many: "%{n} dispositivi trovati"
+  access_toggle: Mostra i dettagli di accesso
+  access_nothing: Non usa dispositivi, programmi o accesso di rete.
   language_sub: Puoi cambiarla in qualsiasi momento dalle Impostazioni
   check_optional: "%{impact} · opzionale"
   check_missing: Mancante
@@ -81,7 +85,7 @@ onboarding:
   prefs_title: Alcune preferenze
   prefs_sub: Puoi modificarle in qualsiasi momento dalle Impostazioni.
   plugins_page_title: Scegli i plugin
-  plugins_page_sub: Abbiamo scelto i plugin adatti all’hardware trovato. Controlla l’accesso di sistema richiesto da ciascuno prima di attivarlo.
+  plugins_page_sub: Abbiamo scelto i plugin adatti all’hardware trovato. Apri una riga per vedere esattamente a cosa può accedere prima di attivarlo.
   plugins_loading: Il download dei plugin ufficiali è ancora in corso. Potrai attivarli in seguito dalla scheda Plugin.
   plugins_error: Impossibile scaricare i plugin ufficiali. Controlla la connessione a Internet e riprova.
   plugins_retry: Riprova
@@ -90,7 +94,7 @@ onboarding:
   please_wait: Ricerca in corso…
   p_get_started: Inizia
   p_scan: Trova plugin
-  p_install: "Installa %{n}"
+  p_install: "Attiva %{n}"
   p_finish: Completa
   p_enter: Apri HaloDaemon
   p_continue: Continua

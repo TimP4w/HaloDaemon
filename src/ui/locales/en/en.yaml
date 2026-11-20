@@ -62,6 +62,10 @@ onboarding:
   done_sub: HaloDaemon is running and your devices are ready.
   skip: Skip for now
   recommended: Recommended
+  found_one: "Found 1 device"
+  found_many: "Found %{n} devices"
+  access_toggle: Show access details
+  access_nothing: Uses no devices, programs or network access.
   language_sub: You can change this at any time in Settings
   check_optional: "%{impact} · optional"
   check_missing: Missing
@@ -81,7 +85,7 @@ onboarding:
   prefs_title: A few preferences
   prefs_sub: You can change these at any time in Settings.
   plugins_page_title: Choose your plugins
-  plugins_page_sub: We picked the plugins that match the hardware we found. Check the system access each one asks for before you enable it.
+  plugins_page_sub: We picked the plugins that match the hardware we found. Open a row to see exactly what it can reach before you enable it.
   plugins_loading: Official plugins are still downloading. You can enable them later from the Plugins tab.
   plugins_error: We couldn't download the official plugins. Check your internet connection, then try again.
   plugins_retry: Retry
@@ -90,7 +94,7 @@ onboarding:
   please_wait: Scanning…
   p_get_started: Get started
   p_scan: Find plugins
-  p_install: "Install %{n}"
+  p_install: "Enable %{n}"
   p_finish: Finish
   p_enter: Open HaloDaemon
   p_continue: Continue

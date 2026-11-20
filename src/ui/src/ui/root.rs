@@ -468,7 +468,7 @@ impl App {
             let outcome =
                 onboarding::show(ctx, &state, debug, &self.cmd, &mut self.onboarding_ui, time);
             for id in self.onboarding_ui.take_enable_requests() {
-                self.plugins_ui.enable_prompt.request(&id);
+                self.plugins_ui.enable_prompt.request_consented(&id);
             }
             if !matches!(outcome, Outcome::Pending) {
                 self.onboarding_completed = true;

@@ -128,6 +128,17 @@ plugins:
   permission_smbus_desc: Scansiona, legge e scrive dispositivi SMBus/I2C. Raggiunge ogni dispositivo sul bus, non solo l'hardware di questo plugin, quindi una scrittura errata può destabilizzare altri dispositivi.
   permission_audio_routing_desc: Crea e instrada sink audio di sistema. Uno script malevolo potrebbe avviare moduli audio o catturare/reindirizzare l'audio su questo computer.
   permission_data_reads_desc: "Legge i dati pubblicati dal sistema o da altri plugin:"
+  chip_hid: HID
+  chip_usb: USB
+  chip_serial: Seriale
+  chip_hwmon: Sensori e ventole
+  chip_lpcio: SuperIO
+  chip_amd_smn: AMD SMN
+  chip_command: Avvia programmi
+  chip_network: Rete
+  chip_secure_storage: Segreti
+  chip_smbus: SMBus
+  chip_audio_routing: Audio
   # Campi di configurazione
   secret_set_hint: (un segreto è memorizzato)
   # Finestra di consenso permessi (mostrata quando si attiva un plugin che richiede permessi)

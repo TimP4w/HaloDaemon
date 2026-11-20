@@ -42,6 +42,31 @@ pub(super) fn permission_description(
     }
 }
 
+pub(crate) fn permission_chip(
+    perm: halod_shared::types::Permission,
+) -> (std::borrow::Cow<'static, str>, widgets::TagTone) {
+    use halod_shared::types::Permission;
+    let (label, device_only) = match perm {
+        Permission::Hid => (t!("plugins.chip_hid"), true),
+        Permission::Usb => (t!("plugins.chip_usb"), true),
+        Permission::Serial => (t!("plugins.chip_serial"), true),
+        Permission::Hwmon => (t!("plugins.chip_hwmon"), false),
+        Permission::Lpcio => (t!("plugins.chip_lpcio"), false),
+        Permission::AmdSmn => (t!("plugins.chip_amd_smn"), false),
+        Permission::Command => (t!("plugins.chip_command"), false),
+        Permission::Network => (t!("plugins.chip_network"), false),
+        Permission::SecureStorage => (t!("plugins.chip_secure_storage"), false),
+        Permission::Smbus => (t!("plugins.chip_smbus"), false),
+        Permission::AudioRouting => (t!("plugins.chip_audio_routing"), false),
+    };
+    let tone = if device_only {
+        widgets::TagTone::Neutral
+    } else {
+        widgets::TagTone::Warn
+    };
+    (label, tone)
+}
+
 pub(super) fn data_reads_detail(keys: &[String]) -> String {
     format!(
         "{} {}",
@@ -51,7 +76,7 @@ pub(super) fn data_reads_detail(keys: &[String]) -> String {
 }
 
 /// One `(title, detail)` row per thing the manifest declares it uses.
-pub(super) fn access_rows(access: &halod_shared::types::PackageUses) -> Vec<(String, String)> {
+pub(crate) fn access_rows(access: &halod_shared::types::PackageUses) -> Vec<(String, String)> {
     let mut rows: Vec<(String, String)> = access
         .permissions
         .iter()
@@ -153,6 +178,13 @@ fn access_list(ui: &mut egui::Ui, rows: &[(String, String)]) {
 #[derive(Default)]
 pub(crate) struct EnablePrompt {
     queue: Vec<PluginId>,
+    consented: Vec<PluginId>,
+}
+
+fn settled(plugins: &[PluginInfo], id: &PluginId) -> bool {
+    plugins
+        .iter()
+        .any(|p| p.id == *id && (p.enabled || !p.platform_supported))
 }
 
 impl EnablePrompt {
@@ -162,12 +194,26 @@ impl EnablePrompt {
         }
     }
 
+    pub(crate) fn request_consented(&mut self, id: &PluginId) {
+        if !self.consented.iter().any(|queued| queued == id) {
+            self.consented.push(id.into());
+        }
+    }
+
     pub(super) fn current<'a>(&mut self, plugins: &'a [PluginInfo]) -> Option<&'a PluginInfo> {
-        self.queue
-            .retain(|id| !plugins.iter().any(|p| p.id == id && p.enabled));
+        self.queue.retain(|id| !settled(plugins, id));
         self.queue
             .iter()
             .find_map(|id| plugins.iter().find(|p| p.id == id))
+    }
+
+    pub(super) fn take_consented(&mut self, plugins: &[PluginInfo]) -> Option<PluginId> {
+        self.consented.retain(|id| !settled(plugins, id));
+        let at = self
+            .consented
+            .iter()
+            .position(|id| plugins.iter().any(|p| p.id == *id))?;
+        Some(self.consented.remove(at))
     }
 
     pub(super) fn resolve(&mut self, cmd: &CommandTx, id: &PluginId, enable: bool) -> bool {
@@ -191,6 +237,9 @@ impl EnablePrompt {
         plugins: &[PluginInfo],
         cmd: &CommandTx,
     ) -> Option<PluginId> {
+        if let Some(id) = self.take_consented(plugins) {
+            return self.resolve(cmd, &id, true).then_some(id);
+        }
         let plugin = self.current(plugins)?;
         let enable = access_prompt(
             ctx,

@@ -28,8 +28,8 @@ mod access;
 mod repo;
 mod udev;
 
-pub(crate) use access::EnablePrompt;
 use access::*;
+pub(crate) use access::{access_rows, permission_chip, EnablePrompt};
 use udev::*;
 
 pub(crate) fn plugin_name(plugin: &PluginInfo) -> &str {
@@ -1621,6 +1621,34 @@ mod tests {
 
         clear_finished_installs(&mut installing, &state, UPDATE_TIMEOUT + 1.0);
         assert!(installing.is_empty());
+    }
+
+    #[test]
+    fn the_enable_prompt_skips_plugins_this_platform_cannot_run() {
+        let mut foreign = info("amd_smn", false);
+        foreign.platform_supported = false;
+        let plugins = [foreign];
+        let mut prompt = EnablePrompt::default();
+        prompt.request(&plugins[0].id);
+        assert!(prompt.current(&plugins).is_none());
+    }
+
+    #[test]
+    fn consented_plugins_enable_once_installed_without_a_prompt() {
+        let mut prompt = EnablePrompt::default();
+        let mut foreign = info("amd_smn", false);
+        foreign.platform_supported = false;
+        prompt.request_consented(&"acme".parse().unwrap());
+        prompt.request_consented(&foreign.id);
+
+        assert_eq!(prompt.take_consented(&[]), None);
+        let installed = [foreign, info("acme", false)];
+        assert_eq!(prompt.take_consented(&installed).as_deref(), Some("acme"));
+        assert_eq!(prompt.take_consented(&installed), None);
+        assert!(
+            prompt.current(&installed).is_none(),
+            "consent never opens a dialog"
+        );
     }
 
     #[test]

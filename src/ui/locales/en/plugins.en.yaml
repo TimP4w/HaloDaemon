@@ -128,6 +128,17 @@ plugins:
   permission_smbus_desc: Scans, reads, and writes SMBus/I2C devices. This reaches every device on the bus, not just this plugin's own hardware, so a bad write can destabilize other devices.
   permission_audio_routing_desc: Creates and routes host audio sinks. A malicious script could spawn audio modules or capture/redirect audio on this machine.
   permission_data_reads_desc: "Reads data published by the host or by other plugins:"
+  chip_hid: HID
+  chip_usb: USB
+  chip_serial: Serial
+  chip_hwmon: Sensors and fans
+  chip_lpcio: SuperIO
+  chip_amd_smn: AMD SMN
+  chip_command: Runs programs
+  chip_network: Network
+  chip_secure_storage: Secrets
+  chip_smbus: SMBus
+  chip_audio_routing: Audio
   # Config fields
   secret_set_hint: (a secret is stored)
   enable_prompt_title: "Enable %{name}?"

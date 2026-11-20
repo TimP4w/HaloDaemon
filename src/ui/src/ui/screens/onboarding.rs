@@ -12,6 +12,7 @@ use crate::domain::models::device;
 use crate::runtime::ipc::{self, CommandTx};
 use crate::ui::components::{self as widgets, ButtonKind};
 use crate::ui::screens::depcheck;
+use crate::ui::screens::plugins as plugins_screen;
 use crate::ui::screens::settings;
 use crate::ui::theme;
 use halod_shared::ids::PluginId;
@@ -39,6 +40,7 @@ pub struct OnboardingUi {
     selected: HashMap<PluginId, bool>,
     start_on_boot: Option<bool>,
     enable_after_install: Vec<PluginId>,
+    expanded: Option<PluginId>,
 }
 
 impl OnboardingUi {
@@ -87,6 +89,7 @@ fn plugin_candidates(plugins: &PluginsState) -> Vec<&AvailablePlugin> {
             });
         if offered
             && entry.compatible
+            && entry.matches.supports_platform(std::env::consts::OS)
             && !plugins.plugins.iter().any(|p| p.id == entry.id)
             && !candidates.iter().any(|c| c.id == entry.id)
         {
@@ -505,27 +508,33 @@ fn step_plugins(
         );
         return;
     }
-    let recommended = t!("onboarding.recommended");
+    let expand_hint = t!("onboarding.access_toggle");
+    let nothing = t!("onboarding.access_nothing");
     egui::ScrollArea::vertical()
         .max_height(LIST_MAX_H)
         .show(ui, |ui| {
             ui.spacing_mut().item_spacing.y = theme::SPACE_4;
             for row in plugin_rows(st, &state.plugins) {
-                let note = if row.recommended {
-                    recommended.as_ref()
-                } else {
-                    ""
-                };
-                if widgets::check_row(
+                let meta = row_meta(&row);
+                let resp = widgets::expand_row(
                     ui,
-                    row.label,
-                    Some(row.version),
-                    (!note.is_empty()).then_some((note, theme::TEXT_SOFT)),
-                    row.selected,
-                )
-                .clicked()
-                {
+                    row.id,
+                    &widgets::ExpandRow {
+                        label: row.label,
+                        chips: &row.chips,
+                        meta: meta.as_deref().map(|m| (m, theme::TEXT_SOFT)),
+                        details: &row.details,
+                        empty_details: &nothing,
+                        expand_hint: &expand_hint,
+                        checked: row.selected,
+                        expanded: row.expanded,
+                    },
+                );
+                if resp.toggled {
                     st.selected.insert(row.id.clone(), !row.selected);
+                }
+                if resp.expand_clicked {
+                    st.expanded = (!row.expanded).then(|| row.id.clone());
                 }
             }
         });
@@ -535,20 +544,58 @@ fn step_plugins(
 struct PluginRow<'a> {
     id: &'a PluginId,
     label: &'a str,
-    version: &'a str,
+    chips: Vec<(String, widgets::TagTone)>,
+    details: Vec<(String, String)>,
+    devices_found: usize,
     recommended: bool,
     selected: bool,
+    expanded: bool,
+}
+
+fn row_meta(row: &PluginRow) -> Option<String> {
+    match row.devices_found {
+        0 if row.recommended => Some(t!("onboarding.recommended").into_owned()),
+        0 => None,
+        1 => Some(t!("onboarding.found_one").into_owned()),
+        n => Some(t!("onboarding.found_many", n = n).into_owned()),
+    }
 }
 
 fn plugin_rows<'a>(st: &OnboardingUi, plugins: &'a PluginsState) -> Vec<PluginRow<'a>> {
+    use halod_shared::types::PluginRecommendationMatch as Match;
     plugin_candidates(plugins)
         .into_iter()
-        .map(|entry| PluginRow {
-            id: &entry.id,
-            label: &entry.name,
-            version: &entry.version,
-            recommended: plugins.recommendations.iter().any(|r| recommends(r, entry)),
-            selected: is_selected(st, &entry.id),
+        .map(|entry| {
+            let recs = plugins
+                .recommendations
+                .iter()
+                .filter(|r| recommends(r, entry));
+            PluginRow {
+                id: &entry.id,
+                label: &entry.name,
+                chips: entry
+                    .uses
+                    .permissions
+                    .iter()
+                    .map(|&perm| {
+                        let (label, tone) = plugins_screen::permission_chip(perm);
+                        (label.into_owned(), tone)
+                    })
+                    .collect(),
+                details: plugins_screen::access_rows(&entry.uses),
+                devices_found: recs
+                    .clone()
+                    .filter(|r| {
+                        matches!(
+                            r.hardware,
+                            Match::Hid { .. } | Match::Usb { .. } | Match::SmbusGpu { .. }
+                        )
+                    })
+                    .count(),
+                recommended: recs.count() > 0,
+                selected: is_selected(st, &entry.id),
+                expanded: st.expanded.as_ref() == Some(&entry.id),
+            }
         })
         .collect()
 }
@@ -759,9 +806,17 @@ mod tests {
     }
 
     #[test]
-    fn candidates_are_compatible_official_plugins_not_yet_installed() {
+    fn candidates_are_compatible_official_plugins_for_this_platform_not_yet_installed() {
         let mut plugins = catalog(&["a", "b", "c"]);
         plugins.available[1].compatible = false;
+        plugins.available.push(AvailablePlugin {
+            id: "foreign".parse().unwrap(),
+            matches: halod_shared::types::PackageMatches {
+                platforms: vec!["no-such-os".into()],
+                ..Default::default()
+            },
+            ..plugins.available[0].clone()
+        });
         plugins.available.push(AvailablePlugin {
             matches: Default::default(),
             repo: "other".into(),
@@ -789,11 +844,45 @@ mod tests {
             [PluginRow {
                 id: &kraken,
                 label: "KRAKEN",
-                version: "1.0.0",
+                chips: vec![],
+                details: vec![],
+                devices_found: 1,
                 recommended: true,
                 selected: false,
+                expanded: false,
             }]
         );
+    }
+
+    #[test]
+    fn rows_list_each_declared_access_and_count_matched_devices() {
+        use halod_shared::types::{PackageUses, Permission, PluginRecommendationMatch};
+        let mut plugins = catalog(&["arctis", "nvidia"]);
+        plugins.available[0].uses = PackageUses {
+            permissions: vec![Permission::Hid, Permission::AudioRouting],
+            ..Default::default()
+        };
+        let mut second = rec("arctis");
+        second.hardware = PluginRecommendationMatch::Hid { vid: 1, pid: 3 };
+        let mut command = rec("nvidia");
+        command.hardware = PluginRecommendationMatch::Command {
+            executable: "nvidia-smi".into(),
+        };
+        plugins.recommendations = vec![rec("arctis"), second, command];
+        let st = OnboardingUi {
+            expanded: Some("arctis".parse().unwrap()),
+            ..Default::default()
+        };
+        let rows = plugin_rows(&st, &plugins);
+
+        let tones: Vec<_> = rows[0].chips.iter().map(|(_, tone)| *tone).collect();
+        assert_eq!(tones, [widgets::TagTone::Neutral, widgets::TagTone::Warn]);
+        assert_eq!(rows[0].details.len(), 2);
+        assert_eq!((rows[0].devices_found, rows[0].expanded), (2, true));
+        assert_eq!((rows[1].devices_found, rows[1].recommended), (0, true));
+        assert!(!rows[1].expanded);
+        assert_ne!(row_meta(&rows[0]), row_meta(&rows[1]));
+        assert!(row_meta(&rows[1]).is_some());
     }
 
     #[test]
