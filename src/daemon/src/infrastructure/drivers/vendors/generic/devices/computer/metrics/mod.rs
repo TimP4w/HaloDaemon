@@ -119,7 +119,7 @@ pub fn make_backend() -> Option<std::sync::Arc<dyn HostMetricsBackend>> {
 
 #[cfg(target_os = "windows")]
 pub fn make_backend() -> Option<std::sync::Arc<dyn HostMetricsBackend>> {
-    Some(std::sync::Arc::new(windows::WindowsMetrics))
+    Some(std::sync::Arc::new(windows::WindowsMetrics::default()))
 }
 
 #[cfg(not(any(target_os = "linux", target_os = "windows")))]
