@@ -32,7 +32,7 @@ SUBSYSTEM=="hwmon", KERNEL=="hwmon[0-9]*", ACTION=="add|change", RUN{program}+="
 # Logitech HID++ (logitech)
 KERNEL=="hidraw*", ATTRS{idVendor}=="046d", ATTRS{idProduct}=="0a66", TAG+="uaccess"
 
-# Logitech G560 (logitech_g560)
+# Logitech HID++ (logitech)
 KERNEL=="hidraw*", ATTRS{idVendor}=="046d", ATTRS{idProduct}=="0a78", TAG+="uaccess"
 
 # Logitech HID++ (logitech)
