@@ -263,11 +263,13 @@ impl KeyRemapEngine {
     ) {
         match (action, pressed) {
             (ButtonAction::LayerShift, pressed) => {
+                let was_active = self.app.input.layer_shift_active();
                 if pressed {
                     self.app.input.layer_shift_press(device_id, cid);
                 } else {
                     self.app.input.layer_shift_release(device_id, cid);
                 }
+                notify_layer_shift(&self.app, was_active).await;
                 log::debug!(
                     "KeyRemapEngine: Layer Shift {}",
                     if pressed { "engaged" } else { "released" }
@@ -309,6 +311,21 @@ impl KeyRemapEngine {
                         .await;
                 }
             }
+        }
+    }
+}
+
+/// Tell every key-remap device when the global layer shift flipped, so each
+/// suppresses native output only for buttons mapped on the active layer.
+pub(crate) async fn notify_layer_shift(app: &AppState, was_active: bool) {
+    let active = app.input.layer_shift_active();
+    if active == was_active {
+        return;
+    }
+    let devices = app.device_registry.read().await.clone();
+    for device in devices {
+        if let Some(remap) = device.as_key_remap() {
+            remap.set_layer_shift(active).await;
         }
     }
 }
@@ -363,6 +380,27 @@ mod tests {
     fn missing_mapping_resolves_native() {
         assert_eq!(KeyRemapEngine::resolve(None, false), &ButtonAction::Native);
         assert_eq!(KeyRemapEngine::resolve(None, true), &ButtonAction::Native);
+    }
+
+    #[tokio::test]
+    async fn devices_are_told_only_when_the_global_layer_flips() {
+        let mouse = Arc::new(crate::test_support::MockDevice::new("mouse").with_key_remap());
+        let app = crate::test_support::app_with(vec![mouse.clone()]);
+        let engine = test_engine(Arc::clone(&app));
+        let mut held = HashMap::new();
+        let keyboard: DeviceId = "keyboard".parse().unwrap();
+        for (cid, pressed) in [(1, true), (2, true), (1, false), (2, false)] {
+            engine
+                .handle_button(
+                    &ButtonAction::LayerShift,
+                    pressed,
+                    cid,
+                    &keyboard,
+                    &mut held,
+                )
+                .await;
+        }
+        assert_eq!(*mouse.layer_shift_calls.lock(), vec![true, false]);
     }
 
     #[tokio::test]

@@ -1716,6 +1716,22 @@ fn open_device(
         let handle = handle.clone();
         dev_table
             .set(
+                "set_eq_preset",
+                lua.create_function(move |_, (_self, preset): (Table, usize)| {
+                    handle
+                        .block_on(EqualizerCapability::set_eq_preset(&*device, preset))
+                        .map_err(to_lua_err)
+                })
+                .map_err(from_lua_err)?,
+            )
+            .map_err(from_lua_err)?;
+    }
+
+    {
+        let device = device.clone();
+        let handle = handle.clone();
+        dev_table
+            .set(
                 "set_boolean",
                 lua.create_function(move |_, (_self, key, value): (Table, String, bool)| {
                     handle
@@ -1738,6 +1754,21 @@ fn open_device(
                     handle
                         .block_on(KeyRemapCapability::set_button_mapping(&*device, mapping))
                         .map_err(to_lua_err)
+                })
+                .map_err(from_lua_err)?,
+            )
+            .map_err(from_lua_err)?;
+    }
+
+    {
+        let device = device.clone();
+        let handle = handle.clone();
+        dev_table
+            .set(
+                "key_remap_layer",
+                lua.create_function(move |_, (_self, active): (Table, bool)| {
+                    handle.block_on(KeyRemapCapability::set_layer_shift(&*device, active));
+                    Ok(())
                 })
                 .map_err(from_lua_err)?,
             )

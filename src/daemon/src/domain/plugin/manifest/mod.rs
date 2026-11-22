@@ -650,6 +650,8 @@ pub struct ChoiceDef {
     /// Index selected before the user picks one.
     #[serde(default)]
     pub default: usize,
+    #[serde(default)]
+    pub visible_when: Option<halod_shared::types::VisibleWhen>,
 }
 
 /// One user-editable setting a plugin declares (e.g. a server IP/port). Shown by

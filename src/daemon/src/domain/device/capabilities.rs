@@ -764,6 +764,8 @@ pub trait KeyRemapCapability: Send + Sync {
     async fn set_button_mapping(&self, mapping: ButtonMapping) -> Result<()>;
     async fn reset_button_mapping(&self, cid: u16) -> Result<()>;
     async fn reset_all_button_mappings(&self) -> Result<()>;
+    /// The global layer shift engaged (`true`) or released.
+    async fn set_layer_shift(&self, _active: bool) {}
 
     async fn to_wire(&self) -> Option<DeviceCapability> {
         let status = self.get_key_remap_status().await;

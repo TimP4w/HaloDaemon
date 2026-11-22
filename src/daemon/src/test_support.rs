@@ -208,6 +208,8 @@ pub struct MockDevice {
     pub key_remap_last_mapping: Option<Mutex<Option<ButtonMapping>>>,
     /// Mappings returned by `get_key_remap_status`. Set via `with_key_remap_mappings`.
     pub key_remap_mappings: Vec<ButtonMapping>,
+    /// Every `set_layer_shift` notification, in order.
+    pub layer_shift_calls: Mutex<Vec<bool>>,
     // Sensor capability
     pub sensors: Option<Mutex<Vec<Sensor>>>,
     // Equalizer capability
@@ -269,6 +271,7 @@ impl MockDevice {
             range_last_set: None,
             key_remap_last_mapping: None,
             key_remap_mappings: Vec::new(),
+            layer_shift_calls: Mutex::new(Vec::new()),
             sensors: None,
             eq_state: None,
             eq_last_preset: None,
@@ -1034,6 +1037,9 @@ impl KeyRemapCapability for MockDevice {
     }
     async fn reset_all_button_mappings(&self) -> Result<()> {
         Ok(())
+    }
+    async fn set_layer_shift(&self, active: bool) {
+        self.layer_shift_calls.lock().push(active);
     }
 }
 

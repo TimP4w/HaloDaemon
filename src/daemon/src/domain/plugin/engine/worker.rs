@@ -1326,6 +1326,19 @@ impl PluginHandle {
         self.call("reset_all_button_mappings", ()).await
     }
 
+    /// Tells the plugin the global layer shift engaged or released, so it can
+    /// suppress native output only for buttons mapped on the active layer.
+    pub async fn key_remap_layer(&self, active: bool) -> Result<()> {
+        self.run(move |ctx, dev, _| {
+            let Some(f) = func(&ctx.manifest, "key_remap_layer") else {
+                return Ok(());
+            };
+            f.call::<()>((dev, active))
+                .map_err(|e| lua_err("key_remap_layer", e))
+        })
+        .await
+    }
+
     /// Whether the device is currently in the host mode remapping requires.
     /// Devices that don't declare `key_remap_host_mode` are assumed always active
     /// (the common case: remapping doesn't depend on a device-side mode toggle).
@@ -1827,6 +1840,7 @@ mod tests {
                 display: Default::default(),
                 options: vec![],
                 default: 0,
+                visible_when: None,
             }],
             actions: vec![ActionDef {
                 key: "mode".to_owned(),

@@ -26,6 +26,58 @@ use halod_shared::keyboard::KeyboardLayoutSelection;
 //   app_rules.yaml        - app_rules
 //   profiles/<slug>.yaml  - one Profile per file, named for a human to read
 
+// ── Developer plugin mode ───────────────────────────────────────────────────
+//
+// `halod --dev-plugins <dir>` (or `HALOD_DEV_PLUGINS=<dir>`) loads plugins only
+// from `dir`: the official and every other repository are left out of the
+// in-memory config, nothing is fetched, and saving writes the repository list
+// exactly as it was loaded, so the user's setup survives a dev session.
+
+pub const DEV_PLUGIN_REPO_SLUG: &str = "dev";
+pub const DEV_PLUGINS_ENV: &str = "HALOD_DEV_PLUGINS";
+
+static DEV_PLUGINS: std::sync::OnceLock<PathBuf> = std::sync::OnceLock::new();
+static SAVED_REPOS: std::sync::OnceLock<Vec<PluginRepoRecord>> = std::sync::OnceLock::new();
+
+/// Must be called before [`load`].
+pub fn enable_dev_plugins(dir: &Path) -> Result<PathBuf> {
+    let dir = std::fs::canonicalize(dir)
+        .map_err(|e| anyhow::anyhow!("dev plugin directory {}: {e}", dir.display()))?;
+    if !dir.is_dir() {
+        anyhow::bail!("dev plugin directory {} is not a directory", dir.display());
+    }
+    Ok(DEV_PLUGINS.get_or_init(|| dir).clone())
+}
+
+pub fn dev_plugins_dir() -> Option<&'static Path> {
+    DEV_PLUGINS.get().map(PathBuf::as_path)
+}
+
+/// Returns the repositories that were on disk, to be written back on save.
+fn apply_dev_plugins(plugins: &mut PluginPolicy, dir: &Path) -> Vec<PluginRepoRecord> {
+    std::mem::replace(
+        &mut plugins.repos,
+        vec![PluginRepoRecord {
+            slug: DEV_PLUGIN_REPO_SLUG.to_owned(),
+            source: PluginRepoSource::Local(dir.to_path_buf()),
+            trusted_key: None,
+        }],
+    )
+}
+
+fn persisted_plugins<'a>(
+    plugins: &'a PluginPolicy,
+    saved_repos: Option<&Vec<PluginRepoRecord>>,
+) -> std::borrow::Cow<'a, PluginPolicy> {
+    match saved_repos {
+        Some(saved) => std::borrow::Cow::Owned(PluginPolicy {
+            repos: saved.clone(),
+            ..plugins.clone()
+        }),
+        None => std::borrow::Cow::Borrowed(plugins),
+    }
+}
+
 pub fn load() -> Result<Config> {
     let main_path = main_config_path();
     let first_run = !main_path.exists();
@@ -35,7 +87,11 @@ pub fn load() -> Result<Config> {
     }
     let devices: DevicesFile = load_file(&devices_config_path(), "devices.yaml")?;
     let app_rules: AppRulesFile = load_file(&app_rules_config_path(), "app_rules.yaml")?;
-    let plugins: PluginPolicy = load_file(&plugins_config_path(), "plugin_state.yaml")?;
+    let mut plugins: PluginPolicy = load_file(&plugins_config_path(), "plugin_state.yaml")?;
+    if let Some(dir) = dev_plugins_dir() {
+        let saved = apply_dev_plugins(&mut plugins, dir);
+        let _ = SAVED_REPOS.set(saved);
+    }
     let mut profiles = load_profiles()?;
     if profiles.is_empty() {
         profiles.insert(DEFAULT_PROFILE_NAME.to_string(), Profile::default());
@@ -90,7 +146,7 @@ pub fn save(cfg: &Config) -> Result<()> {
     )?;
     fs::atomic_write(
         &plugins_config_path(),
-        &serde_yaml::to_string(&cfg.plugins)?,
+        &serde_yaml::to_string(persisted_plugins(&cfg.plugins, SAVED_REPOS.get()).as_ref())?,
     )?;
     save_profiles(&cfg.profiles)?;
     Ok(())
@@ -709,5 +765,44 @@ mod tests {
             saved_devices["known_devices"]["nzxt_kraken-8EC3"]["name"],
             expected_devices["known_devices"]["nzxt_kraken-8EC3"]["name"]
         );
+    }
+}
+
+#[cfg(test)]
+mod dev_plugin_tests {
+    use super::*;
+
+    fn record(slug: &str) -> PluginRepoRecord {
+        PluginRepoRecord {
+            slug: slug.into(),
+            source: PluginRepoSource::Url(format!("https://{slug}.example/catalog.yaml")),
+            trusted_key: None,
+        }
+    }
+
+    #[test]
+    fn dev_mode_loads_only_the_dev_folder_and_saves_the_original_repos() {
+        let mut plugins = PluginPolicy {
+            repos: vec![record("official"), record("community")],
+            enabled: vec!["logitech".parse().unwrap()],
+            ..PluginPolicy::default()
+        };
+        let saved = apply_dev_plugins(&mut plugins, Path::new("/work/plugins"));
+        assert_eq!(plugins.repos.len(), 1);
+        assert_eq!(plugins.repos[0].slug, DEV_PLUGIN_REPO_SLUG);
+        assert_eq!(
+            plugins.repos[0].source,
+            PluginRepoSource::Local("/work/plugins".into())
+        );
+
+        plugins.enabled.push("nzxt_kraken".parse().unwrap());
+        let written = persisted_plugins(&plugins, Some(&saved));
+        assert_eq!(written.repos, vec![record("official"), record("community")]);
+        assert_eq!(
+            written.enabled.len(),
+            2,
+            "other policy changes still persist"
+        );
+        assert_eq!(persisted_plugins(&plugins, None).repos, plugins.repos);
     }
 }

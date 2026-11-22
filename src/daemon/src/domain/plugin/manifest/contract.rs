@@ -166,6 +166,7 @@ pub const CALLBACKS_V1: &[CallbackContract] = &[
     callback!("reset_button_mapping", Capability, "dev, cid", "nil"),
     callback!("reset_all_button_mappings", Capability, "dev", "nil"),
     callback!("key_remap_host_mode", Optional, "dev", "bool"),
+    callback!("key_remap_layer", Optional, "dev, active", "nil"),
     callback!(
         "render_effect_{id}",
         EffectPattern,

@@ -184,7 +184,7 @@ The key remap engine diverts button events from devices and injects mapped actio
 
 The engine is event-driven. When a device reports a button event (press or release), the engine looks up the configured action for that button and executes it via `/dev/uinput`, a virtual input device that appears to the OS as a regular keyboard or mouse.
 
-A **layer shift** mechanism lets a single button act as a modifier: while held, all mapped keys switch to their alternate action defined in the layer.
+A **layer shift** mechanism lets a single button act as a modifier: while held, all mapped keys switch to their alternate action defined in the layer. The layer is global across devices; whenever it engages or releases, every key-remap device is told (`set_layer_shift`), so a device suppresses a button's native output only on the layer where that button is mapped. A button mapped only on the shift layer keeps its native function on the normal layer.
 
 ### Device defaults
 

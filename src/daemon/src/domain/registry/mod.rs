@@ -42,7 +42,9 @@ pub async fn seed_known_devices(app: Arc<AppState>) {
 }
 
 pub async fn initialize_app_state(app: Arc<AppState>) {
-    ensure_official_repo(&app).await;
+    if crate::config::dev_plugins_dir().is_none() {
+        ensure_official_repo(&app).await;
+    }
     let repos = app.config.read().await.plugins.repos.clone();
     let cached = tokio::task::spawn_blocking(move || {
         if let Err(error) =

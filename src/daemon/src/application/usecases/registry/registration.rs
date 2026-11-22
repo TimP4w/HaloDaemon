@@ -14,7 +14,9 @@ use halod_shared::types::{ConnectionType, VisibilityState, DEFAULT_PROFILE_NAME}
 /// registry removal path must use this instead of calling `Device::close`
 /// directly so a disconnected layer-shift key cannot remain latched.
 pub async fn close_device(app: &Arc<AppState>, device: &Arc<dyn Device>) {
+    let was_active = app.input.layer_shift_active();
     app.input.layer_shift_clear_device(device.id());
+    crate::domain::input::engine::key_remap::notify_layer_shift(app, was_active).await;
     app.restore_retry.clear(device.id());
     device.close().await;
 }

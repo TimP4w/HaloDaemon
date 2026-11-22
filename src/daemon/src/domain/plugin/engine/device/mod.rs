@@ -306,7 +306,7 @@ impl Controls {
             selected: self.choice_cache.get(&c.key).unwrap_or(c.default),
             category: c.category.clone(),
             display: c.display.clone(),
-            visible_when: None,
+            visible_when: c.visible_when.clone(),
         })
     }
 
@@ -2585,6 +2585,13 @@ impl KeyRemapCapability for LuaDevice {
         }
         Ok(())
     }
+
+    async fn set_layer_shift(&self, active: bool) {
+        let Ok(worker) = self.worker() else { return };
+        if let Err(e) = self.track(worker.key_remap_layer(active).await).await {
+            log::debug!("key_remap_layer on {}: {e:#}", self.id);
+        }
+    }
 }
 
 #[async_trait]
@@ -3108,7 +3115,7 @@ mod tests {
     #[test]
     fn runtime_controls_validate_cache_and_render_wire_state() {
         let runtime: InitControls = serde_yaml::from_str(
-            "choices:\n  - key: mode\n    label: Mode\n    options:\n      - { id: a, label: A }\n      - { id: b, label: B }\n    default: 0\nranges:\n  - key: hz\n    label: Hz\n    min: 100\n    max: 1000\n    default: 500\n    visible_when: { key: mode, equals: [1] }\nbooleans:\n  - key: snap\n    label: Angle Snap\n    category: Mouse\nactions:\n  - key: calibrate\n    label: Calibrate\n",
+            "choices:\n  - key: mode\n    label: Mode\n    options:\n      - { id: a, label: A }\n      - { id: b, label: B }\n    default: 0\n  - key: preset\n    label: Preset\n    options:\n      - { id: x, label: X }\n    visible_when: { key: snap, equals: [1] }\nranges:\n  - key: hz\n    label: Hz\n    min: 100\n    max: 1000\n    default: 500\n    visible_when: { key: mode, equals: [1] }\nbooleans:\n  - key: snap\n    label: Angle Snap\n    category: Mouse\nactions:\n  - key: calibrate\n    label: Calibrate\n",
         )
         .unwrap();
         let controls = Controls::from_runtime(runtime);
@@ -3120,6 +3127,9 @@ mod tests {
             panic!("choice capability missing");
         };
         assert_eq!(choices[0].selected, 1);
+        assert!(choices[0].visible_when.is_none());
+        assert_eq!(choices[1].visible_when.as_ref().unwrap().key, "snap");
+        assert_eq!(choices[1].visible_when.as_ref().unwrap().equals, vec![1]);
 
         let hz = controls.clamp_range("hz", 5000).unwrap();
         assert_eq!(hz, 1000);

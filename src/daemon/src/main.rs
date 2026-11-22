@@ -26,7 +26,9 @@ use crate::util::task::TaskHandle;
 /// The daemon is always a plain user process now — Windows service registration
 /// and the elevated register-bus broker live in `halod-broker.exe`, and the GUI
 /// launches this daemon directly. `--headless` opts out of idle-shutdown (see
-/// [`crate::application::lifecycle`]).
+/// [`crate::application::lifecycle`]). `--dev-plugins <dir>` (or the
+/// `HALOD_DEV_PLUGINS` environment variable) loads plugins only from a local
+/// directory; see [`crate::config::enable_dev_plugins`].
 ///
 /// `plugin-test <package-dir>` (behind the `plugin-test` cargo feature) is a
 /// separate mode entirely: it drives one plugin package's `test.lua` against
@@ -37,6 +39,7 @@ use crate::util::task::TaskHandle;
 enum ProcessRole {
     Server {
         headless: bool,
+        dev_plugins: Option<std::path::PathBuf>,
     },
     #[cfg(feature = "plugin-test")]
     PluginTest {
@@ -47,7 +50,8 @@ enum ProcessRole {
     },
 }
 
-const USAGE: &str = "usage: halod [--headless] | halod udev-rules [--catalog <url>]";
+const USAGE: &str =
+    "usage: halod [--headless] [--dev-plugins <dir>] | halod udev-rules [--catalog <url>]";
 
 fn process_role(args: &[String]) -> std::result::Result<ProcessRole, String> {
     if args.first().map(String::as_str) == Some("udev-rules") {
@@ -70,11 +74,24 @@ fn process_role(args: &[String]) -> std::result::Result<ProcessRole, String> {
         }
         return Ok(ProcessRole::PluginTest { package });
     }
-    match args {
-        [] => Ok(ProcessRole::Server { headless: false }),
-        [flag] if flag == "--headless" => Ok(ProcessRole::Server { headless: true }),
-        _ => Err(format!("unknown arguments {args:?}")),
+    let (mut headless, mut dev_plugins) = (false, None);
+    let mut rest = args.iter();
+    while let Some(arg) = rest.next() {
+        match arg.as_str() {
+            "--headless" if !headless => headless = true,
+            "--dev-plugins" if dev_plugins.is_none() => {
+                let dir = rest
+                    .next()
+                    .ok_or_else(|| "--dev-plugins needs a directory".to_owned())?;
+                dev_plugins = Some(dir.into());
+            }
+            _ => return Err(format!("unknown arguments {args:?}")),
+        }
     }
+    Ok(ProcessRole::Server {
+        headless,
+        dev_plugins,
+    })
 }
 
 fn main() -> Result<()> {
@@ -108,8 +125,16 @@ fn main() -> Result<()> {
         return Ok(());
     }
 
-    let headless = match &role {
-        ProcessRole::Server { headless, .. } => *headless,
+    let (headless, dev_plugins) = match &role {
+        ProcessRole::Server {
+            headless,
+            dev_plugins,
+        } => (
+            *headless,
+            dev_plugins
+                .clone()
+                .or_else(|| std::env::var_os(config::DEV_PLUGINS_ENV).map(Into::into)),
+        ),
         ProcessRole::UdevRules { .. } => unreachable!("handled above"),
         #[cfg(feature = "plugin-test")]
         ProcessRole::PluginTest { .. } => unreachable!("handled above"),
@@ -125,6 +150,9 @@ fn main() -> Result<()> {
         std::env::set_var("PATH", new_path);
     }
 
+    if let Some(dir) = &dev_plugins {
+        config::enable_dev_plugins(dir)?;
+    }
     let cfg = config::load()?;
 
     // Prevent glibc from creating one 64MB malloc arena per CPU core: the
@@ -165,6 +193,12 @@ async fn run_daemon(headless: bool, cfg: crate::config::Config) -> Result<()> {
         env!("HALOD_BUILD_HASH")
     );
     log::info!("Daemon is running. Press Ctrl+C to shut down.");
+    if let Some(dir) = crate::config::dev_plugins_dir() {
+        log::warn!(
+            "DEV PLUGIN MODE: loading plugins only from {}; plugin repositories are not loaded or fetched",
+            dir.display()
+        );
+    }
 
     #[cfg(unix)]
     platform::elevation::refuse_if_elevated()?;
@@ -488,16 +522,37 @@ mod tests {
     fn server_arguments_parse_and_reject_unknown_flags() {
         assert_eq!(
             process_role(&argv(&[])).unwrap(),
-            ProcessRole::Server { headless: false }
+            ProcessRole::Server {
+                headless: false,
+                dev_plugins: None
+            }
         );
         assert_eq!(
             process_role(&argv(&["--headless"])).unwrap(),
-            ProcessRole::Server { headless: true }
+            ProcessRole::Server {
+                headless: true,
+                dev_plugins: None
+            }
         );
+        for args in [
+            vec!["--dev-plugins", "C:/plugins", "--headless"],
+            vec!["--headless", "--dev-plugins", "C:/plugins"],
+        ] {
+            assert_eq!(
+                process_role(&argv(&args)).unwrap(),
+                ProcessRole::Server {
+                    headless: true,
+                    dev_plugins: Some("C:/plugins".into())
+                },
+                "{args:?}"
+            );
+        }
         for args in [
             vec!["--unknown"],
             vec!["--headless", "--headless"],
             vec!["--dev-plugin-repo", "C:/plugins"],
+            vec!["--dev-plugins"],
+            vec!["--dev-plugins", "a", "--dev-plugins", "b"],
         ] {
             assert!(process_role(&argv(&args)).is_err(), "{args:?}");
         }
