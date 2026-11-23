@@ -219,15 +219,81 @@ impl PackageMatches {
         self.platforms.is_empty() || self.platforms.iter().any(|platform| platform == os)
     }
 
-    pub fn widens(&self, previous: &PackageMatches) -> bool {
-        fn beyond<T: PartialEq>(next: &[T], previous: &[T]) -> bool {
-            next.iter().any(|item| !previous.contains(item))
-        }
+    pub fn device_keys(&self) -> Vec<DeviceKey> {
+        let hid = self.hid.iter().flat_map(|identity| {
+            identity.pids.iter().map(|&pid| DeviceKey::Hid {
+                vid: identity.vid,
+                pid,
+                usage_page: identity.usage_page,
+                usage: identity.usage,
+                interface: identity.interface,
+            })
+        });
+        let usb = self.usb.iter().flat_map(|identity| {
+            identity.pids.iter().map(|&pid| DeviceKey::Usb {
+                vid: identity.vid,
+                pid,
+                interface: identity.interface,
+            })
+        });
+        let pci = self.smbus_gpu.iter().cloned().map(DeviceKey::SmbusGpu);
+        hid.chain(usb).chain(pci).collect()
+    }
+
+    fn widens_access(&self, previous: &PackageMatches) -> bool {
         (self.hid_any && !previous.hid_any)
-            || beyond(&self.hid, &previous.hid)
-            || beyond(&self.usb, &previous.usb)
-            || beyond(&self.smbus_gpu, &previous.smbus_gpu)
-            || beyond(&self.commands, &previous.commands)
+            || self
+                .commands
+                .iter()
+                .any(|command| !previous.commands.contains(command))
+    }
+}
+
+#[derive(Debug, Clone, PartialEq, Eq)]
+pub enum DeviceKey {
+    Hid {
+        vid: u16,
+        pid: u16,
+        usage_page: Option<u16>,
+        usage: Option<u16>,
+        interface: Option<i32>,
+    },
+    Usb {
+        vid: u16,
+        pid: u16,
+        interface: u8,
+    },
+    SmbusGpu(PciIdentity),
+}
+
+#[derive(Debug, Clone, Copy, PartialEq, Eq)]
+pub enum UpdateScope {
+    Unchanged,
+    NewDevices(usize),
+    MorePermissions,
+}
+
+pub fn update_scope(
+    previous: Option<(&PackageUses, &PackageMatches)>,
+    next: (&PackageUses, &PackageMatches),
+) -> UpdateScope {
+    let Some((previous_uses, previous_matches)) = previous else {
+        return UpdateScope::MorePermissions;
+    };
+    let (next_uses, next_matches) = next;
+    if next_uses.widens(previous_uses) || next_matches.widens_access(previous_matches) {
+        return UpdateScope::MorePermissions;
+    }
+    let known = previous_matches.device_keys();
+    let mut added: Vec<DeviceKey> = Vec::new();
+    for key in next_matches.device_keys() {
+        if !known.contains(&key) && !added.contains(&key) {
+            added.push(key);
+        }
+    }
+    match added.len() {
+        0 => UpdateScope::Unchanged,
+        count => UpdateScope::NewDevices(count),
     }
 }
 
@@ -721,5 +787,111 @@ mod tests {
         let mut reads = uses(0, &[]);
         reads.data_reads.push("host.sensors.*".into());
         assert!(reads.widens(&uses(0, &[])));
+    }
+
+    fn hid(vid: u16, pids: &[u16]) -> HidIdentity {
+        HidIdentity {
+            vid,
+            pids: pids.to_vec(),
+            usage_page: None,
+            usage: None,
+            interface: None,
+        }
+    }
+
+    fn matching(identities: Vec<HidIdentity>) -> PackageMatches {
+        PackageMatches {
+            hid: identities,
+            ..PackageMatches::default()
+        }
+    }
+
+    fn scope(previous: &PackageMatches, next: &PackageMatches) -> UpdateScope {
+        let base = uses(1, &[]);
+        update_scope(Some((&base, previous)), (&base, next))
+    }
+
+    #[test]
+    fn a_fresh_install_needs_permissions() {
+        let base = uses(1, &[]);
+        let matches = PackageMatches::default();
+        assert_eq!(
+            update_scope(None, (&base, &matches)),
+            UpdateScope::MorePermissions
+        );
+    }
+
+    #[test]
+    fn new_pids_and_identities_count_as_new_devices() {
+        let base = matching(vec![hid(1, &[10])]);
+        assert_eq!(
+            scope(&base, &matching(vec![hid(1, &[10, 11])])),
+            UpdateScope::NewDevices(1)
+        );
+        assert_eq!(
+            scope(&base, &matching(vec![hid(1, &[10]), hid(2, &[20, 21])])),
+            UpdateScope::NewDevices(2)
+        );
+        let mut usb = base.clone();
+        usb.usb.push(UsbIdentity {
+            vid: 3,
+            pids: vec![30],
+            interface: 0,
+        });
+        usb.smbus_gpu.push(PciIdentity::default());
+        assert_eq!(scope(&base, &usb), UpdateScope::NewDevices(2));
+    }
+
+    #[test]
+    fn regrouping_or_dropping_devices_is_unchanged() {
+        let base = matching(vec![hid(1, &[10, 11])]);
+        assert_eq!(
+            scope(&base, &matching(vec![hid(1, &[11]), hid(1, &[10])])),
+            UpdateScope::Unchanged
+        );
+        assert_eq!(
+            scope(&base, &matching(vec![hid(1, &[10])])),
+            UpdateScope::Unchanged
+        );
+        assert_eq!(
+            scope(&base, &matching(vec![hid(1, &[10, 10, 11])])),
+            UpdateScope::Unchanged
+        );
+    }
+
+    #[test]
+    fn new_access_outranks_new_devices() {
+        let base = matching(vec![hid(1, &[10])]);
+        let mut any = matching(vec![hid(1, &[10, 11])]);
+        any.hid_any = true;
+        assert_eq!(scope(&base, &any), UpdateScope::MorePermissions);
+        let mut command = base.clone();
+        command.commands.push("tool".into());
+        assert_eq!(scope(&base, &command), UpdateScope::MorePermissions);
+        let wider = uses(3, &[]);
+        assert_eq!(
+            update_scope(Some((&uses(1, &[]), &base)), (&wider, &base)),
+            UpdateScope::MorePermissions
+        );
+    }
+
+    proptest! {
+        #[test]
+        fn new_devices_counts_exactly_the_unseen_pids(
+            previous in proptest::collection::vec(0u16..32, 0..8),
+            next in proptest::collection::vec(0u16..32, 0..8),
+        ) {
+            let mut unseen: Vec<u16> = next.iter().copied().filter(|pid| !previous.contains(pid)).collect();
+            unseen.sort_unstable();
+            unseen.dedup();
+            let expected = match unseen.len() {
+                0 => UpdateScope::Unchanged,
+                count => UpdateScope::NewDevices(count),
+            };
+            prop_assert_eq!(
+                scope(&matching(vec![hid(1, &previous)]), &matching(vec![hid(1, &next)])),
+                expected
+            );
+        }
     }
 }

@@ -68,7 +68,6 @@ pub struct DeviceDebugInfo {
 pub enum DependencyRule {
     Ffmpeg,
     Pactl,
-    NvidiaSmi,
     UdevRules,
     I2cAccess,
     HalodGroup,
@@ -83,7 +82,6 @@ impl DependencyRule {
     pub const ALL: &'static [DependencyRule] = &[
         DependencyRule::Ffmpeg,
         DependencyRule::Pactl,
-        DependencyRule::NvidiaSmi,
         DependencyRule::UdevRules,
         DependencyRule::I2cAccess,
         DependencyRule::HalodGroup,
@@ -98,7 +96,6 @@ impl DependencyRule {
         match self {
             DependencyRule::Ffmpeg => "ffmpeg",
             DependencyRule::Pactl => "pactl",
-            DependencyRule::NvidiaSmi => "nvidia_smi",
             DependencyRule::UdevRules => "udev_rules",
             DependencyRule::I2cAccess => "i2c_access",
             DependencyRule::HalodGroup => "halod_group",

@@ -2,14 +2,14 @@
 //! Daemon-only string constants that aren't part of the wire-facing
 //! `halod_shared::app` identity (see that module for cross-process constants).
 
-/// UUID of the `halod@halod` GNOME Shell extension used for focus tracking.
 #[cfg(target_os = "linux")]
-pub const GNOME_EXTENSION_UUID: &str = "companion@halod.timp4w.dev";
+pub use halod_shared::app::GNOME_EXTENSION_UUID;
 
-/// D-Bus interface the `halod@halod` GNOME Shell extension emits its
-/// `FocusChanged` signal on.
 #[cfg(target_os = "linux")]
 pub const FOCUS_WATCHER_DBUS_INTERFACE: &str = "dev.timp4w.halod.FocusWatcher1";
+
+#[cfg(target_os = "linux")]
+pub const FOCUS_WATCHER_DBUS_PATH: &str = "/dev/timp4w/halod/FocusWatcher1";
 
 /// Prefix every halod-managed virtual PulseAudio/PipeWire sink is named with.
 #[cfg(target_os = "linux")]

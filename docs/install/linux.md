@@ -40,7 +40,7 @@ This installs the binaries and base udev rules and runs `halod` as a per-user se
 | `i2c.enable` | Turns on `hardware.i2c.enable` (loads `i2c-dev`) for SMBus DRAM/GPU RGB; generated rules grant matching nodes to `halod` |
 | `i2c.platform` | Chipset SMBus driver: `"amd"` → `i2c-piix4`, `"intel"` → `i2c-i801` (`null` = load neither) |
 | `enableNuvotonFanControl` | Loads `nct6775` for NCT677x SuperIO temperature sensors and PWM fan headers (no-op if the chip is absent) |
-| `enableGnomeExtension` | Installs the GNOME Shell extension system-wide (each user still runs `gnome-extensions enable halod@halod`) |
+| `enableGnomeExtension` | Installs the GNOME Shell extension system-wide (each user still runs `gnome-extensions enable companion@halod.timp4w.dev`) |
 
 On `x86_64-linux` the default package is the tested binary release, so updating the input does not trigger a Rust rebuild. To compile the workspace yourself instead (required on `aarch64-linux`, which has no release tarball):
 

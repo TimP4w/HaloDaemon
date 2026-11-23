@@ -103,12 +103,6 @@ fn health_rules(ffmpeg_available: bool) -> Vec<HealthRule> {
             check: Box::new(|| binary_on_path("pactl")),
         },
         HealthRule {
-            id: DependencyRule::NvidiaSmi,
-            required: false,
-            platform: "Linux",
-            check: Box::new(|| binary_on_path("nvidia-smi")),
-        },
-        HealthRule {
             id: DependencyRule::UdevRules,
             required: true,
             platform: "Linux",

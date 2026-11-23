@@ -5,7 +5,7 @@ use std::sync::Arc;
 use anyhow::{anyhow, bail, Context as _, Result};
 use halod_plugin_signing::declarations::{read_declarations, PackageDeclarations};
 use halod_plugin_signing::{CatalogError, CatalogPackage, HOST_PLUGIN_API};
-use halod_shared::types::{NotificationCode, PluginRepoLocation};
+use halod_shared::types::{NotificationCode, PluginRepoLocation, UpdateScope};
 
 use crate::application::notifications;
 use crate::application::state::AppState;
@@ -324,13 +324,11 @@ async fn install_staged(
     swap_and_load(app, repo, id, staging, permissions_confirmed).await
 }
 
-fn update_needs_permissions(
-    previous: Option<&PackageDeclarations>,
-    next: &PackageDeclarations,
-) -> bool {
-    previous.is_none_or(|previous| {
-        next.uses.widens(&previous.uses) || next.matches.widens(&previous.matches)
-    })
+fn update_scope(previous: Option<&PackageDeclarations>, next: &PackageDeclarations) -> UpdateScope {
+    halod_shared::types::update_scope(
+        previous.map(|previous| (&previous.uses, &previous.matches)),
+        (&next.uses, &next.matches),
+    )
 }
 
 async fn swap_and_load(
@@ -346,8 +344,9 @@ async fn swap_and_load(
     })
     .await?;
     let previous = app.registry.declarations_for(id);
+    let scope = update_scope(previous.as_ref(), &next);
     let disabled_for_update = !permissions_confirmed
-        && update_needs_permissions(previous.as_ref(), &next)
+        && scope == UpdateScope::MorePermissions
         && app.config.read().await.plugins.enabled.contains(id);
     if disabled_for_update {
         plugins::set_enabled(id.clone(), false, Arc::clone(app)).await?;
@@ -395,15 +394,20 @@ async fn swap_and_load(
         bail!("{id} failed to load: {problem}");
     }
     blocking(move || copies.iter().try_for_each(|(_, backup)| remove_dir(backup))).await?;
-    if disabled_for_update {
-        notifications::send(
-            app,
-            NotificationCode::PluginUpdateNeedsPermissions {
-                plugin: id.clone(),
-                name: next.name,
-            },
-        )
-        .await;
+    let notice = match scope {
+        _ if disabled_for_update => Some(NotificationCode::PluginUpdateNeedsPermissions {
+            plugin: id.clone(),
+            name: next.name,
+        }),
+        UpdateScope::NewDevices(count) => Some(NotificationCode::PluginUpdateAddsDevices {
+            plugin: id.clone(),
+            name: next.name,
+            count,
+        }),
+        _ => None,
+    };
+    if let Some(notice) = notice {
+        notifications::send(app, notice).await;
     }
     reconcile_plugins(app, std::slice::from_ref(id)).await;
     Ok(())
@@ -791,10 +795,18 @@ mod tests {
     }
 
     fn staged_using(slug: &str, version: &str, transports: &str) -> PathBuf {
+        staged_manifest(
+            slug,
+            version,
+            &format!("type: integration\ntransports:\n  command:\n    commands: [nvidia-smi]\n{transports}"),
+        )
+    }
+
+    fn staged_manifest(slug: &str, version: &str, body: &str) -> PathBuf {
         let package = staged(slug, "demo", version);
         std::fs::write(
             package.join("plugin.yaml"),
-            format!("id: demo\nversion: {version}\napi: \"1.0\"\ntype: integration\ntransports:\n  command:\n    commands: [nvidia-smi]\n{transports}"),
+            format!("id: demo\nversion: {version}\napi: \"1.0\"\n{body}"),
         )
         .unwrap();
         package
@@ -803,20 +815,22 @@ mod tests {
     const HTTP: &str = "  http:\n    origins: [https://api.example.com]\n";
 
     async fn install_demo(app: &Arc<AppState>, transports: &str) {
+        install_demo_staged(app, staged_using("official", "1.0.0", transports)).await;
+    }
+
+    async fn install_demo_staged(app: &Arc<AppState>, staging: PathBuf) {
         with_remote_repo(app, "official").await;
-        install_staged(
-            app,
-            "official",
-            &"demo".parse().unwrap(),
-            staged_using("official", "1.0.0", transports),
-            false,
-        )
-        .await
-        .unwrap();
+        install_staged(app, "official", &"demo".parse().unwrap(), staging, false)
+            .await
+            .unwrap();
     }
 
     async fn install_enabled_demo(app: &Arc<AppState>, transports: &str) {
         install_demo(app, transports).await;
+        enable_demo(app).await;
+    }
+
+    async fn enable_demo(app: &Arc<AppState>) {
         let mut cfg = app.config.write().await;
         cfg.plugins.enabled.push("demo".parse().unwrap());
         app.registry.replace_policy(&cfg.plugins);
@@ -836,12 +850,25 @@ mod tests {
         transports: &str,
         permissions_confirmed: bool,
     ) -> Vec<NotificationCode> {
+        update_demo_staged(
+            app,
+            staged_using("official", "1.1.0", transports),
+            permissions_confirmed,
+        )
+        .await
+    }
+
+    async fn update_demo_staged(
+        app: &Arc<AppState>,
+        staging: PathBuf,
+        permissions_confirmed: bool,
+    ) -> Vec<NotificationCode> {
         let mut events = app.data_bus.subscribe_events();
         install_staged(
             app,
             "official",
             &"demo".parse().unwrap(),
-            staged_using("official", "1.1.0", transports),
+            staging,
             permissions_confirmed,
         )
         .await
@@ -903,8 +930,51 @@ mod tests {
         .await;
     }
 
+    fn device_manifest(version: &str, pids: &str) -> PathBuf {
+        staged_manifest(
+            "official",
+            version,
+            &format!("capabilities: [battery]\ndevices:\n  - vendor: Demo\n    model: One\n    type: headset\n    match:\n      hid: {{ vid: 0x1234, pids: [{pids}] }}\ntransports:\n  hid: {{ report_size: 64 }}\n"),
+        )
+    }
+
+    async fn install_enabled_device_demo(app: &Arc<AppState>) {
+        install_demo_staged(app, device_manifest("1.0.0", "1")).await;
+        enable_demo(app).await;
+    }
+
+    fn adds_devices(sent: &[NotificationCode]) -> Option<usize> {
+        sent.iter().find_map(|code| match code {
+            NotificationCode::PluginUpdateAddsDevices { count, .. } => Some(*count),
+            _ => None,
+        })
+    }
+
+    #[tokio::test]
+    async fn an_update_adding_devices_stays_enabled_and_says_so() {
+        crate::test_support::with_tmp_config(|app| async move {
+            install_enabled_device_demo(&app).await;
+            let sent = update_demo_staged(&app, device_manifest("1.1.0", "1, 2"), false).await;
+            assert!(demo_enabled(&app).await);
+            assert!(!needs_permissions(&sent));
+            assert_eq!(adds_devices(&sent), Some(1));
+        })
+        .await;
+    }
+
+    #[tokio::test]
+    async fn an_unchanged_update_sends_no_notice() {
+        crate::test_support::with_tmp_config(|app| async move {
+            install_enabled_device_demo(&app).await;
+            let sent = update_demo_staged(&app, device_manifest("1.1.0", "1"), false).await;
+            assert!(demo_enabled(&app).await);
+            assert!(sent.is_empty());
+        })
+        .await;
+    }
+
     #[test]
-    fn permissions_are_needed_for_wider_uses_wider_matches_or_an_unknown_previous() {
+    fn scope_reads_both_sides_of_the_declarations() {
         use halod_shared::types::{HidIdentity, Permission};
         let mut base = PackageDeclarations {
             name: "demo".into(),
@@ -919,20 +989,23 @@ mod tests {
             usage: None,
             interface: None,
         }];
-        assert!(!update_needs_permissions(Some(&base), &base));
-        assert!(update_needs_permissions(None, &base));
+        assert_eq!(update_scope(Some(&base), &base), UpdateScope::Unchanged);
+        assert_eq!(update_scope(None, &base), UpdateScope::MorePermissions);
         let mut wider_uses = base.clone();
         wider_uses.uses.permissions.push(Permission::Network);
-        assert!(update_needs_permissions(Some(&base), &wider_uses));
-        let mut any_hid = base.clone();
-        any_hid.matches.hid_any = true;
-        assert!(update_needs_permissions(Some(&base), &any_hid));
+        assert_eq!(
+            update_scope(Some(&base), &wider_uses),
+            UpdateScope::MorePermissions
+        );
         let mut more_pids = base.clone();
         more_pids.matches.hid[0].pids.push(2);
-        assert!(update_needs_permissions(Some(&base), &more_pids));
+        assert_eq!(
+            update_scope(Some(&base), &more_pids),
+            UpdateScope::NewDevices(1)
+        );
         let mut fewer = base.clone();
         fewer.uses.permissions.clear();
-        assert!(!update_needs_permissions(Some(&base), &fewer));
+        assert_eq!(update_scope(Some(&base), &fewer), UpdateScope::Unchanged);
     }
 
     fn dir_with(path: &Path, marker: &str) {

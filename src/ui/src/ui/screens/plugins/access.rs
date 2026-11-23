@@ -284,8 +284,10 @@ pub(super) fn plan_updates(state: &PluginsState, ids: &[&PluginId]) -> Vec<Plann
             Some(PlannedUpdate {
                 repo: update.repo.clone(),
                 id: plugin.id.clone(),
-                needs_permissions: update.uses.widens(&plugin.uses)
-                    || update.matches.widens(&plugin.matches),
+                needs_permissions: halod_shared::types::update_scope(
+                    Some((&plugin.uses, &plugin.matches)),
+                    (&update.uses, &update.matches),
+                ) == halod_shared::types::UpdateScope::MorePermissions,
                 confirmed: None,
             })
         })

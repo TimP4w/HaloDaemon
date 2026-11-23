@@ -26,6 +26,8 @@ pub const GUI_PIPE_NAME: &str = r"\\.\pipe\halod-gui";
 /// app id, single-instance checks).
 pub const GUI_PROCESS_NAME: &str = "halod-gui";
 
+pub const GNOME_EXTENSION_UUID: &str = "companion@halod.timp4w.dev";
+
 /// Reverse-DNS application id: the GUI's Wayland/X11 window class/app_id and
 /// the base name of the desktop entry / D-Bus well-known name it registers
 /// (`{APP_ID}.desktop`).

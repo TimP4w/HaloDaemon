@@ -13,6 +13,65 @@ use crate::ui::theme;
 pub struct DepCheckUi {
     dismissed: bool,
     dont_show_again: bool,
+    copied: CopiedCommand,
+}
+
+#[derive(Default)]
+pub(crate) struct CopiedCommand(Option<(DependencyRule, f64)>);
+
+impl CopiedCommand {
+    pub(crate) fn showing(&self, id: DependencyRule, now: f64) -> bool {
+        self.0.is_some_and(|(copied, at)| {
+            copied == id && crate::ui::screens::settings::copied_feedback_visible(Some(at), now)
+        })
+    }
+
+    pub(crate) fn mark(&mut self, id: DependencyRule, now: f64) {
+        self.0 = Some((id, now));
+    }
+}
+
+pub(crate) fn udev_install_commands() -> String {
+    "halod udev-rules | sudo tee /etc/udev/rules.d/60-halod.rules >/dev/null\n\
+sudo udevadm control --reload-rules\n\
+sudo udevadm trigger"
+        .to_owned()
+}
+
+pub(crate) fn fix_command(dep: &DependencyStatus) -> Option<String> {
+    match (dep.id, dep.fix_variant.as_str()) {
+        (DependencyRule::UdevRules, _) => Some(udev_install_commands()),
+        (DependencyRule::I2cAccess, _) => Some(
+            "sudo modprobe i2c-dev\n\
+echo i2c-dev | sudo tee /etc/modules-load.d/i2c-dev.conf\n\
+sudo usermod -aG i2c \"$USER\""
+                .to_owned(),
+        ),
+        (DependencyRule::HalodGroup, _) => Some("sudo usermod -aG halod \"$USER\"".to_owned()),
+        (DependencyRule::GnomeExtension, "disabled") => Some(format!(
+            "gnome-extensions enable {}",
+            halod_shared::app::GNOME_EXTENSION_UUID
+        )),
+        _ => None,
+    }
+}
+
+pub(crate) fn fix_command_block(
+    ui: &mut egui::Ui,
+    dep: &DependencyStatus,
+    copied: &mut CopiedCommand,
+) {
+    let Some(command) = fix_command(dep) else {
+        return;
+    };
+    let now = ui.ctx().input(|i| i.time);
+    let showing = copied.showing(dep.id, now);
+    if showing {
+        ui.ctx().request_repaint();
+    }
+    if widgets::command_block(ui, &command, showing) {
+        copied.mark(dep.id, now);
+    }
 }
 
 impl DepCheckUi {
@@ -150,7 +209,7 @@ pub fn show(
         |ui| {
             ui.add_space(theme::SPACE_6);
             for dep in &failing {
-                issue_card(ui, dep);
+                issue_card(ui, dep, &mut st.copied);
                 ui.add_space(theme::SPACE_5);
             }
             if passed > 0 {
@@ -226,19 +285,10 @@ pub(crate) fn fix_text(dep: &DependencyStatus) -> String {
     }
 }
 
-pub(crate) fn issue_card(ui: &mut egui::Ui, dep: &DependencyStatus) {
-    issue_card_with_surface(ui, dep, theme::INNER_BG, theme::BORDER);
-}
-
-pub(crate) fn issue_card_with_surface(
-    ui: &mut egui::Ui,
-    dep: &DependencyStatus,
-    fill: egui::Color32,
-    border: egui::Color32,
-) {
+pub(crate) fn issue_card(ui: &mut egui::Ui, dep: &DependencyStatus, copied: &mut CopiedCommand) {
     egui::Frame::NONE
-        .fill(fill)
-        .stroke(egui::Stroke::new(1.0, border))
+        .fill(theme::INNER_BG)
+        .stroke(egui::Stroke::new(1.0, theme::BORDER))
         .corner_radius(theme::RADIUS_MD)
         .inner_margin(egui::Margin::same(14))
         .show(ui, |ui| {
@@ -272,6 +322,7 @@ pub(crate) fn issue_card_with_surface(
                     .font(theme::body_md())
                     .color(theme::TEXT_DIM),
             );
+            fix_command_block(ui, dep, copied);
         });
 }
 
@@ -386,7 +437,7 @@ mod tests {
         let di = info(vec![
             dep(DependencyRule::Ffmpeg, false, false),
             dep(DependencyRule::UdevRules, false, true),
-            dep(DependencyRule::NvidiaSmi, true, true),
+            dep(DependencyRule::Pactl, true, true),
         ]);
         let got = failing(&di);
         assert_eq!(got.len(), 2);
@@ -471,5 +522,56 @@ mod tests {
                 "missing fix translation for gnome_extension/{variant}"
             );
         }
+    }
+
+    #[test]
+    fn udev_install_command_generates_then_reloads_rules() {
+        let command = udev_install_commands();
+        assert!(command.contains("halod udev-rules"));
+        assert!(command.contains("/etc/udev/rules.d/60-halod.rules"));
+        assert!(command.contains("udevadm control --reload-rules"));
+        assert!(command.contains("udevadm trigger"));
+    }
+
+    #[test]
+    fn only_distro_independent_fixes_offer_a_command() {
+        let with_command: Vec<DependencyRule> = DependencyRule::ALL
+            .iter()
+            .copied()
+            .filter(|&id| fix_command(&dep(id, false, false)).is_some())
+            .collect();
+        assert_eq!(
+            with_command,
+            [
+                DependencyRule::UdevRules,
+                DependencyRule::I2cAccess,
+                DependencyRule::HalodGroup
+            ]
+        );
+        assert!(fix_command(&dep(DependencyRule::HalodGroup, false, false))
+            .unwrap()
+            .contains("usermod -aG halod"));
+    }
+
+    #[test]
+    fn a_disabled_gnome_extension_gets_an_enable_command() {
+        let mut gnome = dep(DependencyRule::GnomeExtension, false, false);
+        gnome.fix_variant = "disabled".into();
+        assert_eq!(
+            fix_command(&gnome).as_deref(),
+            Some("gnome-extensions enable companion@halod.timp4w.dev")
+        );
+        gnome.fix_variant = "missing".into();
+        assert_eq!(fix_command(&gnome), None);
+    }
+
+    #[test]
+    fn copied_feedback_follows_only_the_copied_rule() {
+        let mut copied = CopiedCommand::default();
+        assert!(!copied.showing(DependencyRule::HalodGroup, 1.0));
+        copied.mark(DependencyRule::HalodGroup, 1.0);
+        assert!(copied.showing(DependencyRule::HalodGroup, 1.0));
+        assert!(!copied.showing(DependencyRule::UdevRules, 1.0));
+        assert!(!copied.showing(DependencyRule::HalodGroup, 1000.0));
     }
 }

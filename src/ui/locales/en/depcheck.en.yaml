@@ -17,14 +17,10 @@ depcheck:
       title: pactl
       impact: "Headset ChatMix: game/chat audio split via virtual sinks"
       fix: Install PipeWire or PulseAudio utilities (provides pactl)
-    nvidia_smi:
-      title: nvidia-smi
-      impact: NVIDIA GPU temperature monitoring
-      fix: This is only required for NVIDIA GPUs and is included with the proprietary driver
     udev_rules:
       title: udev rules
       impact: Access to HID and hwmon devices without root privileges
-      fix: Install udev/60-halod.rules, then reload udev
+      fix: Install the udev rules, then reload udev
     i2c_access:
       title: I2C access
       impact: Chipset SMBus RGB (DRAM and GPU)
@@ -52,5 +48,5 @@ depcheck:
     gnome_extension:
       title: GNOME Shell extension
       impact: Profile switching based on the app in focus on GNOME
-      fix_disabled: "Installed but disabled, enable it in the Extensions app"
+      fix_disabled: "Installed but disabled. Enable it in the Extensions app, or run:"
       fix_missing: Install and enable the HaloDaemon GNOME Shell extension

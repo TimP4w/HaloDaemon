@@ -39,6 +39,9 @@ notify:
   plugin_update_needs_permissions:
     title: "%{plugin} è stato aggiornato e richiede più permessi"
     message: Resta disattivato finché non lo riattivi in Plugin, dove puoi controllarne i permessi.
+  plugin_update_adds_devices:
+    title: "%{plugin} ora supporta più dispositivi"
+    message: "Nuovi ID dispositivo: %{count}. I suoi permessi non sono cambiati."
   update_available:
     title: "HaloDaemon %{version} è disponibile"
     message: "Hai la %{current}. Apri le Impostazioni per aggiornare."

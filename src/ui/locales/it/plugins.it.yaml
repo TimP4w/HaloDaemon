@@ -55,8 +55,6 @@ plugins:
   udev_modal_current: "%{path} contiene tutte le %{count} regole necessarie ai tuoi plugin. Accesso aggiornato."
   udev_modal_outdated: "In %{path} mancano regole per %{count} plugin installati. Intervento necessario."
   udev_modal_missing: "%{count} regole generate non sono installate. Intervento necessario."
-  udev_copy_command: Copia comando
-  udev_command_copied: Copiato
   udev_recheck: Ricontrolla regole
   udev_rechecking: Ricontrollo…
   udev_recheck_hint: Esegui il comando in un terminale, poi ricontrolla. HaloDaemon confronta le regole generate con il file installato effettivo.

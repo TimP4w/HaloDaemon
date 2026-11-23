@@ -32,6 +32,7 @@ pub struct SettingsUi {
     /// dependency panel, so we don't re-request it every frame.
     deps_requested: bool,
     rechecking: bool,
+    copied_fix_command: crate::ui::screens::depcheck::CopiedCommand,
     /// Cached OS "launch at login" state; seeded on first render so the
     /// toggle doesn't hit the filesystem/registry every frame. `None` until
     /// seeded.
@@ -815,6 +816,13 @@ fn healthcheck_rows(
         Some(info) => {
             for dep in &info.dependencies {
                 dependency_row(ui, dep);
+                if !dep.present {
+                    crate::ui::screens::depcheck::fix_command_block(
+                        ui,
+                        dep,
+                        &mut st.copied_fix_command,
+                    );
+                }
             }
         }
     }

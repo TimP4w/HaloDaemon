@@ -94,3 +94,5 @@ misc:
   widget_remove_stop: Rimuovi
   widget_stop_value: Valore
   widget_stop_readout: "Soglia %{n} · %{value}"
+  copy_command: Copia comando
+  command_copied: Copiato

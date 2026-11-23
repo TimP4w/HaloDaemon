@@ -6,9 +6,35 @@ use zbus::{Connection, MatchRule, MessageStream};
 
 use super::FocusEvent;
 use crate::constants::FOCUS_WATCHER_DBUS_INTERFACE;
+use crate::constants::FOCUS_WATCHER_DBUS_PATH;
 use crate::constants::GNOME_EXTENSION_UUID;
 
-/// Detected state of the `halod@halod` GNOME Shell extension, for the settings
+fn focus_event(name: &str) -> FocusEvent {
+    if name.is_empty() {
+        FocusEvent::NoApp
+    } else {
+        FocusEvent::AppFocused {
+            process_name: super::normalize_name(name),
+        }
+    }
+}
+
+async fn current_focus(session: &Connection) -> Option<FocusEvent> {
+    let reply = session
+        .call_method(
+            Some("org.gnome.Shell"),
+            FOCUS_WATCHER_DBUS_PATH,
+            Some(FOCUS_WATCHER_DBUS_INTERFACE),
+            "GetFocused",
+            &(),
+        )
+        .await
+        .ok()?;
+    let (name,) = reply.body().deserialize::<(String,)>().ok()?;
+    Some(focus_event(&name))
+}
+
+/// Detected state of the GNOME Shell companion extension, for the settings
 /// dependency panel.
 #[derive(Debug, Clone, Copy, PartialEq, Eq)]
 pub enum ExtensionStatus {
@@ -128,6 +154,12 @@ pub async fn spawn() -> anyhow::Result<mpsc::Receiver<FocusEvent>> {
         // Only trust signals from the current owner of org.gnome.Shell.
         let mut owner = gnome_shell_owner(&session).await;
 
+        if let Some(event) = current_focus(&session).await {
+            if tx.send(event).await.is_err() {
+                return;
+            }
+        }
+
         while let Some(msg) = stream.next().await {
             let msg = match msg {
                 Ok(m) => m,
@@ -145,25 +177,11 @@ pub async fn spawn() -> anyhow::Result<mpsc::Receiver<FocusEvent>> {
                 }
             }
             match msg.body().deserialize::<(String,)>() {
-                Ok((name,)) if !name.is_empty() => {
-                    let normalized = super::normalize_name(&name);
-                    if tx
-                        .send(FocusEvent::AppFocused {
-                            process_name: normalized,
-                        })
-                        .await
-                        .is_err()
-                    {
+                Ok((name,)) => {
+                    if tx.send(focus_event(&name)).await.is_err() {
                         break;
                     }
                 }
-                Ok((name,)) if name.is_empty() => {
-                    // GNOME Shell extension signals focus loss with an empty name.
-                    if tx.send(FocusEvent::NoApp).await.is_err() {
-                        break;
-                    }
-                }
-                Ok(_) => {} // Catch-all for any other Ok variant.
                 Err(e) => {
                     log::debug!("deserialize error: {e}");
                 }

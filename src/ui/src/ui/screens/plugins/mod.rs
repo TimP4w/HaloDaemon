@@ -1519,6 +1519,27 @@ mod tests {
     }
 
     #[test]
+    fn an_update_that_only_adds_devices_installs_without_a_prompt() {
+        use halod_shared::types::HidIdentity;
+        let (cmd, mut rx) = tokio::sync::mpsc::unbounded_channel();
+        let mut state = update_state();
+        let device = |pids: Vec<u16>| HidIdentity {
+            vid: 1,
+            pids,
+            usage_page: None,
+            usage: None,
+            interface: None,
+        };
+        state.plugins[1].matches.hid = vec![device(vec![1])];
+        state.available[1].matches.hid = vec![device(vec![1, 2])];
+        let mut screen = PluginsUi::default();
+        let planned = ids(&["same"]);
+        screen.request_updates(1.0, &cmd, &state, &planned.iter().collect::<Vec<_>>());
+        assert_eq!(screen.updates.current(), None);
+        assert_eq!(sent_installs(&mut rx), ["same"]);
+    }
+
+    #[test]
     fn requesting_the_same_update_twice_prompts_once() {
         let mut prompt = UpdatePrompt::default();
         let planned = ids(&["wider"]);

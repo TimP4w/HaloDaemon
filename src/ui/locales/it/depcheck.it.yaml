@@ -17,14 +17,10 @@ depcheck:
       title: pactl
       impact: "ChatMix cuffie: divisione audio gioco/chat tramite sink virtuali"
       fix: Installa le utility PipeWire o PulseAudio (fornisce pactl)
-    nvidia_smi:
-      title: nvidia-smi
-      impact: Monitoraggio temperatura GPU NVIDIA
-      fix: Solo per GPU NVIDIA; incluso nel driver proprietario
     udev_rules:
       title: Regole udev
       impact: Accesso ai dispositivi HID e hwmon senza privilegi root
-      fix: Installa udev/60-halod.rules, quindi ricarica udev
+      fix: Installa le regole udev, quindi ricarica udev
     i2c_access:
       title: Accesso I2C
       impact: RGB SMBus del chipset (DRAM e GPU)
@@ -52,5 +48,5 @@ depcheck:
     gnome_extension:
       title: Estensione GNOME Shell
       impact: Cambio del profilo in base all'app in primo piano su GNOME
-      fix_disabled: "Installata ma disabilitata, abilitala nell'app Estensioni"
+      fix_disabled: "Installata ma disabilitata. Abilitala nell'app Estensioni oppure esegui:"
       fix_missing: Installa e abilita l'estensione GNOME Shell di HaloDaemon

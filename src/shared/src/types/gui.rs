@@ -230,6 +230,11 @@ pub enum NotificationCode {
         plugin: crate::ids::PluginId,
         name: String,
     },
+    PluginUpdateAddsDevices {
+        plugin: crate::ids::PluginId,
+        name: String,
+        count: usize,
+    },
     UpdateAvailable {
         version: String,
     },
@@ -255,6 +260,7 @@ impl NotificationCode {
             | LowBattery { .. }
             | PluginRecommended { .. }
             | PluginUpdateNeedsPermissions { .. }
+            | PluginUpdateAddsDevices { .. }
             | UpdateAvailable { .. } => NotificationSeverity::Info,
         }
     }

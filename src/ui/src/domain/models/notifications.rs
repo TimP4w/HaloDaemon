@@ -71,6 +71,10 @@ pub fn notification_text(code: &NotificationCode) -> (String, String) {
             .to_string(),
             t!("notify.plugin_update_needs_permissions.message").to_string(),
         ),
+        PluginUpdateAddsDevices { name, count, .. } => (
+            t!("notify.plugin_update_adds_devices.title", plugin = name).to_string(),
+            t!("notify.plugin_update_adds_devices.message", count = count).to_string(),
+        ),
         UpdateAvailable { version } => (
             t!("notify.update_available.title", version = version).to_string(),
             t!(
@@ -113,7 +117,8 @@ pub fn notification_target(
         PluginRuntimeError { plugin, .. }
         | PluginConnectFailed { plugin, .. }
         | PluginRecommended { plugin, .. }
-        | PluginUpdateNeedsPermissions { plugin, .. } => {
+        | PluginUpdateNeedsPermissions { plugin, .. }
+        | PluginUpdateAddsDevices { plugin, .. } => {
             Some(NotificationTarget::Plugin(plugin.clone()))
         }
         EngineStopped { .. } | KeyRemapUnavailable { .. } | Generic { .. } => None,
@@ -224,6 +229,11 @@ mod tests {
             PluginUpdateNeedsPermissions {
                 plugin: "nzxt_kraken".parse().unwrap(),
                 name: "NZXT Kraken".into(),
+            },
+            PluginUpdateAddsDevices {
+                plugin: "nzxt_kraken".parse().unwrap(),
+                name: "NZXT Kraken".into(),
+                count: 2,
             },
             UpdateAvailable {
                 version: "0.14.0".into(),

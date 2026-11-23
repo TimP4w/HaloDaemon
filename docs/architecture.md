@@ -188,7 +188,10 @@ listed but never loaded. See [plugins.md](plugins.md).
 folder, lists what it uses and asks for confirmation before it is enabled.
 When an update needs more permissions than the installed version, the GUI asks
 before installing it, and an enabled plugin stays enabled once the new version
-is loaded.
+is loaded. An update that only matches more devices under the access the
+plugin already has installs without asking, keeps the plugin enabled, and
+notifies the user that it supports more devices. New permissions, programs,
+data reads, or an any-HID match still count as more permissions.
 An update the daemon applies without that confirmation (for example from the
 CLI) disables the plugin and notifies the user, who confirms the new
 permissions by enabling it again.

@@ -2,14 +2,29 @@ import Gio from "gi://Gio";
 import GLib from "gi://GLib";
 import { Extension } from "resource:///org/gnome/shell/extensions/extension.js";
 
+const OBJECT_PATH = "/dev/timp4w/halod/FocusWatcher1";
+const INTERFACE_XML = `
+<node>
+  <interface name="dev.timp4w.halod.FocusWatcher1">
+    <method name="GetFocused">
+      <arg type="s" direction="out" name="name"/>
+    </method>
+    <signal name="FocusChanged">
+      <arg type="s" name="name"/>
+    </signal>
+  </interface>
+</node>`;
+
 const WINE_BINS = ["wine", "wine64", "wine-preloader", "wine64-preloader"];
 
 export default class HalodFocusWatcher extends Extension {
   enable() {
+    this._lastName = null;
+    this._dbus = Gio.DBusExportedObject.wrapJSObject(INTERFACE_XML, this);
+    this._dbus.export(Gio.DBus.session, OBJECT_PATH);
     this._focusConn = global.display.connect("notify::focus-window", () => {
       this._onFocusChanged();
     });
-    // Emit for the window that's already focused when we enable.
     this._onFocusChanged();
   }
 
@@ -18,34 +33,34 @@ export default class HalodFocusWatcher extends Extension {
       global.display.disconnect(this._focusConn);
       this._focusConn = null;
     }
+    if (this._dbus) {
+      this._dbus.unexport();
+      this._dbus = null;
+    }
+    this._lastName = null;
+  }
+
+  GetFocused() {
+    return this._focusedName();
   }
 
   _onFocusChanged() {
-    const win = global.display.focus_window;
-    if (!win) return;
-    const pid = win.get_pid();
-    if (!pid) return;
+    const name = this._focusedName();
+    if (name === this._lastName) return;
+    this._lastName = name;
+    this._dbus.emit_signal("FocusChanged", new GLib.Variant("(s)", [name]));
+  }
+
+  _focusedName() {
+    const pid = global.display.focus_window?.get_pid();
+    if (!pid || pid <= 0) return "";
     try {
       const exe = GLib.file_read_link(`/proc/${pid}/exe`);
-      let name = GLib.path_get_basename(exe).toLowerCase();
-
-      // Wine/Proton: the exe is the Wine loader, not the game.
-      // Extract the actual Windows exe stem from the process cmdline.
-      if (WINE_BINS.includes(name)) {
-        const winName = this._wineExeName(pid);
-        if (winName) name = winName;
-      }
-
-      if (!name) return;
-      Gio.DBus.session.emit_signal(
-        null,
-        "/dev/timp4w/halod/FocusWatcher1",
-        "dev.timp4w.halod.FocusWatcher1",
-        "FocusChanged",
-        new GLib.Variant("(s)", [name]),
-      );
+      const name = GLib.path_get_basename(exe).toLowerCase();
+      if (WINE_BINS.includes(name)) return this._wineExeName(pid) ?? name;
+      return name;
     } catch (_e) {
-      // Kernel threads or processes whose exe link has gone — ignore.
+      return "";
     }
   }
 
@@ -53,26 +68,16 @@ export default class HalodFocusWatcher extends Extension {
     try {
       const [, bytes] = GLib.file_get_contents(`/proc/${pid}/cmdline`);
       const args = new TextDecoder().decode(bytes).split("\0");
-
-      // GLib.path_get_basename only splits on "/", so DOS paths need both.
       const basename = (p) => p.split(/[\\/]/).pop().toLowerCase();
-      // Reject Windows system paths — Wine-internal processes, not real apps.
       const isSystem = (a) => a.toLowerCase().includes("\\windows\\");
 
-      // Prefer an arg ending in .exe.
       const exeArg = args.find(
         (a) => a.toLowerCase().endsWith(".exe") && !isSystem(a),
       );
-      if (exeArg) {
-        return basename(exeArg).replace(/\.exe$/, "") || null;
-      }
+      if (exeArg) return basename(exeArg).replace(/\.exe$/, "") || null;
 
-      // Fallback: Wine maps the Linux fs under z:\ — match any Windows-style
-      // path (e.g. "z:\...\ds") and take its basename.
       const winPath = args.find((a) => /^[a-z]:\\/i.test(a) && !isSystem(a));
-      if (winPath) {
-        return basename(winPath) || null;
-      }
+      if (winPath) return basename(winPath) || null;
 
       return null;
     } catch (_e) {

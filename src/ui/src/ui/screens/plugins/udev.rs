@@ -1,5 +1,6 @@
 // SPDX-License-Identifier: GPL-3.0-or-later
 use super::*;
+pub(super) use crate::ui::screens::depcheck::udev_install_commands;
 
 pub(super) fn udev_plugin_warning_banner(ui: &mut egui::Ui) -> bool {
     widgets::Banner::warn(&t!("plugins.udev_plugin_action"))
@@ -11,13 +12,6 @@ pub(super) fn udev_plugin_warning_banner(ui: &mut egui::Ui) -> bool {
         ))
         .action_below()
         .show(ui)
-}
-
-pub(super) fn udev_install_commands() -> String {
-    "halod udev-rules | sudo tee /etc/udev/rules.d/60-halod.rules >/dev/null\n\
-sudo udevadm control --reload-rules\n\
-sudo udevadm trigger"
-        .to_owned()
 }
 
 #[derive(Debug, Clone, Copy, PartialEq, Eq)]
@@ -132,36 +126,9 @@ pub(super) fn udev_info_modal(
                     .color(theme::TEXT_DIM),
             );
             ui.add_space(theme::SPACE_4);
-            widgets::inset(ui, egui::Margin::same(14), |ui| {
-                egui::Sides::new().show(
-                    ui,
-                    |ui| {
-                        ui.label(
-                            egui::RichText::new(udev_install_commands())
-                                .font(theme::mono(10.5))
-                                .color(theme::TEXT_DIM),
-                        );
-                    },
-                    |ui| {
-                        let label = if copied {
-                            t!("plugins.udev_command_copied")
-                        } else {
-                            t!("plugins.udev_copy_command")
-                        };
-                        if widgets::button(
-                            ui,
-                            &label,
-                            ButtonKind::Secondary,
-                            Vec2::new(125.0, 28.0),
-                        )
-                        .clicked()
-                        {
-                            ui.ctx().copy_text(udev_install_commands());
-                            *copied_at = Some(now);
-                        }
-                    },
-                );
-            });
+            if widgets::command_block(ui, &udev_install_commands(), copied) {
+                *copied_at = Some(now);
+            }
         },
         |ui| {
             // The action row lays out right-to-left: buttons hug the right edge,
@@ -264,19 +231,5 @@ pub(super) fn udev_modal_status(ui: &mut egui::Ui, status: &halod_shared::types:
             None => t!("plugins.udev_modal_missing", count = count),
         };
         widgets::Banner::warn(&text).dot(theme::STAT_AMBER).show(ui);
-    }
-}
-
-#[cfg(test)]
-mod tests {
-    use super::*;
-
-    #[test]
-    fn udev_install_command_generates_then_reloads_rules() {
-        let command = udev_install_commands();
-        assert!(command.contains("halod udev-rules"));
-        assert!(command.contains("/etc/udev/rules.d/60-halod.rules"));
-        assert!(command.contains("udevadm control --reload-rules"));
-        assert!(command.contains("udevadm trigger"));
     }
 }

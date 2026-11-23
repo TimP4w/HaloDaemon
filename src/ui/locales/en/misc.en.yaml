@@ -94,3 +94,5 @@ misc:
   widget_remove_stop: Remove
   widget_stop_value: Value
   widget_stop_readout: "Stop %{n} · %{value}"
+  copy_command: Copy command
+  command_copied: Copied

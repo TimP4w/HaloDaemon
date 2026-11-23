@@ -27,7 +27,7 @@ in
     enableGnomeExtension = lib.mkEnableOption ''
       the HaloDaemon GNOME Shell focus-watcher extension (foreground-app
       detection on GNOME Wayland). Installs it system-wide; each user
-      still enables it with `gnome-extensions enable halod@halod`'';
+      still enables it with `gnome-extensions enable companion@halod.timp4w.dev`'';
 
     autostart = lib.mkOption {
       type = lib.types.bool;
@@ -81,7 +81,7 @@ in
     # halod / halod-gui on PATH. The GNOME Shell focus-watcher extension
     # (foreground-app detection on GNOME Wayland) is opt-in: installing it
     # under share/gnome-shell/extensions only makes it discoverable; each
-    # user still enables it with `gnome-extensions enable halod@halod`.
+    # user still enables it with `gnome-extensions enable companion@halod.timp4w.dev`.
     environment.systemPackages = [
       cfg.package
     ]
