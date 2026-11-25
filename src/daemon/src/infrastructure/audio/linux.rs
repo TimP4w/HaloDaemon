@@ -78,6 +78,7 @@ fn run_session(handle: &Arc<AudioHandle>) {
             *pipewire::keys::MEDIA_CATEGORY => "Capture",
             *pipewire::keys::MEDIA_ROLE     => "Music",
             *pipewire::keys::STREAM_CAPTURE_SINK => "true",
+            *pipewire::keys::NODE_PASSIVE   => "true",
         },
     );
     let stream = match stream {
@@ -96,9 +97,16 @@ fn run_session(handle: &Arc<AudioHandle>) {
     let analyzer: Arc<Mutex<Option<SpectrumAnalyzer>>> = Arc::new(Mutex::new(None));
     let analyzer_pc = Arc::clone(&analyzer);
     let handle_process = Arc::clone(handle);
+    let handle_state = Arc::clone(handle);
 
     let _listener = match stream
         .add_local_listener_with_user_data(())
+        .state_changed(move |_, (), old, new| {
+            use pipewire::stream::StreamState;
+            if matches!(old, StreamState::Streaming) && !matches!(new, StreamState::Streaming) {
+                handle_state.publish_silence();
+            }
+        })
         .param_changed(move |_, (), id, pod| {
             use pipewire::spa::param::{
                 audio::AudioInfoRaw,

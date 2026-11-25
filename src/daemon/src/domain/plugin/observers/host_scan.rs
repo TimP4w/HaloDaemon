@@ -21,6 +21,7 @@ pub(crate) async fn retry_failed_opens(app: Arc<AppState>) {
     loop {
         tokio::time::sleep(TRANSPORT_OPEN_BACKOFF).await;
         let kinds = app.registry.retryable_open_failure_kinds();
+        let revision = app.device_registry.revision();
         if kinds
             .iter()
             .any(|kind| matches!(*kind, "command" | "amd_smn" | "lpcio"))
@@ -30,6 +31,8 @@ pub(crate) async fn retry_failed_opens(app: Arc<AppState>) {
         if kinds.contains("usb") {
             discovery::scan_usb_non_hid(Arc::clone(&app)).await;
         }
+        crate::application::usecases::registry::runtime::topology_changed_since(&app, revision)
+            .await;
     }
 }
 

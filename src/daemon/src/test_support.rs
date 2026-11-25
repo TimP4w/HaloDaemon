@@ -225,6 +225,7 @@ pub struct MockDevice {
     pub external_name: bool,
     pub write_rate: Option<WriteRateStatus>,
     pub connection_type: Option<ConnectionType>,
+    pub usb_location: Option<crate::domain::device::UsbLocation>,
 }
 
 impl MockDevice {
@@ -285,6 +286,7 @@ impl MockDevice {
             external_name: false,
             write_rate: None,
             connection_type: None,
+            usb_location: None,
         }
     }
 
@@ -356,6 +358,11 @@ impl MockDevice {
 
     pub fn with_write_rate(mut self, status: WriteRateStatus) -> Self {
         self.write_rate = Some(status);
+        self
+    }
+
+    pub fn with_usb_location(mut self, location: crate::domain::device::UsbLocation) -> Self {
+        self.usb_location = Some(location);
         self
     }
 
@@ -573,6 +580,10 @@ impl Device for MockDevice {
 
     fn owning_plugin_id(&self) -> Option<PluginId> {
         self.owning_plugin_id.clone()
+    }
+
+    fn usb_location(&self) -> Option<crate::domain::device::UsbLocation> {
+        self.usb_location.clone()
     }
 
     fn identity(&self) -> DeviceIdentity {

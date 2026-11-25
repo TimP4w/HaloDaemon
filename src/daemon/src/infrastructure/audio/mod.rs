@@ -80,6 +80,15 @@ impl AudioHandle {
         *self.latest.write() = frame;
     }
 
+    #[cfg_attr(not(target_os = "linux"), allow(dead_code))]
+    fn publish_silence(&self) {
+        let mut latest = self.latest.write();
+        *latest = SpectrumFrame {
+            seq: latest.seq + 1,
+            ..SpectrumFrame::default()
+        };
+    }
+
     /// True once no consumer has polled `latest()` for [`IDLE_EXIT_MS`] —
     /// the platform backend's signal to disconnect and exit.
     pub(crate) fn idle_expired(&self, now_ms: u64) -> bool {
@@ -185,6 +194,26 @@ mod tests {
         assert_eq!(got.level, 0.75);
         assert_eq!(got.seq, 42);
         assert!(got.beat);
+    }
+
+    #[test]
+    fn publish_silence_clears_the_frame_and_advances_seq() {
+        let handle = AudioHandle::new();
+        handle.publish(SpectrumFrame {
+            bands: [0.5; BANDS],
+            level: 0.75,
+            flux: 0.25,
+            beat: true,
+            seq: 42,
+        });
+        handle.publish_silence();
+
+        let got = handle.latest();
+        assert!(got.bands.iter().all(|&b| b == 0.0));
+        assert_eq!(got.level, 0.0);
+        assert_eq!(got.flux, 0.0);
+        assert!(!got.beat);
+        assert_eq!(got.seq, 43);
     }
 
     #[test]

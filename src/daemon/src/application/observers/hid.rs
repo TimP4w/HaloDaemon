@@ -73,6 +73,7 @@ pub async fn hotplug_monitor(app: Arc<AppState>) {
         // Re-snapshot so a key freed this cycle can be re-added in the same pass.
         let tracked_keys: HashSet<String> = app.hid.keys().await;
 
+        let revision = app.device_registry.revision();
         let picked = pick_hid_devices(&app.registry, &live);
         for (info, idx) in devices_to_register(&picked, &tracked_keys) {
             let serial_opt = (!info.serial.is_empty()).then_some(info.serial.as_str());
@@ -89,6 +90,7 @@ pub async fn hotplug_monitor(app: Arc<AppState>) {
             )
             .await;
         }
+        runtime::topology_changed_since(&app, revision).await;
     }
 }
 
@@ -331,6 +333,7 @@ pub(crate) async fn handle_hid_key_removed(app: Arc<AppState>, key: String) {
             tokio::spawn(async move {
                 if let Err(e) = async {
                     tokio::time::sleep(tokio::time::Duration::from_secs(2)).await;
+                    let revision = app2.device_registry.revision();
                     let controllers: Vec<Arc<dyn Device>> = app2
                         .device_registry
                         .read()
@@ -347,6 +350,7 @@ pub(crate) async fn handle_hid_key_removed(app: Arc<AppState>, key: String) {
                             }
                         }
                     }
+                    runtime::topology_changed_since(&app2, revision).await;
                     Ok::<_, anyhow::Error>(())
                 }
                 .await

@@ -51,13 +51,24 @@ impl log::Log for FileLogger {
 
 /// Install the daemon logger. File opening is best-effort; stderr remains
 /// available if the config directory cannot be written.
-pub fn init(path: PathBuf, level: LevelFilter) {
+pub fn init(path: PathBuf) {
     let _ = log::set_boxed_logger(Box::new(FileLogger(RotatingLog::open(path))));
-    if std::env::var_os("HALOD_TRACE").is_some() {
-        TRACE_ENABLED.store(true, Ordering::Relaxed);
-        log::set_max_level(LevelFilter::Trace);
+    TRACE_ENABLED.store(std::env::var_os("HALOD_TRACE").is_some(), Ordering::Relaxed);
+    set_level(LevelFilter::Info);
+}
+
+pub fn set_level(level: LevelFilter) {
+    log::set_max_level(effective_level(
+        level,
+        TRACE_ENABLED.load(Ordering::Relaxed),
+    ));
+}
+
+fn effective_level(level: LevelFilter, trace: bool) -> LevelFilter {
+    if trace {
+        LevelFilter::Trace
     } else {
-        log::set_max_level(without_trace(level));
+        without_trace(level)
     }
 }
 
@@ -76,6 +87,16 @@ mod tests {
         assert!(!allowed(&metadata(Level::Trace, "halod")));
         assert!(!allowed(&metadata(Level::Debug, "wmi::context")));
         assert!(!allowed(&metadata(Level::Info, "wmi::connection::query")));
+    }
+
+    #[test]
+    fn trace_override_outranks_the_configured_level() {
+        assert_eq!(effective_level(LevelFilter::Warn, true), LevelFilter::Trace);
+        assert_eq!(effective_level(LevelFilter::Warn, false), LevelFilter::Warn);
+        assert_eq!(
+            effective_level(LevelFilter::Trace, false),
+            LevelFilter::Debug
+        );
     }
 
     #[test]

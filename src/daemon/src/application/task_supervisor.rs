@@ -14,6 +14,7 @@ use crate::util::backoff::{respawn_wait, FailureStreak};
 use crate::util::task::TaskHandle;
 
 const MAX_FAILURES: u32 = 3;
+const STABLE_RUN: Duration = Duration::from_secs(60);
 
 type StartFuture = Pin<Box<dyn Future<Output = TaskHandle> + Send>>;
 type StartTask = Arc<dyn Fn() -> StartFuture + Send + Sync>;
@@ -94,6 +95,7 @@ impl TaskSupervisor {
                     }
                 };
                 set_state(&manager_state, TaskState::Running(child.0.abort_handle()));
+                let started = Instant::now();
 
                 let result = tokio::select! {
                     result = &mut child.0 => Some(result),
@@ -118,6 +120,9 @@ impl TaskSupervisor {
                     Err(error) if error.is_panic() => format!("panicked: {error}"),
                     Err(error) => format!("was cancelled unexpectedly: {error}"),
                 };
+                if started.elapsed() >= STABLE_RUN {
+                    streak = None;
+                }
                 let streak = FailureStreak::record_in(&mut streak, Instant::now());
                 set_state(&manager_state, TaskState::Failed(reason.clone()));
                 log::error!("{name} {reason}");
@@ -132,6 +137,7 @@ impl TaskSupervisor {
                 }
 
                 if streak.failures() >= MAX_FAILURES {
+                    log::error!("{name} failed {MAX_FAILURES} times in a row; not restarting it");
                     return;
                 }
                 set_state(&manager_state, TaskState::Restarting);
@@ -240,6 +246,33 @@ mod tests {
         }
         assert_eq!(starts.load(Ordering::SeqCst), MAX_FAILURES as usize);
         assert!(matches!(*state.lock(), TaskState::Failed(_)));
+        supervisor.shutdown().await;
+    }
+
+    #[tokio::test(start_paused = true)]
+    async fn a_stable_run_forgives_earlier_failures() {
+        let app = Arc::new(AppState::new(crate::config::Config::default()));
+        let mut supervisor = TaskSupervisor::new(app);
+        let starts = Arc::new(AtomicUsize::new(0));
+        let starts_for_task = Arc::clone(&starts);
+        let state = supervisor.register(
+            "occasionally failing test",
+            "",
+            move || {
+                let starts = Arc::clone(&starts_for_task);
+                Box::pin(async move {
+                    starts.fetch_add(1, Ordering::SeqCst);
+                    TaskHandle(tokio::spawn(tokio::time::sleep(STABLE_RUN)))
+                })
+            },
+            || {},
+        );
+        for _ in 0..600 {
+            tokio::time::advance(Duration::from_secs(1)).await;
+            tokio::task::yield_now().await;
+        }
+        assert!(starts.load(Ordering::SeqCst) > MAX_FAILURES as usize);
+        assert!(!matches!(*state.lock(), TaskState::Failed(_)));
         supervisor.shutdown().await;
     }
 

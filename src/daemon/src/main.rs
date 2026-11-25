@@ -153,7 +153,9 @@ fn main() -> Result<()> {
     if let Some(dir) = &dev_plugins {
         config::enable_dev_plugins(dir)?;
     }
-    let cfg = config::load()?;
+    logger::init(config::config_dir().join("halod.log"));
+    let cfg = config::load()
+        .inspect_err(|error| log::error!("Failed to load configuration: {error:#}"))?;
 
     // Prevent glibc from creating one 64MB malloc arena per CPU core: the
     // daemon is I/O-bound and fragmentation across many arenas makes
@@ -176,16 +178,13 @@ fn main() -> Result<()> {
 /// On Windows, register-bus access is delegated to the elevated `halod-broker`
 /// on demand (see `drivers::transports::register_ops`); nothing here elevates.
 async fn run_daemon(headless: bool, cfg: crate::config::Config) -> Result<()> {
-    let initial_level: log::LevelFilter =
-        cfg.gui.log_level.parse().unwrap_or(log::LevelFilter::Info);
+    logger::set_level(cfg.gui.log_level.parse().unwrap_or(log::LevelFilter::Info));
 
     let app = Arc::new(
         application::state::AppState::new(cfg).with_secret_store(secrets::open_secret_store()),
     );
     let save_worker = crate::application::state::start_config_save_worker(app.clone());
     let persist_worker = crate::application::state::start_persist_worker(app.clone());
-
-    logger::init(crate::config::config_dir().join("halod.log"), initial_level);
 
     log::info!(
         "Starting halod v{} (build {})",
