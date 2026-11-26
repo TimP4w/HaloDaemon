@@ -63,6 +63,9 @@ KERNEL=="hidraw*", ATTRS{idVendor}=="046d", ATTRS{idProduct}=="c095", TAG+="uacc
 KERNEL=="hidraw*", ATTRS{idVendor}=="046d", ATTRS{idProduct}=="c352", TAG+="uaccess"
 
 # Logitech HID++ (logitech)
+KERNEL=="hidraw*", ATTRS{idVendor}=="046d", ATTRS{idProduct}=="c356", TAG+="uaccess"
+
+# Logitech HID++ (logitech)
 KERNEL=="hidraw*", ATTRS{idVendor}=="046d", ATTRS{idProduct}=="c518", TAG+="uaccess"
 
 # Logitech HID++ (logitech)

@@ -141,18 +141,25 @@ fn visual_keys(variant: &InitKeyboardVariant) -> Vec<VisualKey> {
     keys
 }
 
+fn keyboard_columns(form_factor: &KeyboardFormFactor) -> f32 {
+    match form_factor {
+        KeyboardFormFactor::FullSize => 23.0,
+        _ => 18.0,
+    }
+}
+
 fn keyboard_led_positions(
     keys: &[VisualKey],
     advertised: &[u32],
+    columns: f32,
 ) -> Vec<halod_shared::types::LedPosition> {
     let position = |id: u32| {
         let (x, y) = keys
             .iter()
             .find(|key| key.led_id == id)
             .map_or((0.5, 0.5), |key| {
-                // Exact projection used by the former native TKL descriptor.
                 (
-                    (key.cell.col + key.cell.w / 2.0) / 18.0,
+                    (key.cell.col + key.cell.w / 2.0) / columns,
                     (key.cell.row + 1.5) / 7.0,
                 )
             });
@@ -227,11 +234,11 @@ pub(super) fn build_dynamic_descriptor(
                     division: Default::default(),
                     visibility: Default::default(),
                 }
-            } else if let (ZoneTopology::Keyboard { .. }, Some(keys)) =
+            } else if let (ZoneTopology::Keyboard { form_factor, .. }, Some(keys)) =
                 (&topology, keyboard_keys.filter(|keys| !keys.is_empty()))
             {
                 LightingChannel {
-                    leds: keyboard_led_positions(keys, &z.led_ids),
+                    leds: keyboard_led_positions(keys, &z.led_ids, keyboard_columns(form_factor)),
                     id: z.id,
                     name: z.name,
                     topology,
@@ -385,9 +392,39 @@ mod dynamic_rgb_descriptor_tests {
             cell: KeyCell::new(id, col, 0.0),
         };
         let keys = [key(1, KeyId::A, 0.0), key(2, KeyId::B, 1.0)];
-        let leds = keyboard_led_positions(&keys, &[2, 9, 1]);
+        let leds = keyboard_led_positions(&keys, &[2, 9, 1], 18.0);
         assert_eq!(leds.iter().map(|l| l.id).collect::<Vec<_>>(), [2, 9, 1]);
         assert_eq!(leds[0].x, 1.5 / 18.0);
         assert_eq!(leds[2].x, 0.5 / 18.0);
+    }
+
+    #[test]
+    fn every_standard_key_projects_inside_its_form_factor() {
+        use halod_shared::keyboard::StandardLayout;
+        for (layout, form_factor) in [
+            (StandardLayout::Tkl, KeyboardFormFactor::TKL),
+            (StandardLayout::TklIso, KeyboardFormFactor::TKL),
+            (StandardLayout::FullSize, KeyboardFormFactor::FullSize),
+            (StandardLayout::FullSizeIso, KeyboardFormFactor::FullSize),
+        ] {
+            let keys: Vec<VisualKey> = layout
+                .cells()
+                .into_iter()
+                .enumerate()
+                .map(|(led_id, cell)| VisualKey {
+                    led_id: led_id as u32,
+                    remap_cid: None,
+                    cell,
+                })
+                .collect();
+            for led in keyboard_led_positions(&keys, &[], keyboard_columns(&form_factor)) {
+                assert!(
+                    (0.0..=1.0).contains(&led.x),
+                    "{layout:?} led {} x {}",
+                    led.id,
+                    led.x
+                );
+            }
+        }
     }
 }
