@@ -10,18 +10,26 @@ use async_trait::async_trait;
 use std::sync::Arc;
 
 use halod_shared::types::{
-    CoolingChannel, CoolingChannelKind, DeviceType, LightingDescriptor, LightingState, RgbColor,
+    CoolingChannel, CoolingChannelKind, DeviceType, LightingDescriptor, LightingState,
+    NativeEffect, RgbColor,
 };
 
 use crate::domain::device::chain::LightingDivisionHub;
 use crate::domain::device::lighting_segment::transformed_zone_frame;
 use crate::domain::device::{
-    CapabilityRef, CoolingCapability, CoolingHub, CoolingStateSlot, Device, LightingCapability,
-    LightingStateSlot, VisibilitySlot,
+    CapabilityRef, ChannelEffectHub, CoolingCapability, CoolingHub, CoolingStateSlot, Device,
+    LightingCapability, LightingStateSlot, VisibilitySlot,
 };
 use halod_shared::ids::DeviceId;
 
 use super::manifest::AccessoryManifest;
+
+/// The parent's native effects, offered on a chain output that can run them on
+/// its own.
+pub struct ChannelEffects {
+    pub effects: Vec<NativeEffect>,
+    pub hub: Arc<dyn ChannelEffectHub>,
+}
 
 pub struct ChainLeaf {
     id: DeviceId,
@@ -39,6 +47,7 @@ pub struct ChainLeaf {
     visibility: VisibilitySlot,
     chain_hub: Arc<dyn LightingDivisionHub>,
     cooling_hub: Arc<dyn CoolingHub>,
+    effect_hub: Option<Arc<dyn ChannelEffectHub>>,
 }
 
 impl ChainLeaf {
@@ -51,7 +60,13 @@ impl ChainLeaf {
         accessory: &AccessoryManifest,
         chain_hub: Arc<dyn LightingDivisionHub>,
         cooling_hub: Arc<dyn CoolingHub>,
+        effects: Option<ChannelEffects>,
     ) -> Self {
+        let mut rgb_descriptor = accessory.rgb_descriptor();
+        let effect_hub = effects.map(|e| {
+            rgb_descriptor.native_effects = e.effects;
+            e.hub
+        });
         Self {
             id,
             parent_id,
@@ -61,12 +76,13 @@ impl ChainLeaf {
             // Both sides must agree: the hardware reports a fan and the plugin
             // declares which cooling channel this output hands over.
             fan_channel: fan_channel.filter(|_| accessory.fan),
-            rgb_descriptor: accessory.rgb_descriptor(),
+            rgb_descriptor,
             rgb: LightingStateSlot::default(),
             cooling: CoolingStateSlot::default(),
             visibility: VisibilitySlot::default(),
             chain_hub,
             cooling_hub,
+            effect_hub,
         }
     }
 
@@ -100,9 +116,14 @@ impl ChainLeaf {
                         .await?;
                 }
             }
-            LightingState::NativeEffect { .. }
-            | LightingState::DirectEffect { .. }
-            | LightingState::Engine => {}
+            LightingState::NativeEffect { .. } => {
+                let hub = self.effect_hub.as_ref().ok_or_else(|| {
+                    anyhow::anyhow!("{} has no native effects on its channel", self.id)
+                })?;
+                hub.apply_channel_effect(&self.channel_id, state.clone())
+                    .await?;
+            }
+            LightingState::DirectEffect { .. } | LightingState::Engine => {}
         }
         self.rgb.set_state(Some(state));
         Ok(())

@@ -25,11 +25,11 @@ use crate::domain::device::chain::{
 };
 use crate::domain::device::{
     ActionCapability, BatteryCapability, BoolStateCache, BooleanCapability, CapabilityRef,
-    ChoiceCapability, ChoiceStateCache, ConnectionCapability, Controller, CoolingCapability,
-    CoolingHub, CoolingStateSlot, Device, DpiCapability, EqualizerCapability, KeyRemapCapability,
-    KeyboardLayoutCapability, KeyboardLayoutSlot, LcdCapability, LcdStateSlot, LightingCapability,
-    LightingStateSlot, OnboardProfilesCapability, PairingCapability, RangeCapability,
-    RangeStateCache, SensorCapability, VisibilitySlot,
+    ChannelEffectHub, ChoiceCapability, ChoiceStateCache, ConnectionCapability, Controller,
+    CoolingCapability, CoolingHub, CoolingStateSlot, Device, DpiCapability, EqualizerCapability,
+    KeyRemapCapability, KeyboardLayoutCapability, KeyboardLayoutSlot, LcdCapability, LcdStateSlot,
+    LightingCapability, LightingStateSlot, OnboardProfilesCapability, PairingCapability,
+    RangeCapability, RangeStateCache, SensorCapability, VisibilitySlot,
 };
 use halod_shared::ids::{DeviceId, PluginId};
 
@@ -47,7 +47,7 @@ use lcd::LcdFacet;
 use lighting::LightingFacet;
 use status::StatusCache;
 
-use super::chain_leaf::ChainLeaf;
+use super::chain_leaf::{ChainLeaf, ChannelEffects};
 use super::manifest::{
     AccessoryManifest, ActionDef, BooleanDef, ChoiceDef, DeviceSpec, PluginManifest, RangeDef,
 };
@@ -492,6 +492,8 @@ pub struct LuaDevice {
     /// The `chainable` subset of the channels `initialize` reports (capacity is
     /// known only at runtime, e.g. ARGB headers read from a config table).
     dynamic_chain_channels: OnceLock<Vec<ChannelDescriptor>>,
+    /// Chain outputs that run native effects on their own.
+    effect_channels: OnceLock<HashSet<String>>,
     accessories: Vec<AccessoryManifest>,
     dynamic_accessories: OnceLock<Vec<AccessoryManifest>>,
 
@@ -1070,6 +1072,7 @@ impl LuaDevice {
             chain_host: OnceLock::new(),
             self_ref: Weak::new(),
             dynamic_chain_channels: OnceLock::new(),
+            effect_channels: OnceLock::new(),
             accessories: Vec::new(),
             dynamic_accessories: OnceLock::new(),
             notify,
@@ -1343,6 +1346,13 @@ impl Device for LuaDevice {
         if let Some(channels) = outcome.channels {
             let (chainable, plain): (Vec<_>, Vec<_>) =
                 channels.into_iter().partition(|channel| channel.chainable);
+            let _ = self.effect_channels.set(
+                chainable
+                    .iter()
+                    .filter(|c| c.native_effects)
+                    .map(|c| c.id.clone())
+                    .collect(),
+            );
             let _ = self.dynamic_chain_channels.set(
                 chainable
                     .into_iter()
@@ -1852,6 +1862,19 @@ impl LuaDevice {
             .collect()
     }
 
+    fn channel_effects(&self, channel_id: &str) -> Option<ChannelEffects> {
+        let offered = self
+            .effect_channels
+            .get()
+            .is_some_and(|channels| channels.contains(channel_id));
+        let effects = self.descriptor().native_effects.clone();
+        if !offered || effects.is_empty() {
+            return None;
+        }
+        let hub: Arc<dyn ChannelEffectHub> = self.self_ref.upgrade()?;
+        Some(ChannelEffects { effects, hub })
+    }
+
     async fn discover_chain_accessories(&self) -> Vec<DiscoveredChainAccessory> {
         let (Some(worker), Some(host)) = (&self.worker, self.chain_host.get()) else {
             return Vec::new();
@@ -1909,6 +1932,7 @@ impl LuaDevice {
                 accessory,
                 chain_hub.clone(),
                 cooling_hub.clone(),
+                self.channel_effects(&channel_str),
             ));
             if let Err(e) = leaf.initialize().await {
                 log::warn!("plugin '{}' child init failed: {e:#}", self.plugin_id);
@@ -2621,6 +2645,14 @@ impl LightingDivisionAdapter for LuaDevice {
 }
 
 #[async_trait]
+impl ChannelEffectHub for LuaDevice {
+    async fn apply_channel_effect(&self, channel: &str, state: LightingState) -> Result<()> {
+        let r = self.worker()?.rgb_apply_channel(state, channel).await;
+        self.track(r).await
+    }
+}
+
+#[async_trait]
 impl CoolingHub for LuaDevice {
     async fn get_cooling_status(&self, channel: &str) -> Result<CoolingChannel> {
         if let Some(status) = self.status.cooling.lock().get(channel).cloned() {
@@ -3276,6 +3308,70 @@ mod tests {
         ));
         assert!(dev.initialize().await.unwrap());
         (tmp, dev)
+    }
+
+    #[tokio::test(flavor = "multi_thread", worker_threads = 2)]
+    async fn chain_child_runs_native_effects_only_on_an_opted_in_output() {
+        let script = r#"
+            return {
+              initialize = function()
+                return {
+                  channels = {
+                    { id = "0", name = "A", chainable = true, max_leds = 40, native_effects = true },
+                    { id = "1", name = "B", chainable = true, max_leds = 40 },
+                  },
+                  native_effects = { { id = "pulse", name = "Pulse", params = {} } },
+                  accessories = { { id = 24, name = "F140 RGB Core", led_count = 8 } },
+                }
+              end,
+              detect_accessories = function()
+                return { { channel = 0, accessory = 24 }, { channel = 1, accessory = 24 } }
+              end,
+              apply = function(_, state, channel)
+                if state.mode == "native_effect" and channel ~= "0" then
+                  error("effect routed to channel " .. tostring(channel))
+                end
+              end,
+              write_frame = function() end,
+            }
+        "#;
+        let (_tmp, manifest) =
+            test_manifest("chain_effects", &["lighting", "lighting_division"], script);
+        let dev = Arc::new_cyclic(|weak| {
+            let mut dev = hid_device(
+                "chain_effects-0",
+                &manifest,
+                Arc::new(MockTransport::empty()),
+            );
+            dev.set_self_ref(weak.clone());
+            dev
+        });
+        let adapter: Arc<dyn crate::domain::device::chain::LightingDivisionAdapter> = dev.clone();
+        dev.install_chain_host(crate::domain::device::chain::LightingDivisionHost::new(
+            adapter,
+        ));
+        assert!(dev.initialize().await.unwrap());
+        let children = Controller::discover_children(dev.as_ref()).await;
+        let child = |suffix: &str| {
+            children
+                .iter()
+                .find(|c| c.id().contains(suffix))
+                .and_then(|c| c.as_lighting())
+                .expect("chain child missing")
+        };
+        let pulse = LightingState::NativeEffect {
+            id: "pulse".into(),
+            params: Default::default(),
+        };
+
+        let opted_in = child("_acc_0_24");
+        assert_eq!(opted_in.descriptor().native_effects.len(), 1);
+        opted_in.apply(pulse.clone()).await.unwrap();
+
+        let plain = child("_acc_1_24");
+        assert!(plain.descriptor().native_effects.is_empty());
+        assert!(plain.apply(pulse).await.is_err());
+        dev.close().await;
     }
 
     #[tokio::test(flavor = "multi_thread", worker_threads = 2)]

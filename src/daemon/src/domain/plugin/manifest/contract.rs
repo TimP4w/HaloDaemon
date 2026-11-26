@@ -67,7 +67,12 @@ pub const CALLBACKS_V1: &[CallbackContract] = &[
     callback!("close", Lifecycle, "dev", "nil"),
     callback!("close_child", Lifecycle, "dev", "nil"),
     callback!("pre_scan", Lifecycle, "dev", "nil"),
-    callback!("apply", Capability, "dev, LightingState", "nil"),
+    callback!(
+        "apply",
+        Capability,
+        "dev, LightingState, channel_id?",
+        "nil"
+    ),
     callback!("write_frame", Capability, "dev, channel_id, bytes", "nil"),
     callback!("read_status", Optional, "dev", "PollOutcome | nil"),
     callback!("event", Optional, "dev, Event", "PollOutcome | nil"),
@@ -221,7 +226,7 @@ pub const TABLES_V1: &[TableContract] = &[
     },
     TableContract {
         name: "InitTable",
-        fields: "ok?; model?; capabilities?; channels={{id; name; topology; led_count; led_ids?; leds?; rings?; chainable?; max_leds?; color_order?; cooling_channel?}, ...}?; native_effects?; lcd?; accessories?; controls?; dpi?; cooling={channels={{id; name; kind='fan'|'pump'; controllable}, ...}}?; key_remap?; keyboard?; ranges?; choices?",
+        fields: "ok?; model?; capabilities?; channels={{id; name; topology; led_count; led_ids?; leds?; rings?; chainable?; max_leds?; color_order?; cooling_channel?; native_effects?}, ...}?; native_effects?; lcd?; accessories?; controls?; dpi?; cooling={channels={{id; name; kind='fan'|'pump'; controllable}, ...}}?; key_remap?; keyboard?; ranges?; choices?",
     },
     TableContract {
         name: "DetectedController",

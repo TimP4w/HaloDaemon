@@ -86,6 +86,13 @@ pub trait CoolingHub: Send + Sync + 'static {
     }
 }
 
+/// Runs a parent's native effect on one chain output only, for the chain child
+/// that sits on it.
+#[async_trait]
+pub trait ChannelEffectHub: Send + Sync + 'static {
+    async fn apply_channel_effect(&self, channel: &str, state: LightingState) -> Result<()>;
+}
+
 /// Unified cooling surface for one or more independently addressable outputs.
 #[async_trait]
 pub trait CoolingCapability: Send + Sync {

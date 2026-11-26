@@ -237,6 +237,10 @@ pub struct InitLightingChannel {
     /// While a child holds it, the parent stops exposing that channel.
     #[serde(default)]
     pub cooling_channel: Option<String>,
+    /// The chain output can run the device's native effects on its own, so its
+    /// children offer them. `apply` then receives this channel id.
+    #[serde(default)]
+    pub native_effects: bool,
 }
 
 fn default_zone_topology() -> String {
@@ -972,6 +976,21 @@ impl PluginHandle {
         .await
     }
 
+    /// `apply` scoped to one chain output, for a child running a native effect.
+    pub async fn rgb_apply_channel(&self, state: LightingState, channel_id: &str) -> Result<()> {
+        let channel_id = channel_id.to_owned();
+        self.run(move |ctx, dev, _| {
+            let f = required(&ctx.manifest, "apply")?;
+            let state_v = ctx
+                .lua
+                .to_value(&state)
+                .map_err(|e| lua_err("apply arg", e))?;
+            f.call::<()>((dev, state_v, channel_id))
+                .map_err(|e| lua_err("apply", e))
+        })
+        .await
+    }
+
     pub async fn write_lighting_frame(&self, channel_id: &str, bytes: &[u8]) -> Result<()> {
         let channel_id = channel_id.to_owned();
         let bytes = bytes.to_vec();
@@ -1371,6 +1390,12 @@ fn validate_chainable(channel: &InitLightingChannel, cooling: Option<&InitCoolin
                 channel.id
             );
         }
+        if channel.native_effects {
+            bail!(
+                "channel '{}' declares native_effects but is not chainable",
+                channel.id
+            );
+        }
         return Ok(());
     }
     if channel.max_leds == 0 {
@@ -1712,6 +1737,7 @@ mod tests {
             max_leds: 0,
             color_order: Default::default(),
             cooling_channel: None,
+            native_effects: false,
         }
     }
 
@@ -1755,6 +1781,13 @@ mod tests {
         let mut ch = channel("ring");
         ch.cooling_channel = Some("fan1".into());
         assert!(validate_chainable(&ch, Some(&cooling(&["fan1"]))).is_err());
+    }
+
+    #[test]
+    fn only_a_chain_output_may_offer_native_effects_to_children() {
+        let mut ch = channel("ring");
+        ch.native_effects = true;
+        assert!(validate_chainable(&ch, None).is_err());
     }
 
     struct GcDropProbe(std::sync::Arc<std::sync::atomic::AtomicBool>);

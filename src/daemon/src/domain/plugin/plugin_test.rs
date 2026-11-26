@@ -39,6 +39,7 @@ use crate::application::bus::data_bus::DataValue;
 use crate::domain::device::chain::LightingDivisionHost;
 use crate::domain::device::BatteryCapability;
 use crate::domain::device::BooleanCapability;
+use crate::domain::device::ChannelEffectHub;
 use crate::domain::device::ChoiceCapability;
 use crate::domain::device::ConnectionCapability;
 use crate::domain::device::Controller;
@@ -54,6 +55,7 @@ use crate::domain::device::RangeCapability;
 use crate::domain::device::SensorCapability;
 use crate::domain::plugin::ResolvedConfig;
 use crate::domain::plugin::ResolvedConfigValue;
+#[cfg(target_os = "linux")]
 use crate::infrastructure::drivers::transports::hwmon::HwmonTransport;
 use crate::infrastructure::drivers::transports::serial::SerialControl;
 use crate::infrastructure::drivers::transports::smbus::SmBusDevice;
@@ -1904,10 +1906,18 @@ fn open_device(
         dev_table
             .set(
                 "apply",
-                lua.create_function(move |_, (_self, state): (Table, Table)| {
-                    let rgb_state = table_to_rgb_state(&state).map_err(to_lua_err)?;
-                    handle.block_on(device.apply(rgb_state)).map_err(to_lua_err)
-                })
+                lua.create_function(
+                    move |_, (_self, state, channel): (Table, Table, Option<String>)| {
+                        let rgb_state = table_to_rgb_state(&state).map_err(to_lua_err)?;
+                        let applied = match channel {
+                            Some(channel) => {
+                                handle.block_on(device.apply_channel_effect(&channel, rgb_state))
+                            }
+                            None => handle.block_on(device.apply(rgb_state)),
+                        };
+                        applied.map_err(to_lua_err)
+                    },
+                )
                 .map_err(from_lua_err)?,
             )
             .map_err(from_lua_err)?;
