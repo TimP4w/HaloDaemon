@@ -7,6 +7,8 @@
 //!
 //! [`net_guard`]: crate::domain::plugin::engine::backends::net_guard
 
+pub mod dtls;
+
 use std::net::{SocketAddr, UdpSocket};
 use std::sync::Arc;
 use std::time::Duration;
@@ -15,6 +17,9 @@ use anyhow::{bail, Context, Result};
 
 use crate::domain::plugin::engine::backends::net_guard;
 use crate::domain::plugin::manifest::UdpConfig;
+use dtls::{DtlsPskBackend, DtlsPskParams};
+
+pub(crate) const MAX_UDP_PAYLOAD: usize = 65_507;
 
 /// Performs the actual datagram I/O. The live implementation is a connected
 /// [`UdpSocket`]; the plugin-test harness swaps in a recording backend so
@@ -103,12 +108,20 @@ impl UdpRuntime {
 
     /// Build the live runtime from a manifest's declared udp transport and the
     /// plugin's configured destination host/port.
-    pub fn from_config(config: &UdpConfig, host: &str, port: u16) -> Result<Self> {
+    pub fn from_config(
+        config: &UdpConfig,
+        host: &str,
+        port: u16,
+        dtls: Option<(DtlsPskParams, tokio::runtime::Handle)>,
+    ) -> Result<Self> {
         let addr = net_guard::resolve_vetted_addr(host, port, config.allow_private)?;
-        let backend = Arc::new(ConnectedUdpBackend::connect(
-            addr,
-            Duration::from_millis(config.send_timeout_ms),
-        )?);
+        let send_timeout = Duration::from_millis(config.send_timeout_ms);
+        let backend: Arc<dyn UdpBackend> = match dtls {
+            Some((params, handle)) => {
+                Arc::new(DtlsPskBackend::new(addr, params, send_timeout, handle))
+            }
+            None => Arc::new(ConnectedUdpBackend::connect(addr, send_timeout)?),
+        };
         Ok(Self::new(
             backend,
             config.max_datagram_bytes,

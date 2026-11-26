@@ -221,7 +221,38 @@ pub struct UdpConfig {
     pub send_timeout_ms: u64,
     #[serde(default = "default_udp_timeout_ms")]
     pub recv_timeout_ms: u64,
+    #[serde(default, skip_serializing_if = "Option::is_none")]
+    pub dtls: Option<UdpDtls>,
 }
+
+#[derive(Debug, Clone, Serialize, Deserialize)]
+#[serde(deny_unknown_fields)]
+pub struct UdpDtls {
+    #[serde(default = "default_udp_dtls_profile")]
+    pub profile: String,
+    pub identity: String,
+    pub psk: String,
+    #[serde(default = "default_udp_dtls_psk_encoding")]
+    pub psk_encoding: String,
+    pub ciphers: Vec<String>,
+    #[serde(default, skip_serializing_if = "Option::is_none")]
+    pub session_idle_ms: Option<u64>,
+}
+
+fn default_udp_dtls_profile() -> String {
+    "psk".to_owned()
+}
+fn default_udp_dtls_psk_encoding() -> String {
+    "hex".to_owned()
+}
+
+pub const UDP_DTLS_PROFILES: &[&str] = &["psk"];
+pub const UDP_DTLS_PSK_ENCODINGS: &[&str] = &["hex", "base64", "raw"];
+pub const UDP_DTLS_PSK_CIPHERS: &[&str] = &[
+    "TLS_PSK_WITH_AES_128_GCM_SHA256",
+    "TLS_PSK_WITH_AES_128_CCM",
+    "TLS_PSK_WITH_AES_128_CCM_8",
+];
 
 fn default_udp_datagram_bytes() -> usize {
     // The maximum UDP/IPv4 payload (65535 − 8 UDP − 20 IP), so `udp: {}` with all
@@ -241,6 +272,7 @@ impl Default for UdpConfig {
             max_datagram_bytes: default_udp_datagram_bytes(),
             send_timeout_ms: default_udp_timeout_ms(),
             recv_timeout_ms: default_udp_timeout_ms(),
+            dtls: None,
         }
     }
 }
@@ -2087,6 +2119,51 @@ fn validate_udp_transport(manifest: &PluginManifest) -> Result<()> {
     }
     if udp.recv_timeout_ms == 0 || udp.recv_timeout_ms > 60_000 {
         bail!("udp recv_timeout_ms must be between 1 and 60000");
+    }
+    let Some(dtls) = &udp.dtls else {
+        return Ok(());
+    };
+    if !UDP_DTLS_PROFILES.contains(&dtls.profile.as_str()) {
+        bail!(
+            "udp dtls profile '{}' is not available (host profiles: {})",
+            dtls.profile,
+            UDP_DTLS_PROFILES.join(", ")
+        );
+    }
+    if field(&dtls.identity).is_none() {
+        bail!(
+            "udp dtls identity '{}' must name a config field",
+            dtls.identity
+        );
+    }
+    if !field(&dtls.psk).is_some_and(|f| f.secure) {
+        bail!(
+            "udp dtls psk '{}' must name a secure config field",
+            dtls.psk
+        );
+    }
+    if !UDP_DTLS_PSK_ENCODINGS.contains(&dtls.psk_encoding.as_str()) {
+        bail!(
+            "udp dtls psk_encoding must be one of {}",
+            UDP_DTLS_PSK_ENCODINGS.join(", ")
+        );
+    }
+    if dtls.ciphers.is_empty() {
+        bail!("udp dtls requires at least one cipher");
+    }
+    for cipher in &dtls.ciphers {
+        if !UDP_DTLS_PSK_CIPHERS.contains(&cipher.as_str()) {
+            bail!(
+                "udp dtls cipher '{cipher}' is not available (host ciphers: {})",
+                UDP_DTLS_PSK_CIPHERS.join(", ")
+            );
+        }
+    }
+    if dtls
+        .session_idle_ms
+        .is_some_and(|ms| ms == 0 || ms > 600_000)
+    {
+        bail!("udp dtls session_idle_ms must be between 1 and 600000");
     }
     Ok(())
 }
@@ -4330,6 +4407,90 @@ mod tests {
             .unwrap_err()
             .to_string()
             .contains("host and port config fields"));
+    }
+
+    fn udp_dtls_manifest(dtls: &str, psk_field: &str) -> String {
+        format!(
+            "capabilities: [lighting]\ndevices:\n  - vendor: A\n    model: B\n    type: led_strip\n    match: {{ hid: {{ vid: 1, pid: 2 }} }}\ntransports:\n  udp:\n    host_key: host\n    port_key: port\n    dtls: {dtls}\nconfig:\n  fields:\n    - {{ key: host, label: Host, kind: host }}\n    - {{ key: port, label: Port, kind: port }}\n    - {{ key: app, label: App }}\n    - {psk_field}\n"
+        )
+    }
+
+    const SECURE_PSK_FIELD: &str = "{ key: secret, label: Secret, secure: true }";
+
+    fn udp_dtls_error(name: &str, dtls: &str, psk_field: &str) -> String {
+        let tmp = tempfile::tempdir().unwrap();
+        let dir = write_plugin_dir(
+            tmp.path(),
+            name,
+            &udp_dtls_manifest(dtls, psk_field),
+            ENTRY_LUA,
+        );
+        parse_manifest_from_dir(&dir).unwrap_err().to_string()
+    }
+
+    #[test]
+    fn udp_dtls_psk_block_is_valid_with_defaults() {
+        let tmp = tempfile::tempdir().unwrap();
+        let dir = write_plugin_dir(
+            tmp.path(),
+            "udp_dtls_ok",
+            &udp_dtls_manifest(
+                "{ identity: app, psk: secret, ciphers: [TLS_PSK_WITH_AES_128_GCM_SHA256], session_idle_ms: 2500 }",
+                SECURE_PSK_FIELD,
+            ),
+            ENTRY_LUA,
+        );
+        let manifest = parse_manifest_from_dir(&dir).unwrap();
+        let dtls = manifest.transports.udp.unwrap().dtls.unwrap();
+        assert_eq!(dtls.profile, "psk");
+        assert_eq!(dtls.psk_encoding, "hex");
+        assert_eq!(dtls.session_idle_ms, Some(2500));
+    }
+
+    #[test]
+    fn udp_dtls_rejects_invalid_declarations() {
+        let ok_cipher = "ciphers: [TLS_PSK_WITH_AES_128_GCM_SHA256]";
+        let cases = [
+            (
+                format!("{{ profile: cert, identity: app, psk: secret, {ok_cipher} }}"),
+                SECURE_PSK_FIELD,
+                "profile 'cert' is not available",
+            ),
+            (
+                format!("{{ identity: missing, psk: secret, {ok_cipher} }}"),
+                SECURE_PSK_FIELD,
+                "identity 'missing' must name a config field",
+            ),
+            (
+                format!("{{ identity: app, psk: secret, {ok_cipher} }}"),
+                "{ key: secret, label: Secret }",
+                "must name a secure config field",
+            ),
+            (
+                format!("{{ identity: app, psk: secret, psk_encoding: rot13, {ok_cipher} }}"),
+                SECURE_PSK_FIELD,
+                "psk_encoding must be one of",
+            ),
+            (
+                "{ identity: app, psk: secret, ciphers: [] }".to_owned(),
+                SECURE_PSK_FIELD,
+                "at least one cipher",
+            ),
+            (
+                "{ identity: app, psk: secret, ciphers: [TLS_RSA_WITH_NULL_MD5] }".to_owned(),
+                SECURE_PSK_FIELD,
+                "cipher 'TLS_RSA_WITH_NULL_MD5' is not available",
+            ),
+            (
+                format!("{{ identity: app, psk: secret, session_idle_ms: 0, {ok_cipher} }}"),
+                SECURE_PSK_FIELD,
+                "session_idle_ms",
+            ),
+        ];
+        for (index, (dtls, psk_field, expected)) in cases.iter().enumerate() {
+            let err = udp_dtls_error(&format!("udp_dtls_bad_{index}"), dtls, psk_field);
+            assert!(err.contains(expected), "{dtls}: {err}");
+        }
     }
 
     #[test]

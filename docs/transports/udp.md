@@ -37,11 +37,30 @@ for a LAN device.
 Because the socket is connected, the plugin cannot send to or receive from any
 peer other than the vetted destination.
 
+## Datagram TLS
+
+A manifest may add a `dtls` block to wrap the socket in a DTLS 1.2 pre-shared-key
+session. The plugin still calls `halod.udp:send` and `halod.udp:receive` with
+plaintext datagrams; the host encrypts and decrypts them.
+
+- The identity and key are read from the config fields the manifest names. The
+  key field must be `secure: true` and is decoded as `hex`, `base64`, or `raw`.
+  Without both values the plugin has no `halod.udp`.
+- The manifest lists the cipher suites it accepts, drawn from the suites the
+  host supports.
+- The handshake runs on the first `send`, bounded by `send_timeout_ms`, so a
+  plugin can prepare the peer over another transport first. `receive` returns
+  `nil` until a session exists.
+- A failed send or receive ends the session; the next `send` handshakes again.
+- With `session_idle_ms`, a `send` after a longer gap opens a new session from a
+  new local port instead of reusing one the peer may have dropped.
+
 ## Limitations
 
 - Unicast to a single connected destination only, no broadcast or multicast.
-- UDP provides no delivery guarantee, ordering, encryption, or peer
-  authentication; the plugin's protocol owns any reliability it needs.
+- UDP provides no delivery guarantee or ordering; the plugin's protocol owns any
+  reliability it needs. Encryption and peer authentication exist only with a
+  `dtls` block.
 - Service discovery via mDNS, SSDP or a TCP probe is a separate integration-setup
   mechanism, not part of this transport.
 

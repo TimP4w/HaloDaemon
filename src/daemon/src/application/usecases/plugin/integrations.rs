@@ -59,7 +59,12 @@ async fn setup_worker(app: &Arc<AppState>, manifest: &PluginManifest) -> Result<
     let granted = app.registry.granted_for(&manifest.plugin_id);
     let config = resolved_config(app, &manifest.plugin_id, &granted).await?;
     let http = worker::http_runtime_for(manifest, &granted, &config);
-    let udp = worker::udp_runtime_for(manifest, &granted, &config);
+    let udp = worker::udp_runtime_for(
+        manifest,
+        &granted,
+        &config,
+        &tokio::runtime::Handle::current(),
+    );
     Ok(PluginHandle::spawn_with_data(
         manifest.script_source.clone(),
         manifest.module_sources.clone(),

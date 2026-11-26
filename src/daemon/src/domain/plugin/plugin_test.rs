@@ -149,6 +149,9 @@ struct RecordingStream {
     deferred: Mutex<std::collections::VecDeque<Vec<u8>>>,
     companion: bool,
     write_error: Option<String>,
+    /// Report ids the device's descriptor does not declare; writing one fails
+    /// the way the OS refuses it.
+    refused_report_ids: Vec<u8>,
     /// Serial line-control calls (`set_dtr`/`set_rts`/`send_break`/`flush_input`)
     /// recorded in order, so a serial package's `test.lua` can drive them without
     /// erroring and a future assertion helper can inspect them.
@@ -158,18 +161,33 @@ struct RecordingStream {
 
 impl RecordingStream {
     fn new(reads: Vec<Vec<u8>>) -> Self {
-        Self::with_options(reads, false, None)
+        Self::with_options(reads, false, None, Vec::new())
     }
 
-    fn with_options(reads: Vec<Vec<u8>>, companion: bool, write_error: Option<String>) -> Self {
+    fn with_options(
+        reads: Vec<Vec<u8>>,
+        companion: bool,
+        write_error: Option<String>,
+        refused_report_ids: Vec<u8>,
+    ) -> Self {
         Self {
             written: Mutex::new(Vec::new()),
             reads: Mutex::new(reads.into()),
             deferred: Mutex::new(std::collections::VecDeque::new()),
             companion,
             write_error,
+            refused_report_ids,
             serial_ops: Mutex::new(Vec::new()),
             rate: Metered::new((), None),
+        }
+    }
+
+    fn refuse_undeclared_report(&self, data: &[u8]) -> Result<()> {
+        match data.first() {
+            Some(id) if self.refused_report_ids.contains(id) => {
+                anyhow::bail!("HID write error: report id {id:#04x} is not declared")
+            }
+            _ => Ok(()),
         }
     }
 
@@ -192,6 +210,7 @@ impl Transport for RecordingStream {
         if let Some(error) = &self.write_error {
             anyhow::bail!(error.clone());
         }
+        self.refuse_undeclared_report(data)?;
         self.rate.write_access(data.len())?;
         self.record("primary", data);
         Ok(())
@@ -262,6 +281,7 @@ impl HidTransport for RecordingStream {
         if let Some(error) = &self.write_error {
             anyhow::bail!(error.clone());
         }
+        self.refuse_undeclared_report(data)?;
         self.rate.write_access(data.len())?;
         self.record("companion", data);
         Ok(())
@@ -609,9 +629,15 @@ fn attach_http_methods(
                     ))
                 }
             };
+            let headers = match args.get::<Option<Table>>("headers")? {
+                Some(headers) => headers
+                    .pairs::<String, String>()
+                    .collect::<mlua::Result<Vec<_>>>()?,
+                None => Vec::new(),
+            };
             queue.responses.lock().push_back(HttpResponse {
                 status,
-                headers: Vec::new(),
+                headers,
                 body,
             });
             Ok(())
@@ -1047,6 +1073,27 @@ fn open_integration(
         let worker = worker.clone();
         let handle = handle.clone();
         dev.set(
+            "pair",
+            lua.create_function(move |lua, (_self, context): (Table, Value)| {
+                let context: serde_json::Value = lua.from_value(context)?;
+                let result = handle
+                    .block_on(worker.setup_pair(context))
+                    .map_err(to_lua_err)?;
+                let out = lua.create_table()?;
+                out.set("ok", result.ok)?;
+                out.set("pending", result.pending)?;
+                out.set("reason", result.reason)?;
+                out.set("values", result.values)?;
+                Ok(out)
+            })
+            .map_err(from_lua_err)?,
+        )
+        .map_err(from_lua_err)?;
+    }
+    {
+        let worker = worker.clone();
+        let handle = handle.clone();
+        dev.set(
             "enumerate_controllers",
             lua.create_function(move |lua, _self: Table| {
                 let controllers = handle
@@ -1142,6 +1189,16 @@ fn integration_child_table(
     handle: tokio::runtime::Handle,
 ) -> mlua::Result<Table> {
     let table = lua.create_table()?;
+    {
+        let child = child.clone();
+        let handle = handle.clone();
+        table.set(
+            "close",
+            lua.create_function(move |_, _self: Table| {
+                handle.block_on(child.close()).map_err(to_lua_err)
+            })?,
+        )?;
+    }
     {
         let child = child.clone();
         let handle = handle.clone();
@@ -1384,10 +1441,20 @@ fn open_device(
     let write_error = spec_table
         .as_ref()
         .and_then(|table| table.get::<Option<String>>("write_error").ok().flatten());
+    let refused_report_ids = spec_table
+        .as_ref()
+        .and_then(|table| {
+            table
+                .get::<Option<Vec<u8>>>("refused_report_ids")
+                .ok()
+                .flatten()
+        })
+        .unwrap_or_default();
     let recording = Arc::new(RecordingStream::with_options(
         reads_from_spec(&spec_table),
         companion,
         write_error,
+        refused_report_ids,
     ));
     let smbus_written = Arc::new(Mutex::new(Vec::new()));
     let usb_recording = manifest
@@ -2274,13 +2341,29 @@ mod tests {
 
     #[test]
     fn recording_stream_injects_write_failures_without_recording_data() {
-        let stream =
-            RecordingStream::with_options(Vec::new(), true, Some("simulated write failure".into()));
+        let stream = RecordingStream::with_options(
+            Vec::new(),
+            true,
+            Some("simulated write failure".into()),
+            Vec::new(),
+        );
 
         assert!(Transport::write(&stream, &[1]).is_err());
         assert!(HidTransport::send_feature_report(&stream, &[2]).is_err());
         assert!(HidTransport::write_companion(&stream, &[3]).is_err());
         assert!(stream.written.lock().is_empty());
+    }
+
+    #[test]
+    fn recording_stream_refuses_only_undeclared_report_ids() {
+        let stream = RecordingStream::with_options(Vec::new(), true, None, vec![0x10]);
+
+        assert!(Transport::write(&stream, &[0x10, 1]).is_err());
+        assert!(HidTransport::write_companion(&stream, &[0x10, 1]).is_err());
+        assert!(Transport::write(&stream, &[0x11, 1]).is_ok());
+        let written = stream.written.lock();
+        assert_eq!(written.len(), 1);
+        assert_eq!(written[0].data, vec![0x11, 1]);
     }
 
     fn write_fixture(dir: &Path, test_lua: &str) {
@@ -2381,6 +2464,56 @@ mod tests {
             end"#,
         );
         assert_eq!(code, 0);
+    }
+
+    #[test]
+    fn integration_harness_drives_pairing_response_headers_and_child_close() {
+        let tmp = tempfile::tempdir().unwrap();
+        let dir = tmp.path().join("fixture");
+        std::fs::create_dir_all(&dir).unwrap();
+        std::fs::write(
+            dir.join("plugin.yaml"),
+            "id: fixture\nversion: 1.0.0\napi: \"1.0\"\ntype: integration\ncapabilities: [lighting]\ntransports:\n  http:\n    origins: [\"https://api.example.com\"]\n    methods: [GET, PUT]\nconfig:\n  fields:\n    - { key: token, label: Token, secure: true }\n",
+        )
+        .unwrap();
+        std::fs::write(
+            dir.join("main.lua"),
+            r#"local function call(method, path)
+                return halod.http:request({ method = method, origin = "https://api.example.com", path = path })
+            end
+            return {
+                validate = function() return { ok = true } end,
+                pair = function()
+                    return { ok = true, values = { token = call("GET", "/pair").headers["x-token"] } }
+                end,
+                initialize = function() return true end,
+                enumerate_controllers = function()
+                    return { { index = 0, key = "a", name = "A", channels = { { id = "z", name = "Z", led_count = 1 } } } }
+                end,
+                close_child = function(dev) call("PUT", "/closed/" .. dev.match.key) end,
+            }"#,
+        )
+        .unwrap();
+        std::fs::write(
+            dir.join("test.lua"),
+            r#"return function(h)
+                local dev = h:open_integration()
+                dev:queue_http_response({ status = 200, headers = { ["x-token"] = "secret" } })
+                local paired = dev:pair({ config = {} })
+                h:assert(paired.ok, "pairing succeeds")
+                h:assert_eq(paired.values.token, "secret", "response header reaches the plugin")
+                dev:open_controller(0):close()
+                local requests = dev:http_requests()
+                h:assert_eq(requests[#requests].path, "/closed/a", "child close runs its hook")
+            end"#,
+        )
+        .unwrap();
+        let runtime = tokio::runtime::Builder::new_multi_thread()
+            .worker_threads(2)
+            .enable_all()
+            .build()
+            .unwrap();
+        assert_eq!(run(runtime.handle().clone(), &dir).unwrap(), 0);
     }
 
     #[test]

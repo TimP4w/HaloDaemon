@@ -88,6 +88,7 @@ pkgs.rustPlatform.buildRustPackage {
             libGL
             wayland
             libxkbcommon
+            dbus
           ]
         )
       }
