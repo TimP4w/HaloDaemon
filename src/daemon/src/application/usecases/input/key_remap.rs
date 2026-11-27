@@ -23,12 +23,6 @@ pub async fn set_button_mapping(
         .as_key_remap()
         .context("device does not support key remapping")?;
 
-    log::info!(
-        "[{id}] set button mapping cid {:#06x}: base {:?}, shifted {:?}",
-        mapping.cid,
-        mapping.base,
-        mapping.shifted
-    );
     cap.set_button_mapping(mapping).await?;
     persist_device_state(&app, device.as_ref()).await;
     app.record_change(Change::Device(id)).await;
@@ -41,7 +35,6 @@ pub async fn reset_button_mapping(id: DeviceId, cid: u16, app: Arc<AppState>) ->
         .as_key_remap()
         .context("device does not support key remapping")?;
 
-    log::info!("[{id}] reset button mapping cid {cid:#06x}");
     cap.reset_button_mapping(cid).await?;
     persist_device_state(&app, device.as_ref()).await;
     app.record_change(Change::Device(id)).await;

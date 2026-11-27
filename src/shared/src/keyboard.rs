@@ -154,6 +154,15 @@ impl StandardLayout {
             StandardLayout::FullSizeIso => iso_full_size_cells(),
         }
     }
+
+    /// Width of the template in key units; LED x positions are cell centres
+    /// divided by this.
+    pub fn columns(&self) -> f32 {
+        match self {
+            StandardLayout::FullSize | StandardLayout::FullSizeIso => 23.0,
+            StandardLayout::Tkl | StandardLayout::TklIso => 18.0,
+        }
+    }
 }
 
 /// Alpha-block shape, independent of the printed language legends.
@@ -313,6 +322,8 @@ fn tkl_common_cells() -> Vec<KeyCell> {
         (LeftAlt, 2.5, 5.5, 1.25, 1.0),
         (Space, 3.75, 5.5, 6.25, 1.0),
         (RightAlt, 10.0, 5.5, 1.25, 1.0),
+        (RightSuper, 11.25, 5.5, 1.25, 1.0),
+        (Menu, 12.5, 5.5, 1.25, 1.0),
         (RightCtrl, 13.75, 5.5, 1.25, 1.0),
         (Left, 15.5, 5.5, 1.0, 1.0),
         (Down, 16.5, 5.5, 1.0, 1.0),
@@ -334,8 +345,6 @@ fn iso_tkl_cells() -> Vec<KeyCell> {
 fn full_size_extra_cells() -> impl Iterator<Item = KeyCell> {
     use KeyId::*;
     [
-        (RightSuper, 11.25, 5.5, 1.25, 1.0),
-        (Menu, 12.5, 5.5, 1.25, 1.0),
         (NumLock, 19.5, 1.5, 1.0, 1.0),
         (NumDiv, 20.5, 1.5, 1.0, 1.0),
         (NumMul, 21.5, 1.5, 1.0, 1.0),
@@ -376,7 +385,7 @@ mod tests {
 
     #[test]
     fn tkl_base_has_expected_key_count() {
-        assert_eq!(StandardLayout::Tkl.cells().len(), 86);
+        assert_eq!(StandardLayout::Tkl.cells().len(), 88);
     }
 
     #[test]
@@ -443,7 +452,7 @@ mod tests {
 
     #[test]
     fn tkl_iso_base_has_expected_key_count() {
-        assert_eq!(StandardLayout::TklIso.cells().len(), 86);
+        assert_eq!(StandardLayout::TklIso.cells().len(), 88);
     }
 
     #[test]
@@ -513,10 +522,7 @@ mod tests {
     #[test]
     fn led_centers_are_in_unit_square() {
         for layout in ALL_LAYOUTS {
-            let div = match layout {
-                StandardLayout::FullSize | StandardLayout::FullSizeIso => 23.0,
-                StandardLayout::Tkl | StandardLayout::TklIso => 18.0,
-            };
+            let div = layout.columns();
             for c in layout.cells() {
                 let x = (c.col + c.w / 2.0) / div;
                 let y = (c.row + 1.5) / 7.0;
