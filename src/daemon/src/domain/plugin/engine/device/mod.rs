@@ -679,7 +679,7 @@ impl LuaDevice {
             std::sync::Arc::new(parking_lot::Mutex::new(Vec::new()));
         let http = super::worker::http_runtime_for(manifest, &granted, &config);
         let http_meter = http.clone();
-        let udp = super::worker::udp_runtime_for(manifest, &granted, &config);
+        let udp = super::worker::udp_runtime_for(manifest, &granted, &config, &handle);
         let worker = PluginHandle::spawn_with_data(
             manifest.script_source.clone(),
             manifest.module_sources.clone(),

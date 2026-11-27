@@ -75,6 +75,8 @@ rand = "0.10.2"
 ureq = { version = "3.3.0", default-features = false, features = ["rustls"] }
 rustls = { version = "0.23.42", default-features = false, features = ["ring", "std", "tls12"] }
 x509-parser = "0.18.1"
+webrtc-dtls = "0.12.0"
+webrtc-util = { version = "0.11.0", default-features = false, features = ["conn"] }
 
 [dev-dependencies]
 tokio    = { version = "1.53.1", features = ["test-util"] }

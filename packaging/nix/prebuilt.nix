@@ -56,6 +56,7 @@ pkgs.stdenv.mkDerivation {
             libGL
             wayland
             libxkbcommon
+            dbus
           ]
         )
       }

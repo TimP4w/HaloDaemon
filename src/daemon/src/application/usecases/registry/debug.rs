@@ -9,6 +9,7 @@ use halod_shared::messages::DaemonMessage;
 use std::sync::Arc;
 
 use crate::application::ipc::ClientHandle;
+use crate::application::observers::hid::hid_key;
 use crate::application::state::AppState;
 use crate::domain::device::Device;
 use crate::domain::lcd::engine::video;
@@ -321,8 +322,6 @@ fn smbus_to_wire(b: BusInfo, kind: SmbusBusKind) -> SmbusBusDebugInfo {
 }
 
 /// `(device_id, hid_key)` pairs for every device the HID transport is tracking.
-/// The HID key has the shape
-/// `vid:pid:serial` (all hex, serial may be empty).
 async fn snapshot_tracking_keys(app: &Arc<AppState>) -> Vec<(DeviceId, String)> {
     use crate::application::state::HidTrackingEntry;
     let tracking = app.hid.snapshot().await;
@@ -336,18 +335,9 @@ async fn snapshot_tracking_keys(app: &Arc<AppState>) -> Vec<(DeviceId, String)> 
     out
 }
 
-/// Returns true when `key` (a `vid:pid:serial` tracking key) refers to the same
-/// HID interface as `entry`.
+/// Returns true when the tracking `key` refers to the same HID interface as `entry`.
 fn matches_hid_key(key: &str, entry: &HidEntryDebugInfo) -> bool {
-    let mut parts = key.splitn(3, ':');
-    let Some(vid) = parts.next().and_then(|s| u16::from_str_radix(s, 16).ok()) else {
-        return false;
-    };
-    let Some(pid) = parts.next().and_then(|s| u16::from_str_radix(s, 16).ok()) else {
-        return false;
-    };
-    let serial = parts.next().unwrap_or("");
-    vid == entry.vid && pid == entry.pid && serial == entry.serial
+    key == hid_key(entry.vid, entry.pid, &entry.serial, &entry.path)
 }
 
 async fn build_device_debug(
@@ -657,7 +647,8 @@ mod tests {
             serial: String::new(),
             ..entry.clone()
         };
-        assert!(matches_hid_key("046d:c095:", &no_serial));
+        assert!(matches_hid_key("046d:c095:p", &no_serial));
+        assert!(!matches_hid_key("046d:c095:", &no_serial));
     }
 
     #[cfg(target_os = "linux")]

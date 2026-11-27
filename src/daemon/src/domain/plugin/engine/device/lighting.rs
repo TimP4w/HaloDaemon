@@ -37,19 +37,26 @@ impl LightingFacet {
         effects: Vec<NativeEffect>,
     ) {
         let keyboard = self.keyboard.get();
-        let ansi_keys = keyboard.map(|descriptor| visual_keys(&descriptor.ansi));
+        let ansi_keys = keyboard.map(|descriptor| {
+            (
+                visual_keys(&descriptor.ansi),
+                descriptor.ansi.base.columns(),
+            )
+        });
         if let Some(iso) = keyboard.and_then(|descriptor| descriptor.iso.as_ref()) {
             let iso_keys = visual_keys(iso);
             let _ = self.iso_descriptor.set(build_dynamic_descriptor(
                 channels.clone(),
                 effects.clone(),
-                Some(&iso_keys),
+                Some((&iso_keys, iso.base.columns())),
             ));
         }
         let _ = self.descriptor.set(build_dynamic_descriptor(
             channels,
             effects,
-            ansi_keys.as_deref(),
+            ansi_keys
+                .as_ref()
+                .map(|(keys, columns)| (keys.as_slice(), *columns)),
         ));
     }
 
@@ -144,15 +151,15 @@ fn visual_keys(variant: &InitKeyboardVariant) -> Vec<VisualKey> {
 fn keyboard_led_positions(
     keys: &[VisualKey],
     advertised: &[u32],
+    columns: f32,
 ) -> Vec<halod_shared::types::LedPosition> {
     let position = |id: u32| {
         let (x, y) = keys
             .iter()
             .find(|key| key.led_id == id)
             .map_or((0.5, 0.5), |key| {
-                // Exact projection used by the former native TKL descriptor.
                 (
-                    (key.cell.col + key.cell.w / 2.0) / 18.0,
+                    (key.cell.col + key.cell.w / 2.0) / columns,
                     (key.cell.row + 1.5) / 7.0,
                 )
             });
@@ -194,10 +201,11 @@ fn selected_visual_keys(descriptor: &InitKeyboard, slot: &KeyboardLayoutSlot) ->
 
 /// Build an `LightingDescriptor` from `initialize`-reported channels, computing LED
 /// positions from the declared topology + count (as static accessory channels do).
+/// `keyboard_keys` carries the resolved keys and the width of their template.
 pub(super) fn build_dynamic_descriptor(
     channels: Vec<InitLightingChannel>,
     native_effects: Vec<NativeEffect>,
-    keyboard_keys: Option<&[VisualKey]>,
+    keyboard_keys: Option<(&[VisualKey], f32)>,
 ) -> LightingDescriptor {
     let channels = channels
         .into_iter()
@@ -227,11 +235,12 @@ pub(super) fn build_dynamic_descriptor(
                     division: Default::default(),
                     visibility: Default::default(),
                 }
-            } else if let (ZoneTopology::Keyboard { .. }, Some(keys)) =
-                (&topology, keyboard_keys.filter(|keys| !keys.is_empty()))
-            {
+            } else if let (ZoneTopology::Keyboard { .. }, Some((keys, columns))) = (
+                &topology,
+                keyboard_keys.filter(|(keys, _)| !keys.is_empty()),
+            ) {
                 LightingChannel {
-                    leds: keyboard_led_positions(keys, &z.led_ids),
+                    leds: keyboard_led_positions(keys, &z.led_ids, columns),
                     id: z.id,
                     name: z.name,
                     topology,
@@ -385,9 +394,39 @@ mod dynamic_rgb_descriptor_tests {
             cell: KeyCell::new(id, col, 0.0),
         };
         let keys = [key(1, KeyId::A, 0.0), key(2, KeyId::B, 1.0)];
-        let leds = keyboard_led_positions(&keys, &[2, 9, 1]);
+        let leds = keyboard_led_positions(&keys, &[2, 9, 1], 18.0);
         assert_eq!(leds.iter().map(|l| l.id).collect::<Vec<_>>(), [2, 9, 1]);
         assert_eq!(leds[0].x, 1.5 / 18.0);
         assert_eq!(leds[2].x, 0.5 / 18.0);
+    }
+
+    #[test]
+    fn every_standard_key_projects_inside_its_template() {
+        use halod_shared::keyboard::StandardLayout;
+        for layout in [
+            StandardLayout::Tkl,
+            StandardLayout::TklIso,
+            StandardLayout::FullSize,
+            StandardLayout::FullSizeIso,
+        ] {
+            let keys: Vec<VisualKey> = layout
+                .cells()
+                .into_iter()
+                .enumerate()
+                .map(|(led_id, cell)| VisualKey {
+                    led_id: led_id as u32,
+                    remap_cid: None,
+                    cell,
+                })
+                .collect();
+            for led in keyboard_led_positions(&keys, &[], layout.columns()) {
+                assert!(
+                    (0.0..=1.0).contains(&led.x),
+                    "{layout:?} led {} x {}",
+                    led.id,
+                    led.x
+                );
+            }
+        }
     }
 }

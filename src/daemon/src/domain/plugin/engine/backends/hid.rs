@@ -12,7 +12,7 @@ use crate::domain::plugin::engine::transport::{
 use crate::domain::plugin::manifest::{DeviceSpec, PluginManifest};
 use crate::domain::plugin::ResolvedConfig;
 use crate::domain::registry::observers::discovery::DiscoveryHandle;
-use crate::infrastructure::drivers::transports::hid::HidTransport;
+use crate::infrastructure::drivers::transports::hid::{physical_path_stem, HidTransport};
 use crate::infrastructure::drivers::transports::usb::UsbCollection;
 use crate::infrastructure::drivers::transports::usb::UsbSelector;
 
@@ -72,6 +72,9 @@ fn open(
     let transport = if let Some(companion) = &hid.companion {
         let api = hidapi::HidApi::new()?;
         let serial = serial.filter(|value| !value.is_empty());
+        // Twin receivers share vid/pid/interface and report no serial; only a
+        // collection of the matched interface itself may carry its long replies.
+        let interface = physical_path_stem(path);
         let companion_path = api
             .device_list()
             .filter(|device| device.vendor_id() == *vid && device.product_id() == *pid)
@@ -79,10 +82,11 @@ fn open(
                 interface_number.is_none_or(|interface| device.interface_number() == interface)
             })
             .filter(|device| serial.is_none_or(|value| device.serial_number() == Some(value)))
-            .find(|device| {
+            .filter(|device| {
                 device.usage_page() == companion.usage_page && device.usage() == companion.usage
             })
-            .map(|device| device.path().to_string_lossy().into_owned());
+            .map(|device| device.path().to_string_lossy().into_owned())
+            .find(|candidate| physical_path_stem(candidate) == interface);
 
         HidTransport::open_dual(
             path,

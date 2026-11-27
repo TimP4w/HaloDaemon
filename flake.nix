@@ -125,6 +125,7 @@
                 pkgs.wayland
                 pkgs.libxkbcommon
                 pkgs.libGL
+                pkgs.dbus
               ];
             };
 

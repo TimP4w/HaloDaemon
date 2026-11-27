@@ -42,6 +42,7 @@ use crate::domain::plugin::ResolvedConfig;
 use crate::domain::plugin::ResolvedConfigValue;
 use crate::infrastructure::drivers::transports::smbus::SmBusDevice;
 use crate::infrastructure::http::HttpRuntime;
+use crate::infrastructure::udp::dtls::DtlsPskParams;
 use crate::infrastructure::udp::UdpRuntime;
 
 /// Maximum HID reports handled by one serialized Lua-worker job. Event input,
@@ -1488,6 +1489,7 @@ pub(crate) fn udp_runtime_for(
     manifest: &PluginManifest,
     granted: &[Permission],
     config: &ResolvedConfig,
+    handle: &Handle,
 ) -> Option<UdpRuntime> {
     let udp = manifest.transports.udp.as_ref()?;
     if !network_granted(granted) {
@@ -1511,7 +1513,29 @@ pub(crate) fn udp_runtime_for(
             return None;
         }
     };
-    match UdpRuntime::from_config(udp, &host, port) {
+    let dtls = match &udp.dtls {
+        Some(dtls) => {
+            match DtlsPskParams::from_config(dtls, &value(&dtls.identity), &value(&dtls.psk)) {
+                Ok(Some(params)) => Some((params, handle.clone())),
+                Ok(None) => {
+                    log::debug!(
+                        "plugin '{}': udp dtls credentials are not configured",
+                        manifest.plugin_id
+                    );
+                    return None;
+                }
+                Err(e) => {
+                    log::error!(
+                        "plugin '{}': udp dtls credentials are unusable: {e:#}",
+                        manifest.plugin_id
+                    );
+                    return None;
+                }
+            }
+        }
+        None => None,
+    };
+    match UdpRuntime::from_config(udp, &host, port, dtls) {
         Ok(runtime) => Some(runtime),
         Err(e) => {
             log::error!(
@@ -2137,7 +2161,7 @@ mod tests {
         let granted = manifest.declarations.uses.permissions.clone();
         let config = HashMap::new();
         assert!(http_runtime_for(&manifest, &granted, &config).is_none());
-        assert!(udp_runtime_for(&manifest, &granted, &config).is_none());
+        assert!(udp_runtime_for(&manifest, &granted, &config, &Handle::current()).is_none());
 
         let h = spawn(
             "return { initialize = function()
