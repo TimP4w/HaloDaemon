@@ -32,8 +32,8 @@ fn switch_disabled(host_mode: bool, active: bool) -> bool {
     host_mode || active
 }
 
-fn slot_can_toggle(slot: &OnboardProfileSlot) -> bool {
-    slot.index != 1 && !slot.read_only
+fn slot_can_toggle(op: &OnboardProfiles, slot: &OnboardProfileSlot) -> bool {
+    !op.slots_fixed && slot.index != 1 && !slot.read_only
 }
 
 fn slot_can_restore(slot: &OnboardProfileSlot) -> bool {
@@ -178,7 +178,7 @@ fn slot_row(
                     },
                 );
             }
-            if slot_can_toggle(slot) {
+            if slot_can_toggle(op, slot) {
                 let (label, enabled_after, kind) = if slot.enabled {
                     (t!("devtabs.remove"), false, widgets::ButtonKind::Danger)
                 } else {
@@ -231,15 +231,22 @@ mod tests {
             active: false,
             has_rom_default: true,
         };
+        let mut op = OnboardProfiles {
+            active_slot: 0,
+            slots: vec![],
+            slots_fixed: false,
+        };
         assert!(!switch_disabled(false, false));
-        assert!(!slot_can_toggle(&slot));
+        assert!(!slot_can_toggle(&op, &slot));
         assert!(!slot_can_restore(&slot));
         slot.index = 1;
         slot.read_only = false;
-        assert!(!slot_can_toggle(&slot));
+        assert!(!slot_can_toggle(&op, &slot));
         assert!(slot_can_restore(&slot));
         slot.index = 2;
-        assert!(slot_can_toggle(&slot));
+        assert!(slot_can_toggle(&op, &slot));
+        op.slots_fixed = true;
+        assert!(!slot_can_toggle(&op, &slot));
         slot.enabled = false;
         assert!(!slot_can_restore(&slot));
     }
@@ -261,6 +268,7 @@ mod tests {
             DeviceCapability::OnboardProfiles(OnboardProfiles {
                 active_slot: 0,
                 slots: vec![],
+                slots_fixed: false,
             }),
             DeviceCapability::Boolean(vec![boolean("something_else"), boolean(HOST_MODE_KEY)]),
         ];

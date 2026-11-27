@@ -886,6 +886,7 @@ impl OnboardProfilesCapability for MockDevice {
                         has_rom_default: false,
                     })
                     .collect(),
+                slots_fixed: false,
             },
         ))
     }

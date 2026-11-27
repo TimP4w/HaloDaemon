@@ -304,6 +304,9 @@ pub struct OnboardProfiles {
     /// 1-based; 0 when no profile is active (host mode).
     pub active_slot: u16,
     pub slots: Vec<OnboardProfileSlot>,
+    /// Slots can neither be created nor removed.
+    #[serde(default)]
+    pub slots_fixed: bool,
 }
 
 #[derive(Debug, Clone, Serialize, Deserialize, Default, PartialEq)]
