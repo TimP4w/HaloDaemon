@@ -7,7 +7,7 @@ use tokio::time::Instant;
 
 use crate::application::usecases::registry::registration;
 use crate::application::usecases::registry::runtime;
-use crate::domain::plugin::Registry;
+use crate::infrastructure::drivers::transports::hid::physical_path_stem;
 use crate::util::backoff::{respawn_wait, FailureStreak};
 use crate::{
     application::state::{AppState, HidTrackingEntry},
@@ -58,7 +58,7 @@ pub async fn hotplug_monitor(app: Arc<AppState>) {
 
         let live_keys: HashSet<String> = live
             .iter()
-            .map(|i| hid_key(i.vid, i.pid, &i.serial))
+            .map(|i| hid_key(i.vid, i.pid, &i.serial, &i.path))
             .collect();
         let tracked_keys: HashSet<String> = app.hid.keys().await;
 
@@ -74,7 +74,7 @@ pub async fn hotplug_monitor(app: Arc<AppState>) {
         let tracked_keys: HashSet<String> = app.hid.keys().await;
 
         let revision = app.device_registry.revision();
-        let picked = pick_hid_devices(&app.registry, &live);
+        let picked = pick_hid_devices(|probe| app.registry.has_match(probe), &live);
         for (info, idx) in devices_to_register(&picked, &tracked_keys) {
             let serial_opt = (!info.serial.is_empty()).then_some(info.serial.as_str());
             add_hid_device(
@@ -114,7 +114,7 @@ async fn discover(app: Arc<AppState>) -> Result<()> {
     // Skip already-registered devices so a rescan never opens a second handle to
     // hardware in use (a rival listener corrupts HID++ messaging for both).
     let tracked_keys: HashSet<String> = app.hid.keys().await;
-    let picked = pick_hid_devices(&app.registry, &entries);
+    let picked = pick_hid_devices(|probe| app.registry.has_match(probe), &entries);
     for (info, idx) in devices_to_register(&picked, &tracked_keys) {
         log::debug!(
             "Checking HID {:04x}:{:04x} path={} iface={}",
@@ -187,17 +187,17 @@ impl From<&hidapi::DeviceInfo> for HidDeviceInfo {
 }
 
 /// Resolve enumerated HID entries to one entry per physical device,
-/// keyed by `(vid, pid, serial)`.
+/// keyed by [`hid_key`].
 ///
-/// Filters entries against the loaded plugin registry. When multiple entries exist for one
+/// Filters entries through `is_recognized`. When multiple entries exist for one
 /// physical device (Windows HID collections), the one whose usage_page/usage
 /// satisfies a match is preferred; otherwise the first entry in the group
 /// wins. Result order follows enumeration first-occurrence so device `idx`
 /// assignment stays stable.
-fn pick_hid_devices<'a>(
-    registry: &Registry,
-    entries: &'a [HidDeviceInfo],
-) -> Vec<&'a HidDeviceInfo> {
+fn pick_hid_devices(
+    is_recognized: impl Fn(&DiscoveryHandle<'_>) -> bool,
+    entries: &[HidDeviceInfo],
+) -> Vec<&HidDeviceInfo> {
     let make_probe = |e: &HidDeviceInfo| DiscoveryHandle::Hid {
         vid: e.vid,
         pid: e.pid,
@@ -209,17 +209,15 @@ fn pick_hid_devices<'a>(
         interface_number: Some(e.iface),
     };
 
-    let mut order: Vec<(u16, u16, String)> = Vec::new();
-    let mut groups: HashMap<(u16, u16, String), Vec<&HidDeviceInfo>> = HashMap::new();
-
-    let is_recognized = |probe: &DiscoveryHandle<'_>| registry.has_match(probe);
+    let mut order: Vec<String> = Vec::new();
+    let mut groups: HashMap<String, Vec<&HidDeviceInfo>> = HashMap::new();
 
     for e in entries {
         let probe = make_probe(e);
         if !is_recognized(&probe) {
             continue;
         }
-        let key = (e.vid, e.pid, e.serial.clone());
+        let key = hid_key(e.vid, e.pid, &e.serial, &e.path);
         if !groups.contains_key(&key) {
             order.push(key.clone());
         }
@@ -239,8 +237,14 @@ fn pick_hid_devices<'a>(
         .collect()
 }
 
-fn hid_key(vid: u16, pid: u16, serial: &str) -> String {
-    format!("{vid:04x}:{pid:04x}:{serial}")
+/// Tracking key of one physical HID device: `vid:pid:serial`, or for a device
+/// that reports no serial, `vid:pid:` followed by its [`physical_path_stem`].
+pub(crate) fn hid_key(vid: u16, pid: u16, serial: &str, path: &str) -> String {
+    if serial.is_empty() {
+        format!("{vid:04x}:{pid:04x}:{}", physical_path_stem(path))
+    } else {
+        format!("{vid:04x}:{pid:04x}:{serial}")
+    }
 }
 
 /// From the picker's output, the entries not already tracked, each tagged with
@@ -266,7 +270,7 @@ fn devices_to_register<'a>(
 
     let mut out = Vec::new();
     for &info in picked {
-        if tracked_keys.contains(&hid_key(info.vid, info.pid, &info.serial)) {
+        if tracked_keys.contains(&hid_key(info.vid, info.pid, &info.serial, &info.path)) {
             continue;
         }
         let counter = counts.entry((info.vid, info.pid)).or_insert(0);
@@ -410,8 +414,7 @@ async fn add_hid_device(
     let Some(impl_) = app.registry.make_device(app, &handle) else {
         return;
     };
-    let serial_key = serial.filter(|s| !s.is_empty()).unwrap_or("").to_string();
-    let key = hid_key(vid, pid, &serial_key);
+    let key = hid_key(vid, pid, serial.unwrap_or(""), path);
 
     let _ = scoped;
 
@@ -449,6 +452,61 @@ mod tests {
     use super::*;
     use crate::test_support::{app_with, MockDevice};
     use std::sync::atomic::Ordering;
+
+    const RECEIVER_A_SHORT: &str =
+        "\\\\?\\HID#VID_046D&PID_C547&MI_02&Col01#b&3090b098&0&0000#{4d1e55b2-f16f-11cf-88cb-001111000030}";
+    const RECEIVER_A_LONG: &str =
+        "\\\\?\\HID#VID_046D&PID_C547&MI_02&Col02#b&3090b098&0&0001#{4d1e55b2-f16f-11cf-88cb-001111000030}";
+    const RECEIVER_B_SHORT: &str =
+        "\\\\?\\HID#VID_046D&PID_C547&MI_02&Col01#d&28800fc7&0&0000#{4d1e55b2-f16f-11cf-88cb-001111000030}";
+
+    fn entry(path: &str, serial: &str, usage: u16) -> HidDeviceInfo {
+        HidDeviceInfo {
+            vid: 0x046d,
+            pid: 0xc547,
+            path: path.into(),
+            iface: 2,
+            serial: serial.into(),
+            usage_page: 0xff00,
+            usage,
+        }
+    }
+
+    #[test]
+    fn serial_less_twins_get_distinct_keys_and_a_serial_wins_over_the_path() {
+        assert_ne!(
+            hid_key(0x046d, 0xc547, "", RECEIVER_A_SHORT),
+            hid_key(0x046d, 0xc547, "", RECEIVER_B_SHORT)
+        );
+        assert_eq!(
+            hid_key(0x046d, 0xc547, "S1", RECEIVER_A_SHORT),
+            hid_key(0x046d, 0xc547, "S1", RECEIVER_B_SHORT)
+        );
+    }
+
+    #[test]
+    fn picker_registers_both_serial_less_receivers_once_each() {
+        let entries = [
+            entry(RECEIVER_A_LONG, "", 2),
+            entry(RECEIVER_A_SHORT, "", 1),
+            entry(RECEIVER_B_SHORT, "", 1),
+        ];
+        let short_only =
+            |probe: &DiscoveryHandle<'_>| matches!(probe, DiscoveryHandle::Hid { usage: 1, .. });
+        let picked = pick_hid_devices(short_only, &entries);
+        let paths: Vec<&str> = picked.iter().map(|e| e.path.as_str()).collect();
+        assert_eq!(paths, [RECEIVER_A_SHORT, RECEIVER_B_SHORT]);
+
+        let registered = devices_to_register(&picked, &HashSet::new());
+        let idx: Vec<usize> = registered.iter().map(|(_, idx)| *idx).collect();
+        assert_eq!(idx, [0, 1]);
+
+        let tracked: HashSet<String> = [hid_key(0x046d, 0xc547, "", RECEIVER_A_LONG)].into();
+        let late = devices_to_register(&picked, &tracked);
+        assert_eq!(late.len(), 1);
+        assert_eq!(late[0].0.path, RECEIVER_B_SHORT);
+        assert_eq!(late[0].1, 1);
+    }
 
     #[tokio::test]
     async fn removing_a_hid_key_closes_children_registered_after_tracking() {
