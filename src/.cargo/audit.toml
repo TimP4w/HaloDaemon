@@ -1,0 +1,4 @@
+[advisories]
+# crypto-bigint 0.5 via webrtc-dtls -> p256/p384; no patched release in that chain.
+# The DTLS transport only offers PSK suites, so the EC code never runs.
+ignore = ["RUSTSEC-2026-0387"]
