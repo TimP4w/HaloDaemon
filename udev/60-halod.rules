@@ -32,7 +32,7 @@ SUBSYSTEM=="hwmon", KERNEL=="hwmon[0-9]*", ACTION=="add|change", RUN{program}+="
 # Logitech HID++ (logitech)
 KERNEL=="hidraw*", ATTRS{idVendor}=="046d", ATTRS{idProduct}=="0a66", TAG+="uaccess"
 
-# Logitech G560 (logitech_g560)
+# Logitech HID++ (logitech)
 KERNEL=="hidraw*", ATTRS{idVendor}=="046d", ATTRS{idProduct}=="0a78", TAG+="uaccess"
 
 # Logitech HID++ (logitech)
@@ -61,6 +61,9 @@ KERNEL=="hidraw*", ATTRS{idVendor}=="046d", ATTRS{idProduct}=="c095", TAG+="uacc
 
 # Logitech HID++ (logitech)
 KERNEL=="hidraw*", ATTRS{idVendor}=="046d", ATTRS{idProduct}=="c352", TAG+="uaccess"
+
+# Logitech HID++ (logitech)
+KERNEL=="hidraw*", ATTRS{idVendor}=="046d", ATTRS{idProduct}=="c356", TAG+="uaccess"
 
 # Logitech HID++ (logitech)
 KERNEL=="hidraw*", ATTRS{idVendor}=="046d", ATTRS{idProduct}=="c518", TAG+="uaccess"
@@ -176,11 +179,38 @@ KERNEL=="hidraw*", ATTRS{idVendor}=="1038", ATTRS{idProduct}=="12e5", TAG+="uacc
 # SteelSeries Arctis Nova Pro Wireless (steelseries_arctis)
 KERNEL=="hidraw*", ATTRS{idVendor}=="1038", ATTRS{idProduct}=="225d", TAG+="uaccess"
 
+# NZXT RGB & Fan Controller (nzxt_control_hub)
+KERNEL=="hidraw*", ATTRS{idVendor}=="1e71", ATTRS{idProduct}=="2006", TAG+="uaccess"
+
 # NZXT Kraken X53/X63/X73 (nzxt_kraken_x3)
 KERNEL=="hidraw*", ATTRS{idVendor}=="1e71", ATTRS{idProduct}=="2007", TAG+="uaccess"
 
+# NZXT RGB & Fan Controller (nzxt_control_hub)
+KERNEL=="hidraw*", ATTRS{idVendor}=="1e71", ATTRS{idProduct}=="2009", TAG+="uaccess"
+
+# NZXT RGB & Fan Controller (nzxt_control_hub)
+KERNEL=="hidraw*", ATTRS{idVendor}=="1e71", ATTRS{idProduct}=="200d", TAG+="uaccess"
+
+# NZXT RGB & Fan Controller (nzxt_control_hub)
+KERNEL=="hidraw*", ATTRS{idVendor}=="1e71", ATTRS{idProduct}=="200e", TAG+="uaccess"
+
+# NZXT RGB & Fan Controller (nzxt_control_hub)
+KERNEL=="hidraw*", ATTRS{idVendor}=="1e71", ATTRS{idProduct}=="200f", TAG+="uaccess"
+
+# NZXT RGB & Fan Controller (nzxt_control_hub)
+KERNEL=="hidraw*", ATTRS{idVendor}=="1e71", ATTRS{idProduct}=="2010", TAG+="uaccess"
+
+# NZXT RGB & Fan Controller (nzxt_control_hub)
+KERNEL=="hidraw*", ATTRS{idVendor}=="1e71", ATTRS{idProduct}=="2011", TAG+="uaccess"
+
 # NZXT Kraken X53/X63/X73 (nzxt_kraken_x3)
 KERNEL=="hidraw*", ATTRS{idVendor}=="1e71", ATTRS{idProduct}=="2014", TAG+="uaccess"
+
+# NZXT RGB & Fan Controller (nzxt_control_hub)
+KERNEL=="hidraw*", ATTRS{idVendor}=="1e71", ATTRS{idProduct}=="2019", TAG+="uaccess"
+
+# NZXT RGB & Fan Controller (nzxt_control_hub)
+KERNEL=="hidraw*", ATTRS{idVendor}=="1e71", ATTRS{idProduct}=="2020", TAG+="uaccess"
 
 # NZXT RGB & Fan Controller (nzxt_control_hub)
 KERNEL=="hidraw*", ATTRS{idVendor}=="1e71", ATTRS{idProduct}=="2022", TAG+="uaccess"
